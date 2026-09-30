@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+out/
+publish/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+.nuget-local/
+
+# User-specific
+*.user
+*.suo
+.vs/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+coverage/
+
+# Logs
+*.log
