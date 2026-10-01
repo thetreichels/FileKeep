@@ -125,6 +125,8 @@ Windows 10/11 machine to build and test.
       articles, deterministic message-IDs, resumable uploads.
       Tagged `v0.3-nntp-backend`.
 - [x] Milestone 4 (v0.4): NZB generation. Tagged `v0.4-nzb-generation`.
-- [ ] Milestone 5 (v0.5): download/recovery pipeline
+- [x] Milestone 5 (v0.5): download/recovery pipeline — NZB parsing,
+      resumable chunk download with per-chunk authentication and
+      hash verification. Tagged `v0.5-download-pipeline`.
 - [ ] Milestone 6 (v0.6): VSS and system images
 - [ ] Milestone 7 (v0.7): Windows service, GUI, installer, recovery ISO

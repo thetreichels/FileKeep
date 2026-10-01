@@ -40,7 +40,9 @@ internal sealed class FakeNntpServer : IDisposable
         : ((IPEndPoint)_listener.LocalEndpoint).Port;
     public int PostCount => Volatile.Read(ref _postCount);
     public int StatCount => Volatile.Read(ref _statCount);
+    public int ArticleCount => Volatile.Read(ref _articleCount);
     private int _statCount;
+    private int _articleCount;
 
     private async Task AcceptLoop()
     {
@@ -111,6 +113,7 @@ internal sealed class FakeNntpServer : IDisposable
                         writer.WriteLine(Articles.ContainsKey(arg) ? "223 0 article exists" : "430 no such article");
                         break;
                     case "ARTICLE":
+                        Interlocked.Increment(ref _articleCount);
                         if (Articles.TryGetValue(arg, out string? found))
                         {
                             writer.WriteLine("220 0 article follows");

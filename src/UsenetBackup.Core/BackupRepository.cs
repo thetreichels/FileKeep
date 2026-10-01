@@ -290,6 +290,86 @@ public sealed class BackupRepository : IDisposable
     /// <summary>Path to catalog.db, which also holds the NNTP upload journal.</summary>
     public string CatalogPath => Path.Combine(_root, "catalog.db");
 
+    /// <summary>
+    /// Milestone 5: download every chunk referenced by an NZB index from an
+    /// NNTP server into this repository's local chunk store.
+    ///
+    /// Interruption-safe: chunks already present locally are skipped (and
+    /// adopted into the download journal), so re-running after a failure
+    /// fetches only what's missing. Every fetched blob is authenticated
+    /// (AES-GCM) and its SHA-256(plaintext) is checked against the chunk ID
+    /// before it is stored — a corrupt or wrong article is never journaled.
+    /// </summary>
+    /// <param name="nzb">Parsed NZB index (see <see cref="NzbParser"/>).</param>
+    /// <param name="remote">NNTP-backed blob store to fetch from.</param>
+    /// <param name="progress">Called as (done, total) after each chunk.</param>
+    public DownloadResult DownloadChunks(
+        NzbDocument nzb,
+        NntpBlobStore remote,
+        Action<int, int>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(nzb);
+        ArgumentNullException.ThrowIfNull(remote);
+
+        int downloaded = 0, alreadyPresent = 0;
+        var files = nzb.Files;
+        for (int i = 0; i < files.Count; i++)
+        {
+            string? chunkId = files[i].ChunkId;
+            if (chunkId is null)
+                throw new InvalidDataException(
+                    $"NZB file #{i + 1} ('{files[i].Subject}') does not reference a usenet-backup article.");
+            string messageId = ArticleCodec.MakeMessageId(chunkId, RepoId);
+
+            if (_blobs.Exists(chunkId))
+            {
+                _catalog.RecordDownload(messageId, chunkId); // adopt into journal
+                alreadyPresent++;
+            }
+            else
+            {
+                // ARTICLE + yEnc CRC-32 + header chunk-ID check inside.
+                byte[] blob = remote.Get(chunkId);
+                VerifyDownloadedBlob(chunkId, blob);
+                _blobs.Put(chunkId, blob);
+                _catalog.RecordChunk(chunkId, blob.Length);
+                _catalog.RecordDownload(messageId, chunkId);
+                downloaded++;
+            }
+            progress?.Invoke(i + 1, files.Count);
+        }
+        return new DownloadResult(downloaded, alreadyPresent, files.Count);
+    }
+
+    /// <summary>
+    /// Fails closed: decrypts (AES-GCM authentication) and checks
+    /// SHA-256(plaintext) against the content-addressed chunk ID.
+    /// </summary>
+    private void VerifyDownloadedBlob(string chunkIdHex, byte[] blob)
+    {
+        byte[] plaintext;
+        try
+        {
+            plaintext = ChunkCrypto.Decrypt(blob, _key, Hashing.HexToBytes(chunkIdHex));
+        }
+        catch (CryptographicException ex)
+        {
+            throw new InvalidDataException(
+                $"Downloaded chunk {chunkIdHex} failed authentication (wrong key or corrupted).", ex);
+        }
+        try
+        {
+            string actual = Hashing.Sha256Hex(plaintext);
+            if (!actual.Equals(chunkIdHex, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"Downloaded chunk {chunkIdHex} hash mismatch (SHA-256(plaintext) = {actual}).");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
     public void Restore(string backupId, string destDir)
     {
         var manifest = LoadManifest(backupId);

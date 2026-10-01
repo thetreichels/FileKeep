@@ -30,6 +30,10 @@ public sealed class Catalog : IDisposable
                 message_id TEXT PRIMARY KEY,
                 chunk_id TEXT NOT NULL,
                 uploaded_utc TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS downloads(
+                message_id TEXT PRIMARY KEY,
+                chunk_id TEXT NOT NULL,
+                downloaded_utc TEXT NOT NULL);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -102,6 +106,37 @@ public sealed class Catalog : IDisposable
             System.Globalization.DateTimeStyles.RoundtripKind);
     }
 
+    /// <summary>
+    /// Download journal for resumable NNTP downloads. Records every chunk
+    /// fetched from the server and verified, so an interrupted download
+    /// resumes without re-fetching articles it already has.
+    /// </summary>
+    public void RecordDownload(string messageId, string chunkId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO downloads(message_id, chunk_id, downloaded_utc) VALUES($mid, $cid, $ts)";
+        cmd.Parameters.AddWithValue("$mid", messageId);
+        cmd.Parameters.AddWithValue("$cid", chunkId);
+        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool IsDownloaded(string messageId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM downloads WHERE message_id = $mid";
+        cmd.Parameters.AddWithValue("$mid", messageId);
+        using var r = cmd.ExecuteReader();
+        return r.Read();
+    }
+
+    public long DownloadedCount()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM downloads";
+        return (long)cmd.ExecuteScalar()!;
+    }
+
     public IReadOnlyList<BackupSummary> ListBackups()
     {
         var list = new List<BackupSummary>();
@@ -128,3 +163,6 @@ public sealed class Catalog : IDisposable
 }
 
 public sealed record BackupSummary(string BackupId, string Type, string Source, DateTime CreatedUtc);
+
+/// <summary>Outcome of <see cref="BackupRepository.DownloadChunks"/>.</summary>
+public sealed record DownloadResult(int Downloaded, int AlreadyPresent, int Total);

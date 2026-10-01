@@ -209,8 +209,34 @@ server.
 
 The NZB references articles; it does not prove they exist on any server.
 Generate after `nntp-upload` (or treat a missing journal record as
-"not known to be posted"). The manifest itself is not posted — recovery of
-the file tree from Usenet alone is a later milestone.
+"not known to be posted"). The manifest itself is not posted — see
+recovery below.
+
+## Download/recovery (v1, milestone 5)
+
+A backup is recovered from Usenet by parsing its NZB and fetching every
+referenced article:
+
+1. Parse the NZB (`NzbParser`); extract each file's chunk ID from its
+   segment message-ID (`<{chunkid}.{repoid}@usenet-backup>`).
+2. For each chunk: `ARTICLE <message-id>`, then validate in order —
+   yEnc `size`/`crc32` trailer, `X-UsenetBackup-Chunk` header matches the
+   expected chunk ID, AES-256-GCM decryption authenticates, and
+   SHA-256(plaintext) equals the chunk ID. A chunk failing any check is
+   rejected and never recorded.
+3. Store verified blobs in the local chunk store.
+
+**Resume.** The catalog records every verified download in a `downloads`
+journal (message-ID → chunk ID). Chunks already present locally are
+skipped (and adopted into the journal), so an interrupted download
+resumes by re-running; only missing chunks are fetched.
+
+**Same-repo requirement.** Message-IDs embed the repo ID, which is
+SHA-256(repo salt)[..16]. Downloading therefore requires the original
+repository directory (it holds the salt, manifests, and catalog) — the
+NZB plus Usenet alone are not sufficient. Keep a copy of the repo
+metadata (small: `repo.json`, `manifests/`, `catalog.db`) somewhere safe;
+the bulky `chunks/` directory is what Usenet replaces.
 
 ## What v1 deliberately excludes
 

@@ -20,6 +20,7 @@ try
         "nntp-check" => NntpCheck(args[1..]),
         "nntp-upload" => NntpUpload(args[1..]),
         "nzb-generate" => NzbGenerate(args[1..]),
+        "download" => Download(args[1..]),
         _ => Unknown(args[0]),
     };
 }
@@ -45,6 +46,8 @@ static void PrintUsage()
               [--ssl] [--user USER] [--newsgroup GROUP]
           usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
               [--newsgroup GROUP] [--poster POSTER]
+          usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
+              [--ssl] [--user USER] [--newsgroup GROUP]
 
         --parent turns the backup into an incremental against that parent
         manifest. Unchanged files (same size + mtime) reuse the parent's
@@ -57,6 +60,11 @@ static void PrintUsage()
         nzb-generate writes an NZB 1.1 index of the backup's chunk articles
         (one file per chunk, deterministic message-IDs). Chunks with no
         upload journal record are flagged — run nntp-upload first.
+
+        download fetches every chunk referenced by an NZB index into the
+        repo's local chunk store. It is resumable: chunks already present
+        are skipped. Each fetched chunk is authenticated and hash-verified
+        before being stored. Run verify/restore afterwards as usual.
 
         The passphrase is read from --passphrase, the USENETBACKUP_PASSPHRASE
         environment variable, or an interactive prompt (in that order).
@@ -281,4 +289,49 @@ static int NzbGenerate(string[] args)
         Console.WriteLine($"warning: {notUploaded}/{chunkCount} chunks have no upload journal record — run nntp-upload first.");
     Console.WriteLine($"NZB written to {pos[2]} ({chunkCount} chunks).");
     return 0;
+}
+
+static int Download(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: download <repo> <nzb-file> --host HOST [...]"); return 2; }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+
+    NzbDocument nzb;
+    try
+    {
+        nzb = NzbParser.ParseFile(pos[1]);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: cannot parse NZB '{pos[1]}': {ex.Message}");
+        return 2;
+    }
+    if (nzb.Files.Count == 0)
+    {
+        Console.Error.WriteLine($"error: NZB '{pos[1]}' contains no files.");
+        return 2;
+    }
+    Console.WriteLine($"NZB references {nzb.Files.Count} chunk(s)" +
+        (nzb.BackupId is null ? "" : $" (backup {nzb.BackupId})") + ".");
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
+        DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
+        {
+            if (done % 25 == 0 || done == total)
+                Console.WriteLine($"  {done}/{total} chunks processed");
+        });
+        OperationLog.Append(Path.GetFullPath(pos[0]), "download",
+            $"nzb={pos[1]} chunks={result.Total} downloaded={result.Downloaded} already_present={result.AlreadyPresent} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+        Console.WriteLine($"Download complete: {result.Downloaded} fetched, {result.AlreadyPresent} already present.");
+        return 0;
+    }
+    finally
+    {
+        client.Quit();
+    }
 }
