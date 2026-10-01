@@ -98,6 +98,15 @@ Notes:
   these so the tree round-trips exactly, including empty directories.
   Like `parent_id`, it is additive and optional: manifests written
   before this field existed verify unchanged.
+- `kind` (v0.6, additive, optional): `"disk-image"` for raw block-device
+  image backups, absent for directory backups (readers treat absent as
+  `"directory"`). A disk-image manifest has exactly one file entry — the
+  image, e.g. `"path": "disk.img"` — chunked, encrypted and hashed exactly
+  like a regular file, so the same per-chunk authentication applies.
+- `snapshot` (v0.6, additive, optional): the point-in-time mechanism the
+  backup was read from, e.g. `"vss"` on Windows. Absent means the live
+  tree was read directly. Like `parent_id`, both fields are omitted when
+  not applicable, so manifests written before v0.6 verify unchanged.
 - Symlinks are recorded as entries with `"symlink_target"` and are not
   followed (v1).
 - Filenames are plaintext in v1. Encrypting the manifest is a possible
@@ -240,7 +249,8 @@ the bulky `chunks/` directory is what Usenet replaces.
 
 ## What v1 deliberately excludes
 
-Compression, PAR2 parity, VSS snapshots — all reserved for later
-milestones and later format versions. (The NNTP article format and the NZB
-mapping above are defined in v1 as of milestones 3 and 4; multi-article
+Compression, PAR2 parity — reserved for later milestones and later format
+versions. (The NNTP article format and the NZB mapping above are defined
+in v1 as of milestones 3 and 4; VSS snapshots and raw disk images arrived
+in v0.6 as additive manifest fields, documented above; multi-article
 chunk splitting is not yet needed and not specified.)

@@ -14,7 +14,9 @@ try
     {
         "init" => Init(args[1..]),
         "backup" => Backup(args[1..]),
+        "backup-disk" => BackupDisk(args[1..]),
         "restore" => Restore(args[1..]),
+        "restore-disk" => RestoreDisk(args[1..]),
         "verify" => Verify(args[1..]),
         "list" => List(args[1..]),
         "nntp-check" => NntpCheck(args[1..]),
@@ -37,8 +39,10 @@ static void PrintUsage()
 
         Usage:
           usenet-backup init <repo> [--chunk-size BYTES]
-          usenet-backup backup <repo> <source-dir> [--parent <backup-id>]
+          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--vss]
+          usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
+          usenet-backup restore-disk <repo> <backup-id> <device>
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
           usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER]
@@ -65,6 +69,16 @@ static void PrintUsage()
         repo's local chunk store. It is resumable: chunks already present
         are skipped. Each fetched chunk is authenticated and hash-verified
         before being stored. Run verify/restore afterwards as usual.
+
+        --vss takes a Volume Shadow Copy snapshot of the source volume
+        (Windows only, requires administrator rights) and backs up from
+        the snapshot, so open/locked files are read consistently.
+
+        backup-disk images a raw block device (e.g. \\.\C: on Windows,
+        /dev/sda on Linux) through the normal chunk/encrypt pipeline as a
+        single image entry; restore-disk writes it back. For a
+        crash-consistent image of a live Windows volume, image a VSS
+        snapshot instead of the live volume.
 
         The passphrase is read from --passphrase, the USENETBACKUP_PASSPHRASE
         environment variable, or an interactive prompt (in that order).
@@ -118,6 +132,9 @@ static string? GetOption(string[] args, string name)
 static string[] Positionals(string[] args) =>
     args.Where((a, i) => !(a.StartsWith("--") || (i > 0 && args[i - 1].StartsWith("--")))).ToArray();
 
+static bool HasFlag(string[] args, string name) =>
+    args.Any(a => a == name);
+
 static int Init(string[] args)
 {
     var pos = Positionals(args);
@@ -131,15 +148,39 @@ static int Init(string[] args)
 static int Backup(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>]"); return 2; }
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--vss]"); return 2; }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     string? parent = GetOption(args, "--parent");
+    using ISnapshotProvider? snap = HasFlag(args, "--vss") ? new VssSnapshotProvider(pos[1]) : null;
     var manifest = parent is null
-        ? repo.BackupDirectory(pos[1])
-        : repo.BackupIncremental(pos[1], parent);
+        ? repo.BackupDirectory(pos[1], snap)
+        : repo.BackupIncremental(pos[1], parent, snap);
     Console.WriteLine($"{manifest.Type} backup {manifest.BackupId}" +
         (manifest.ParentId is null ? "" : $" (parent {manifest.ParentId})") +
+        (manifest.Snapshot is null ? "" : $" [snapshot: {manifest.Snapshot}]") +
         $": {manifest.Files.Count} files, {manifest.Files.Sum(f => f.Chunks.Count)} chunk refs, {repo.StoredChunkCount()} unique chunks stored.");
+    return 0;
+}
+
+static int BackupDisk(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup-disk <repo> <device> [--image-name NAME]"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    string imageName = GetOption(args, "--image-name") ?? "disk.img";
+    var manifest = repo.BackupDiskImage(pos[1], imageName);
+    Console.WriteLine($"disk-image backup {manifest.BackupId}: {manifest.Files[0].Size} bytes as '{imageName}', " +
+        $"{manifest.Files[0].Chunks.Count} chunks, {repo.StoredChunkCount()} unique chunks stored.");
+    return 0;
+}
+
+static int RestoreDisk(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore-disk <repo> <backup-id> <device>"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    repo.RestoreDiskImage(pos[1], pos[2]);
+    Console.WriteLine($"Restored disk image {pos[1]} to {pos[2]}.");
     return 0;
 }
 

@@ -88,9 +88,15 @@ public sealed class BackupRepository : IDisposable
     // ---------- backup ----------
 
     /// <summary>Full backup: every file is chunked.</summary>
-    public BackupManifest BackupDirectory(string sourceDir)
+    /// <summary>
+    /// Full backup of a directory tree. When <paramref name="snapshotProvider"/>
+    /// is supplied, files are read from its point-in-time view instead of the
+    /// live tree (e.g. a VSS shadow copy on Windows); the caller owns and
+    /// disposes the provider. Null reads the live tree directly.
+    /// </summary>
+    public BackupManifest BackupDirectory(string sourceDir, ISnapshotProvider? snapshotProvider = null)
     {
-        var manifest = BackupDirectoryInternal(sourceDir, parent: null);
+        var manifest = BackupDirectoryInternal(sourceDir, parent: null, snapshotProvider);
         manifest.Type = "full";
         return FinalizeManifest(manifest);
     }
@@ -102,14 +108,14 @@ public sealed class BackupRepository : IDisposable
     /// is self-contained: it lists every file with complete chunk lists,
     /// so restore/verify never need the parent.
     /// </summary>
-    public BackupManifest BackupIncremental(string sourceDir, string parentBackupId)
+    public BackupManifest BackupIncremental(string sourceDir, string parentBackupId, ISnapshotProvider? snapshotProvider = null)
     {
         var parent = LoadManifest(parentBackupId); // validates parent root hash
         if (parent.ChunkSize != _config.ChunkSize)
             throw new InvalidOperationException(
                 $"Parent backup {parentBackupId} uses chunk size {parent.ChunkSize}, " +
                 $"but this repository uses {_config.ChunkSize}.");
-        var manifest = BackupDirectoryInternal(sourceDir, parent);
+        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider);
         manifest.Type = "inc";
         manifest.ParentId = parentBackupId;
         return FinalizeManifest(manifest);
@@ -132,11 +138,30 @@ public sealed class BackupRepository : IDisposable
         return manifest;
     }
 
-    private BackupManifest BackupDirectoryInternal(string sourceDir, BackupManifest? parent)
+    private BackupManifest BackupDirectoryInternal(string sourceDir, BackupManifest? parent, ISnapshotProvider? snapshotProvider)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
             throw new DirectoryNotFoundException($"Source directory not found: {fullSource}");
+
+        // The provider is caller-owned; only dispose one we created ourselves.
+        ISnapshotProvider? owned = null;
+        ISnapshotProvider snap = snapshotProvider ?? (owned = new NullSnapshotProvider(fullSource));
+        try
+        {
+            return BackupDirectoryFromRoot(fullSource, snap, parent);
+        }
+        finally
+        {
+            owned?.Dispose();
+        }
+    }
+
+    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent)
+    {
+        string readRoot = snap.SnapshotRoot;
+        if (!Directory.Exists(readRoot))
+            throw new DirectoryNotFoundException($"Snapshot root not found: {readRoot}");
 
         var manifest = new BackupManifest
         {
@@ -144,22 +169,23 @@ public sealed class BackupRepository : IDisposable
             CreatedUtc = DateTime.UtcNow,
             Source = fullSource,
             ChunkSize = _config.ChunkSize,
+            Snapshot = snap.IsSnapshot ? snap.Name : null,
         };
 
         Dictionary<string, FileEntry>? parentByPath = parent?.Files
             .ToDictionary(f => f.Path, StringComparer.Ordinal);
 
         string[] files = Directory
-            .EnumerateFiles(fullSource, "*", SearchOption.AllDirectories)
-            .Select(f => Path.GetRelativePath(fullSource, f).Replace(Path.DirectorySeparatorChar, '/'))
+            .EnumerateFiles(readRoot, "*", SearchOption.AllDirectories)
+            .Select(f => Path.GetRelativePath(readRoot, f).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToArray();
 
         // Record every directory (including empty ones) so restore
         // reproduces the source tree exactly, not just the files.
         string[] dirs = Directory
-            .EnumerateDirectories(fullSource, "*", SearchOption.AllDirectories)
-            .Select(d => Path.GetRelativePath(fullSource, d).Replace(Path.DirectorySeparatorChar, '/'))
+            .EnumerateDirectories(readRoot, "*", SearchOption.AllDirectories)
+            .Select(d => Path.GetRelativePath(readRoot, d).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToArray();
         if (dirs.Length > 0)
@@ -170,7 +196,7 @@ public sealed class BackupRepository : IDisposable
         {
             foreach (string rel in files)
             {
-                string full = Path.Combine(fullSource, rel.Replace('/', Path.DirectorySeparatorChar));
+                string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
                 if (parentByPath is not null &&
                     parentByPath.TryGetValue(rel, out var parentEntry) &&
                     IsUnchanged(full, parentEntry))
@@ -223,24 +249,41 @@ public sealed class BackupRepository : IDisposable
 
     private FileEntry BackupOneFile(string fullPath, string relPath, byte[] buffer)
     {
-        var entry = new FileEntry
-        {
-            Path = relPath,
-            MtimeUtc = File.GetLastWriteTimeUtc(fullPath),
-        };
-
         if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
         {
-            entry.SymlinkTarget = File.ResolveLinkTarget(fullPath, returnFinalTarget: false)?.ToString();
-            entry.Size = 0;
-            entry.Sha256 = Hashing.Sha256Hex(ReadOnlySpan<byte>.Empty);
-            return entry;
+            return new FileEntry
+            {
+                Path = relPath,
+                MtimeUtc = File.GetLastWriteTimeUtc(fullPath),
+                SymlinkTarget = File.ResolveLinkTarget(fullPath, returnFinalTarget: false)?.ToString(),
+                Size = 0,
+                Sha256 = Hashing.Sha256Hex(ReadOnlySpan<byte>.Empty),
+            };
         }
 
         using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        entry.Size = stream.Length;
-        using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        return BackupStream(stream, relPath, File.GetLastWriteTimeUtc(fullPath), buffer);
+    }
 
+    /// <summary>
+    /// Chunks, hashes, encrypts and stores a byte stream as one manifest file
+    /// entry. Used for regular files and for raw disk images alike.
+    /// </summary>
+    private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer)
+    {
+        var entry = new FileEntry
+        {
+            Path = relPath,
+            MtimeUtc = mtimeUtc,
+        };
+
+        long size;
+        try { size = stream.Length; }
+        catch (NotSupportedException) { size = -1; } // e.g. some raw devices
+        catch (IOException) { size = -1; }
+
+        using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long total = 0;
         int read;
         while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
         {
@@ -254,9 +297,110 @@ public sealed class BackupRepository : IDisposable
             _catalog.RecordChunk(chunkId, read);
             entry.Chunks.Add(chunkId);
             fileHash.AppendData(span);
+            total += read;
         }
+        entry.Size = size >= 0 ? size : total;
+        if (size >= 0 && size != total)
+            throw new IOException(
+                $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
         entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
         return entry;
+    }
+
+    // ---------- disk images ----------
+
+    /// <summary>
+    /// Backs up a raw block device (e.g. <c>\\.\C:</c> on Windows,
+    /// <c>/dev/sda</c> on Linux) as a single image entry. The device is read
+    /// sequentially through the normal chunk/encrypt pipeline, so the image
+    /// gets the same per-chunk authentication and deduplication as files.
+    /// The device is opened with <see cref="FileShare.ReadWrite"/> so a live
+    /// volume can be imaged; for a crash-consistent image, image a VSS
+    /// snapshot instead of the live volume.
+    /// </summary>
+    public BackupManifest BackupDiskImage(string devicePath, string imageName = "disk.img")
+    {
+        if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
+            throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
+
+        using var stream = new FileStream(devicePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        try
+        {
+            var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer);
+            var manifest = new BackupManifest
+            {
+                BackupId = Guid.NewGuid().ToString("N"),
+                CreatedUtc = DateTime.UtcNow,
+                Source = devicePath,
+                ChunkSize = _config.ChunkSize,
+                Kind = "disk-image",
+                Files = { entry },
+            };
+            manifest.Type = "full";
+            return FinalizeManifest(manifest);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Restores a disk-image backup (see <see cref="BackupDiskImage"/>) by
+    /// writing the decrypted image back to a block device. Fails closed:
+    /// every chunk is AES-GCM authenticated on decrypt, its SHA-256 is
+    /// checked against the chunk ID, and the whole-image SHA-256 must match
+    /// the manifest — any mismatch aborts the restore with an exception.
+    /// </summary>
+    public void RestoreDiskImage(string backupId, string devicePath)
+    {
+        var manifest = LoadManifest(backupId); // validates root hash
+        if (!manifest.IsDiskImage || manifest.Files.Count != 1)
+            throw new InvalidOperationException(
+                $"Backup {backupId} is not a disk-image backup (kind={manifest.Kind ?? "directory"}, files={manifest.Files.Count}).");
+        var entry = manifest.Files[0];
+
+        using var device = new FileStream(devicePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        try
+        {
+            long deviceLen = device.Length;
+            if (deviceLen < entry.Size)
+                throw new IOException(
+                    $"Target device ({deviceLen} bytes) is smaller than the image ({entry.Size} bytes).");
+        }
+        catch (NotSupportedException) { /* length unknown; write and let it fail naturally */ }
+        catch (IOException ex) when (ex.Message.StartsWith("Target device")) { throw; }
+        catch (IOException) { /* length unknown; write and let it fail naturally */ }
+
+        using var imageHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] chunkBuf = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        try
+        {
+            foreach (string chunkId in entry.Chunks)
+            {
+                byte[] blob = _blobs.Get(chunkId); // throws if missing
+                byte[] plain = ChunkCrypto.Decrypt(blob, _key, Hashing.HexToBytes(chunkId)); // AES-GCM authenticates
+                if (!string.Equals(Hashing.Sha256Hex(plain), chunkId, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"Chunk {chunkId} failed hash verification; restore aborted.");
+                device.Write(plain, 0, plain.Length);
+                imageHash.AppendData(plain);
+                CryptographicOperations.ZeroMemory(plain);
+            }
+            device.Flush(flushToDisk: true);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(chunkBuf);
+        }
+
+        string actual = Convert.ToHexString(imageHash.GetHashAndReset()).ToLowerInvariant();
+        if (!string.Equals(actual, entry.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                $"Restored image hash mismatch for backup {backupId}: manifest says {entry.Sha256}, wrote {actual}.");
+
+        OperationLog.Append(_root, "restore-disk",
+            $"id={backupId} device={devicePath} bytes={entry.Size}");
     }
 
     // ---------- restore & verify ----------

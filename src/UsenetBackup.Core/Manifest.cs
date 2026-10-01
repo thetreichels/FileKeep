@@ -41,6 +41,27 @@ public sealed class BackupManifest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ParentId { get; set; }
 
+    /// <summary>
+    /// What was backed up: "directory" (default when absent, pre-v0.6 manifests)
+    /// or "disk-image" (raw block device). Null is treated as "directory" and is
+    /// not serialized, so old manifests verify unchanged.
+    /// </summary>
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Kind { get; set; }
+
+    /// <summary>
+    /// Snapshot mechanism used during backup ("vss", ...). Null/absent means the
+    /// live tree was read directly. Additive; old manifests verify unchanged.
+    /// </summary>
+    [JsonPropertyName("snapshot")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Snapshot { get; set; }
+
+    /// <summary>True for raw block-device image backups (<see cref="Kind"/> == "disk-image").</summary>
+    [JsonIgnore]
+    public bool IsDiskImage => string.Equals(Kind, "disk-image", StringComparison.Ordinal);
+
     [JsonPropertyName("created_utc")]
     public DateTime CreatedUtc { get; set; }
 

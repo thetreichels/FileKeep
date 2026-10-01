@@ -95,7 +95,8 @@ they never silently change `v1`.
 5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
    verify, restore.
 6. **v0.6 — VSS and system images.** Volume Shadow Copy support, block
-   device imaging, bare-metal recovery.
+   device imaging, bare-metal recovery. ✅ done (`v0.6-vss-system-images`,
+   69/69 tests; VSS snapshot path needs Windows validation)
 7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
 
 Each milestone gets a git tag (`v0.1-local-repository`, …) so any
@@ -128,5 +129,14 @@ Windows 10/11 machine to build and test.
 - [x] Milestone 5 (v0.5): download/recovery pipeline — NZB parsing,
       resumable chunk download with per-chunk authentication and
       hash verification. Tagged `v0.5-download-pipeline`.
-- [ ] Milestone 6 (v0.6): VSS and system images
+- [x] Milestone 6 (v0.6): VSS and system images — `ISnapshotProvider`
+      abstraction (live passthrough + Windows VSS shadow copies via
+      `vssapi.dll`, admin rights required), `backup --vss`, raw block-device
+      imaging (`backup-disk`/`restore-disk`) through the normal
+      chunk/encrypt/hash pipeline with AES-GCM + SHA-256 fails-closed
+      restore, additive manifest `kind`/`snapshot` fields. Tagged
+      `v0.6-vss-system-images`. Note: the VSS COM path compiles
+      cross-platform but can only be exercised on Windows (vtable order
+      flagged for re-verification against the SDK's `vss.h` there); all
+      platform-independent behavior is tested on Linux.
 - [ ] Milestone 7 (v0.7): Windows service, GUI, installer, recovery ISO
