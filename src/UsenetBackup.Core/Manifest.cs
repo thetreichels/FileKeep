@@ -56,6 +56,10 @@ public sealed class BackupManifest
     [JsonPropertyName("files")]
     public List<FileEntry> Files { get; set; } = new();
 
+    [JsonPropertyName("directories")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Directories { get; set; }
+
     [JsonPropertyName("root_sha256")]
     public string RootSha256 { get; set; } = "";
 

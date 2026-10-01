@@ -9,11 +9,14 @@ never silently change `v1`. Every reader must support `v1` forever.
 <repo>/
   repo.json        # repository config (plaintext)
   catalog.db       # SQLite index: chunks, backups (rebuildable)
+  operations.log   # append-only audit log of critical operations
+                   # (init, backup, restore, verify); informational only,
+                   # not covered by any hash, never required for restore
   manifests/
     <backup-id>.json
   chunks/
     <hh>/<rest-of-hex>    # one file per unique chunk
-  parity/                 # reserved for v0.8 (PAR2); empty in v1
+  parity/                 # reserved for a later milestone (PAR2); empty in v1
 ```
 
 `catalog.db` is a cache/index. Deleting it must never lose data: it can
@@ -81,6 +84,7 @@ Boring, standard, no invented cryptography:
       "chunks": ["<chunk-id>", "…"]
     }
   ],
+  "directories": ["empty-dir", "nested/empty-subdir"],
   "root_sha256": "<hex: SHA-256 over canonical JSON of this manifest minus root_sha256>"
 }
 ```
@@ -88,6 +92,12 @@ Boring, standard, no invented cryptography:
 Notes:
 
 - `path` is relative to the backup source root, `/`-separated.
+- `directories` lists every directory in the source tree, relative and
+  `/`-separated, sorted (the source root itself is excluded). It is
+  omitted when the source contains no subdirectories. Restore recreates
+  these so the tree round-trips exactly, including empty directories.
+  Like `parent_id`, it is additive and optional: manifests written
+  before this field existed verify unchanged.
 - Symlinks are recorded as entries with `"symlink_target"` and are not
   followed (v1).
 - Filenames are plaintext in v1. Encrypting the manifest is a possible

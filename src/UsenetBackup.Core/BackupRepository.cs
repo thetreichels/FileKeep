@@ -62,7 +62,9 @@ public sealed class BackupRepository : IDisposable
         Directory.CreateDirectory(Path.Combine(repoPath, "parity"));
 
         byte[] key = KeyDerivation.DeriveKey(passphrase, Convert.FromBase64String(config.KdfSaltB64), kdfIterations);
-        return new BackupRepository(Path.GetFullPath(repoPath), config, key);
+        string fullRoot = Path.GetFullPath(repoPath);
+        OperationLog.Append(fullRoot, "init", $"chunk_size={chunkSize} kdf_iterations={kdfIterations}");
+        return new BackupRepository(fullRoot, config, key);
     }
 
     public static BackupRepository Open(string repoPath, string passphrase)
@@ -121,6 +123,11 @@ public sealed class BackupRepository : IDisposable
 
         WriteManifest(manifest);
         _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source, manifest.CreatedUtc);
+        OperationLog.Append(_root, "backup",
+            $"type={manifest.Type} id={manifest.BackupId} files={manifest.Files.Count} " +
+            $"chunk_refs={manifest.Files.Sum(f => f.Chunks.Count)} " +
+            $"unique_chunks={_chunks.StoredChunkCount()} source={manifest.Source}" +
+            (manifest.ParentId is null ? "" : $" parent={manifest.ParentId}"));
         return manifest;
     }
 
@@ -146,6 +153,16 @@ public sealed class BackupRepository : IDisposable
             .Select(f => Path.GetRelativePath(fullSource, f).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToArray();
+
+        // Record every directory (including empty ones) so restore
+        // reproduces the source tree exactly, not just the files.
+        string[] dirs = Directory
+            .EnumerateDirectories(fullSource, "*", SearchOption.AllDirectories)
+            .Select(d => Path.GetRelativePath(fullSource, d).Replace(Path.DirectorySeparatorChar, '/'))
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToArray();
+        if (dirs.Length > 0)
+            manifest.Directories = new List<string>(dirs);
 
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
@@ -258,6 +275,8 @@ public sealed class BackupRepository : IDisposable
         var manifest = LoadManifest(backupId);
         var errors = new List<string>();
         RestoreOrVerify(manifest, destDir, verifyOnly: false, errors);
+        OperationLog.Append(_root, "restore",
+            $"id={backupId} dest={destDir} files={manifest.Files.Count} errors={errors.Count}");
         if (errors.Count > 0)
             throw new InvalidDataException("Restore failed:\n" + string.Join("\n", errors));
     }
@@ -273,14 +292,34 @@ public sealed class BackupRepository : IDisposable
         }
         catch (Exception ex)
         {
-            return new List<string> { ex.Message };
+            errors.Add(ex.Message);
+            OperationLog.Append(_root, "verify", $"id={backupId} errors={errors.Count} ok=False");
+            return errors;
         }
         RestoreOrVerify(manifest, destDir: null, verifyOnly: true, errors);
+        OperationLog.Append(_root, "verify",
+            $"id={backupId} files={manifest.Files.Count} errors={errors.Count} ok={errors.Count == 0}");
         return errors;
     }
 
     private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly, List<string> errors)
     {
+        if (!verifyOnly && destDir is not null && manifest.Directories is not null)
+        {
+            foreach (string dir in manifest.Directories)
+            {
+                try
+                {
+                    Directory.CreateDirectory(
+                        Path.Combine(destDir, dir.Replace('/', Path.DirectorySeparatorChar)));
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{dir}/: {ex.Message}");
+                }
+            }
+        }
+
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
         {
