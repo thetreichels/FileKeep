@@ -1,3 +1,4 @@
+using System.Text;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 
@@ -18,6 +19,7 @@ try
         "list" => List(args[1..]),
         "nntp-check" => NntpCheck(args[1..]),
         "nntp-upload" => NntpUpload(args[1..]),
+        "nzb-generate" => NzbGenerate(args[1..]),
         _ => Unknown(args[0]),
     };
 }
@@ -41,6 +43,8 @@ static void PrintUsage()
           usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER]
           usenet-backup nntp-upload <repo> <backup-id> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
+          usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
+              [--newsgroup GROUP] [--poster POSTER]
 
         --parent turns the backup into an incremental against that parent
         manifest. Unchanged files (same size + mtime) reuse the parent's
@@ -49,6 +53,10 @@ static void PrintUsage()
         nntp-upload posts every unique chunk of a backup as one yEnc article
         each. It is resumable: already-posted articles are skipped via the
         local upload journal plus a server STAT check.
+
+        nzb-generate writes an NZB 1.1 index of the backup's chunk articles
+        (one file per chunk, deterministic message-IDs). Chunks with no
+        upload journal record are flagged — run nntp-upload first.
 
         The passphrase is read from --passphrase, the USENETBACKUP_PASSPHRASE
         environment variable, or an interactive prompt (in that order).
@@ -234,4 +242,43 @@ static int NntpUpload(string[] args)
     {
         client.Quit();
     }
+}
+
+static int NzbGenerate(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 3)
+    {
+        Console.Error.WriteLine("error: nzb-generate <repo> <backup-id> <output.nzb> [--newsgroup GROUP] [--poster POSTER]");
+        return 2;
+    }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    string poster = GetOption(args, "--poster") ?? "usenet-backup";
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    var manifest = repo.LoadManifest(pos[1]);
+    using var catalog = new Catalog(repo.CatalogPath);
+
+    int notUploaded = 0;
+    string xml = NzbGenerator.Generate(
+        manifest,
+        chunkId => repo.GetChunkBlob(chunkId),
+        chunkId =>
+        {
+            var t = catalog.GetUploadTimeUtc(chunkId);
+            if (t is null)
+                notUploaded++;
+            return t;
+        },
+        new NzbGenerator.Options(newsgroup, poster, repo.RepoId));
+
+    File.WriteAllText(pos[2], xml, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+    int chunkCount = manifest.Files.SelectMany(f => f.Chunks).Distinct().Count();
+    OperationLog.Append(Path.GetFullPath(pos[0]), "nzb-generate",
+        $"id={manifest.BackupId} chunks={chunkCount} output={pos[2]} newsgroup={newsgroup}");
+    if (notUploaded > 0)
+        Console.WriteLine($"warning: {notUploaded}/{chunkCount} chunks have no upload journal record — run nntp-upload first.");
+    Console.WriteLine($"NZB written to {pos[2]} ({chunkCount} chunks).");
+    return 0;
 }

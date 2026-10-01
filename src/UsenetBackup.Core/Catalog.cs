@@ -86,6 +86,22 @@ public sealed class Catalog : IDisposable
         return (long)cmd.ExecuteScalar()!;
     }
 
+    /// <summary>
+    /// When a chunk was uploaded (UTC), or null when this repository has
+    /// no journal record of uploading it.
+    /// </summary>
+    public DateTime? GetUploadTimeUtc(string chunkId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT uploaded_utc FROM uploads WHERE chunk_id = $cid LIMIT 1";
+        cmd.Parameters.AddWithValue("$cid", chunkId);
+        object? value = cmd.ExecuteScalar();
+        if (value is null or DBNull)
+            return null;
+        return DateTime.Parse((string)value, null,
+            System.Globalization.DateTimeStyles.RoundtripKind);
+    }
+
     public IReadOnlyList<BackupSummary> ListBackups()
     {
         var list = new List<BackupSummary>();

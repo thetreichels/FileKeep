@@ -187,9 +187,34 @@ falls back to STAT on a journal miss (covers a lost journal and server-side
 expiry), and only posts when the server lacks the article. An interrupted
 upload therefore resumes without re-posting.
 
+## NZB indexes (v1, milestone 4)
+
+An NZB 1.1 document indexing one backup: **one `<file>` per unique chunk,
+one `<segment>` per file** (v1 posts one article per chunk). Chunk files
+are sorted by chunk ID, so the same manifest always yields byte-identical
+NZB output — an NZB can be regenerated at any time without contacting a
+server.
+
+- `<file>`: `poster` = the article `From` value, `date` = Unix time of the
+  upload (from the `uploads` journal; falls back to the backup's creation
+  time when the chunk has no journal record), `subject` = the article
+  subject (`[usenet-backup] chunk <chunkid>`).
+- `<segment>`: `bytes` = the exact article size in bytes (headers + yEnc
+  body as the uploader would post it), `number` = `1`, body = the article
+  message-ID **with** angle brackets.
+- `<head>` meta: `title`, `x-usenetbackup-generator`,
+  `x-usenetbackup-backup-id`, `x-usenetbackup-root-sha256`,
+  `x-usenetbackup-chunk-count`. The root hash lets a downloader confirm the
+  NZB describes the intended backup before fetching anything.
+
+The NZB references articles; it does not prove they exist on any server.
+Generate after `nntp-upload` (or treat a missing journal record as
+"not known to be posted"). The manifest itself is not posted — recovery of
+the file tree from Usenet alone is a later milestone.
+
 ## What v1 deliberately excludes
 
-Compression, PAR2 parity, VSS snapshots, NZB generation — all reserved for
-later milestones and later format versions. (The NNTP article format above
-is defined in v1 as of milestone 3; multi-article chunk splitting is not
-yet needed and not specified.)
+Compression, PAR2 parity, VSS snapshots — all reserved for later
+milestones and later format versions. (The NNTP article format and the NZB
+mapping above are defined in v1 as of milestones 3 and 4; multi-article
+chunk splitting is not yet needed and not specified.)

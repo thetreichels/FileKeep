@@ -87,7 +87,11 @@ they never silently change `v1`.
    (AUTH, POST, STAT, ARTICLE), yEnc article codec with CRC-32, deterministic
    message-IDs, resumable uploads via a catalog journal. ✅ done
    (`v0.3-nntp-backend`, 46/46 tests)
-4. **v0.4 — NZB generation.** Encrypted chunks → NNTP articles → NZB files.
+4. **v0.4 — NZB generation.** NZB 1.1 index per backup: one file per chunk,
+   one segment per article, deterministic message-IDs, exact article byte
+   sizes, journal-backed upload dates, head meta with the manifest root
+   hash. CLI `nzb-generate` warns about chunks with no upload record. ✅ done
+   (`v0.4-nzb-generation`, 54/54 tests)
 5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
    verify, restore.
 6. **v0.6 — VSS and system images.** Volume Shadow Copy support, block
@@ -114,9 +118,13 @@ Windows 10/11 machine to build and test.
 - [x] Milestone 1 (v0.1): local repository engine — directory backup,
       chunking, AES-256-GCM encryption, manifest, round-trip restore.
       Tagged `v0.1-local-repository`.
-- [ ] Milestone 2 (v0.2): incrementals — in progress
-- [ ] Milestone 3 (v0.3): Usenet backend adapter
-- [ ] Milestone 4 (v0.4): NZB generation
+- [x] Milestone 2 (v0.2): incrementals — parent-linked, self-contained
+      manifests, size+mtime fast path. Tagged `v0.2-incrementals`
+      (plus `v0.2.1` requirements-compliance revision).
+- [x] Milestone 3 (v0.3): Usenet backend adapter — NNTP client, yEnc
+      articles, deterministic message-IDs, resumable uploads.
+      Tagged `v0.3-nntp-backend`.
+- [x] Milestone 4 (v0.4): NZB generation. Tagged `v0.4-nzb-generation`.
 - [ ] Milestone 5 (v0.5): download/recovery pipeline
 - [ ] Milestone 6 (v0.6): VSS and system images
 - [ ] Milestone 7 (v0.7): Windows service, GUI, installer, recovery ISO
