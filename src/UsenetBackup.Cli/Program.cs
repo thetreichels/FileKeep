@@ -88,11 +88,23 @@ static string GetPassphrase(string[] args)
     string? fromEnv = Environment.GetEnvironmentVariable("USENETBACKUP_PASSPHRASE");
     if (!string.IsNullOrEmpty(fromEnv))
         return fromEnv;
-    Console.Write("Passphrase: ");
-    string? typed = Console.ReadLine();
+    string typed = PromptInteractive("Passphrase: ", "--passphrase", "USENETBACKUP_PASSPHRASE");
     if (string.IsNullOrEmpty(typed))
         throw new InvalidOperationException("A passphrase is required.");
     return typed;
+}
+
+/// <summary>
+/// Prompts on stdin for a secret, but fails fast instead of hanging when stdin
+/// is not interactive (piped / redirected), e.g. in scripts.
+/// </summary>
+static string PromptInteractive(string prompt, string flagName, string envName)
+{
+    if (Console.IsInputRedirected)
+        throw new InvalidOperationException(
+            $"A secret is required but stdin is not interactive. Pass {flagName} or set {envName}.");
+    Console.Write(prompt);
+    return Console.ReadLine() ?? "";
 }
 
 static string? GetOption(string[] args, string name)
@@ -175,8 +187,7 @@ static string GetNntpPassword(string[] args)
     string? fromEnv = Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD");
     if (!string.IsNullOrEmpty(fromEnv))
         return fromEnv;
-    Console.Write("NNTP password: ");
-    return Console.ReadLine() ?? "";
+    return PromptInteractive("NNTP password: ", "--password", "USENETBACKUP_NNTP_PASSWORD");
 }
 
 static NntpClient ConnectNntp(string[] args)
