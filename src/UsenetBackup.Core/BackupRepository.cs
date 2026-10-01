@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using UsenetBackup.Core.Nntp;
 
 namespace UsenetBackup.Core;
 
@@ -18,7 +19,7 @@ public sealed class BackupRepository : IDisposable
     private readonly string _root;
     private readonly RepositoryConfig _config;
     private readonly byte[] _key;
-    private readonly ChunkStore _chunks;
+    private readonly IBlobStore _blobs;
     private readonly Catalog _catalog;
     private bool _disposed;
 
@@ -27,7 +28,7 @@ public sealed class BackupRepository : IDisposable
         _root = root;
         _config = config;
         _key = key;
-        _chunks = new ChunkStore(root, key);
+        _blobs = new LocalBlobStore(root);
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
     }
 
@@ -126,7 +127,7 @@ public sealed class BackupRepository : IDisposable
         OperationLog.Append(_root, "backup",
             $"type={manifest.Type} id={manifest.BackupId} files={manifest.Files.Count} " +
             $"chunk_refs={manifest.Files.Sum(f => f.Chunks.Count)} " +
-            $"unique_chunks={_chunks.StoredChunkCount()} source={manifest.Source}" +
+            $"unique_chunks={_blobs.StoredCount} source={manifest.Source}" +
             (manifest.ParentId is null ? "" : $" parent={manifest.ParentId}"));
         return manifest;
     }
@@ -244,7 +245,12 @@ public sealed class BackupRepository : IDisposable
         while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
         {
             var span = buffer.AsSpan(0, read);
-            string chunkId = _chunks.Write(span);
+            string chunkId = Hashing.Sha256Hex(span);
+            if (!_blobs.Exists(chunkId))
+            {
+                byte[] blob = ChunkCrypto.Encrypt(span, _key, Hashing.HexToBytes(chunkId));
+                _blobs.Put(chunkId, blob);
+            }
             _catalog.RecordChunk(chunkId, read);
             entry.Chunks.Add(chunkId);
             fileHash.AppendData(span);
@@ -268,7 +274,21 @@ public sealed class BackupRepository : IDisposable
 
     public IReadOnlyList<BackupSummary> ListBackups() => _catalog.ListBackups();
 
-    public long StoredChunkCount() => _chunks.StoredChunkCount();
+    public long StoredChunkCount() => _blobs.StoredCount;
+
+    /// <summary>
+    /// Raw encrypted blob for a chunk, for upload to remote blob stores.
+    /// </summary>
+    public byte[] GetChunkBlob(string chunkIdHex) => _blobs.Get(chunkIdHex);
+
+    /// <summary>
+    /// Short repository identity used in NNTP message-IDs, derived from
+    /// the repository salt (stable; no migration for existing repos).
+    /// </summary>
+    public string RepoId => ArticleCodec.DeriveRepoId(Convert.FromBase64String(_config.KdfSaltB64));
+
+    /// <summary>Path to catalog.db, which also holds the NNTP upload journal.</summary>
+    public string CatalogPath => Path.Combine(_root, "catalog.db");
 
     public void Restore(string backupId, string destDir)
     {
@@ -370,7 +390,7 @@ public sealed class BackupRepository : IDisposable
 
             foreach (string chunkId in entry.Chunks)
             {
-                byte[] plaintext = _chunks.Read(chunkId); // decrypts, authenticates, re-hashes
+                byte[] plaintext = ReadChunkPlaintext(chunkId);
                 fileHash.AppendData(plaintext);
                 outStream?.Write(plaintext, 0, plaintext.Length);
             }
@@ -387,6 +407,31 @@ public sealed class BackupRepository : IDisposable
 
         if (!verifyOnly && outPath is not null)
             File.SetLastWriteTimeUtc(outPath, entry.MtimeUtc);
+    }
+
+    /// <summary>
+    /// Reads a blob from the store, AES-GCM-decrypts it (fails closed on
+    /// any tampering) and re-hashes the plaintext against the chunk ID.
+    /// </summary>
+    private byte[] ReadChunkPlaintext(string chunkIdHex)
+    {
+        byte[] blob = _blobs.Get(chunkIdHex);
+        byte[] chunkId = Hashing.HexToBytes(chunkIdHex);
+        byte[] plaintext;
+        try
+        {
+            plaintext = ChunkCrypto.Decrypt(blob, _key, chunkId);
+        }
+        catch (CryptographicException ex)
+        {
+            throw new InvalidDataException(
+                $"Chunk {chunkIdHex} failed authentication (wrong key or tampered data).", ex);
+        }
+
+        string actual = Hashing.Sha256Hex(plaintext);
+        if (!actual.Equals(chunkIdHex, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Chunk {chunkIdHex} hash mismatch after decryption.");
+        return plaintext;
     }
 
     public void Dispose()

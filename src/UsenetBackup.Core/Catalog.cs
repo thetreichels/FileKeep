@@ -26,6 +26,10 @@ public sealed class Catalog : IDisposable
                 type TEXT NOT NULL,
                 source TEXT NOT NULL,
                 created_utc TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS uploads(
+                message_id TEXT PRIMARY KEY,
+                chunk_id TEXT NOT NULL,
+                uploaded_utc TEXT NOT NULL);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -49,6 +53,37 @@ public sealed class Catalog : IDisposable
         cmd.Parameters.AddWithValue("$src", source);
         cmd.Parameters.AddWithValue("$ts", createdUtc.ToString("O"));
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Upload journal for resumable NNTP uploads. Like the rest of the
+    /// catalog it is rebuildable (by STAT-probing the server), but keeping
+    /// it makes resume fast and avoids re-posting.
+    /// </summary>
+    public void RecordUpload(string messageId, string chunkId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "INSERT OR IGNORE INTO uploads(message_id, chunk_id, uploaded_utc) VALUES($mid, $cid, $ts)";
+        cmd.Parameters.AddWithValue("$mid", messageId);
+        cmd.Parameters.AddWithValue("$cid", chunkId);
+        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool IsUploaded(string messageId)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT 1 FROM uploads WHERE message_id = $mid";
+        cmd.Parameters.AddWithValue("$mid", messageId);
+        using var r = cmd.ExecuteReader();
+        return r.Read();
+    }
+
+    public long UploadedCount()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM uploads";
+        return (long)cmd.ExecuteScalar()!;
     }
 
     public IReadOnlyList<BackupSummary> ListBackups()

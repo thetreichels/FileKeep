@@ -83,7 +83,10 @@ they never silently change `v1`.
 2. **v0.2 — Incrementals.** FULL → INC → INC chains against a parent
    manifest; tests prove only changed blocks produce new chunks.
 3. **v0.3 — Usenet backend.** NNTP adapter behind the storage
-   interface, independent of the repository engine.
+   interface, independent of the repository engine. Minimal NNTP client
+   (AUTH, POST, STAT, ARTICLE), yEnc article codec with CRC-32, deterministic
+   message-IDs, resumable uploads via a catalog journal. ✅ done
+   (`v0.3-nntp-backend`, 46/46 tests)
 4. **v0.4 — NZB generation.** Encrypted chunks → NNTP articles → NZB files.
 5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
    verify, restore.

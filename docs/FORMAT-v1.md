@@ -147,7 +147,49 @@ Any failure aborts with the offending chunk/file identified. There is no
 "best effort" partial restore in v1: verification is all-or-nothing per
 file, and the manifest root hash covers the whole backup.
 
+## Usenet articles (v1, milestone 3)
+
+Each chunk blob (nonce || ciphertext || tag, exactly as stored locally) is
+posted as **one NNTP article** with a yEnc-encoded body. The article format
+is part of v1 so that any v1 reader can fetch and decode articles; NZB
+generation (which indexes these articles) is still a later milestone.
+
+**Message-ID.** Deterministic: `<chunkid.repoid@usenet-backup>`, where
+`chunkid` is the 64-char lowercase hex chunk ID and `repoid` is the first
+16 hex chars of SHA-256(repository salt). Determinism makes uploads
+idempotent (re-posting an existing message-ID is a server-side no-op),
+makes existence checks possible with a bare STAT, and means a download
+needs nothing but the chunk ID — no article index to lose.
+
+**Headers.**
+
+```
+From: usenet-backup
+Newsgroups: <configured group>
+Subject: [usenet-backup] chunk <chunkid>
+Message-ID: <chunkid.repoid@usenet-backup>
+X-UsenetBackup-Chunk: <chunkid>
+X-UsenetBackup-Format: v1
+```
+
+`X-UsenetBackup-Chunk` carries the cryptographic hash of every uploaded
+object (the chunk ID is SHA-256 of the plaintext). A reader MUST compare
+it to the requested chunk ID and reject a mismatch.
+
+**Body.** yEnc (`=ybegin`/`=yend`, 128-char lines) with the `size` and
+`crc32` trailer fields. A reader MUST verify both before accepting the
+blob; the blob is then decrypted and re-hashed exactly as in local
+verification.
+
+**Resume.** The repository catalog records every posted message-ID in an
+`uploads` journal. Before posting, the uploader checks the journal, then
+falls back to STAT on a journal miss (covers a lost journal and server-side
+expiry), and only posts when the server lacks the article. An interrupted
+upload therefore resumes without re-posting.
+
 ## What v1 deliberately excludes
 
-Compression, PAR2 parity, VSS snapshots, NNTP/NZB — all reserved for
-later milestones and later format versions.
+Compression, PAR2 parity, VSS snapshots, NZB generation — all reserved for
+later milestones and later format versions. (The NNTP article format above
+is defined in v1 as of milestone 3; multi-article chunk splitting is not
+yet needed and not specified.)
