@@ -84,6 +84,36 @@ public sealed class NntpClientTests : IDisposable
     }
 
     [Fact]
+    public void DotStuffing_IgnorableLeadingByteFollowedByDots_RoundTrips()
+    {
+        // Regression: culture-sensitive StartsWith("..") treats U+0099 as ignorable,
+        // so a line beginning "\u0099.." was misread as dot-stuffed and its first byte
+        // stripped. Dot-stuff checks must be ordinal.
+        using var client = Connect();
+
+        string trickyLine = new string(new char[] { '\u0099', '.', '.', 'A' });
+        string article =
+            "From: test\r\n" +
+            "Newsgroups: alt.binaries.test\r\n" +
+            "Subject: tricky\r\n" +
+            "Message-ID: <tricky999@test>\r\n" +
+            "\r\n" +
+            trickyLine + "\r\n";
+
+        client.Post(article);
+
+        // Upload path: server must store the line intact, not stripped to "..A".
+        Assert.True(_server.Articles.TryGetValue("<tricky999@test>", out string? stored));
+        Assert.Contains(trickyLine, stored);
+
+        // Download path: client un-dot-stuffing must round-trip it as well.
+        string? back = client.GetArticle("<tricky999@test>");
+        Assert.NotNull(back);
+        Assert.Contains(trickyLine, back);
+        client.Quit();
+    }
+
+    [Fact]
     public void Commands_WithoutConnect_Throw()
     {
         var (clientStream, serverStream) = InMemoryTransport.Create();

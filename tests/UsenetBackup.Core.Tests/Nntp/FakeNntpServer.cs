@@ -174,7 +174,10 @@ internal sealed class FakeNntpServer : IDisposable
             string? line = ReadLine(reader);
             if (line is null || line == ".")
                 break;
-            sb.Append(line.StartsWith("..") ? line[1..] : line).Append("\r\n");
+            // Un-dot-stuff. Must be ordinal: culture-sensitive StartsWith("..") treats
+            // leading control/format chars (e.g. U+0099) as ignorable and would strip a
+            // legitimate first byte from lines like "\u0099..".
+            sb.Append(line.StartsWith("..", StringComparison.Ordinal) ? line[1..] : line).Append("\r\n");
         }
         return sb.ToString();
     }
