@@ -92,8 +92,36 @@ Notes:
   followed (v1).
 - Filenames are plaintext in v1. Encrypting the manifest is a possible
   future format version; v1 optimizes for independent verifiability.
-- `type` is `"full"` in v1. Incremental chains (`"inc"`, `parent_id`)
-  arrive with milestone 3 as a format extension, not a v1 change.
+- `type` is `"full"` for full backups, `"inc"` for incremental backups.
+  An incremental manifest carries `"parent_id"` (the backup it was
+  diffed against) and is **self-contained**: it lists every file present
+  at backup time with complete chunk lists, exactly like a full manifest.
+  Unchanged files simply reference already-stored chunks. Because of
+  this, a reader that only understands `"full"` can still verify and
+  restore an `"inc"` manifest — `parent_id` is informational, never
+  required for restore. Adding these two additive, optional fields does
+  not change any v1 semantic: every v1 full backup remains byte-identical
+  to this spec.
+- Files present in the parent but deleted from the source are absent
+  from the incremental manifest. Restoring an incremental therefore
+  reproduces the source tree as it was at that backup's time, not a
+  union with the parent.
+
+## Incrementals (v1, milestone 2)
+
+Change detection is per file, using size + mtime:
+
+- A file whose path, size, and `mtime_utc` all match the parent entry
+  is assumed unchanged: its chunk list and `sha256` are copied from the
+  parent without re-reading the file.
+- Any new file, or any file whose size or mtime differs, is re-chunked
+  in full. Content addressing means unchanged chunks are not stored
+  twice — only genuinely new chunk blobs are written.
+
+This is conservative by design: a file whose mtime changed but whose
+content did not is re-chunked (cheap; dedup absorbs it), while a file
+whose content changed without touching size+mtime is the caller's
+responsibility to flag (same tradeoff as rsync).
 
 ## Verification (v1)
 
@@ -111,5 +139,5 @@ file, and the manifest root hash covers the whole backup.
 
 ## What v1 deliberately excludes
 
-Compression, incremental chains, PAR2 parity, VSS snapshots, NNTP/NZB —
-all reserved for later milestones and later format versions.
+Compression, PAR2 parity, VSS snapshots, NNTP/NZB — all reserved for
+later milestones and later format versions.

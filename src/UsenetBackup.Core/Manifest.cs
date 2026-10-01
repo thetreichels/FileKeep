@@ -37,6 +37,10 @@ public sealed class BackupManifest
     [JsonPropertyName("type")]
     public string Type { get; set; } = "full";
 
+    [JsonPropertyName("parent_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ParentId { get; set; }
+
     [JsonPropertyName("created_utc")]
     public DateTime CreatedUtc { get; set; }
 

@@ -75,46 +75,45 @@ they never silently change `v1`.
 
 ## Development order (incremental milestones)
 
-1. **v0.1 — Local repository engine.** Directory → chunk → compress →
-   encrypt → store → manifest. Full round-trip reconstruction verified
-   on test data. No Usenet yet.
-2. **v0.2 — Encryption.** Authenticated encryption, key derivation,
-   tamper-detection tests.
-3. **v0.3 — Incrementals.** FULL → INC001 → INC002 chains; tests prove
-   only changed blocks are captured.
-4. **v0.4 — VSS.** Volume Shadow Copy support for live system imaging.
-5. **v0.5 — NZB generation.** Encrypted chunks → NNTP articles → NZB files.
-6. **v0.6 — NNTP upload.** Usenet backend with resume.
-7. **v0.7 — NNTP download.** Restore path from Usenet.
-8. **v0.8 — Recovery.** Bare-metal restore, VHD/VHDX reconstruction,
-   bootable recovery environment.
-9. **v0.9 — Service, GUI, installer.** Windows service, GUI, CLI,
-   WiX-based installer, recovery ISO.
+1. **v0.1 — Local repository engine.** Directory → chunk → encrypt →
+   store → manifest. Authenticated encryption (AES-256-GCM, PBKDF2
+   key derivation) included, since milestone 1's own spec requires
+   encrypted chunks. Full round-trip reconstruction verified on test
+   data. No Usenet yet. ✅ done
+2. **v0.2 — Incrementals.** FULL → INC → INC chains against a parent
+   manifest; tests prove only changed blocks produce new chunks.
+3. **v0.3 — Usenet backend.** NNTP adapter behind the storage
+   interface, independent of the repository engine.
+4. **v0.4 — NZB generation.** Encrypted chunks → NNTP articles → NZB files.
+5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
+   verify, restore.
+6. **v0.6 — VSS and system images.** Volume Shadow Copy support, block
+   device imaging, bare-metal recovery.
+7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
 
 Each milestone gets a git tag (`v0.1-local-repository`, …) so any
 broken experiment can be rolled back to a known-good state.
 
 ## Building
 
-Milestones 1–3 are platform-independent and build/test on Linux:
+Milestones 1–2 are platform-independent and build/test on Linux:
 
 ```sh
 dotnet build UsenetBackup.slnx
 dotnet test UsenetBackup.slnx
 ```
 
-Milestones 4+ (VSS, Windows service, recovery environment) require a
+Milestone 6 (VSS, Windows service, recovery environment) requires a
 Windows 10/11 machine to build and test.
 
 ## Status
 
-- [ ] Milestone 1: local repository engine (directory backup, chunking,
-      AES-256-GCM encryption, manifest, round-trip restore) — in progress
-- [ ] Milestone 2: hardened encryption module
-- [ ] Milestone 3: incrementals
-- [ ] Milestone 4: VSS
-- [ ] Milestone 5: NZB generation
-- [ ] Milestone 6: NNTP upload
-- [ ] Milestone 7: NNTP download
-- [ ] Milestone 8: recovery
-- [ ] Milestone 9: service, GUI, installer
+- [x] Milestone 1 (v0.1): local repository engine — directory backup,
+      chunking, AES-256-GCM encryption, manifest, round-trip restore.
+      Tagged `v0.1-local-repository`.
+- [ ] Milestone 2 (v0.2): incrementals — in progress
+- [ ] Milestone 3 (v0.3): Usenet backend adapter
+- [ ] Milestone 4 (v0.4): NZB generation
+- [ ] Milestone 5 (v0.5): download/recovery pipeline
+- [ ] Milestone 6 (v0.6): VSS and system images
+- [ ] Milestone 7 (v0.7): Windows service, GUI, installer, recovery ISO

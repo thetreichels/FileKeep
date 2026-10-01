@@ -7,6 +7,7 @@ namespace UsenetBackup.Core;
 /// <summary>
 /// Milestone 1: local repository engine.
 /// Init → BackupDirectory → manifest; Restore / Verify from manifest.
+/// Milestone 2: incremental backups against a parent manifest.
 /// </summary>
 public sealed class BackupRepository : IDisposable
 {
@@ -83,7 +84,47 @@ public sealed class BackupRepository : IDisposable
 
     // ---------- backup ----------
 
+    /// <summary>Full backup: every file is chunked.</summary>
     public BackupManifest BackupDirectory(string sourceDir)
+    {
+        var manifest = BackupDirectoryInternal(sourceDir, parent: null);
+        manifest.Type = "full";
+        return FinalizeManifest(manifest);
+    }
+
+    /// <summary>
+    /// Incremental backup against a parent manifest. Files whose path,
+    /// size and mtime match the parent are assumed unchanged and reuse
+    /// the parent's chunk list without re-reading. The resulting manifest
+    /// is self-contained: it lists every file with complete chunk lists,
+    /// so restore/verify never need the parent.
+    /// </summary>
+    public BackupManifest BackupIncremental(string sourceDir, string parentBackupId)
+    {
+        var parent = LoadManifest(parentBackupId); // validates parent root hash
+        if (parent.ChunkSize != _config.ChunkSize)
+            throw new InvalidOperationException(
+                $"Parent backup {parentBackupId} uses chunk size {parent.ChunkSize}, " +
+                $"but this repository uses {_config.ChunkSize}.");
+        var manifest = BackupDirectoryInternal(sourceDir, parent);
+        manifest.Type = "inc";
+        manifest.ParentId = parentBackupId;
+        return FinalizeManifest(manifest);
+    }
+
+    private BackupManifest FinalizeManifest(BackupManifest manifest)
+    {
+        // Root hash covers type + parent_id, so compute it last.
+        manifest.RootSha256 = manifest.ComputeRootHash();
+        if (!manifest.VerifyRootHash())
+            throw new InvalidOperationException("Internal error: manifest root hash did not verify.");
+
+        WriteManifest(manifest);
+        _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source, manifest.CreatedUtc);
+        return manifest;
+    }
+
+    private BackupManifest BackupDirectoryInternal(string sourceDir, BackupManifest? parent)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
@@ -97,6 +138,9 @@ public sealed class BackupRepository : IDisposable
             ChunkSize = _config.ChunkSize,
         };
 
+        Dictionary<string, FileEntry>? parentByPath = parent?.Files
+            .ToDictionary(f => f.Path, StringComparer.Ordinal);
+
         string[] files = Directory
             .EnumerateFiles(fullSource, "*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(fullSource, f).Replace(Path.DirectorySeparatorChar, '/'))
@@ -109,7 +153,16 @@ public sealed class BackupRepository : IDisposable
             foreach (string rel in files)
             {
                 string full = Path.Combine(fullSource, rel.Replace('/', Path.DirectorySeparatorChar));
-                manifest.Files.Add(BackupOneFile(full, rel, buffer));
+                if (parentByPath is not null &&
+                    parentByPath.TryGetValue(rel, out var parentEntry) &&
+                    IsUnchanged(full, parentEntry))
+                {
+                    manifest.Files.Add(parentEntry);
+                }
+                else
+                {
+                    manifest.Files.Add(BackupOneFile(full, rel, buffer));
+                }
             }
         }
         finally
@@ -117,14 +170,37 @@ public sealed class BackupRepository : IDisposable
             ArrayPool<byte>.Shared.Return(buffer);
         }
 
-        manifest.RootSha256 = manifest.ComputeRootHash();
-        if (!manifest.VerifyRootHash())
-            throw new InvalidOperationException("Internal error: manifest root hash did not verify.");
+        return manifest;
+    }
 
+    private void WriteManifest(BackupManifest manifest)
+    {
         string manifestPath = Path.Combine(_root, "manifests", manifest.BackupId + ".json");
         File.WriteAllText(manifestPath, manifest.ToJson());
-        _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source, manifest.CreatedUtc);
-        return manifest;
+    }
+
+    /// <summary>
+    /// Fast path: the file is unchanged since the parent backup if path,
+    /// size, mtime and symlink target all match. Reads only attributes,
+    /// not file contents.
+    /// </summary>
+    private static bool IsUnchanged(string fullPath, FileEntry parentEntry)
+    {
+        if (File.GetLastWriteTimeUtc(fullPath) != parentEntry.MtimeUtc)
+            return false;
+        var info = new FileInfo(fullPath);
+        if (info.Length != parentEntry.Size)
+            return false;
+        bool isLink = (info.Attributes & FileAttributes.ReparsePoint) != 0;
+        if (isLink != (parentEntry.SymlinkTarget is not null))
+            return false;
+        if (isLink)
+        {
+            string? target = File.ResolveLinkTarget(fullPath, returnFinalTarget: false)?.ToString();
+            if (!string.Equals(target, parentEntry.SymlinkTarget, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
     }
 
     private FileEntry BackupOneFile(string fullPath, string relPath, byte[] buffer)

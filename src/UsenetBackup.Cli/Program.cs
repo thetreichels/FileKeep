@@ -27,14 +27,18 @@ catch (Exception ex)
 static void PrintUsage()
 {
     Console.WriteLine("""
-        usenet-backup — Milestone 1: local repository engine
+        usenet-backup — local repository engine (milestones 1-2)
 
         Usage:
           usenet-backup init <repo> [--chunk-size BYTES]
-          usenet-backup backup <repo> <source-dir>
+          usenet-backup backup <repo> <source-dir> [--parent <backup-id>]
           usenet-backup restore <repo> <backup-id> <dest-dir>
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
+
+        --parent turns the backup into an incremental against that parent
+        manifest. Unchanged files (same size + mtime) reuse the parent's
+        chunks without re-reading.
 
         The passphrase is read from --passphrase, the USENETBACKUP_PASSPHRASE
         environment variable, or an interactive prompt (in that order).
@@ -87,10 +91,15 @@ static int Init(string[] args)
 static int Backup(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir>"); return 2; }
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>]"); return 2; }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
-    var manifest = repo.BackupDirectory(pos[1]);
-    Console.WriteLine($"Backup {manifest.BackupId}: {manifest.Files.Count} files, {manifest.Files.Sum(f => f.Chunks.Count)} chunk refs, {repo.StoredChunkCount()} unique chunks stored.");
+    string? parent = GetOption(args, "--parent");
+    var manifest = parent is null
+        ? repo.BackupDirectory(pos[1])
+        : repo.BackupIncremental(pos[1], parent);
+    Console.WriteLine($"{manifest.Type} backup {manifest.BackupId}" +
+        (manifest.ParentId is null ? "" : $" (parent {manifest.ParentId})") +
+        $": {manifest.Files.Count} files, {manifest.Files.Sum(f => f.Chunks.Count)} chunk refs, {repo.StoredChunkCount()} unique chunks stored.");
     return 0;
 }
 
