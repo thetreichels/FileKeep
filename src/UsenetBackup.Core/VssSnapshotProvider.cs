@@ -147,7 +147,11 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
         }
         finally
         {
-            Marshal.ReleaseComObject(backup);
+            // ReleaseComObject is Windows-only; _backup is only ever non-null
+            // on Windows (the constructor throws otherwise), and the guard
+            // keeps the CA1416 analyzer satisfied on other platforms.
+            if (OperatingSystem.IsWindows())
+                Marshal.ReleaseComObject(backup);
         }
     }
 
