@@ -160,7 +160,10 @@ try {
         $target = Join-Path $work "target.bin"
         $size = 3 * 1024 * 1024 + 12345  # not a multiple of the chunk size
         $bytes = New-Object byte[] $size
-        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        # RandomNumberGenerator.Fill is .NET Core 3.0+; use the instance API
+        # for Windows PowerShell 5.1 (.NET Framework) compatibility.
+        $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
         [IO.File]::WriteAllBytes($disk, $bytes)
         $h1 = (Get-FileHash $disk -Algorithm SHA256).Hash
 
