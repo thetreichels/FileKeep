@@ -54,6 +54,13 @@ function Get-BackupId([string]$cliOutput) {
     return $m.Groups[1].Value
 }
 
+function Get-ShadowIds([string]$vssadmin) {
+    $out = & $vssadmin list shadows 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "vssadmin list shadows failed: $out" }
+    return @([regex]::Matches($out, 'Shadow Copy ID:\s*(\{[0-9a-fA-F\-]+\})') |
+        ForEach-Object { $_.Groups[1].Value })
+}
+
 function Report {
     Write-Host "`n===== VALIDATION RESULTS =====" -ForegroundColor Yellow
     $results | Format-Table -AutoSize | Out-String | Write-Host
@@ -124,7 +131,13 @@ try {
         $src = New-Item -ItemType Directory -Force -Path (Join-Path $work "vss-src")
         "hello" | Out-File (Join-Path $src "a.txt") -Encoding utf8
         "locked-content" | Out-File (Join-Path $src "locked.txt") -Encoding utf8
-        $shadowsBefore = @(Get-CimInstance Win32_ShadowCopy | Select-Object -ExpandProperty ID)
+        # Shadow-copy hygiene via vssadmin (full path: PATH may be modified).
+        # WMI (Get-CimInstance Win32_ShadowCopy) is avoided: its provider can
+        # fail with "Initialization failure" on some machines even when VSS
+        # itself works fine.
+        $vssadmin = Join-Path $env:SystemRoot "System32\vssadmin.exe"
+        Assert-True (Test-Path $vssadmin) "vssadmin.exe not found at $vssadmin"
+        $shadowsBefore = @(Get-ShadowIds $vssadmin)
 
         $lockStream = [IO.File]::Open((Join-Path $src "locked.txt"),
             [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -150,7 +163,7 @@ try {
         Assert-True ($content -eq "locked-content") "restored locked file content mismatch: '$content'"
 
         Start-Sleep -Seconds 5  # give VSS a moment to report deletions
-        $shadowsAfter = @(Get-CimInstance Win32_ShadowCopy | Select-Object -ExpandProperty ID)
+        $shadowsAfter = @(Get-ShadowIds $vssadmin)
         $leaked = @($shadowsAfter | Where-Object { $_ -notin $shadowsBefore })
         Assert-True ($leaked.Count -eq 0) "leaked shadow copies: $($leaked -join ', ')"
     }
