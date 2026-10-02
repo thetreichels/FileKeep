@@ -54,6 +54,17 @@ function Get-BackupId([string]$cliOutput) {
     return $m.Groups[1].Value
 }
 
+function Report {
+    Write-Host "`n===== VALIDATION RESULTS =====" -ForegroundColor Yellow
+    $results | Format-Table -AutoSize | Out-String | Write-Host
+    $failed = @($results | Where-Object { $_.Result -eq "FAIL" })
+    if ($failed.Count -gt 0) {
+        Write-Host "$($failed.Count) check(s) FAILED" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "ALL CHECKS PASSED" -ForegroundColor Green
+}
+
 # --- random passphrase for the throwaway repos (never leaves this machine) ---
 $pw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $env:USENETBACKUP_PASSPHRASE = $pw
@@ -75,7 +86,7 @@ Check "Prerequisites: binaries" {
         Assert-True (Test-Path (Join-Path $CliDir "usenet-backup.exe")) "usenet-backup.exe not found in $CliDir"
         Assert-True (Test-Path (Join-Path $ServiceDir "usenet-backup-service.exe")) "usenet-backup-service.exe not found in $ServiceDir"
     } else {
-        Assert-True (Get-Command dotnet -ErrorAction SilentlyContinue) ".NET SDK not found; install it or pass -CliDir and -ServiceDir."
+        Assert-True ($null -ne (Get-Command dotnet -ErrorAction SilentlyContinue)) ".NET SDK not found; install it or pass -CliDir and -ServiceDir."
         $pub = Join-Path $WorkRoot "publish"
         Write-Host "Publishing CLI..."
         dotnet publish "$RepoRoot/src/UsenetBackup.Cli/UsenetBackup.Cli.csproj" -c Release -r win-x64 `
@@ -197,7 +208,13 @@ try {
             Assert-True ((@($status.jobs | Where-Object { $_.name -eq "validate" })).Count -eq 1) `
                 "job 'validate' missing from dashboard"
 
-            Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/jobs/validate/run" -TimeoutSec 10 | Out-Null
+            # Dashboard POSTs require the per-startup CSRF token (embedded in
+            # the served HTML as <meta name="csrf-token">).
+            $page = Invoke-WebRequest "http://127.0.0.1:$port/" -TimeoutSec 10
+            $token = [regex]::Match($page.Content, 'name="csrf-token" content="([^"]+)"').Groups[1].Value
+            Assert-True ($token.Length -gt 0) "could not extract CSRF token from dashboard HTML"
+            Invoke-RestMethod -Method Post "http://127.0.0.1:$port/api/jobs/validate/run" `
+                -Headers @{ "X-CSRF-Token" = $token } -TimeoutSec 10 | Out-Null
             $ok = $false
             for ($i = 0; $i -lt 40 -and -not $ok; $i++) {
                 Start-Sleep -Seconds 3
@@ -230,14 +247,3 @@ try {
 }
 
 Report
-
-function Report {
-    Write-Host "`n===== VALIDATION RESULTS =====" -ForegroundColor Yellow
-    $results | Format-Table -AutoSize | Out-String | Write-Host
-    $failed = @($results | Where-Object { $_.Result -eq "FAIL" })
-    if ($failed.Count -gt 0) {
-        Write-Host "$($failed.Count) check(s) FAILED" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "ALL CHECKS PASSED" -ForegroundColor Green
-}
