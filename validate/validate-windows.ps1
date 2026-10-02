@@ -153,7 +153,7 @@ try {
         Assert-True ($manifest.kind -eq "disk-image") "manifest kind='$($manifest.kind)', expected 'disk-image'"
 
         [IO.File]::WriteAllBytes($target, (New-Object byte[] $size))
-        & $cli restore-disk $repo $id $target 2>&1 | Out-Null
+        & $cli restore-disk $repo $id $target --yes 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -eq 0) "restore-disk failed"
         $h2 = (Get-FileHash $target -Algorithm SHA256).Hash
         Assert-True ($h1 -eq $h2) "disk image hash mismatch after round-trip"

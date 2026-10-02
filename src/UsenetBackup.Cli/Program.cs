@@ -42,7 +42,7 @@ static void PrintUsage()
           usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
-          usenet-backup restore-disk <repo> <backup-id> <device>
+          usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
           usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER]
@@ -98,7 +98,10 @@ static string GetPassphrase(string[] args)
 {
     string? fromArg = GetOption(args, "--passphrase");
     if (!string.IsNullOrEmpty(fromArg))
+    {
+        WarnSecretOnCommandLine("--passphrase", "USENETBACKUP_PASSPHRASE");
         return fromArg;
+    }
     string? fromEnv = Environment.GetEnvironmentVariable("USENETBACKUP_PASSPHRASE");
     if (!string.IsNullOrEmpty(fromEnv))
         return fromEnv;
@@ -106,6 +109,17 @@ static string GetPassphrase(string[] args)
     if (string.IsNullOrEmpty(typed))
         throw new InvalidOperationException("A passphrase is required.");
     return typed;
+}
+
+/// <summary>
+/// A secret passed as a command-line flag is visible to other users on the
+/// machine via the process list. Warn once per invocation.
+/// </summary>
+static void WarnSecretOnCommandLine(string flag, string envVar)
+{
+    Console.Error.WriteLine(
+        $"warning: {flag} exposes the secret in the process list; " +
+        $"prefer the {envVar} environment variable or the interactive prompt.");
 }
 
 /// <summary>
@@ -177,10 +191,25 @@ static int BackupDisk(string[] args)
 static int RestoreDisk(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 3) { Console.Error.WriteLine("error: restore-disk <repo> <backup-id> <device>"); return 2; }
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore-disk <repo> <backup-id> <device> [--yes]"); return 2; }
+    string device = pos[2];
+    if (!HasFlag(args, "--yes"))
+    {
+        // Destructive by design: make the operator prove they mean THIS device.
+        if (Console.IsInputRedirected)
+            throw new InvalidOperationException(
+                "Refusing to overwrite a block device without confirmation: stdin is not " +
+                "interactive. Re-run with --yes to confirm non-interactively.");
+        Console.Error.WriteLine($"WARNING: this will OVERWRITE {device} with the contents of backup {pos[1]}.");
+        Console.Error.WriteLine("All existing data on that device will be destroyed.");
+        Console.Write($"Type the device path exactly to confirm: ");
+        string? typed = Console.ReadLine();
+        if (!string.Equals(typed?.Trim(), device, StringComparison.Ordinal))
+            throw new InvalidOperationException("Confirmation did not match; restore aborted.");
+    }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
-    repo.RestoreDiskImage(pos[1], pos[2]);
-    Console.WriteLine($"Restored disk image {pos[1]} to {pos[2]}.");
+    repo.RestoreDiskImage(pos[1], device);
+    Console.WriteLine($"Restored disk image {pos[1]} to {device}.");
     return 0;
 }
 
@@ -224,7 +253,10 @@ static string GetNntpPassword(string[] args)
 {
     string? fromArg = GetOption(args, "--password");
     if (!string.IsNullOrEmpty(fromArg))
+    {
+        WarnSecretOnCommandLine("--password", "USENETBACKUP_NNTP_PASSWORD");
         return fromArg;
+    }
     string? fromEnv = Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD");
     if (!string.IsNullOrEmpty(fromEnv))
         return fromEnv;

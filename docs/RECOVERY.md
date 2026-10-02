@@ -61,7 +61,8 @@ chunk before you trust the restore.
    usenet-backup download X:\repo disk-backup.nzb --host <provider> --user <user>
    ```
 5. Write the image to the target drive (**destructive** — triple-check
-   the drive number; `diskpart → list disk`):
+   the drive number; `diskpart → list disk`). You must type the device
+   path to confirm (or pass `--yes` in a script):
    ```
    usenet-backup restore-disk X:\repo <backup-id> \\.\PhysicalDrive0
    ```

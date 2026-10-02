@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Service;
 
@@ -12,19 +14,29 @@ namespace UsenetBackup.Service;
 /// </summary>
 public static class Dashboard
 {
-    public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler, CancellationToken ct)
+    public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
+        CancellationToken ct, Action<string>? log = null)
     {
+        // Per-startup CSRF token for state-changing endpoints. The dashboard
+        // has no login, so without this any website you visit could trigger
+        // backups via cross-origin POSTs to loopback. The token is embedded
+        // in the served HTML (unreadable cross-origin) and never logged.
+        string csrfToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        log?.Invoke("dashboard CSRF token generated (embedded in served pages)");
+
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{config.DashboardBind}:{config.DashboardPort}");
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
         var app = builder.Build();
 
-        app.MapGet("/", () => Results.Content(DashboardHtml.Page(), "text/html; charset=utf-8"));
+        app.MapGet("/", () => Results.Content(DashboardHtml.Page(csrfToken), "text/html; charset=utf-8"));
 
         app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
 
-        app.MapPost("/api/jobs/{name}/run", (string name) =>
+        app.MapPost("/api/jobs/{name}/run", (string name, HttpRequest request) =>
         {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
             if (!DashboardApi.IsKnownJob(scheduler, name))
                 return Results.NotFound(new { error = $"Unknown job '{name}'." });
             // Run in the background; the scheduler serializes runs.
@@ -84,6 +96,18 @@ public static class DashboardApi
     public static bool IsKnownJob(BackupScheduler scheduler, string name) =>
         scheduler.Jobs.Any(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Constant-time CSRF token check for state-changing dashboard endpoints.
+    /// </summary>
+    public static bool ValidateCsrfToken(string expected, string? provided)
+    {
+        if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(provided))
+            return false;
+        byte[] a = Encoding.UTF8.GetBytes(expected);
+        byte[] b = Encoding.UTF8.GetBytes(provided);
+        return a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
+    }
+
     public static bool IsKnownRepo(ServiceConfig config, string repo) =>
         config.Jobs.Any(j => string.Equals(
             Path.GetFullPath(j.Repo), Path.GetFullPath(repo), StringComparison.OrdinalIgnoreCase));
@@ -122,11 +146,20 @@ public static class DashboardApi
 
 public static class DashboardHtml
 {
-    public static string Page() => """
+    /// <summary>
+    /// The {{CSRF_TOKEN}} placeholder is replaced with the per-startup token;
+    /// the page is unreadable cross-origin, so only the operator's browser
+    /// (and localhost) can learn it.
+    /// </summary>
+    public static string Page(string csrfToken) =>
+        RawPage.Replace("{{CSRF_TOKEN}}", csrfToken, StringComparison.Ordinal);
+
+    private static string RawPage => """
         <!DOCTYPE html>
         <html lang="en">
         <head>
         <meta charset="utf-8">
+        <meta name="csrf-token" content="{{CSRF_TOKEN}}">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Usenet Backup</title>
         <style>
@@ -182,7 +215,9 @@ public static class DashboardHtml
           loadRepo();
         }
         async function runJob(name) {
-          await api('/api/jobs/' + encodeURIComponent(name) + '/run', { method: 'POST' });
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          await api('/api/jobs/' + encodeURIComponent(name) + '/run',
+            { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
           setTimeout(load, 2000);
         }
         async function loadRepo() {

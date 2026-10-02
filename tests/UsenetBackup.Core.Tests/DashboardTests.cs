@@ -136,11 +136,25 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void HtmlPage_ContainsDashboardElements()
     {
-        string html = DashboardHtml.Page();
+        string html = DashboardHtml.Page("test-csrf-token");
         Assert.Contains("<title>Usenet Backup</title>", html);
+        Assert.Contains("name=\"csrf-token\" content=\"test-csrf-token\"", html);
+        Assert.Contains("X-CSRF-Token", html);
         Assert.Contains("/api/status", html);
         Assert.Contains("/api/jobs/", html);
         Assert.Contains("/api/backups", html);
         Assert.Contains("/api/log", html);
+    }
+
+    [Fact]
+    public void ValidateCsrfToken_AcceptsOnlyExactMatch()
+    {
+        Assert.True(DashboardApi.ValidateCsrfToken("abc123", "abc123"));
+        Assert.False(DashboardApi.ValidateCsrfToken("abc123", "abc124"));
+        Assert.False(DashboardApi.ValidateCsrfToken("abc123", "abc12"));   // length differs
+        Assert.False(DashboardApi.ValidateCsrfToken("abc123", "abc1234")); // length differs
+        Assert.False(DashboardApi.ValidateCsrfToken("abc123", null));
+        Assert.False(DashboardApi.ValidateCsrfToken("abc123", ""));
+        Assert.False(DashboardApi.ValidateCsrfToken("", "abc123"));
     }
 }

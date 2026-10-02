@@ -31,6 +31,13 @@
 .PARAMETER ServiceName
     SCM service name. Defaults to UsenetBackup.
 
+.PARAMETER ServiceAccount
+    Account the service runs as, e.g. "NT SERVICE\UsenetBackup" for a
+    least-privilege virtual service account. Defaults to LocalSystem.
+    Notes: VSS snapshot jobs (--vss) require an administrator account, so
+    keep LocalSystem if any job uses "vss": true. A custom account must be
+    granted read access to the repo/source paths itself.
+
 .PARAMETER Passphrase
     Repository passphrase as a SecureString. If omitted, you are prompted
     interactively. Useful for automated installs.
@@ -43,6 +50,7 @@ param(
     [string]$Config = "",
     [string]$InstallDir = "C:\Program Files\UsenetBackup",
     [string]$ServiceName = "UsenetBackup",
+    [string]$ServiceAccount = "",
     [SecureString]$Passphrase,
     [switch]$Uninstall
 )
@@ -87,13 +95,18 @@ $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
 $plain = $null
 
 $binPath = "`"$(Join-Path $InstallDir 'usenet-backup-service.exe')`""
+# Least privilege: a virtual service account (NT SERVICE\<name>) or any
+# caller-supplied account can be used instead of LocalSystem. Note that
+# VSS snapshot jobs require an administrator account.
+$objArg = @()
+if ($ServiceAccount) { $objArg = @("obj=", $ServiceAccount) }
 $existing = sc.exe query $ServiceName 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Service already exists; updating binary path..."
-    sc.exe config $ServiceName binPath= $binPath | Out-Null
+    sc.exe config $ServiceName binPath= $binPath @objArg | Out-Null
 } else {
     Write-Host "Creating service $ServiceName..."
-    $out = sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= "Usenet Backup Service"
+    $out = sc.exe create $ServiceName binPath= $binPath @objArg start= auto DisplayName= "Usenet Backup Service"
     if ($LASTEXITCODE -ne 0) { Fail "sc.exe create failed: $out" }
     sc.exe description $ServiceName "Scheduled encrypted backups to Usenet (usenet-backup)." | Out-Null
 }

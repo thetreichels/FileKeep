@@ -154,6 +154,36 @@ as the WinPE recovery tool — boot WinPE, reassemble the repo metadata
 (`repo.json`, `manifests/`, `catalog.db`), `download` the chunks from
 Usenet, `verify`, then `restore` (or `restore-disk` for images).
 
+## Security notes
+
+- **Passphrase handling.** The encryption key is derived at runtime
+  (PBKDF2-HMAC-SHA-512, 600,000 iterations) and zeroed on dispose; it is
+  never written to the repo. Prefer the `USENETBACKUP_PASSPHRASE`
+  environment variable or the interactive prompt — `--passphrase` on the
+  command line is visible in the process list (the CLI warns about this).
+  The Windows service reads the passphrase from a machine-level
+  environment variable; treat that machine as trusted, or use DPAPI/a
+  secret store instead.
+- **What's public.** Chunk message-IDs posted to Usenet embed the
+  SHA-256 of the plaintext chunk (required for content addressing and
+  dedup). Ciphertext is safe, but anyone with an NZB can confirm guesses
+  about plaintext. Filenames are plaintext in manifests (v1 tradeoff for
+  independent verifiability). There is no forward secrecy: a compromised
+  passphrase decrypts all past Usenet posts.
+- **Destructive commands.** `restore-disk` overwrites a block device; it
+  requires typing the device path to confirm (or `--yes` for scripts) and
+  refuses when stdin isn't interactive.
+- **Dashboard.** Binds to loopback only, no login. State-changing calls
+  require a per-startup CSRF token (embedded in the served page), but
+  treat it as single-user: don't expose the port, and don't run it on a
+  shared machine without a reverse proxy.
+- **Service account.** The installer defaults to LocalSystem (needed for
+  VSS); pass `-ServiceAccount "NT SERVICE\UsenetBackup"` for least
+  privilege when no job uses VSS.
+- **Dependencies.** The vendored `SQLitePCLRaw.lib.e_sqlite3` 2.1.11
+  carries a known high-severity advisory; it only ever opens the app's
+  own `catalog.db`, but upgrade it when dependencies are next touched.
+
 ## Status
 
 - [x] Milestone 1 (v0.1): local repository engine — directory backup,
