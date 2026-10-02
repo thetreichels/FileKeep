@@ -92,10 +92,7 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
 
             // Map the source dir onto the shadow copy: strip the volume root
             // (e.g. "C:\") and re-root under the snapshot device object.
-            string relative = Path.GetRelativePath(volumeRoot, fullSource);
-            SnapshotRoot = relative == "."
-                ? deviceObject
-                : Path.Combine(deviceObject, relative);
+            SnapshotRoot = MapToSnapshotDevice(deviceObject, volumeRoot, fullSource);
         }
         catch
         {
@@ -105,6 +102,36 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
     }
 
     public string SnapshotRoot { get; }
+
+    /// <summary>
+    /// Maps a source directory onto its shadow-copy device path by stripping
+    /// the volume root and re-rooting under the snapshot device object.
+    /// Computed manually rather than via <see cref="Path.GetRelativePath"/>:
+    /// if the remainder were ever absolute, <see cref="Path.Combine"/> would
+    /// silently discard the device object and reads would hit the LIVE volume
+    /// instead of the snapshot. Any mapping failure throws.
+    /// </summary>
+    internal static string MapToSnapshotDevice(string deviceObject, string volumeRoot, string fullSource)
+    {
+        if (string.IsNullOrEmpty(deviceObject))
+            throw new ArgumentException("Snapshot device object is empty.", nameof(deviceObject));
+        if (!fullSource.StartsWith(volumeRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Cannot map '{fullSource}' onto the VSS snapshot of volume '{volumeRoot}'.");
+        // Trim both separator styles so the remainder is provably relative;
+        // a rooted remainder would make Path.Combine discard deviceObject.
+        string relative = fullSource.Substring(volumeRoot.Length).TrimStart('\\', '/');
+        if (relative.Length == 0)
+            return deviceObject;
+        if (Path.IsPathRooted(relative))
+            throw new InvalidOperationException(
+                $"Cannot map '{fullSource}' onto the VSS snapshot of volume '{volumeRoot}'.");
+        string mapped = Path.Combine(deviceObject, relative);
+        if (!mapped.StartsWith(deviceObject, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"VSS snapshot path mapping failed for '{fullSource}'.");
+        return mapped;
+    }
 
     public bool IsSnapshot => true;
 

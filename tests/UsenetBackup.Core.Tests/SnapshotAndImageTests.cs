@@ -247,4 +247,51 @@ public sealed class SnapshotAndImageTests : IDisposable
             Assert.False(loaded.IsDiskImage);
         }
     }
+
+    [Fact]
+    public void MapToSnapshotDevice_MapsSourceUnderDeviceObject()
+    {
+        // Windows-style paths; the mapping is pure string logic.
+        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
+        string mapped = VssSnapshotProvider.MapToSnapshotDevice(
+            device, @"C:\", @"C:\ProgramData\ub\vss-src");
+        Assert.StartsWith(device, mapped, StringComparison.Ordinal);
+        Assert.Contains("vss-src", mapped, StringComparison.Ordinal);
+        Assert.NotEqual(@"C:\ProgramData\ub\vss-src", mapped);
+    }
+
+    [Fact]
+    public void MapToSnapshotDevice_VolumeRootItself_ReturnsDeviceObject()
+    {
+        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7";
+        Assert.Equal(device, VssSnapshotProvider.MapToSnapshotDevice(device, @"D:\", @"D:\"));
+    }
+
+    [Fact]
+    public void MapToSnapshotDevice_MismatchedVolume_Throws()
+    {
+        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
+        Assert.Throws<InvalidOperationException>(() =>
+            VssSnapshotProvider.MapToSnapshotDevice(device, @"C:\", @"D:\data"));
+    }
+
+    [Fact]
+    public void MapToSnapshotDevice_EmptyDeviceObject_Throws()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            VssSnapshotProvider.MapToSnapshotDevice("", @"C:\", @"C:\data"));
+    }
+
+    [Fact]
+    public void MapToSnapshotDevice_NeverReturnsLivePath()
+    {
+        // Regression test for the live-volume read: the mapped root must
+        // always be under the device object, never the original path.
+        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
+        foreach (string src in new[] { @"C:\a", @"C:\a\b\c", @"C:\" })
+        {
+            string mapped = VssSnapshotProvider.MapToSnapshotDevice(device, @"C:\", src);
+            Assert.StartsWith(device, mapped, StringComparison.Ordinal);
+        }
+    }
 }

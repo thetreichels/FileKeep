@@ -8,6 +8,11 @@
     <RootNamespace>UsenetBackup.Core</RootNamespace>
   </PropertyGroup>
 
+  <!-- Exposed for unit tests of internal helpers (e.g. VSS path mapping). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="UsenetBackup.Core.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
   </ItemGroup>
