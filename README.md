@@ -98,6 +98,9 @@ they never silently change `v1`.
    device imaging, bare-metal recovery. ✅ done (`v0.6-vss-system-images`,
    69/69 tests; VSS snapshot path needs Windows validation)
 7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
+   ✅ done (`v0.7-service-gui-installer`, 85/85 tests; service + localhost
+   web dashboard + PS installer + recovery runbook — WiX MSI and a
+   purpose-built WinPE ISO still need Windows tooling)
 
 Each milestone gets a git tag (`v0.1-local-repository`, …) so any
 broken experiment can be rolled back to a known-good state.
@@ -111,8 +114,38 @@ dotnet build UsenetBackup.slnx
 dotnet test UsenetBackup.slnx
 ```
 
-Milestone 6 (VSS, Windows service, recovery environment) requires a
-Windows 10/11 machine to build and test.
+The VSS snapshot path (milestone 6) and running as a Windows service
+(milestone 7) require a Windows 10/11 machine to execute; both compile
+cross-platform and fail fast with a clear error elsewhere. The service
+also runs in `--console` mode on any OS (useful for testing), and the
+dashboard is a localhost web UI reachable from any browser.
+
+## Service & dashboard (milestone 7)
+
+`usenet-backup-service` runs scheduled backups as a Windows service
+(raw SCM P/Invoke, no extra dependencies) and serves a localhost web
+dashboard (the GUI) with job status, manual "run now", backup lists and
+the operations log:
+
+```sh
+# console mode (any OS) — handy for trying it out:
+USENETBACKUP_PASSPHRASE=... usenet-backup-service --console --config service.json
+# then open http://127.0.0.1:15789/
+```
+
+`service.json` (see `src/UsenetBackup.Service/service.example.json`)
+defines jobs: repo, source, schedule (`"daily HH:mm"` or
+`"interval N"` minutes), mode (`incremental` — falls back to full when
+no parent exists — or `full`), and `vss` for shadow-copy backups.
+The passphrase comes from the `USENETBACKUP_PASSPHRASE` environment
+variable; scheduled runs fail fast with a clear error when it is missing.
+On Windows, `install/install.ps1` (run as admin) publishes, registers
+and starts the service.
+
+Bare-metal recovery is documented in `docs/RECOVERY.md`: the CLI doubles
+as the WinPE recovery tool — boot WinPE, reassemble the repo metadata
+(`repo.json`, `manifests/`, `catalog.db`), `download` the chunks from
+Usenet, `verify`, then `restore` (or `restore-disk` for images).
 
 ## Status
 
@@ -139,4 +172,12 @@ Windows 10/11 machine to build and test.
       cross-platform but can only be exercised on Windows (vtable order
       flagged for re-verification against the SDK's `vss.h` there); all
       platform-independent behavior is tested on Linux.
-- [ ] Milestone 7 (v0.7): Windows service, GUI, installer, recovery ISO
+- [x] Milestone 7 (v0.7): Windows service, GUI, installer, recovery —
+      `usenet-backup-service`: SCM-hosted Windows service (raw P/Invoke,
+      zero new dependencies) running scheduled `daily HH:mm` / `interval N`
+      backup jobs from `service.json` with failure tracking and resume;
+      localhost web dashboard (status, run-now, backups, operations log);
+      admin PowerShell installer (`install/install.ps1`); bare-metal
+      recovery runbook (`docs/RECOVERY.md`, CLI as the WinPE tool).
+      Tagged `v0.7-service-gui-installer`. Not done here: WiX MSI packaging
+      and a purpose-built WinPE ISO need Windows tooling.

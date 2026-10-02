@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\UsenetBackup.Core\UsenetBackup.Core.csproj" />
+    <ProjectReference Include="..\..\src\UsenetBackup.Service\UsenetBackup.Service.csproj" />
   </ItemGroup>
 
 </Project>
