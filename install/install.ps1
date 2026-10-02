@@ -28,6 +28,13 @@
 .PARAMETER InstallDir
     Install location. Defaults to C:\Program Files\UsenetBackup.
 
+.PARAMETER ServiceName
+    SCM service name. Defaults to UsenetBackup.
+
+.PARAMETER Passphrase
+    Repository passphrase as a SecureString. If omitted, you are prompted
+    interactively. Useful for automated installs.
+
 .PARAMETER Uninstall
     Stop and remove the service instead of installing.
 #>
@@ -35,11 +42,12 @@ param(
     [string]$Source = "",
     [string]$Config = "",
     [string]$InstallDir = "C:\Program Files\UsenetBackup",
+    [string]$ServiceName = "UsenetBackup",
+    [SecureString]$Passphrase,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
-$ServiceName = "UsenetBackup"
 
 function Fail([string]$msg) { Write-Error $msg; exit 1 }
 
@@ -70,9 +78,11 @@ Copy-Item $Config (Join-Path $InstallDir "service.json") -Force
 # The service needs the passphrase non-interactively. Store it as a
 # machine-level environment variable (readable by admins + SYSTEM only
 # via ACLs on the registry key in practice — treat this machine as trusted).
-$pw = Read-Host "Repository passphrase (stored as machine env USENETBACKUP_PASSPHRASE)" -AsSecureString
+if (-not $Passphrase) {
+    $Passphrase = Read-Host "Repository passphrase (stored as machine env USENETBACKUP_PASSPHRASE)" -AsSecureString
+}
 $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw))
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Passphrase))
 [Environment]::SetEnvironmentVariable("USENETBACKUP_PASSPHRASE", $plain, "Machine")
 $plain = $null
 

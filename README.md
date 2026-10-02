@@ -142,6 +142,13 @@ variable; scheduled runs fail fast with a clear error when it is missing.
 On Windows, `install/install.ps1` (run as admin) publishes, registers
 and starts the service.
 
+Windows-only paths (VSS snapshots, SCM hosting) are validated by
+`validate/validate-windows.ps1` — run it as admin on a Windows 10/11
+machine with the .NET SDK (or prebuilt binaries); it publishes, then
+checks VSS locked-file backup + shadow-copy hygiene, disk-image
+round-trip, and service install → dashboard run → uninstall, cleaning
+up afterwards.
+
 Bare-metal recovery is documented in `docs/RECOVERY.md`: the CLI doubles
 as the WinPE recovery tool — boot WinPE, reassemble the repo metadata
 (`repo.json`, `manifests/`, `catalog.db`), `download` the chunks from
