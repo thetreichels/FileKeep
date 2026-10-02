@@ -87,14 +87,21 @@ Check "Prerequisites: binaries" {
         Assert-True (Test-Path (Join-Path $ServiceDir "usenet-backup-service.exe")) "usenet-backup-service.exe not found in $ServiceDir"
     } else {
         Assert-True ($null -ne (Get-Command dotnet -ErrorAction SilentlyContinue)) ".NET SDK not found; install it or pass -CliDir and -ServiceDir."
+        # The repo's nuget.config points at a sandbox-only vendored feed
+        # (.nuget-local/) that is not shipped. On a normal machine with
+        # internet, restore from nuget.org instead.
+        $restoreSrc = @()
+        if (-not (Test-Path (Join-Path $RepoRoot ".nuget-local"))) {
+            $restoreSrc = @("/p:RestoreSources=https://api.nuget.org/v3/index.json")
+        }
         $pub = Join-Path $WorkRoot "publish"
         Write-Host "Publishing CLI..."
         dotnet publish "$RepoRoot/src/UsenetBackup.Cli/UsenetBackup.Cli.csproj" -c Release -r win-x64 `
-            --self-contained -p:PublishSingleFile=true -o "$pub/cli" | Out-Null
+            --self-contained -p:PublishSingleFile=true -o "$pub/cli" @restoreSrc | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "CLI publish failed" }
         Write-Host "Publishing service..."
         dotnet publish "$RepoRoot/src/UsenetBackup.Service/UsenetBackup.Service.csproj" -c Release -r win-x64 `
-            --self-contained -p:PublishSingleFile=true -o "$pub/service" | Out-Null
+            --self-contained -p:PublishSingleFile=true -o "$pub/service" @restoreSrc | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "service publish failed" }
         Set-Variable -Name CliDir -Value "$pub/cli" -Scope Script
         Set-Variable -Name ServiceDir -Value "$pub/service" -Scope Script
