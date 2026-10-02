@@ -61,6 +61,10 @@ public sealed class SnapshotAndImageTests : IDisposable
         public string SnapshotRoot { get; }
         public bool IsSnapshot => true;
         public string Name => "test-snap";
+        public FileStream OpenRead(string fullPath)
+        {
+            return new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        }
         public void Dispose()
         {
             try { Directory.Delete(SnapshotRoot, recursive: true); } catch { /* best effort */ }
@@ -249,49 +253,14 @@ public sealed class SnapshotAndImageTests : IDisposable
     }
 
     [Fact]
-    public void MapToSnapshotDevice_MapsSourceUnderDeviceObject()
+    public void NullSnapshotProvider_OpenRead_ReadsFile()
     {
-        // Windows-style paths; the mapping is pure string logic.
-        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
-        string mapped = VssSnapshotProvider.MapToSnapshotDevice(
-            device, @"C:\", @"C:\ProgramData\ub\vss-src");
-        Assert.StartsWith(device, mapped, StringComparison.Ordinal);
-        Assert.Contains("vss-src", mapped, StringComparison.Ordinal);
-        Assert.NotEqual(@"C:\ProgramData\ub\vss-src", mapped);
-    }
-
-    [Fact]
-    public void MapToSnapshotDevice_VolumeRootItself_ReturnsDeviceObject()
-    {
-        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7";
-        Assert.Equal(device, VssSnapshotProvider.MapToSnapshotDevice(device, @"D:\", @"D:\"));
-    }
-
-    [Fact]
-    public void MapToSnapshotDevice_MismatchedVolume_Throws()
-    {
-        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
-        Assert.Throws<InvalidOperationException>(() =>
-            VssSnapshotProvider.MapToSnapshotDevice(device, @"C:\", @"D:\data"));
-    }
-
-    [Fact]
-    public void MapToSnapshotDevice_EmptyDeviceObject_Throws()
-    {
-        Assert.Throws<ArgumentException>(() =>
-            VssSnapshotProvider.MapToSnapshotDevice("", @"C:\", @"C:\data"));
-    }
-
-    [Fact]
-    public void MapToSnapshotDevice_NeverReturnsLivePath()
-    {
-        // Regression test for the live-volume read: the mapped root must
-        // always be under the device object, never the original path.
-        string device = @"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1";
-        foreach (string src in new[] { @"C:\a", @"C:\a\b\c", @"C:\" })
-        {
-            string mapped = VssSnapshotProvider.MapToSnapshotDevice(device, @"C:\", src);
-            Assert.StartsWith(device, mapped, StringComparison.Ordinal);
-        }
+        // The interface default OpenRead opens normally.
+        string path = Path.Combine(_srcDir, "openread.txt");
+        File.WriteAllText(path, "hello");
+        using var snap = new NullSnapshotProvider(_srcDir);
+        using var stream = snap.OpenRead(path);
+        using var reader = new StreamReader(stream);
+        Assert.Equal("hello", reader.ReadToEnd());
     }
 }

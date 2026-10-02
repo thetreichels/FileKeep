@@ -205,7 +205,7 @@ public sealed class BackupRepository : IDisposable
                 }
                 else
                 {
-                    manifest.Files.Add(BackupOneFile(full, rel, buffer));
+                    manifest.Files.Add(BackupOneFile(snap, full, rel, buffer));
                 }
             }
         }
@@ -247,7 +247,7 @@ public sealed class BackupRepository : IDisposable
         return true;
     }
 
-    private FileEntry BackupOneFile(string fullPath, string relPath, byte[] buffer)
+    private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer)
     {
         if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
         {
@@ -261,7 +261,7 @@ public sealed class BackupRepository : IDisposable
             };
         }
 
-        using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var stream = snap.OpenRead(fullPath);
         return BackupStream(stream, relPath, File.GetLastWriteTimeUtc(fullPath), buffer);
     }
 

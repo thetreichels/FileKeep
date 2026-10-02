@@ -166,21 +166,6 @@ static int Backup(string[] args)
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     string? parent = GetOption(args, "--parent");
     using ISnapshotProvider? snap = HasFlag(args, "--vss") ? new VssSnapshotProvider(pos[1]) : null;
-    if (snap is not null)
-    {
-        // Temporary run-6 diagnostic: print the resolved snapshot root and
-        // whether the source's files are visible through it.
-        Console.Error.WriteLine($"[vss-diag] SnapshotRoot={snap.SnapshotRoot}");
-        try
-        {
-            int visible = Directory.EnumerateFiles(snap.SnapshotRoot, "*", SearchOption.TopDirectoryOnly).Count();
-            Console.Error.WriteLine($"[vss-diag] files visible at snapshot root: {visible}");
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[vss-diag] cannot enumerate snapshot root: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
     var manifest = parent is null
         ? repo.BackupDirectory(pos[1], snap)
         : repo.BackupIncremental(pos[1], parent, snap);
