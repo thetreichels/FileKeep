@@ -53,17 +53,24 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
             throw new ArgumentException($"Cannot determine the volume for '{fullSource}'.", nameof(sourceDir));
 
         int hr = Native.CreateVssBackupComponents(out IVssBackupComponents? backup);
+        System.Console.Error.WriteLine("[vss-diag] CreateVssBackupComponents returned hr=0x" + hr.ToString("x"));
         Marshal.ThrowExceptionForHR(hr);
         _backup = backup ?? throw new InvalidOperationException("CreateVssBackupComponents returned null.");
 
         try
         {
             // HRESULT-returning COM methods throw on failure via the interface declaration.
+            // Temporary step diagnostics to pinpoint EntryPointNotFoundException.
+            System.Console.Error.WriteLine("[vss-diag] calling InitializeForBackup");
             _backup.InitializeForBackup(null);
+            System.Console.Error.WriteLine("[vss-diag] calling SetContext");
             _backup.SetContext(Native.VSS_CTX_BACKUP);
+            System.Console.Error.WriteLine("[vss-diag] calling StartSnapshotSet");
             _backup.StartSnapshotSet(out Guid snapshotSetId);
+            System.Console.Error.WriteLine("[vss-diag] calling AddToSnapshotSet");
             _backup.AddToSnapshotSet(volumeRoot, Guid.Empty, out _snapshotId);
 
+            System.Console.Error.WriteLine("[vss-diag] calling DoSnapshotSet");
             _backup.DoSnapshotSet(out IVssAsync? async);
             try
             {
