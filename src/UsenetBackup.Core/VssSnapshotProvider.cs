@@ -17,10 +17,11 @@ namespace UsenetBackup.Core;
 /// </para>
 /// <para>
 /// <b>Validation note:</b> the <see cref="IVssBackupComponents"/> vtable order
-/// must be re-verified against the SDK's <c>vss.h</c> on a Windows build
-/// machine before trusting snapshots in production. Only the slots actually
-/// called (up to <c>GetSnapshotProperties</c>) are load-bearing; every
-/// predecessor is declared in SDK order so the vtable lines up.
+/// follows the Windows SDK's <c>vss.h</c> exactly, including methods this
+/// provider never calls (<c>SetAbortBackup</c>, <c>AddComponent</c>, and the
+/// writer-status methods) — COM dispatch is positional, so every slot must
+/// line up. An earlier revision omitted those methods, shifting later slots
+/// and causing EntryPointNotFoundException on real Windows VSS calls.
 /// </para>
 /// <para>
 /// The snapshot flow used here is the minimal writer-independent one:
@@ -245,6 +246,11 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IVssBackupComponents
     {
+        // NOTE: method order must match vss.h exactly — COM vtable dispatch
+        // is positional. Slots are numbered from 3 (after IUnknown's 0-2).
+        // A previous revision omitted SetAbortBackup/AddComponent and the
+        // writer-status methods, shifting every later slot and causing
+        // EntryPointNotFoundException on a real Windows VSS call.
         // 3
         void GetWriterComponentsCount(out uint pcComponents);
         // 4
@@ -253,50 +259,71 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
         // 5 — null XML = no stored writer metadata document.
         void InitializeForBackup([MarshalAs(UnmanagedType.BStr)] string? bstrXML);
         // 6
+        void SetAbortBackup();
+        // 7
+        void GatherWriterMetadata([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
+        // 8
+        void GetWriterMetadataCount(out uint pcWriters);
+        // 9
+        void GetWriterMetadata(uint iWriter, out Guid pidInstance,
+            [MarshalAs(UnmanagedType.Interface)] out object ppMetadata);
+        // 10
+        void FreeWriterMetadata();
+        // 11
+        void AddComponent(Guid instanceId, Guid writerId, int componentType,
+            [MarshalAs(UnmanagedType.LPWStr)] string wszLogicalPath,
+            [MarshalAs(UnmanagedType.LPWStr)] string wszComponentName);
+        // 12
+        void PrepareForBackup([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
+        // 13
+        void AbortBackup();
+        // 14
+        void GatherWriterStatus([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
+        // 15
+        void GetWriterStatusCount(out uint pcWriters);
+        // 16
+        void GetWriterStatus(uint iWriter, out Guid pidInstance,
+            [MarshalAs(UnmanagedType.Interface)] out object ppStatus);
+        // 17
+        void FreeWriterStatus();
+        // 18
         void SetBackupState(
             [MarshalAs(UnmanagedType.Bool)] bool bSelectComponents,
             [MarshalAs(UnmanagedType.Bool)] bool bBackupBootableSystemState,
             int backupType,
             [MarshalAs(UnmanagedType.Bool)] bool bPartialFileSupport);
-        // 7
-        void GatherWriterMetadata([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
-        // 8
-        void GetWriterMetadata(uint iWriter, out Guid pidInstance,
-            [MarshalAs(UnmanagedType.Interface)] out object ppMetadata);
-        // 9
-        void FreeWriterMetadata();
-        // 10
+        // 19
         void SetBackupSucceeded(Guid writerId, Guid instanceId,
             [MarshalAs(UnmanagedType.Bool)] bool bSucceeded);
-        // 11
+        // 20
         void SetFileRestoreStatus(Guid writerId, Guid instanceId, int status);
-        // 12
+        // 21
         void SetRangesFilePath(Guid writerId, Guid instanceId, Guid id,
             [MarshalAs(UnmanagedType.LPWStr)] string wszRangesFilePath);
-        // 13
+        // 22
         void PreRestore([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
-        // 14
+        // 23
         void PostRestore([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
-        // 15
+        // 24
         void SetContext(int lContext);
-        // 16
+        // 25
         void StartSnapshotSet(out Guid pSnapshotSetId);
-        // 17 — ProviderId = Guid.Empty selects the default provider.
+        // 26 — ProviderId = Guid.Empty selects the default provider.
         void AddToSnapshotSet(
             [MarshalAs(UnmanagedType.LPWStr)] string pwszVolumeName,
             Guid providerId,
             out Guid pidSnapshot);
-        // 18
+        // 27
         void DoSnapshotSet([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
-        // 19
+        // 28
         void DeleteSnapshots(Guid sourceObjectId, int eSourceObjectType,
             [MarshalAs(UnmanagedType.Bool)] bool bForceDelete,
             out int plDeletedSnapshots, out Guid pNondeletedSnapshotID);
-        // 20
+        // 29
         void ImportSnapshots([MarshalAs(UnmanagedType.Interface)] out IVssAsync ppAsync);
-        // 21 (V)
+        // 30
         void BreakSnapshotSet(Guid snapshotSetId);
-        // 22
+        // 31
         void GetSnapshotProperties(Guid snapshotId, out VSS_SNAPSHOT_PROP pProp);
     }
 }
