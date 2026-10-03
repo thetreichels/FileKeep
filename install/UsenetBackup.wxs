@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v5 installer for Usenet Backup.
+     Build on Windows with the WiX dotnet tool:
+       dotnet tool install --global wix
+       wix build -arch x64 \
+         -d CliBin=C:\ub\publish\cli \
+         -d ServiceBin=C:\ub\publish\service \
+         -d RecoveryBin=C:\ub\publish\recovery \
+         -o usenet-backup-0.8.0-x64.msi \
+         install/UsenetBackup.wxs
+     The -d paths must point at self-contained win-x64 publish outputs. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Usenet Backup"
+           Version="0.8.0"
+           Manufacturer="Usenet Backup"
+           UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Usenet Backup is already installed." />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="UsenetBackup" />
+    </StandardDirectory>
+
+    <!-- CLI -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="CliFiles" Bitness="always64">
+        <Files Include="$(var.CliBin)\*" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Windows service -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ServiceExecutable" Bitness="always64">
+        <File Id="ServiceExe"
+              Source="$(var.ServiceBin)\usenet-backup-service.exe"
+              KeyPath="true" />
+        <ServiceInstall Id="BackupService"
+                        Type="ownProcess"
+                        Name="UsenetBackup"
+                        DisplayName="Usenet Backup Service"
+                        Description="Scheduled encrypted backups to Usenet."
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal" />
+        <ServiceControl Id="BackupServiceControl"
+                        Name="UsenetBackup"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="true" />
+      </Component>
+      <Component Id="ServiceFiles" Bitness="always64">
+        <Files Include="$(var.ServiceBin)\*"
+               Exclude="$(var.ServiceBin)\usenet-backup-service.exe" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Recovery wizard (also shipped on the USB stick) -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="RecoveryFiles" Bitness="always64">
+        <Files Include="$(var.RecoveryBin)\*" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Service config example + recovery runbook -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Docs" Bitness="always64">
+        <File Source="install/service.example.json" Name="service.example.json" />
+        <File Source="docs/RECOVERY.md" Name="RECOVERY.md" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="ProductFeature" Title="Usenet Backup" Level="1">
+      <ComponentRef Id="CliFiles" />
+      <ComponentRef Id="ServiceExecutable" />
+      <ComponentRef Id="ServiceFiles" />
+      <ComponentRef Id="RecoveryFiles" />
+      <ComponentRef Id="Docs" />
+    </Feature>
+  </Package>
+</Wix>
