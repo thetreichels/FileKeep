@@ -3,7 +3,7 @@
      The apps publish as single-file executables (PublishSingleFile in the
      csproj), so the payload is a handful of explicit files — no harvesting.
      Build on Windows with the WiX v5 dotnet tool:
-       wix build -arch x64 -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o usenet-backup-0.8.0-x64.msi install/UsenetBackup.wxs
+       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o usenet-backup-0.8.0-x64.msi install/UsenetBackup.wxs
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
@@ -14,6 +14,8 @@
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Usenet Backup is already installed." />
+
+    <Media Id="1" Cabinet="product.cab" EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="UsenetBackup">
@@ -60,8 +62,8 @@
     <!-- Service config example + recovery runbook -->
     <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
-        <File Source="src/UsenetBackup.Service/service.example.json" Name="service.example.json" />
-        <File Source="docs/RECOVERY.md" Name="RECOVERY.md" />
+        <File Source="$(var.SrcRoot)\UsenetBackup.Service\service.example.json" Name="service.example.json" />
+        <File Source="$(var.SrcRoot)\docs\RECOVERY.md" Name="RECOVERY.md" />
       </Component>
     </ComponentGroup>
 
