@@ -7,7 +7,9 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>UsenetBackup.Service</RootNamespace>
     <AssemblyName>usenet-backup-service</AssemblyName>
-  </PropertyGroup>
+      <!-- Single-file self-contained publish: the MSI installs the exe + native deps explicitly. -->
+    <PublishSingleFile>true</PublishSingleFile>
+</PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\UsenetBackup.Core\UsenetBackup.Core.csproj" />
