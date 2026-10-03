@@ -11,6 +11,7 @@
 param(
     [string]$SourceDir = "C:\ub\src",
     [string]$WorkDir = "C:\winpe",
+    [string]$StageDir = "C:\winpe-stage",
     [string]$IsoPath = "C:\winpe\usenet-backup-winpe.iso"
 )
 
@@ -28,9 +29,10 @@ foreach ($tool in @("copype.cmd", "MakeWinPEMedia.cmd")) {
 if (-not (Get-Command dism.exe -ErrorAction SilentlyContinue)) { Fail "dism.exe not found." }
 
 # --- Publish self-contained binaries ---
+# NOTE: publish into StageDir, NOT WorkDir — WorkDir is wiped below by copype.
 Write-Host "Publishing CLI and recovery wizard (self-contained win-x64)..."
-$cliOut = Join-Path $WorkDir "publish\cli"
-$wizOut = Join-Path $WorkDir "publish\recovery"
+$cliOut = Join-Path $StageDir "cli"
+$wizOut = Join-Path $StageDir "recovery"
 dotnet publish (Join-Path $SourceDir "src\UsenetBackup.Cli\UsenetBackup.Cli.csproj") `
     -c Release -r win-x64 --self-contained -o $cliOut
 if ($LASTEXITCODE -ne 0) { Fail "CLI publish failed." }
@@ -52,6 +54,23 @@ dism.exe /Mount-Image /ImageFile:$bootWim /index:1 /MountDir:$mountDir
 if ($LASTEXITCODE -ne 0) { Fail "DISM mount failed." }
 
 try {
+    # --- WinPE optional components ---
+    # The wizard's drive picker uses WMI (System.Management); the base WinPE
+    # image may not include it, so add the WinPE-WMI package when present.
+    $ocDir = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\WinPE_OCs"
+    $wmiCab = Join-Path $ocDir "WinPE-WMI.cab"
+    $wmiLang = Join-Path $ocDir "en-us\WinPE-WMI_en-us.cab"
+    if (Test-Path $wmiCab) {
+        Write-Host "Adding WinPE-WMI optional component..."
+        $wmiArgs = @("/Add-Package", "/Image:$mountDir", "/PackagePath:$wmiCab")
+        if (Test-Path $wmiLang) { $wmiArgs += "/PackagePath:$wmiLang" }
+        & dism.exe @wmiArgs
+        if ($LASTEXITCODE -ne 0) { Fail "DISM add WinPE-WMI failed." }
+    }
+    else {
+        Write-Host "WARNING: WinPE-WMI.cab not found; the wizard drive picker may not work in WinPE."
+    }
+
     # --- Add recovery tools ---
     $toolsDir = Join-Path $mountDir "usenet-backup"
     New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
