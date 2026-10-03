@@ -37,6 +37,17 @@ dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj `
 
 Use the wizard, or on the machine (or any Windows PC):
 
+### Finding backups newer than the USB stick
+
+`nntp-upload` also posts an AES-256-GCM encrypted copy of each backup's
+manifest to Usenet (message-ID
+`<manifest.<backup-id>.<repo-id>@usenet-backup>`). In the wizard, the
+"Check for newer backups on Usenet…" button on the backup-selection step
+scans the newsgroup for these, decrypts any not on the stick with your
+passphrase, and lists them as "(from Usenet)". The CLI equivalent is
+`usenet-backup manifest-discover <repo> --host HOST`. Wrong passphrases
+and tampered manifests fail closed — they are never imported.
+
 ```powershell
 # 1. Recreate the repo metadata from your offline copy:
 mkdir C:\RestoreRepo

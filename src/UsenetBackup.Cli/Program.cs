@@ -21,6 +21,7 @@ try
         "list" => List(args[1..]),
         "nntp-check" => NntpCheck(args[1..]),
         "nntp-upload" => NntpUpload(args[1..]),
+        "manifest-discover" => ManifestDiscover(args[1..]),
         "nzb-generate" => NzbGenerate(args[1..]),
         "download" => Download(args[1..]),
         _ => Unknown(args[0]),
@@ -328,6 +329,43 @@ static int NntpUpload(string[] args)
         OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
             $"id={manifest.BackupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
         Console.WriteLine($"Upload complete: {uploaded} posted, {skipped} already present.");
+        // Upload the encrypted manifest so the USB recovery wizard can
+        // discover backups newer than the stick.
+        repo.UploadManifest(manifest.BackupId, store);
+        Console.WriteLine("Manifest uploaded (encrypted).");
+        return 0;
+    }
+    finally
+    {
+        client.Quit();
+    }
+}
+
+/// <summary>
+/// Lists backups whose encrypted manifests exist on Usenet but not locally.
+/// Used by the USB recovery wizard to find backups newer than the stick.
+/// </summary>
+static int ManifestDiscover(string[] args)
+{
+    var pos = args.Where(a => !a.StartsWith('-')).ToArray();
+    if (pos.Length < 1) { Console.Error.WriteLine("error: manifest-discover <repo> --host HOST [...]"); return 2; }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
+        var found = repo.DiscoverRemoteManifests(store);
+        if (found.Count == 0)
+        {
+            Console.WriteLine("No remote manifests newer than local.");
+        }
+        else
+        {
+            foreach (var m in found)
+                Console.WriteLine($"{m.BackupId}  type={m.Manifest.Type}  created={m.Manifest.CreatedUtc:u}  files={m.Manifest.Files.Count}");
+        }
         return 0;
     }
     finally

@@ -130,6 +130,13 @@ internal sealed class FakeNntpServer : IDisposable
                     case "QUIT":
                         writer.WriteLine("205 bye");
                         return;
+                    case "LISTGROUP":
+                        writer.WriteLine($"211 {Articles.Count} 1 {Articles.Count} {arg} group selected");
+                        int n = 1;
+                        foreach (string mid in Articles.Keys)
+                            writer.WriteLine($"{n++} {mid}");
+                        writer.WriteLine(".");
+                        break;
                     default:
                         writer.WriteLine("500 unknown command");
                         break;

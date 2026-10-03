@@ -224,6 +224,22 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
+    /// Imports a manifest discovered on Usenet (already authenticated via
+    /// AES-GCM). Writes it to manifests/ and records it in the catalog so
+    /// download/restore treat it like a local backup.
+    /// </summary>
+    public void ImportManifest(BackupManifest manifest)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        if (!manifest.VerifyRootHash())
+            throw new InvalidDataException(
+                $"Imported manifest {manifest.BackupId} failed root-hash verification.");
+        WriteManifest(manifest);
+        _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source ?? "",
+            manifest.CreatedUtc);
+    }
+
+    /// <summary>
     /// Fast path: the file is unchanged since the parent backup if path,
     /// size, mtime and symlink target all match. Reads only attributes,
     /// not file contents.
@@ -499,6 +515,86 @@ public sealed class BackupRepository : IDisposable
             progress?.Invoke(i + 1, files.Count);
         }
         return new DownloadResult(downloaded, alreadyPresent, files.Count);
+    }
+
+    /// <summary>
+    /// Uploads an encrypted copy of a backup's manifest to Usenet so the
+    /// recovery wizard can discover backups newer than the USB stick.
+    /// The manifest is AES-256-GCM encrypted with the repo key (AAD binds
+    /// it to the backup ID); without the passphrase it is opaque bytes.
+    /// Idempotent: skips when the article already exists.
+    /// </summary>
+    public void UploadManifest(string backupId, NntpBlobStore remote)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        string manifestPath = Path.Combine(_root, "manifests", backupId + ".json");
+        if (!File.Exists(manifestPath))
+            throw new InvalidOperationException($"No local manifest for backup {backupId}.");
+        byte[] plaintext = File.ReadAllBytes(manifestPath);
+        byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
+        byte[] encrypted = ChunkCrypto.Encrypt(plaintext, _key, aad);
+        try
+        {
+            remote.PostManifest(backupId, encrypted);
+            OperationLog.Append(_root, "manifest-upload", $"id={backupId}");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(encrypted);
+        }
+    }
+
+    /// <summary>
+    /// A manifest discovered on Usenet that is not on the local USB.
+    /// </summary>
+    public sealed record RemoteManifest(string BackupId, BackupManifest Manifest);
+
+    /// <summary>
+    /// Scans Usenet for encrypted manifests from this repo, downloads and
+    /// decrypts any not present locally, and returns them newest-first.
+    /// Fails closed: wrong passphrase or tampering throws; bad manifests
+    /// are never stored locally.
+    /// </summary>
+    public IReadOnlyList<RemoteManifest> DiscoverRemoteManifests(NntpBlobStore remote)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var result = new List<RemoteManifest>();
+        foreach (string backupId in remote.ListManifestIds())
+        {
+            string localPath = Path.Combine(_root, "manifests", backupId + ".json");
+            if (File.Exists(localPath))
+                continue; // already on USB
+            byte[]? encrypted = remote.GetManifest(backupId);
+            if (encrypted is null)
+                continue;
+            byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
+            byte[] plaintext;
+            try
+            {
+                plaintext = ChunkCrypto.Decrypt(encrypted, _key, aad);
+            }
+            catch (CryptographicException ex)
+            {
+                throw new InvalidDataException(
+                    $"Remote manifest {backupId} failed authentication (wrong passphrase or tampered).", ex);
+            }
+            try
+            {
+                string json = System.Text.Encoding.UTF8.GetString(plaintext);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(json)
+                    ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
+                if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
+                    throw new InvalidDataException(
+                        $"Remote manifest backup ID mismatch (expected {backupId}).");
+                result.Add(new RemoteManifest(backupId, manifest));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+            }
+        }
+        return result.OrderByDescending(m => m.Manifest.CreatedUtc).ToList();
     }
 
     /// <summary>

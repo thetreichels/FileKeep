@@ -1,3 +1,4 @@
+using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Recovery;
 
 namespace UsenetBackup.Recovery;
@@ -31,6 +32,7 @@ public sealed class RecoveryWizard : Form
     // Page 3: select backup
     private readonly ListBox _backupList = new();
     private readonly Label _backupDetail = new();
+    private readonly Button _checkRemote = new();
 
     // Page 4: download
     private readonly TextBox _nzbPath = new();
@@ -219,8 +221,14 @@ public sealed class RecoveryWizard : Form
         p.Controls.Add(_backupList);
 
         _backupDetail.Location = new Point(16, 276);
-        _backupDetail.Size = new Size(560, 80);
+        _backupDetail.Size = new Size(560, 60);
         p.Controls.Add(_backupDetail);
+
+        _checkRemote.Text = "Check for newer backups on Usenet…";
+        _checkRemote.Location = new Point(16, 344);
+        _checkRemote.Size = new Size(280, 32);
+        _checkRemote.Click += CheckRemote_Click;
+        p.Controls.Add(_checkRemote);
 
         _backupList.SelectedIndexChanged += (_, _) =>
         {
@@ -235,6 +243,56 @@ public sealed class RecoveryWizard : Form
     private sealed record BackupSummaryView(string BackupId, string Type, string Source, DateTime CreatedUtc)
     {
         public override string ToString() => $"{CreatedUtc:u}  [{Type}]  {BackupId[..8]}… ({Source})";
+    }
+
+    private async void CheckRemote_Click(object? sender, EventArgs e)
+    {
+        _checkRemote.Enabled = false;
+        try
+        {
+            var found = await Task.Run(() =>
+            {
+                var client = new NntpClient(_state.NntpHost, _state.NntpPort, _state.NntpSsl);
+                try
+                {
+                    client.Connect();
+                    if (!string.IsNullOrEmpty(_state.NntpUser))
+                        client.Authenticate(_state.NntpUser, _state.NntpPassword);
+                    var repo = _state.OpenRepo();
+                    using var store = new NntpBlobStore(
+                        client, _state.Newsgroup, repo.RepoId, repo.CatalogPath);
+                    return _state.DiscoverRemoteManifests(store);
+                }
+                finally
+                {
+                    client.Dispose();
+                }
+            });
+            if (found.Count == 0)
+            {
+                SetStatus("No backups on Usenet newer than this USB stick.");
+            }
+            else
+            {
+                // Save remote manifests locally so download/restore work normally.
+                _state.SaveRemoteManifests(found);
+                foreach (var m in found)
+                {
+                    _backupList.Items.Add(new BackupSummaryView(
+                        m.BackupId, m.Manifest.Type + " (from Usenet)",
+                        m.Manifest.Snapshot ?? "", m.Manifest.CreatedUtc));
+                }
+                SetStatus($"Found {found.Count} newer backup(s) on Usenet — marked '(from Usenet)'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Discovery failed: " + ex.Message, isError: true);
+        }
+        finally
+        {
+            _checkRemote.Enabled = true;
+        }
     }
 
     // ---------- Page 4: download ----------

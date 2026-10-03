@@ -188,6 +188,25 @@ public sealed class WizardState : IDisposable
         OpenRepo().RestoreDiskImage(SelectedBackupId, drive.DevicePath);
     }
 
+    /// <summary>
+    /// Discovers encrypted manifests on Usenet not present locally.
+    /// The caller provides a connected NntpBlobStore.
+    /// </summary>
+    public IReadOnlyList<BackupRepository.RemoteManifest> DiscoverRemoteManifests(NntpBlobStore remote) =>
+        OpenRepo().DiscoverRemoteManifests(remote);
+
+    /// <summary>
+    /// Saves discovered remote manifests to the local manifests directory
+    /// so download/restore treat them like local backups. Also records them
+    /// in the catalog.
+    /// </summary>
+    public void SaveRemoteManifests(IReadOnlyList<BackupRepository.RemoteManifest> manifests)
+    {
+        var repo = OpenRepo();
+        foreach (var m in manifests)
+            repo.ImportManifest(m.Manifest);
+    }
+
     /// <summary>True if the selected backup is a disk image.</summary>
     public bool SelectedIsDiskImage()
     {

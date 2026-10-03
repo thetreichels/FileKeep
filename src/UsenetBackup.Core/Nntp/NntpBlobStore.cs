@@ -86,6 +86,52 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// </summary>
     public long StoredCount => _journal.UploadedCount();
 
+    /// <summary>
+    /// Posts an encrypted manifest article. Idempotent via STAT check.
+    /// </summary>
+    public void PostManifest(string backupId, byte[] encryptedBlob)
+    {
+        ArgumentNullException.ThrowIfNull(encryptedBlob);
+        string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
+        if (_client.Stat(messageId))
+            return; // already posted
+        string article = ArticleCodec.BuildManifestArticle(
+            backupId, _repoId, encryptedBlob, _newsgroup, _from);
+        _client.Post(article);
+    }
+
+    /// <summary>
+    /// Fetches an encrypted manifest article, or null when absent.
+    /// </summary>
+    public byte[]? GetManifest(string backupId)
+    {
+        string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
+        string? article = _client.GetArticle(messageId);
+        if (article is null)
+            return null;
+        var (id, blob) = ArticleCodec.ParseManifestArticle(article);
+        if (!id.Equals(backupId, StringComparison.Ordinal))
+            throw new InvalidDataException(
+                $"Server returned wrong manifest (asked {backupId}, got {id}).");
+        return blob;
+    }
+
+    /// <summary>
+    /// Scans the newsgroup for manifest articles belonging to this repo.
+    /// Returns their backup IDs.
+    /// </summary>
+    public IReadOnlyList<string> ListManifestIds()
+    {
+        var result = new List<string>();
+        foreach (string msgId in _client.ListGroup(_newsgroup))
+        {
+            string? backupId = ArticleCodec.TryParseManifestMessageId(msgId, _repoId);
+            if (backupId is not null)
+                result.Add(backupId);
+        }
+        return result;
+    }
+
     private static void ValidateChunkId(string chunkIdHex)
     {
         if (chunkIdHex.Length != 64 || !chunkIdHex.All(Uri.IsHexDigit))

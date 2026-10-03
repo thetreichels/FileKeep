@@ -155,6 +155,30 @@ public sealed class NntpClient : IDisposable
         return ReadMultiline();
     }
 
+    /// <summary>
+    /// Lists message-IDs in a newsgroup via LISTGROUP. Used by the recovery
+    /// wizard to discover manifest articles newer than the USB stick.
+    /// </summary>
+    public IReadOnlyList<string> ListGroup(string newsgroup)
+    {
+        EnsureConnected();
+        var (code, _) = SendCommand($"LISTGROUP {newsgroup}");
+        if (code != 211)
+            throw new NntpException($"LISTGROUP {newsgroup} failed: {code}");
+        var result = new List<string>();
+        foreach (string line in ReadMultiline().Split('\n'))
+        {
+            string t = line.Trim();
+            if (t.Length == 0 || t == ".")
+                continue;
+            // LISTGROUP lines: "article-number message-id" or just "article-number".
+            int space = t.IndexOf(' ');
+            if (space > 0 && space + 1 < t.Length)
+                result.Add(t[(space + 1)..].Trim());
+        }
+        return result;
+    }
+
     public void Quit()
     {
         if (!IsConnected)
