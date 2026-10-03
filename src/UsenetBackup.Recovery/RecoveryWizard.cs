@@ -46,11 +46,13 @@ public sealed class RecoveryWizard : Form
     private readonly RadioButton _restoreFiles = new();
     private readonly RadioButton _restoreDisk = new();
     private readonly TextBox _restoreDest = new();
-    private readonly TextBox _devicePath = new();
-    private readonly TextBox _deviceConfirm = new();
+    private readonly ComboBox _drivePicker = new();
+    private readonly Label _driveDetail = new();
+    private readonly TextBox _driveConfirm = new();
     private readonly ProgressBar _restoreProgress = new();
     private readonly TextBox _restoreLog = new();
     private readonly Button _restoreStart = new();
+    private readonly IDriveEnumerator _drives = new WmiDriveEnumerator();
 
     public RecoveryWizard()
     {
@@ -375,7 +377,7 @@ public sealed class RecoveryWizard : Form
         _restoreFiles.CheckedChanged += (_, _) => UpdateRestoreMode();
         p.Controls.Add(_restoreFiles);
 
-        _restoreDisk.Text = "Restore disk image to a device (destructive)";
+        _restoreDisk.Text = "Restore disk image to a drive (destructive)";
         _restoreDisk.Location = new Point(16, 44);
         _restoreDisk.AutoSize = true;
         _restoreDisk.CheckedChanged += (_, _) => UpdateRestoreMode();
@@ -395,34 +397,50 @@ public sealed class RecoveryWizard : Form
         };
         p.Controls.Add(destBrowse);
 
-        var devLbl = new Label { Text = "Device path (e.g. \\\\.\\PhysicalDrive0):", AutoSize = true, Location = new Point(16, 144) };
-        p.Controls.Add(devLbl);
-        _devicePath.Location = new Point(16, 168);
-        _devicePath.Size = new Size(560, 28);
-        p.Controls.Add(_devicePath);
+        // Drive picker (disk restore mode)
+        var driveLbl = new Label { Text = "Target drive:", AutoSize = true, Location = new Point(16, 144) };
+        driveLbl.Name = "driveLbl";
+        p.Controls.Add(driveLbl);
+
+        _drivePicker.Location = new Point(16, 168);
+        _drivePicker.Size = new Size(440, 28);
+        _drivePicker.DropDownStyle = ComboBoxStyle.DropDownList;
+        _drivePicker.SelectedIndexChanged += (_, _) => UpdateDriveDetail();
+        p.Controls.Add(_drivePicker);
+
+        var refreshBtn = new Button { Text = "Refresh", Location = new Point(464, 166), Size = new Size(90, 30) };
+        refreshBtn.Name = "refreshBtn";
+        refreshBtn.Click += (_, _) => LoadDrives();
+        p.Controls.Add(refreshBtn);
+
+        _driveDetail.Location = new Point(16, 202);
+        _driveDetail.Size = new Size(560, 40);
+        _driveDetail.ForeColor = Color.DarkRed;
+        p.Controls.Add(_driveDetail);
 
         var confirmLbl = new Label
         {
-            Text = "Type the device path again to confirm (destructive):",
-            AutoSize = true, Location = new Point(16, 204), ForeColor = Color.DarkRed
+            Text = "Type the drive NUMBER to confirm (destructive — triple-check):",
+            AutoSize = true, Location = new Point(16, 246), ForeColor = Color.DarkRed
         };
+        confirmLbl.Name = "confirmLbl";
         p.Controls.Add(confirmLbl);
-        _deviceConfirm.Location = new Point(16, 228);
-        _deviceConfirm.Size = new Size(560, 28);
-        p.Controls.Add(_deviceConfirm);
+        _driveConfirm.Location = new Point(16, 270);
+        _driveConfirm.Size = new Size(120, 28);
+        p.Controls.Add(_driveConfirm);
 
         _restoreStart.Text = "Start restore";
-        _restoreStart.Location = new Point(16, 268);
+        _restoreStart.Location = new Point(16, 310);
         _restoreStart.Size = new Size(140, 32);
         _restoreStart.Click += RestoreStart_Click;
         p.Controls.Add(_restoreStart);
 
-        _restoreProgress.Location = new Point(16, 312);
+        _restoreProgress.Location = new Point(16, 352);
         _restoreProgress.Size = new Size(560, 24);
         p.Controls.Add(_restoreProgress);
 
-        _restoreLog.Location = new Point(16, 348);
-        _restoreLog.Size = new Size(560, 60);
+        _restoreLog.Location = new Point(16, 384);
+        _restoreLog.Size = new Size(560, 40);
         _restoreLog.Multiline = true;
         _restoreLog.ReadOnly = true;
         _restoreLog.ScrollBars = ScrollBars.Vertical;
@@ -431,12 +449,56 @@ public sealed class RecoveryWizard : Form
         UpdateRestoreMode();
     }
 
+    private void LoadDrives()
+    {
+        _drivePicker.Items.Clear();
+        _driveDetail.Text = "";
+        try
+        {
+            var drives = _state.ListPhysicalDrives(_drives);
+            foreach (var d in drives)
+                _drivePicker.Items.Add(d);
+            if (_drivePicker.Items.Count > 0)
+                _drivePicker.SelectedIndex = 0;
+            SetStatus(drives.Count == 0 ? "No physical drives found." : "");
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Cannot list drives: " + ex.Message, isError: true);
+        }
+    }
+
+    private void UpdateDriveDetail()
+    {
+        if (_drivePicker.SelectedItem is PhysicalDriveInfo d)
+        {
+            _driveDetail.Text = $"WILL ERASE: {d.Model}\n{d.DevicePath} — {d.Display}";
+        }
+        else
+        {
+            _driveDetail.Text = "";
+        }
+    }
+
     private void UpdateRestoreMode()
     {
         bool disk = _restoreDisk.Checked;
-        _devicePath.Enabled = disk;
-        _deviceConfirm.Enabled = disk;
+        _drivePicker.Enabled = disk;
+        _driveConfirm.Enabled = disk;
         _restoreDest.Enabled = !disk;
+        // Show/hide drive controls vs folder controls
+        foreach (Control c in Controls)
+        {
+            if (c is TabPage)
+                foreach (Control inner in c.Controls)
+                {
+                    if (inner.Name is "driveLbl" or "refreshBtn" or "confirmLbl")
+                        inner.Visible = disk;
+                }
+        }
+        _driveDetail.Visible = disk;
+        if (disk && _drivePicker.Items.Count == 0)
+            LoadDrives();
     }
 
     private async void RestoreStart_Click(object? sender, EventArgs e)
@@ -454,9 +516,9 @@ public sealed class RecoveryWizard : Form
             }
             else
             {
-                if (string.IsNullOrWhiteSpace(_devicePath.Text))
-                    throw new InvalidOperationException("Enter the device path.");
-                await Task.Run(() => _state.RestoreDisk(_devicePath.Text, _deviceConfirm.Text));
+                if (_drivePicker.SelectedItem is not PhysicalDriveInfo drive)
+                    throw new InvalidOperationException("Select a target drive.");
+                await Task.Run(() => _state.RestoreDiskToDrive(drive, _driveConfirm.Text));
                 _restoreLog.Text = "Disk restore complete. Reboot from the restored drive.";
             }
             SetStatus("Restore complete.");

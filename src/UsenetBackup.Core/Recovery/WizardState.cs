@@ -153,6 +153,13 @@ public sealed class WizardState : IDisposable
     }
 
     /// <summary>
+    /// Lists physical drives for the restore-target picker.
+    /// The enumerator is injected (WMI on Windows, fake in tests).
+    /// </summary>
+    public IReadOnlyList<PhysicalDriveInfo> ListPhysicalDrives(IDriveEnumerator enumerator) =>
+        enumerator.ListDrives();
+
+    /// <summary>
     /// Restores a disk image to a device. The caller must confirm the device
     /// path (typed, not selected) — mirrors the CLI's --yes safety.
     /// </summary>
@@ -163,6 +170,22 @@ public sealed class WizardState : IDisposable
         if (!string.Equals(devicePath, confirmedDevicePath, StringComparison.Ordinal))
             throw new InvalidOperationException("Device path confirmation does not match.");
         OpenRepo().RestoreDiskImage(SelectedBackupId, devicePath);
+    }
+
+    /// <summary>
+    /// Validates a drive selection for disk restore. The drive must come from
+    /// <see cref="ListPhysicalDrives"/> (not free-typed) and the confirmation
+    /// text must be the drive index the user selected.
+    /// </summary>
+    public void RestoreDiskToDrive(PhysicalDriveInfo drive, string typedIndex)
+    {
+        if (SelectedBackupId is null)
+            throw new InvalidOperationException("Select a backup first.");
+        ArgumentNullException.ThrowIfNull(drive);
+        if (!string.Equals(typedIndex.Trim(), drive.Index.ToString(), StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"Confirmation does not match. Type the drive number ({drive.Index}) to confirm.");
+        OpenRepo().RestoreDiskImage(SelectedBackupId, drive.DevicePath);
     }
 
     /// <summary>True if the selected backup is a disk image.</summary>

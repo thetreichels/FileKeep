@@ -151,4 +151,51 @@ public sealed class RecoveryWizardTests : IDisposable
         s.SelectedBackupId = manifest.BackupId;
         Assert.False(s.SelectedIsDiskImage());
     }
+
+    private sealed class FakeDriveEnumerator : IDriveEnumerator
+    {
+        public IReadOnlyList<PhysicalDriveInfo> ListDrives() => new[]
+        {
+            new PhysicalDriveInfo(@"\\.\PhysicalDrive0", 0, "Test SSD 512GB", 512UL * 1024 * 1024 * 1024, "SN123"),
+            new PhysicalDriveInfo(@"\\.\PhysicalDrive1", 1, "Test HDD 2TB", 2UL * 1024 * 1024 * 1024 * 1024, "SN456"),
+        };
+    }
+
+    [Fact]
+    public void ListPhysicalDrives_ReturnsDrives()
+    {
+        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+        var drives = s.ListPhysicalDrives(new FakeDriveEnumerator());
+        Assert.Equal(2, drives.Count);
+        Assert.Equal(0, drives[0].Index);
+        Assert.Contains("Test SSD", drives[0].Model);
+        Assert.Contains("512.0 GB", drives[0].Display);
+    }
+
+    [Fact]
+    public void RestoreDiskToDrive_WrongIndex_Throws()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+        s.SelectedBackupId = manifest.BackupId;
+        var drive = new PhysicalDriveInfo(@"\\.\PhysicalDrive1", 1, "Test HDD", 1000, "");
+        var ex = Assert.Throws<InvalidOperationException>(() => s.RestoreDiskToDrive(drive, "0"));
+        Assert.Contains("drive number (1)", ex.Message);
+    }
+
+    [Fact]
+    public void RestoreDiskToDrive_CorrectIndex_CallsRestore()
+    {
+        // Uses a fake drive; RestoreDiskImage will fail on the bogus device path,
+        // but the confirmation check must pass first (proving the index matched).
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+        s.SelectedBackupId = manifest.BackupId;
+        var drive = new PhysicalDriveInfo(@"\\.\PhysicalDrive9", 9, "Nonexistent", 1000, "");
+        // Should get past confirmation and fail on the device itself, not on confirmation.
+        var ex = Assert.ThrowsAny<Exception>(() => s.RestoreDiskToDrive(drive, "9"));
+        Assert.DoesNotContain("Confirmation does not match", ex.Message);
+    }
 }
