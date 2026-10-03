@@ -174,17 +174,14 @@ public sealed class WizardState : IDisposable
 
     /// <summary>
     /// Validates a drive selection for disk restore. The drive must come from
-    /// <see cref="ListPhysicalDrives"/> (not free-typed) and the confirmation
-    /// text must be the drive index the user selected.
+    /// <see cref="ListPhysicalDrives"/> (not free-typed). The UI confirms via
+    /// a native TaskDialog before calling this.
     /// </summary>
-    public void RestoreDiskToDrive(PhysicalDriveInfo drive, string typedIndex)
+    public void RestoreDiskToDrive(PhysicalDriveInfo drive)
     {
         if (SelectedBackupId is null)
             throw new InvalidOperationException("Select a backup first.");
         ArgumentNullException.ThrowIfNull(drive);
-        if (!string.Equals(typedIndex.Trim(), drive.Index.ToString(), StringComparison.Ordinal))
-            throw new InvalidOperationException(
-                $"Confirmation does not match. Type the drive number ({drive.Index}) to confirm.");
         OpenRepo().RestoreDiskImage(SelectedBackupId, drive.DevicePath);
     }
 

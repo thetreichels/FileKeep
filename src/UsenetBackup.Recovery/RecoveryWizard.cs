@@ -15,6 +15,25 @@ public sealed class RecoveryWizard : Form
     private readonly Button _back = new();
     private readonly Button _next = new();
     private readonly Label _status = new();
+    private readonly Label _headerTitle = new();
+    private readonly Label _headerDesc = new();
+
+    // Per-page header text (title, description), classic wizard style.
+    private static readonly (string Title, string Desc)[] PageHeaders = new[]
+    {
+        ("Where is the backup data?",
+         "Select the folder with repo.json, manifests, and catalog.db — usually on this USB stick."),
+        ("Unlock the repository",
+         "Enter your passphrase and Usenet credentials. They stay in memory and are never saved."),
+        ("Choose a backup",
+         "Pick the backup to restore. You can check Usenet for backups newer than this stick."),
+        ("Download from Usenet",
+         "Fetch the backup's chunks. Every chunk is verified as it arrives."),
+        ("Verify",
+         "Check every chunk before restoring. Do not skip this step."),
+        ("Restore",
+         "Restore files to a folder, or write a disk image to a drive."),
+    };
 
     // Page 1: repo
     private readonly TextBox _repoPath = new();
@@ -50,7 +69,6 @@ public sealed class RecoveryWizard : Form
     private readonly TextBox _restoreDest = new();
     private readonly ComboBox _drivePicker = new();
     private readonly Label _driveDetail = new();
-    private readonly TextBox _driveConfirm = new();
     private readonly ProgressBar _restoreProgress = new();
     private readonly TextBox _restoreLog = new();
     private readonly Button _restoreStart = new();
@@ -59,10 +77,34 @@ public sealed class RecoveryWizard : Form
     public RecoveryWizard()
     {
         Text = "Usenet Backup — USB Recovery";
-        Size = new Size(640, 520);
+        Size = new Size(640, 560);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
+        // Native Windows look: Segoe UI is the system font since Vista.
+        Font = new Font("Segoe UI", 9f);
+
+        // Wizard header banner (white, like Windows Setup): title + description.
+        var header = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = Color.White };
+        _headerTitle = new Label
+        {
+            Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+            Location = new Point(16, 8), AutoSize = true
+        };
+        _headerDesc = new Label
+        {
+            Location = new Point(16, 34), AutoSize = true,
+            ForeColor = SystemColors.GrayText
+        };
+        header.Controls.Add(_headerTitle);
+        header.Controls.Add(_headerDesc);
+        var headerLine = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = SystemColors.ControlDark };
+        Controls.Add(_tabs);
+        Controls.Add(headerLine);
+        Controls.Add(header);
+        // Dock order: header at top, tabs fill the rest.
+        header.BringToFront();
+        headerLine.BringToFront();
 
         _tabs.Dock = DockStyle.Fill;
         _tabs.Appearance = TabAppearance.FlatButtons;
@@ -131,6 +173,9 @@ public sealed class RecoveryWizard : Form
         _back.Enabled = _tabs.SelectedIndex > 0;
         _next.Enabled = _tabs.SelectedIndex < _tabs.TabPages.Count - 1;
         _next.Text = _tabs.SelectedIndex == _tabs.TabPages.Count - 2 ? "Finish" : "Next >";
+        var (title, desc) = PageHeaders[_tabs.SelectedIndex];
+        _headerTitle.Text = title;
+        _headerDesc.Text = desc;
     }
 
     private void SetStatus(string text, bool isError = false)
@@ -476,17 +521,6 @@ public sealed class RecoveryWizard : Form
         _driveDetail.ForeColor = Color.DarkRed;
         p.Controls.Add(_driveDetail);
 
-        var confirmLbl = new Label
-        {
-            Text = "Type the drive NUMBER to confirm (destructive — triple-check):",
-            AutoSize = true, Location = new Point(16, 246), ForeColor = Color.DarkRed
-        };
-        confirmLbl.Name = "confirmLbl";
-        p.Controls.Add(confirmLbl);
-        _driveConfirm.Location = new Point(16, 270);
-        _driveConfirm.Size = new Size(120, 28);
-        p.Controls.Add(_driveConfirm);
-
         _restoreStart.Text = "Start restore";
         _restoreStart.Location = new Point(16, 310);
         _restoreStart.Size = new Size(140, 32);
@@ -542,7 +576,6 @@ public sealed class RecoveryWizard : Form
     {
         bool disk = _restoreDisk.Checked;
         _drivePicker.Enabled = disk;
-        _driveConfirm.Enabled = disk;
         _restoreDest.Enabled = !disk;
         // Show/hide drive controls vs folder controls
         foreach (Control c in Controls)
@@ -550,13 +583,34 @@ public sealed class RecoveryWizard : Form
             if (c is TabPage)
                 foreach (Control inner in c.Controls)
                 {
-                    if (inner.Name is "driveLbl" or "refreshBtn" or "confirmLbl")
+                    if (inner.Name is "driveLbl" or "refreshBtn")
                         inner.Visible = disk;
                 }
         }
         _driveDetail.Visible = disk;
         if (disk && _drivePicker.Items.Count == 0)
             LoadDrives();
+    }
+
+    /// <summary>
+    /// Native Windows TaskDialog for the destructive disk-restore step.
+    /// Shows the exact drive identity; the user must press the explicit
+    /// confirmation button. Returns true when confirmed.
+    /// </summary>
+    private bool ConfirmDiskRestore(PhysicalDriveInfo drive)
+    {
+        var page = new TaskDialogPage
+        {
+            Caption = "Confirm disk restore",
+            Heading = "Erase this drive and restore the disk image?",
+            Text = $"This will permanently erase everything on:\n\n{drive.Model}\n{drive.DevicePath} ({drive.Display})\n\nThis cannot be undone.",
+            Icon = TaskDialogIcon.Warning,
+            Buttons = { TaskDialogButton.Cancel },
+        };
+        var confirm = new TaskDialogButton("Erase drive and restore");
+        page.Buttons.Add(confirm);
+        page.DefaultButton = TaskDialogButton.Cancel;
+        return TaskDialog.ShowDialog(this, page) == confirm;
     }
 
     private async void RestoreStart_Click(object? sender, EventArgs e)
@@ -576,7 +630,13 @@ public sealed class RecoveryWizard : Form
             {
                 if (_drivePicker.SelectedItem is not PhysicalDriveInfo drive)
                     throw new InvalidOperationException("Select a target drive.");
-                await Task.Run(() => _state.RestoreDiskToDrive(drive, _driveConfirm.Text));
+                // Native Windows confirmation dialog (TaskDialog), not a custom popup.
+                if (!ConfirmDiskRestore(drive))
+                {
+                    _restoreLog.Text = "Restore cancelled.";
+                    return;
+                }
+                await Task.Run(() => _state.RestoreDiskToDrive(drive));
                 _restoreLog.Text = "Disk restore complete. Reboot from the restored drive.";
             }
             SetStatus("Restore complete.");

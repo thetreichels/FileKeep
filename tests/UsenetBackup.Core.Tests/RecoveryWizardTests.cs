@@ -173,29 +173,27 @@ public sealed class RecoveryWizardTests : IDisposable
     }
 
     [Fact]
-    public void RestoreDiskToDrive_WrongIndex_Throws()
+    public void RestoreDiskToDrive_NullDrive_Throws()
     {
         using var repo = BackupRepository.Open(_repoDir, Passphrase);
         var manifest = repo.BackupDirectory(_srcDir);
         using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
         s.SelectedBackupId = manifest.BackupId;
-        var drive = new PhysicalDriveInfo(@"\\.\PhysicalDrive1", 1, "Test HDD", 1000, "");
-        var ex = Assert.Throws<InvalidOperationException>(() => s.RestoreDiskToDrive(drive, "0"));
-        Assert.Contains("drive number (1)", ex.Message);
+        Assert.Throws<ArgumentNullException>(() => s.RestoreDiskToDrive(null!));
     }
 
     [Fact]
-    public void RestoreDiskToDrive_CorrectIndex_CallsRestore()
+    public void RestoreDiskToDrive_ValidDrive_CallsRestore()
     {
         // Uses a fake drive; RestoreDiskImage will fail on the bogus device path,
-        // but the confirmation check must pass first (proving the index matched).
+        // proving the drive object flowed through (not a confirmation error).
         using var repo = BackupRepository.Open(_repoDir, Passphrase);
         var manifest = repo.BackupDirectory(_srcDir);
         using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
         s.SelectedBackupId = manifest.BackupId;
         var drive = new PhysicalDriveInfo(@"\\.\PhysicalDrive9", 9, "Nonexistent", 1000, "");
-        // Should get past confirmation and fail on the device itself, not on confirmation.
-        var ex = Assert.ThrowsAny<Exception>(() => s.RestoreDiskToDrive(drive, "9"));
-        Assert.DoesNotContain("Confirmation does not match", ex.Message);
+        // Should fail on the device itself, not on validation.
+        var ex = Assert.ThrowsAny<Exception>(() => s.RestoreDiskToDrive(drive));
+        Assert.DoesNotContain("confirmation", ex.Message.ToLower());
     }
 }
