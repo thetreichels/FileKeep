@@ -66,4 +66,4 @@ if (Test-Path "C:\Program Files\UsenetBackup") { throw "Uninstall left files beh
 Write-Host "  Uninstall clean."
 
 Write-Host ""
-Write-Host "ALL DONE — MSI built, installed, verified, and uninstalled cleanly."
+Write-Host "ALL DONE - MSI built, installed, verified, and uninstalled cleanly."
