@@ -426,6 +426,22 @@ public sealed class BackupRepository : IDisposable
     public byte[] GetChunkBlob(string chunkIdHex) => _blobs.Get(chunkIdHex);
 
     /// <summary>
+    /// Decrypts and hash-verifies one stored chunk. Throws
+    /// <see cref="CryptographicException"/> on wrong passphrase and
+    /// <see cref="InvalidDataException"/> on corruption. Used by the recovery
+    /// wizard for early passphrase validation.
+    /// </summary>
+    public void VerifyChunk(string chunkIdHex)
+    {
+        byte[] blob = _blobs.Get(chunkIdHex);
+        byte[] chunkId = Hashing.HexToBytes(chunkIdHex);
+        byte[] plaintext = ChunkCrypto.Decrypt(blob, _key, chunkId); // AES-GCM authenticates
+        byte[] actual = Hashing.Sha256Bytes(plaintext);
+        if (!CryptographicOperations.FixedTimeEquals(actual, chunkId))
+            throw new InvalidDataException($"Chunk {chunkIdHex} failed hash verification.");
+    }
+
+    /// <summary>
     /// Short repository identity used in NNTP message-IDs, derived from
     /// the repository salt (stable; no migration for existing repos).
     /// </summary>

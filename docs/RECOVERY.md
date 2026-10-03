@@ -1,10 +1,11 @@
 # Bare-metal recovery runbook
 
-This is the "separate narrow WinPE recovery application" from the roadmap:
-in practice it is the `usenet-backup` CLI itself, which has no GUI or
-service dependencies and runs from WinPE (use a self-contained publish so
-no runtime install is needed). Print this file and keep it with your
-offline metadata copy.
+Two recovery tools are on the USB stick: the `usenet-backup` CLI and the
+`usenet-backup-recovery` GUI wizard. Both are self-contained (no .NET
+runtime needed in WinPE). The wizard walks through the same steps as the
+CLI commands below: locate repo metadata → enter passphrase and Usenet
+credentials → pick a backup → download → verify → restore. Print this
+file and keep it with your offline metadata copy.
 
 ## What to keep somewhere safe (offline, off-machine)
 
@@ -20,13 +21,21 @@ keep a copy on USB and/or in a password manager:
 - Your NZB files (or regenerate them later with `nzb-generate`).
 - Usenet provider hostname, username and password.
 - The repository passphrase.
-- A published copy of the `usenet-backup` CLI (`win-x64`, self-contained).
+- A published copy of the `usenet-backup` CLI (`win-x64`, self-contained)
+  and the `usenet-backup-recovery` GUI wizard (same publish options).
+
+Publish the wizard for USB/WinPE use with:
+
+```powershell
+dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj `
+    -c Release -r win-x64 --self-contained
+```
 
 ## Recovery scenarios
 
 ### A. Files are gone but the machine boots
 
-On the machine (or any Windows PC):
+Use the wizard, or on the machine (or any Windows PC):
 
 ```powershell
 # 1. Recreate the repo metadata from your offline copy:
@@ -49,6 +58,9 @@ never journaled. `verify` re-checks the manifest root hash and every
 chunk before you trust the restore.
 
 ### B. Whole disk / bare metal (WinPE)
+
+Run `usenet-backup-recovery.exe` from the USB stick and follow the
+wizard, or use the CLI steps below.
 
 1. Boot WinPE with networking (`wpeinit`, then `ipconfig` to confirm).
 2. From your USB stick (or a network share), get:

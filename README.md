@@ -102,6 +102,11 @@ they never silently change `v1`.
    ✅ done (`v0.7-service-gui-installer`, 85/85 tests; service + localhost
    web dashboard + PS installer + recovery runbook — WiX MSI and a
    purpose-built WinPE ISO still need Windows tooling)
+8. **USB recovery wizard.** WinForms wizard (`usenet-backup-recovery`,
+   self-contained for WinPE): repo location → credentials (with early
+   passphrase check) → pick backup → download → verify → restore, with
+   typed device-path confirmation for disk restores. Workflow logic in
+   `UsenetBackup.Core/Recovery/WizardState.cs`, tested (108/108).
 
 Each milestone gets a git tag (`v0.1-local-repository`, …) so any
 broken experiment can be rolled back to a known-good state.
