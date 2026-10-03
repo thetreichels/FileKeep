@@ -28,9 +28,9 @@ public sealed class BackupJobConfig
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "incremental";
 
-    /// <summary>Take a VSS snapshot before backing up (Windows only).</summary>
-    [JsonPropertyName("vss")]
-    public bool Vss { get; set; }
+    /// <summary>Read files with Windows backup privilege to bypass exclusive locks (Windows only, admin required).</summary>
+    [JsonPropertyName("backup-privilege")]
+    public bool BackupPrivilege { get; set; }
 }
 
 /// <summary>

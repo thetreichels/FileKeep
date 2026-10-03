@@ -34,9 +34,9 @@
 .PARAMETER ServiceAccount
     Account the service runs as, e.g. "NT SERVICE\UsenetBackup" for a
     least-privilege virtual service account. Defaults to LocalSystem.
-    Notes: VSS snapshot jobs (--vss) require an administrator account, so
-    keep LocalSystem if any job uses "vss": true. A custom account must be
-    granted read access to the repo/source paths itself.
+    Notes: backup-privilege jobs (--backup-privilege) require an administrator
+    account, so keep LocalSystem if any job uses "backup-privilege": true.
+    A custom account must be granted read access to the repo/source paths itself.
 
 .PARAMETER Passphrase
     Repository passphrase as a SecureString. If omitted, you are prompted
@@ -97,7 +97,7 @@ $plain = $null
 $binPath = "`"$(Join-Path $InstallDir 'usenet-backup-service.exe')`""
 # Least privilege: a virtual service account (NT SERVICE\<name>) or any
 # caller-supplied account can be used instead of LocalSystem. Note that
-# VSS snapshot jobs require an administrator account.
+# backup-privilege jobs require an administrator account.
 $objArg = @()
 if ($ServiceAccount) { $objArg = @("obj=", $ServiceAccount) }
 $existing = sc.exe query $ServiceName 2>$null

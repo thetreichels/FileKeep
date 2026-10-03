@@ -19,19 +19,25 @@ namespace UsenetBackup.Core;
 /// — the same mechanism used by <c>robocopy /b</c> (backup mode).
 /// </para>
 /// <para>
-/// Note: unlike a true Volume Shadow Copy snapshot, this does not provide a
-/// point-in-time frozen view; it reads the live files while bypassing locks.
-/// The <c>--vss</c> flag name is kept for CLI compatibility.
+/// This is <b>not</b> a Volume Shadow Copy snapshot and does <b>not</b> provide
+/// a point-in-time frozen view; it reads the live files while bypassing locks.
+/// The manifest records <c>snapshot: "backup-privilege"</c> to reflect the
+/// actual mechanism used.
 /// </para>
 /// </remarks>
-public sealed class VssSnapshotProvider : ISnapshotProvider
+public sealed class BackupPrivilegeSnapshotProvider : ISnapshotProvider
 {
+    /// <summary>
+    /// The manifest <c>snapshot</c> value recorded for backups taken with this provider.
+    /// </summary>
+    public const string ProviderName = "backup-privilege";
+
     /// <summary>
     /// Enables backup privilege for the current process.
     /// </summary>
     /// <exception cref="PlatformNotSupportedException">Not running on Windows.</exception>
     /// <exception cref="UnauthorizedAccessException">Backup privilege could not be enabled (admin required).</exception>
-    public VssSnapshotProvider(string sourceDir)
+    public BackupPrivilegeSnapshotProvider(string sourceDir)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException(
@@ -45,7 +51,7 @@ public sealed class VssSnapshotProvider : ISnapshotProvider
 
     public bool IsSnapshot => true;
 
-    public string Name => "vss";
+    public string Name => ProviderName;
 
     /// <summary>
     /// Opens a file with backup semantics, bypassing exclusive locks held by

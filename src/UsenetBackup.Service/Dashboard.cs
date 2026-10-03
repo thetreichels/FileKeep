@@ -79,7 +79,7 @@ public static class DashboardApi
             source = j.Config.Source,
             schedule = j.Schedule.ToString(),
             mode = j.Config.Mode,
-            vss = j.Config.Vss,
+            backupPrivilege = j.Config.BackupPrivilege,
             nextRunLocal = j.NextRunLocal,
             consecutiveFailures = j.ConsecutiveFailures,
             lastResult = j.LastResult is null ? null : new
@@ -199,7 +199,7 @@ public static class DashboardHtml
           const s = await api('/api/status');
           document.getElementById('jobs').innerHTML = s.jobs.map(j => `
             <div class="job">
-              <h2>${esc(j.name)} <span class="meta">(${esc(j.schedule)}, ${esc(j.mode)}${j.vss ? ', vss' : ''})</span></h2>
+              <h2>${esc(j.name)} <span class="meta">(${esc(j.schedule)}, ${esc(j.mode)}${j.backupPrivilege ? ', backup-privilege' : ''})</span></h2>
               <div class="meta">source: ${esc(j.source)}<br>repo: ${esc(j.repo)}</div>
               <p>Next run: ${esc(j.nextRunLocal)} (local)</p>
               <p>Last: ${j.lastResult

@@ -39,7 +39,7 @@ static void PrintUsage()
 
         Usage:
           usenet-backup init <repo> [--chunk-size BYTES]
-          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--vss]
+          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
           usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
@@ -70,15 +70,15 @@ static void PrintUsage()
         are skipped. Each fetched chunk is authenticated and hash-verified
         before being stored. Run verify/restore afterwards as usual.
 
-        --vss takes a Volume Shadow Copy snapshot of the source volume
-        (Windows only, requires administrator rights) and backs up from
-        the snapshot, so open/locked files are read consistently.
+        --backup-privilege enables the Windows SeBackupPrivilege and reads
+        files with backup semantics (Windows only, requires administrator
+        rights), so files locked by other processes can be read. This reads
+        the live files, not a point-in-time copy.
 
         backup-disk images a raw block device (e.g. \\.\C: on Windows,
         /dev/sda on Linux) through the normal chunk/encrypt pipeline as a
-        single image entry; restore-disk writes it back. For a
-        crash-consistent image of a live Windows volume, image a VSS
-        snapshot instead of the live volume.
+        single image entry; restore-disk writes it back. The image is of the
+        live volume, not a point-in-time copy.
 
         The passphrase is read from --passphrase, the USENETBACKUP_PASSPHRASE
         environment variable, or an interactive prompt (in that order).
@@ -162,10 +162,10 @@ static int Init(string[] args)
 static int Backup(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--vss]"); return 2; }
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege]"); return 2; }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     string? parent = GetOption(args, "--parent");
-    using ISnapshotProvider? snap = HasFlag(args, "--vss") ? new VssSnapshotProvider(pos[1]) : null;
+    using ISnapshotProvider? snap = HasFlag(args, "--backup-privilege") ? new BackupPrivilegeSnapshotProvider(pos[1]) : null;
     var manifest = parent is null
         ? repo.BackupDirectory(pos[1], snap)
         : repo.BackupIncremental(pos[1], parent, snap);

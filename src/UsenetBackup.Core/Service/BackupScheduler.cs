@@ -203,7 +203,7 @@ public sealed class BackupScheduler
                     "environment variable for the service account.");
 
             using var repo = BackupRepository.Open(job.Repo, passphrase);
-            using ISnapshotProvider? snap = job.Vss ? new VssSnapshotProvider(job.Source) : null;
+            using ISnapshotProvider? snap = job.BackupPrivilege ? new BackupPrivilegeSnapshotProvider(job.Source) : null;
 
             BackupManifest manifest;
             if (job.Mode == "full")

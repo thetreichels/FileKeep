@@ -12,7 +12,7 @@ system-image backups, using Usenet as an encrypted long-term storage backend.
 
 1. Full system image backup
 2. Incremental block-level backups
-3. Windows VSS support
+3. Windows backup-privilege file access (read locked files)
 4. Client-side authenticated encryption
 5. Deduplication
 6. Configurable chunk size
@@ -41,7 +41,7 @@ system-image backups, using Usenet as an encrypted long-term storage backend.
 | `Encryption`    | Authenticated encryption (AES-256-GCM; boring, standard)|
 | `Deduplication` | Cross-backup dedup via chunk hash index                 |
 | `Manifest`      | Versioned backup manifests (`BACKUP FORMAT v1`)         |
-| `Vss`           | Volume Shadow Copy integration                          |
+| `BackupPrivilege` | Windows SeBackupPrivilege locked-file reads          |
 | `Usenet`        | Backend abstraction (local / NAS / Usenet)              |
 | `Nntp`          | NNTP upload/download with resume                        |
 | `Nzb`           | NZB manifest generation and parsing                     |
@@ -94,9 +94,10 @@ they never silently change `v1`.
    (`v0.4-nzb-generation`, 54/54 tests)
 5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
    verify, restore.
-6. **v0.6 — VSS and system images.** Volume Shadow Copy support, block
+6. **v0.6 — Locked-file reads and system images.** Windows backup-privilege
+   file access (`SeBackupPrivilege`, bypasses exclusive locks), block
    device imaging, bare-metal recovery. ✅ done (`v0.6-vss-system-images`,
-   69/69 tests; VSS snapshot path needs Windows validation)
+   69/69 tests; backup-privilege path needs Windows validation)
 7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
    ✅ done (`v0.7-service-gui-installer`, 85/85 tests; service + localhost
    web dashboard + PS installer + recovery runbook — WiX MSI and a
@@ -114,7 +115,7 @@ dotnet build UsenetBackup.slnx
 dotnet test UsenetBackup.slnx
 ```
 
-The VSS snapshot path (milestone 6) and running as a Windows service
+The backup-privilege file-access path (milestone 6) and running as a Windows service
 (milestone 7) require a Windows 10/11 machine to execute; both compile
 cross-platform and fail fast with a clear error elsewhere. The service
 also runs in `--console` mode on any OS (useful for testing), and the
@@ -136,16 +137,16 @@ USENETBACKUP_PASSPHRASE=... usenet-backup-service --console --config service.jso
 `service.json` (see `src/UsenetBackup.Service/service.example.json`)
 defines jobs: repo, source, schedule (`"daily HH:mm"` or
 `"interval N"` minutes), mode (`incremental` — falls back to full when
-no parent exists — or `full`), and `vss` for shadow-copy backups.
+no parent exists — or `full`), and `backup-privilege` for locked-file reads.
 The passphrase comes from the `USENETBACKUP_PASSPHRASE` environment
 variable; scheduled runs fail fast with a clear error when it is missing.
 On Windows, `install/install.ps1` (run as admin) publishes, registers
 and starts the service.
 
-Windows-only paths (VSS snapshots, SCM hosting) are validated by
+Windows-only paths (backup-privilege file access, SCM hosting) are validated by
 `validate/validate-windows.ps1` — run it as admin on a Windows 10/11
 machine with the .NET SDK (or prebuilt binaries); it publishes, then
-checks VSS locked-file backup + shadow-copy hygiene, disk-image
+checks backup-privilege locked-file backup, disk-image
 round-trip, and service install → dashboard run → uninstall, cleaning
 up afterwards.
 
@@ -178,8 +179,8 @@ Usenet, `verify`, then `restore` (or `restore-disk` for images).
   treat it as single-user: don't expose the port, and don't run it on a
   shared machine without a reverse proxy.
 - **Service account.** The installer defaults to LocalSystem (needed for
-  VSS); pass `-ServiceAccount "NT SERVICE\UsenetBackup"` for least
-  privilege when no job uses VSS.
+  backup privilege); pass `-ServiceAccount "NT SERVICE\UsenetBackup"` for least
+  privilege when no job uses backup privilege.
 - **Dependencies.** The vendored `SQLitePCLRaw.lib.e_sqlite3` 2.1.11
   carries a known high-severity advisory; it only ever opens the app's
   own `catalog.db`, but upgrade it when dependencies are next touched.
@@ -199,16 +200,17 @@ Usenet, `verify`, then `restore` (or `restore-disk` for images).
 - [x] Milestone 5 (v0.5): download/recovery pipeline — NZB parsing,
       resumable chunk download with per-chunk authentication and
       hash verification. Tagged `v0.5-download-pipeline`.
-- [x] Milestone 6 (v0.6): VSS and system images — `ISnapshotProvider`
-      abstraction (live passthrough + Windows VSS shadow copies via
-      `vssapi.dll`, admin rights required), `backup --vss`, raw block-device
-      imaging (`backup-disk`/`restore-disk`) through the normal
-      chunk/encrypt/hash pipeline with AES-GCM + SHA-256 fails-closed
-      restore, additive manifest `kind`/`snapshot` fields. Tagged
-      `v0.6-vss-system-images`. Note: the VSS COM path compiles
-      cross-platform but can only be exercised on Windows (vtable order
-      flagged for re-verification against the SDK's `vss.h` there); all
-      platform-independent behavior is tested on Linux.
+- [x] Milestone 6 (v0.6): locked-file reads and system images — `ISnapshotProvider`
+      abstraction (live passthrough + Windows backup-privilege reads via
+      `SeBackupPrivilege`/`FILE_FLAG_BACKUP_SEMANTICS`, admin rights required),
+      `backup --backup-privilege`, raw block-device imaging
+      (`backup-disk`/`restore-disk`) through the normal chunk/encrypt/hash
+      pipeline with AES-GCM + SHA-256 fails-closed restore, additive manifest
+      `kind`/`snapshot` fields. Tagged `v0.6-vss-system-images` (tag predates
+      the rename; the mechanism was never Volume Shadow Copy). Note: the
+      backup-privilege path compiles cross-platform but can only be exercised
+      on Windows; all platform-independent behavior is tested on Linux.
+      Reads the live files — not a point-in-time copy.
 - [x] Milestone 7 (v0.7): Windows service, GUI, installer, recovery —
       `usenet-backup-service`: SCM-hosted Windows service (raw P/Invoke,
       zero new dependencies) running scheduled `daily HH:mm` / `interval N`

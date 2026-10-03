@@ -8,9 +8,10 @@ namespace UsenetBackup.Core;
 /// <para>
 /// Implementations: <see cref="NullSnapshotProvider"/> reads the live tree
 /// directly (no special handling; works everywhere).
-/// <see cref="VssSnapshotProvider"/> uses Windows backup privilege
+/// <see cref="BackupPrivilegeSnapshotProvider"/> uses Windows backup privilege
 /// (<c>SE_BACKUP_NAME</c>) to open files that are exclusively locked by other
-/// processes (Windows only, admin rights required).
+/// processes (Windows only, admin rights required). It reads the live files,
+/// not a point-in-time copy.
 /// </para>
 /// <para>
 /// The provider is owned by the caller: create it, run the backup against
@@ -29,7 +30,7 @@ public interface ISnapshotProvider : IDisposable
     bool IsSnapshot { get; }
 
     /// <summary>
-    /// Short name recorded in the manifest and logs, e.g. "vss" or "none".
+    /// Short name recorded in the manifest and logs, e.g. "backup-privilege" or "none".
     /// </summary>
     string Name { get; }
 

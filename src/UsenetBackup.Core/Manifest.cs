@@ -51,8 +51,9 @@ public sealed class BackupManifest
     public string? Kind { get; set; }
 
     /// <summary>
-    /// Snapshot mechanism used during backup ("vss", ...). Null/absent means the
-    /// live tree was read directly. Additive; old manifests verify unchanged.
+    /// Snapshot mechanism used during backup ("backup-privilege", ...).
+    /// Null/absent means the live tree was read directly. Additive; old
+    /// manifests verify unchanged.
     /// </summary>
     [JsonPropertyName("snapshot")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

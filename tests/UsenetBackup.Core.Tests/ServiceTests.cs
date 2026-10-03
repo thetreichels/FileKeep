@@ -54,7 +54,7 @@ public sealed class ServiceTests : IDisposable
           "jobs": [
             { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
               "source": "{{_srcDir.Replace("\\", "\\\\")}}",
-              "schedule": "{{schedule}}", "mode": "{{mode}}", "vss": false }
+              "schedule": "{{schedule}}", "mode": "{{mode}}", "backup-privilege": false }
           ]
         }
         """;
@@ -70,7 +70,7 @@ public sealed class ServiceTests : IDisposable
         var job = Assert.Single(config.Jobs);
         Assert.Equal("docs", job.Name);
         Assert.Equal("incremental", job.Mode);
-        Assert.False(job.Vss);
+        Assert.False(job.BackupPrivilege);
     }
 
     [Fact]

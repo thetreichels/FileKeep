@@ -5,9 +5,9 @@ using Xunit;
 namespace UsenetBackup.Core.Tests;
 
 /// <summary>
-/// Milestone 6 acceptance tests: snapshot providers (VSS contract +
-/// passthrough), raw disk image backup/restore through the chunk pipeline,
-/// and manifest backward compatibility for the new additive fields.
+/// Milestone 6 acceptance tests: snapshot providers (backup-privilege
+/// contract + passthrough), raw disk image backup/restore through the chunk
+/// pipeline, and manifest backward compatibility for the new additive fields.
 /// </summary>
 public sealed class SnapshotAndImageTests : IDisposable
 {
@@ -44,7 +44,7 @@ public sealed class SnapshotAndImageTests : IDisposable
 
     /// <summary>
     /// Test double: freezes the source tree by copying it at construction,
-    /// mimicking a point-in-time VSS shadow copy.
+    /// giving a stable point-in-time view for tests.
     /// </summary>
     private sealed class CopySnapshotProvider : ISnapshotProvider
     {
@@ -72,11 +72,33 @@ public sealed class SnapshotAndImageTests : IDisposable
     }
 
     [Fact]
-    public void Vss_ThrowsPlatformNotSupported_OnNonWindows()
+    public void BackupPrivilege_ThrowsPlatformNotSupported_OnNonWindows()
     {
         if (OperatingSystem.IsWindows())
-            return; // Real VSS path needs admin + Windows; validated there.
-        Assert.Throws<PlatformNotSupportedException>(() => new VssSnapshotProvider(_srcDir));
+            return; // Real backup-privilege path needs admin + Windows; validated there.
+        Assert.Throws<PlatformNotSupportedException>(() => new BackupPrivilegeSnapshotProvider(_srcDir));
+    }
+
+    [Fact]
+    public void BackupPrivilege_ProviderName_IsHonestMechanismName()
+    {
+        // The manifest name must describe the actual mechanism (SeBackupPrivilege),
+        // not "vss": this constant is what BackupDirectory records. Testable without
+        // constructing the provider (Windows-only).
+        Assert.Equal("backup-privilege", BackupPrivilegeSnapshotProvider.ProviderName);
+    }
+
+    [Fact]
+    public void BackupDirectory_RecordsProviderName_InManifestSnapshot()
+    {
+        // The manifest's snapshot field must equal the provider's reported Name,
+        // whatever it is — the name is the contract, not a hardcoded string.
+        File.WriteAllBytes(Path.Combine(_srcDir, "a.txt"), "data"u8.ToArray());
+        using var repo = InitRepo();
+        using var snap = new CopySnapshotProvider(_srcDir);
+        var manifest = repo.BackupDirectory(_srcDir, snap);
+        Assert.Equal(snap.Name, manifest.Snapshot);
+        Assert.Equal("test-snap", manifest.Snapshot);
     }
 
     [Fact]

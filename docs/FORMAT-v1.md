@@ -103,10 +103,14 @@ Notes:
   `"directory"`). A disk-image manifest has exactly one file entry — the
   image, e.g. `"path": "disk.img"` — chunked, encrypted and hashed exactly
   like a regular file, so the same per-chunk authentication applies.
-- `snapshot` (v0.6, additive, optional): the point-in-time mechanism the
-  backup was read from, e.g. `"vss"` on Windows. Absent means the live
-  tree was read directly. Like `parent_id`, both fields are omitted when
-  not applicable, so manifests written before v0.6 verify unchanged.
+- `snapshot` (v0.6, additive, optional): the elevated-access mechanism the
+  backup was read through, e.g. `"backup-privilege"` on Windows (files read
+  with `SeBackupPrivilege` to bypass exclusive locks). This is **not** a
+  point-in-time copy — the live files are read. Absent means the live
+  tree was read directly with no elevated access. Like `parent_id`, both fields
+  are omitted when not applicable, so manifests written before v0.6 verify
+  unchanged. (Early v0.6 builds recorded `"vss"` here; readers treat it as
+  an opaque mechanism name.)
 - Symlinks are recorded as entries with `"symlink_target"` and are not
   followed (v1).
 - Filenames are plaintext in v1. Encrypting the manifest is a possible
@@ -251,6 +255,7 @@ the bulky `chunks/` directory is what Usenet replaces.
 
 Compression, PAR2 parity — reserved for later milestones and later format
 versions. (The NNTP article format and the NZB mapping above are defined
-in v1 as of milestones 3 and 4; VSS snapshots and raw disk images arrived
+in v1 as of milestones 3 and 4; elevated-access reads (`"backup-privilege"`)
+and raw disk images arrived
 in v0.6 as additive manifest fields, documented above; multi-article
 chunk splitting is not yet needed and not specified.)

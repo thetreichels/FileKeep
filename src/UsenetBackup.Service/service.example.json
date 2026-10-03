@@ -8,7 +8,7 @@
       "repo": "C:\\Backup\\repo",
       "schedule": "daily 02:00",
       "source": "C:\\Users\\YOU\\Documents",
-      "vss": true
+      "backup-privilege": true
     },
     {
       "mode": "incremental",
@@ -16,7 +16,7 @@
       "repo": "D:\\Backup\\repo",
       "schedule": "interval 120",
       "source": "D:\\Photos",
-      "vss": false
+      "backup-privilege": false
     }
   ]
 }

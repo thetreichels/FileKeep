@@ -5,12 +5,11 @@
 
 .DESCRIPTION
     Exercises everything that cannot be tested on Linux:
-      1. VSS snapshot backup (backup --vss) — including reading an
+      1. Backup-privilege backup (backup --backup-privilege) — including reading an
          exclusively-locked file that a plain backup cannot read, and
-         verifying the manifest records snapshot="vss".
-      2. VSS shadow-copy hygiene — no shadow copies leak after the backup.
-      3. Disk image backup/restore round-trip (file-backed, safe).
-      4. Windows service install/start, dashboard reachability, a
+         verifying the manifest records snapshot="backup-privilege".
+      2. Disk image backup/restore round-trip (file-backed, safe).
+      3. Windows service install/start, dashboard reachability, a
          dashboard-triggered backup run, then clean uninstall.
 
     The script publishes the CLI and service itself when -RepoRoot is given
@@ -52,25 +51,6 @@ function Get-BackupId([string]$cliOutput) {
     $m = [regex]::Match($cliOutput, "backup ([0-9a-f]{32})")
     if (-not $m.Success) { throw "could not parse backup id from CLI output: $cliOutput" }
     return $m.Groups[1].Value
-}
-
-function Get-ShadowIds {
-    # Returns shadow-copy IDs, or $null when enumeration is unavailable.
-    # WMI is tried first; vssadmin.exe (full path) is the fallback.
-    try {
-        $ids = @((Get-CimInstance Win32_ShadowCopy -ErrorAction Stop) |
-            Select-Object -ExpandProperty ID)
-        return $ids
-    } catch { }
-    $vssadmin = Join-Path $env:SystemRoot "System32\vssadmin.exe"
-    if (Test-Path $vssadmin) {
-        $out = & $vssadmin list shadows 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) {
-            return @([regex]::Matches($out, 'Shadow Copy ID:\s*(\{[0-9a-fA-F\-]+\})') |
-                ForEach-Object { $_.Groups[1].Value })
-        }
-    }
-    return $null
 }
 
 function Report {
@@ -139,15 +119,10 @@ try {
         Assert-True ($LASTEXITCODE -eq 0) "init failed"
     }
 
-    Check "VSS: backup --vss reads an exclusively-locked file" {
-        $src = New-Item -ItemType Directory -Force -Path (Join-Path $work "vss-src")
+    Check "Backup-privilege: backup --backup-privilege reads an exclusively-locked file" {
+        $src = New-Item -ItemType Directory -Force -Path (Join-Path $work "bp-src")
         "hello" | Out-File (Join-Path $src "a.txt") -Encoding utf8
         "locked-content" | Out-File (Join-Path $src "locked.txt") -Encoding utf8
-        # Shadow-copy hygiene via WMI with vssadmin fallback; if neither can
-        # enumerate (some stripped images lack vssadmin.exe and have a flaky
-        # WMI provider), warn and skip the leak check rather than failing:
-        # the backup itself is the real test.
-        $shadowsBefore = Get-ShadowIds
 
         $lockStream = [IO.File]::Open((Join-Path $src "locked.txt"),
             [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -155,31 +130,22 @@ try {
             # A plain backup must NOT be able to read the locked file...
             & $cli backup $repo $src 2>$null | Out-Null
             Assert-True ($LASTEXITCODE -ne 0) "plain backup unexpectedly succeeded on an exclusively-locked file"
-            # ...while a VSS backup must sail through via the snapshot.
-            $out = & $cli backup $repo $src --vss 2>&1
-            Assert-True ($LASTEXITCODE -eq 0) "backup --vss failed: $out"
-            $vssBackupId = Get-BackupId ($out | Out-String)
+            # ...while a backup-privilege backup must sail through via SeBackupPrivilege.
+            $out = & $cli backup $repo $src --backup-privilege 2>&1
+            Assert-True ($LASTEXITCODE -eq 0) "backup --backup-privilege failed: $out"
+            $bpBackupId = Get-BackupId ($out | Out-String)
         } finally {
             $lockStream.Close()
         }
 
-        $manifest = Get-Content (Join-Path (Join-Path $repo "manifests") "$vssBackupId.json") -Raw |
+        $manifest = Get-Content (Join-Path (Join-Path $repo "manifests") "$bpBackupId.json") -Raw |
             ConvertFrom-Json
-        Assert-True ($manifest.snapshot -eq "vss") "manifest snapshot='$($manifest.snapshot)', expected 'vss'"
+        Assert-True ($manifest.snapshot -eq "backup-privilege") "manifest snapshot='$($manifest.snapshot)', expected 'backup-privilege'"
 
-        & $cli restore $repo $vssBackupId (Join-Path $work "vss-restored") 2>&1 | Out-Null
-        Assert-True ($LASTEXITCODE -eq 0) "restore of VSS backup failed"
-        $content = (Get-Content (Join-Path (Join-Path $work "vss-restored") "locked.txt") -Raw).Trim()
+        & $cli restore $repo $bpBackupId (Join-Path $work "bp-restored") 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -eq 0) "restore of backup-privilege backup failed"
+        $content = (Get-Content (Join-Path (Join-Path $work "bp-restored") "locked.txt") -Raw).Trim()
         Assert-True ($content -eq "locked-content") "restored locked file content mismatch: '$content'"
-
-        Start-Sleep -Seconds 5  # give VSS a moment to report deletions
-        $shadowsAfter = Get-ShadowIds
-        if ($null -eq $shadowsBefore -or $null -eq $shadowsAfter) {
-            Write-Host "WARNING: shadow-copy enumeration unavailable; leak check skipped" -ForegroundColor Yellow
-        } else {
-            $leaked = @($shadowsAfter | Where-Object { $_ -notin $shadowsBefore })
-            Assert-True ($leaked.Count -eq 0) "leaked shadow copies: $($leaked -join ', ')"
-        }
     }
 
     Check "Disk image: backup-disk / restore-disk round-trip" {
@@ -224,7 +190,7 @@ try {
             dashboardBind = "127.0.0.1"; dashboardPort = $port
             jobs = @(@{
                 name = "validate"; repo = $svcRepo; source = $svcSrc.FullName
-                schedule = "interval 60"; mode = "incremental"; vss = $false
+                schedule = "interval 60"; mode = "incremental"; "backup-privilege" = $false
             })
         } | ConvertTo-Json -Depth 4
         $cfgPath = Join-Path $svcWork "service.json"

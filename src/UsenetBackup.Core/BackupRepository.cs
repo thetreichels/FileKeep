@@ -90,9 +90,9 @@ public sealed class BackupRepository : IDisposable
     /// <summary>Full backup: every file is chunked.</summary>
     /// <summary>
     /// Full backup of a directory tree. When <paramref name="snapshotProvider"/>
-    /// is supplied, files are read from its point-in-time view instead of the
-    /// live tree (e.g. a VSS shadow copy on Windows); the caller owns and
-    /// disposes the provider. Null reads the live tree directly.
+    /// is supplied, files are read through the provider instead of the live
+    /// tree (e.g. with Windows backup privilege to bypass exclusive locks);
+    /// the caller owns and disposes the provider. Null reads the live tree directly.
     /// </summary>
     public BackupManifest BackupDirectory(string sourceDir, ISnapshotProvider? snapshotProvider = null)
     {
@@ -315,8 +315,8 @@ public sealed class BackupRepository : IDisposable
     /// sequentially through the normal chunk/encrypt pipeline, so the image
     /// gets the same per-chunk authentication and deduplication as files.
     /// The device is opened with <see cref="FileShare.ReadWrite"/> so a live
-    /// volume can be imaged; for a crash-consistent image, image a VSS
-    /// snapshot instead of the live volume.
+    /// volume can be imaged. Note the image is of the live volume, not a
+    /// point-in-time copy.
     /// </summary>
     public BackupManifest BackupDiskImage(string devicePath, string imageName = "disk.img")
     {
