@@ -163,31 +163,151 @@ public static class DashboardHtml
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Usenet Backup</title>
         <style>
-          body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
-          h1 { font-size: 1.4rem; }
-          .job { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-          .job h2 { margin: 0 0 .5rem; font-size: 1.1rem; }
-          .meta { color: #555; font-size: .9rem; }
-          .ok { color: #0a7a2f; font-weight: bold; }
-          .fail { color: #b00020; font-weight: bold; }
-          button { padding: .4rem .8rem; border-radius: 6px; border: 1px solid #999; background: #f5f5f5; cursor: pointer; }
-          button:hover { background: #e8e8e8; }
-          pre { background: #f6f6f6; padding: .8rem; border-radius: 6px; overflow-x: auto; font-size: .8rem; max-height: 300px; overflow-y: auto; }
-          table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-          th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #eee; }
-          select { padding: .3rem; }
+          /* Windows 11 Settings page styling: Segoe UI Variable, cards, accent button. */
+          :root {
+            --accent: #0067c0;
+            --accent-hover: #1972c2;
+            --bg: #f3f3f3;
+            --card: #ffffff;
+            --border: #e6e6e6;
+            --text: #1b1b1b;
+            --text-2: #616161;
+            --ok: #107c10;
+            --bad: #c42b1c;
+          }
+          * { box-sizing: border-box; }
+          body {
+            font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+            background: var(--bg); color: var(--text);
+            margin: 0; padding: 0; font-size: 14px;
+          }
+          .app { display: flex; min-height: 100vh; }
+          /* Left nav, Settings-style (only our own real sections — no fake entries). */
+          nav { width: 300px; flex-shrink: 0; padding: 24px 12px 24px 20px; }
+          .nav-brand { display: flex; align-items: center; gap: 12px; padding: 4px 12px 20px; }
+          .nav-brand .glyph {
+            width: 40px; height: 40px; border-radius: 50%;
+            background: var(--accent); color: #fff;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px;
+          }
+          .nav-brand .t1 { font-weight: 600; }
+          .nav-brand .t2 { font-size: 12px; color: var(--text-2); }
+          .nav-item {
+            display: block; padding: 9px 12px; margin: 2px 0; border-radius: 6px;
+            color: var(--text); text-decoration: none; position: relative; cursor: pointer;
+          }
+          .nav-item:hover { background: #fafafa; }
+          .nav-item.active { background: #fafafa; font-weight: 600; }
+          .nav-item.active::before {
+            content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 3px;
+            border-radius: 2px; background: var(--accent);
+          }
+          main { flex: 1; padding: 32px 40px 60px 12px; max-width: 960px; }
+          h1 { font-size: 28px; font-weight: 600; margin: 0 0 20px; }
+          h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
+          .card {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 20px; margin: 0 0 12px;
+          }
+          /* Status hero, Windows Update style. */
+          .hero { display: flex; align-items: center; gap: 20px; }
+          .hero-icon {
+            width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px; color: #fff; background: var(--ok);
+          }
+          .hero-icon.warn { background: #ca5010; }
+          .hero-icon.bad { background: var(--bad); }
+          .hero-title { font-size: 18px; font-weight: 600; }
+          .hero-sub { color: var(--text-2); margin-top: 4px; }
+          .hero button { margin-left: auto; flex-shrink: 0; }
+          .row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+          .row:first-of-type { border-top: none; }
+          .row .grow { flex: 1; }
+          .row .name { font-weight: 600; }
+          .row .meta { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+          .pill {
+            font-size: 12px; padding: 2px 10px; border-radius: 10px; font-weight: 600;
+            background: #e8f5e9; color: var(--ok);
+          }
+          .pill.fail { background: #fdecea; color: var(--bad); }
+          .pill.idle { background: #f0f0f0; color: var(--text-2); }
+          button {
+            font-family: inherit; font-size: 14px;
+            padding: 6px 18px; border-radius: 4px; cursor: pointer;
+            border: 1px solid #d1d1d1; background: #fbfbfb; color: var(--text);
+          }
+          button:hover { background: #f0f0f0; }
+          button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+          button.accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+          button:disabled { opacity: .5; cursor: default; }
+          select {
+            font-family: inherit; font-size: 14px; padding: 6px 10px;
+            border: 1px solid #d1d1d1; border-radius: 4px; background: #fbfbfb;
+            max-width: 420px;
+          }
+          table { border-collapse: collapse; width: 100%; font-size: 13px; }
+          th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+          th { color: var(--text-2); font-weight: 600; }
+          code { font-size: 12px; }
+          pre {
+            background: #fafafa; border: 1px solid var(--border); border-radius: 6px;
+            padding: 12px; overflow: auto; font-size: 12px; max-height: 320px; margin: 0;
+          }
+          .view { display: none; }
+          .view.active { display: block; }
+          .foot { color: var(--text-2); font-size: 12px; margin-top: 32px; }
         </style>
         </head>
         <body>
-        <h1>Usenet Backup — service dashboard</h1>
-        <div id="jobs"><p>Loading…</p></div>
-        <h2>Backups &amp; log</h2>
-        <p><label>Repo: <select id="repo"></select></label>
-        <button onclick="loadRepo()">Refresh</button></p>
-        <h3>Backups</h3>
-        <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th></tr></thead><tbody></tbody></table>
-        <h3>Operations log</h3>
-        <pre id="log"></pre>
+        <div class="app">
+          <nav>
+            <div class="nav-brand">
+              <div class="glyph">⛁</div>
+              <div><div class="t1">Usenet Backup</div><div class="t2">Service settings</div></div>
+            </div>
+            <a class="nav-item active" data-view="overview">Overview</a>
+            <a class="nav-item" data-view="backups">Backups</a>
+            <a class="nav-item" data-view="log">Operations log</a>
+          </nav>
+          <main>
+            <div class="view active" id="view-overview">
+              <h1>Backup (Usenet)</h1>
+              <div class="card hero">
+                <div class="hero-icon" id="heroIcon">✓</div>
+                <div>
+                  <div class="hero-title" id="heroTitle">Checking…</div>
+                  <div class="hero-sub" id="heroSub"></div>
+                </div>
+                <button class="accent" id="backupNow" onclick="runAll()">Back up now</button>
+              </div>
+              <h2>Backup jobs</h2>
+              <div class="card" id="jobs" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
+              <div class="foot">Backups are encrypted locally and posted to Usenet. Your passphrase never leaves this machine's memory.</div>
+            </div>
+            <div class="view" id="view-backups">
+              <h1>Backups</h1>
+              <div class="card">
+                <div class="row">
+                  <div class="grow">
+                    <div class="name">Repository</div>
+                    <div class="meta">Only repos from configured backup jobs are listed.</div>
+                  </div>
+                  <select id="repo"></select>
+                  <button onclick="loadRepo()">Refresh</button>
+                </div>
+              </div>
+              <div class="card" style="padding:8px 20px">
+                <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th></tr></thead><tbody></tbody></table>
+              </div>
+            </div>
+            <div class="view" id="view-log">
+              <h1>Operations log</h1>
+              <div class="card"><pre id="log">(loading…)</pre></div>
+            </div>
+          </main>
+        </div>
         <script>
         async function api(path, opts) {
           const r = await fetch(path, opts);
@@ -195,30 +315,72 @@ public static class DashboardHtml
           return r.status === 202 ? null : r.json();
         }
         function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+        let jobNames = [];
+        document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
+          document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
+          a.classList.add('active');
+          document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+          document.getElementById('view-' + a.dataset.view).classList.add('active');
+        }));
+        function fmtLast(j) {
+          if (!j.lastResult) return '<span class="pill idle">never run</span>';
+          return j.lastResult.success
+            ? '<span class="pill">backed up</span>'
+            : '<span class="pill fail">failed</span>';
+        }
         async function load() {
           const s = await api('/api/status');
+          jobNames = s.jobs.map(j => j.name);
+          const icon = document.getElementById('heroIcon');
+          const title = document.getElementById('heroTitle');
+          const sub = document.getElementById('heroSub');
+          const anyFail = s.jobs.some(j => j.lastResult && !j.lastResult.success);
+          const anyNever = s.jobs.some(j => !j.lastResult);
+          const lastOk = s.jobs.flatMap(j => j.lastResult && j.lastResult.success ? [j.lastResult.startedLocal] : []).sort().pop();
+          if (!s.jobs.length) {
+            icon.textContent = '⛁'; icon.className = 'hero-icon warn';
+            title.textContent = 'No backup jobs configured';
+            sub.textContent = 'Add jobs to service.json and restart the service.';
+          } else if (anyFail) {
+            icon.textContent = '!'; icon.className = 'hero-icon bad';
+            title.textContent = 'A backup needs attention';
+            sub.textContent = 'One or more jobs failed. See Backup jobs below.';
+          } else if (anyNever) {
+            icon.textContent = '⛁'; icon.className = 'hero-icon warn';
+            title.textContent = 'Backup is set up';
+            sub.textContent = 'No backup has run yet. Press "Back up now" or wait for the schedule.';
+          } else {
+            icon.textContent = '✓'; icon.className = 'hero-icon';
+            title.textContent = "You're backed up";
+            sub.textContent = lastOk ? 'Last backup: ' + lastOk + ' (local time)' : '';
+          }
           document.getElementById('jobs').innerHTML = s.jobs.map(j => `
-            <div class="job">
-              <h2>${esc(j.name)} <span class="meta">(${esc(j.schedule)}, ${esc(j.mode)}${j.backupPrivilege ? ', backup-privilege' : ''})</span></h2>
-              <div class="meta">source: ${esc(j.source)}<br>repo: ${esc(j.repo)}</div>
-              <p>Next run: ${esc(j.nextRunLocal)} (local)</p>
-              <p>Last: ${j.lastResult
-                ? (j.lastResult.success
-                    ? `<span class="ok">OK</span> ${esc(j.lastResult.backupId)} — ${j.lastResult.files} files`
-                    : `<span class="fail">FAILED</span> ${esc(j.lastResult.error)}`)
-                : 'never'}${j.consecutiveFailures ? ` <span class="fail">(${j.consecutiveFailures} consecutive failures)</span>` : ''}</p>
+            <div class="row">
+              <div class="grow">
+                <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}<br>
+                ${esc(j.source)} → ${esc(j.repo)}<br>
+                Next run: ${esc(j.nextRunLocal)} (local)${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}</div>
+              </div>
               <button onclick="runJob('${esc(j.name)}')">Run now</button>
-            </div>`).join('');
+            </div>`).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
+          loadLog();
         }
         async function runJob(name) {
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           await api('/api/jobs/' + encodeURIComponent(name) + '/run',
             { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
           setTimeout(load, 2000);
+        }
+        async function runAll() {
+          const btn = document.getElementById('backupNow');
+          btn.disabled = true;
+          try { for (const n of jobNames) await runJob(n); }
+          finally { btn.disabled = false; setTimeout(load, 2000); }
         }
         async function loadRepo() {
           const repo = document.getElementById('repo').value;
@@ -227,10 +389,15 @@ public static class DashboardHtml
           try {
             const bs = await api('/api/backups' + q);
             document.querySelector('#backups tbody').innerHTML = bs.map(b =>
-              `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td></tr>`).join('');
+              `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td></tr>`).join('')
+              || '<tr><td colspan="3" style="color:var(--text-2)">No backups yet.</td></tr>';
           } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="3">${esc(e.message)}</td></tr>`; }
+        }
+        async function loadLog() {
+          const repo = document.getElementById('repo').value;
+          if (!repo) return;
           try {
-            const lines = await api('/api/log' + q + '&lines=60');
+            const lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=60');
             document.getElementById('log').textContent = lines.join('\n') || '(empty)';
           } catch (e) { document.getElementById('log').textContent = e.message; }
         }
@@ -239,5 +406,5 @@ public static class DashboardHtml
         </script>
         </body>
         </html>
-        """;
-}
+
+        """;}
