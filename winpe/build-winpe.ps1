@@ -78,7 +78,8 @@ echo    wizard\usenet-backup-recovery.exe  (GUI wizard)
 echo    RECOVERY.md                 (runbook)
 echo.
 echo  Start networking if needed: wpeinit
-echo  Launch the wizard: X:\usenet-backup\wizard\usenet-backup-recovery.exe
+echo  Launching recovery wizard...
+start "" X:\usenet-backup\wizard\usenet-backup-recovery.exe --win95
 echo.
 cmd
 '@

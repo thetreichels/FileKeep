@@ -74,9 +74,41 @@ public sealed class RecoveryWizard : Form
     private readonly Button _restoreStart = new();
     private readonly IDriveEnumerator _drives = new WmiDriveEnumerator();
 
-    public RecoveryWizard()
+    // Win95 shell controls (only used when win95 is true).
+    private readonly bool _win95;
+    private Panel? _dialog;
+    private Panel? _titleBar;
+    private ListBox? _steps;
+
+    public RecoveryWizard(bool win95 = false)
     {
+        _win95 = win95;
         Text = "Usenet Backup — USB Recovery";
+
+        if (win95)
+            BuildWin95Shell();
+        else
+            BuildModernShell();
+
+        // Shared tab configuration and pages.
+        _tabs.Dock = DockStyle.Fill;
+        _tabs.Appearance = TabAppearance.FlatButtons;
+        _tabs.ItemSize = new Size(0, 1);
+        _tabs.SizeMode = TabSizeMode.Fixed;
+
+        BuildRepoPage();
+        BuildCredsPage();
+        BuildSelectPage();
+        BuildDownloadPage();
+        BuildVerifyPage();
+        BuildRestorePage();
+
+        UpdateNav();
+    }
+
+    /// <summary>Modern native Windows shell: Segoe UI, white wizard header banner.</summary>
+    private void BuildModernShell()
+    {
         Size = new Size(640, 560);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -86,33 +118,17 @@ public sealed class RecoveryWizard : Form
 
         // Wizard header banner (white, like Windows Setup): title + description.
         var header = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = Color.White };
-        _headerTitle = new Label
-        {
-            Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-            Location = new Point(16, 8), AutoSize = true
-        };
-        _headerDesc = new Label
-        {
-            Location = new Point(16, 34), AutoSize = true,
-            ForeColor = SystemColors.GrayText
-        };
+        _headerTitle.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+        _headerTitle.Location = new Point(16, 8);
+        _headerTitle.AutoSize = true;
+        _headerDesc.Location = new Point(16, 34);
+        _headerDesc.AutoSize = true;
+        _headerDesc.ForeColor = SystemColors.GrayText;
         header.Controls.Add(_headerTitle);
         header.Controls.Add(_headerDesc);
         var headerLine = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = SystemColors.ControlDark };
-        Controls.Add(_tabs);
-        Controls.Add(headerLine);
-        Controls.Add(header);
-        // Dock order: header at top, tabs fill the rest.
-        header.BringToFront();
-        headerLine.BringToFront();
-
-        _tabs.Dock = DockStyle.Fill;
-        _tabs.Appearance = TabAppearance.FlatButtons;
-        _tabs.ItemSize = new Size(0, 1);
-        _tabs.SizeMode = TabSizeMode.Fixed;
-        Controls.Add(_tabs);
-
         var nav = new Panel { Dock = DockStyle.Bottom, Height = 56 };
+
         _status.Dock = DockStyle.Left;
         _status.AutoSize = true;
         _status.Padding = new Padding(12, 18, 0, 0);
@@ -129,16 +145,155 @@ public sealed class RecoveryWizard : Form
         _next.Location = new Point(528, 12);
         _next.Click += (_, _) => MovePage(1);
         nav.Controls.Add(_next);
+
+        var content = new Panel { Dock = DockStyle.Fill };
+        content.Controls.Add(_tabs);
+
+        Controls.Add(content);
         Controls.Add(nav);
+        Controls.Add(headerLine);
+        Controls.Add(header);
+    }
 
-        BuildRepoPage();
-        BuildCredsPage();
-        BuildSelectPage();
-        BuildDownloadPage();
-        BuildVerifyPage();
-        BuildRestorePage();
+    /// <summary>
+    /// Windows 95 Setup shell: full-screen teal desktop, navy gradient title bar,
+    /// centered classic 3D dialog with the step list on the left.
+    /// Visual styles are disabled app-wide in this mode (see Program.cs), so all
+    /// standard controls render in the authentic classic style automatically.
+    /// </summary>
+    private void BuildWin95Shell()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        WindowState = FormWindowState.Maximized;
+        BackColor = Win95Theme.Teal;
+        Font = Win95Theme.UiFont;
 
-        UpdateNav();
+        _titleBar = new Panel { Dock = DockStyle.Top, Height = 26 };
+        _titleBar.Paint += TitleBar_Paint;
+        _titleBar.MouseClick += TitleBar_MouseClick;
+        Controls.Add(_titleBar);
+
+        _dialog = new Panel
+        {
+            Size = new Size(700, 500),
+            BackColor = Win95Theme.Face,
+        };
+        _dialog.Paint += (_, e) =>
+            ControlPaint.DrawBorder3D(e.Graphics, _dialog!.ClientRectangle, Border3DStyle.Raised);
+        Controls.Add(_dialog);
+        Resize += (_, _) => CenterDialog();
+
+        // Left: dark step list, like Win95 Setup's "steps" pane.
+        var sidebar = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = 168,
+            BackColor = Win95Theme.Navy,
+        };
+        var sideTitle = new Label
+        {
+            Text = "Recovery steps",
+            Font = Win95Theme.TitleFont,
+            ForeColor = Win95Theme.SidebarText,
+            Dock = DockStyle.Top,
+            Height = 30,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(10, 0, 0, 0),
+        };
+        sidebar.Controls.Add(sideTitle);
+
+        _steps = new ListBox
+        {
+            Dock = DockStyle.Fill,
+            DrawMode = DrawMode.OwnerDrawFixed,
+            ItemHeight = 30,
+            BackColor = Win95Theme.Navy,
+            ForeColor = Win95Theme.SidebarText,
+            BorderStyle = BorderStyle.None,
+            Font = Win95Theme.UiFont,
+            SelectionMode = SelectionMode.None,
+        };
+        foreach (var (title, _) in PageHeaders)
+            _steps.Items.Add(title);
+        _steps.DrawItem += Steps_DrawItem;
+        sidebar.Controls.Add(_steps);
+        // Keep the title above the list.
+        sidebar.Controls.SetChildIndex(sideTitle, 0);
+        _dialog.Controls.Add(sidebar);
+
+        // Bottom nav: status left, classic buttons right.
+        var nav = new Panel { Dock = DockStyle.Bottom, Height = 48, BackColor = Win95Theme.Face };
+        _status.Dock = DockStyle.Left;
+        _status.AutoSize = true;
+        _status.Padding = new Padding(12, 16, 0, 0);
+        nav.Controls.Add(_status);
+
+        var cancel = new Button { Text = "Cancel", Size = new Size(80, 26) };
+        cancel.Click += (_, _) => Close();
+        var nextX = _dialog.Width - 12;
+        _next.Text = "Next >";
+        _next.Size = new Size(80, 26);
+        _next.Click += (_, _) => MovePage(1);
+        _back.Text = "< Back";
+        _back.Size = new Size(80, 26);
+        _back.Click += (_, _) => MovePage(-1);
+        // Right-aligned, classic Win95 order: Back, Next, Cancel.
+        nextX -= cancel.Width; cancel.Location = new Point(nextX, 11);
+        nextX -= _next.Width + 8; _next.Location = new Point(nextX, 11);
+        nextX -= _back.Width + 8; _back.Location = new Point(nextX, 11);
+        nav.Controls.Add(cancel);
+        nav.Controls.Add(_next);
+        nav.Controls.Add(_back);
+        _dialog.Controls.Add(nav);
+
+        var content = new Panel { Dock = DockStyle.Fill, BackColor = Win95Theme.Face };
+        content.Controls.Add(_tabs);
+        _dialog.Controls.Add(content);
+
+        CenterDialog();
+    }
+
+    private void CenterDialog()
+    {
+        if (_dialog is null || _titleBar is null)
+            return;
+        int areaH = ClientSize.Height - _titleBar.Height;
+        _dialog.Location = new Point(
+            Math.Max(0, (ClientSize.Width - _dialog.Width) / 2),
+            _titleBar.Height + Math.Max(0, (areaH - _dialog.Height) / 2));
+    }
+
+    private void TitleBar_Paint(object? sender, PaintEventArgs e)
+    {
+        var bar = _titleBar!;
+        Win95Theme.PaintTitleBar(e.Graphics, bar.ClientRectangle, Text);
+        Win95Theme.PaintCloseButton(e.Graphics, Win95Theme.CloseButtonBounds(bar.ClientRectangle));
+    }
+
+    private void TitleBar_MouseClick(object? sender, MouseEventArgs e)
+    {
+        var bar = _titleBar!;
+        if (Win95Theme.CloseButtonBounds(bar.ClientRectangle).Contains(e.Location))
+            Close();
+    }
+
+    private void Steps_DrawItem(object? sender, DrawItemEventArgs e)
+    {
+        if (e.Index < 0)
+            return;
+        var lb = (ListBox)sender!;
+        string text = lb.Items[e.Index].ToString()!;
+        bool current = e.Index == _tabs.SelectedIndex;
+        bool done = e.Index < _tabs.SelectedIndex;
+
+        e.Graphics.FillRectangle(
+            new SolidBrush(current ? Win95Theme.TitleEnd : Win95Theme.Navy), e.Bounds);
+        var color = current || done ? Win95Theme.SidebarText : Win95Theme.SidebarDim;
+        var font = current ? Win95Theme.TitleFont : Win95Theme.UiFont;
+        string prefix = done ? "✓ " : current ? "> " : "   ";
+        TextRenderer.DrawText(e.Graphics, prefix + text, font,
+            new Rectangle(e.Bounds.X + 8, e.Bounds.Y, e.Bounds.Width - 8, e.Bounds.Height),
+            color, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
     }
 
     protected override void Dispose(bool disposing)
@@ -173,9 +328,16 @@ public sealed class RecoveryWizard : Form
         _back.Enabled = _tabs.SelectedIndex > 0;
         _next.Enabled = _tabs.SelectedIndex < _tabs.TabPages.Count - 1;
         _next.Text = _tabs.SelectedIndex == _tabs.TabPages.Count - 2 ? "Finish" : "Next >";
-        var (title, desc) = PageHeaders[_tabs.SelectedIndex];
-        _headerTitle.Text = title;
-        _headerDesc.Text = desc;
+        if (_win95)
+        {
+            _steps?.Invalidate();
+        }
+        else
+        {
+            var (title, desc) = PageHeaders[_tabs.SelectedIndex];
+            _headerTitle.Text = title;
+            _headerDesc.Text = desc;
+        }
     }
 
     private void SetStatus(string text, bool isError = false)
@@ -592,18 +754,22 @@ public sealed class RecoveryWizard : Form
             LoadDrives();
     }
 
-    /// <summary>
-    /// Native Windows TaskDialog for the destructive disk-restore step.
-    /// Shows the exact drive identity; the user must press the explicit
-    /// confirmation button. Returns true when confirmed.
-    /// </summary>
     private bool ConfirmDiskRestore(PhysicalDriveInfo drive)
     {
+        string body = $"This will permanently erase everything on:\n\n{drive.Model}\n{drive.DevicePath} ({drive.Display})\n\nThis cannot be undone.";
+        if (_win95)
+        {
+            // Classic MessageBox matches the Win95 shell (no visual styles there).
+            return MessageBox.Show(this, body, "Erase this drive and restore the disk image?",
+                MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) == DialogResult.OK;
+        }
+        // Native Windows TaskDialog for the destructive disk-restore step.
         var page = new TaskDialogPage
         {
             Caption = "Confirm disk restore",
             Heading = "Erase this drive and restore the disk image?",
-            Text = $"This will permanently erase everything on:\n\n{drive.Model}\n{drive.DevicePath} ({drive.Display})\n\nThis cannot be undone.",
+            Text = body,
             Icon = TaskDialogIcon.Warning,
             Buttons = { TaskDialogButton.Cancel },
         };
