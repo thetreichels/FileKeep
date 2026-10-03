@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- WiX v5 installer for Usenet Backup.
-     Build on Windows with the WiX dotnet tool:
-       dotnet tool install --global wix
-       wix build -arch x64 \
-         -d CliBin=C:\ub\publish\cli \
-         -d ServiceBin=C:\ub\publish\service \
-         -d RecoveryBin=C:\ub\publish\recovery \
-         -o usenet-backup-0.8.0-x64.msi \
-         install/UsenetBackup.wxs
-     The -d paths must point at self-contained win-x64 publish outputs. -->
+<!-- WiX v5 installer for Usenet Backup. Build on Windows: wix build -arch x64 with -d CliBin, -d ServiceBin, -d RecoveryBin pointing at self-contained publish outputs. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Usenet Backup"
            Version="0.8.0"
