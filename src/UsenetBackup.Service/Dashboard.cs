@@ -258,6 +258,29 @@ public static class DashboardHtml
           .view { display: none; }
           .view.active { display: block; }
           .foot { color: var(--text-2); font-size: 12px; margin-top: 32px; }
+          /* Dark mode: follow the OS color scheme, Windows 11 dark palette. */
+          @media (prefers-color-scheme: dark) {
+            :root {
+              color-scheme: dark;
+              --bg: #202020;
+              --card: #2b2b2b;
+              --border: #353535;
+              --text: #f3f3f3;
+              --text-2: #a7a7a7;
+              --ok: #6ccb5f;
+              --bad: #f1707b;
+            }
+            .nav-item:hover, .nav-item.active { background: #2d2d2d; }
+            button {
+              background: #2d2d2d; border-color: #3a3a3a; color: var(--text);
+            }
+            button:hover { background: #323232; }
+            select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
+            pre { background: #242424; }
+            .pill { background: #1d3325; }
+            .pill.fail { background: #3a2320; }
+            .pill.idle { background: #2d2d2d; }
+          }
         </style>
         </head>
         <body>
