@@ -23,24 +23,10 @@
       </Directory>
     </StandardDirectory>
 
-    <!-- CLI (single-file exe + native SQLite) -->
+    <!-- CLI (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
         <File Id="CliExeFile" Source="$(var.CliBin)\usenet-backup.exe" KeyPath="yes" />
-      </Component>
-      <Component Id="CliNative" Guid="*">
-        <File Id="CliNativeFile" Source="$(var.CliBin)\e_sqlite3.dll" KeyPath="yes" />
-      </Component>
-    </ComponentGroup>
-
-    <!-- Windows service native deps (the exe itself is in ServiceExecutable below,
-         because ServiceInstall must share a component with its executable) -->
-    <ComponentGroup Id="ServiceFiles" Directory="SERVICEDIR">
-      <Component Id="ServiceNative" Guid="*">
-        <File Id="ServiceNativeFile" Source="$(var.ServiceBin)\e_sqlite3.dll" KeyPath="yes" />
-      </Component>
-      <Component Id="ServiceAspNet" Guid="*">
-        <File Id="ServiceAspNetFile" Source="$(var.ServiceBin)\aspnetcorev2_inprocess.dll" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
@@ -64,27 +50,23 @@
       </Component>
     </ComponentGroup>
 
-    <!-- Recovery wizard (single-file exe + native SQLite) -->
+    <!-- Recovery wizard (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="RecoveryFiles" Directory="WIZARDDIR">
       <Component Id="RecoveryExe" Guid="*">
         <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\usenet-backup-recovery.exe" KeyPath="yes" />
-      </Component>
-      <Component Id="RecoveryNative" Guid="*">
-        <File Id="RecoveryNativeFile" Source="$(var.RecoveryBin)\e_sqlite3.dll" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
     <!-- Service config example + recovery runbook -->
     <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
-        <File Source="install/service.example.json" Name="service.example.json" />
+        <File Source="src/UsenetBackup.Service/service.example.json" Name="service.example.json" />
         <File Source="docs/RECOVERY.md" Name="RECOVERY.md" />
       </Component>
     </ComponentGroup>
 
     <Feature Id="ProductFeature" Title="Usenet Backup" Level="1">
       <ComponentGroupRef Id="CliFiles" />
-      <ComponentGroupRef Id="ServiceFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
