@@ -142,10 +142,16 @@ cd C:\ub\src
 # Stamp file versions so Windows Installer replaces binaries on upgrade/reinstall.
 # (Without this, every build carries the default FileVersion 1.0.0.0 and a
 # reinstall silently keeps the previously installed binaries.)
-$buildNo = [int]((Get-Date) - (Get-Date "2026-01-01")).TotalDays
-$verProps = @("/p:Version=0.8.1", "/p:FileVersion=0.8.1.$buildNo",
+# Build = days since 2026-01-01, revision = minutes since midnight: two builds
+# on the same day still get distinct versions, so a same-day rebuild +
+# reinstall actually replaces the binaries.
+$now = Get-Date
+$buildNo = [int](($now - (Get-Date "2026-01-01")).TotalDays)
+$revNo = $now.Hour * 60 + $now.Minute
+$fileVer = "0.8.$buildNo.$revNo"
+$verProps = @("/p:Version=0.8.1", "/p:FileVersion=$fileVer",
               "/p:AssemblyVersion=0.8.1.0", "/p:InformationalVersion=0.8.1")
-Write-Host "Stamping FileVersion 0.8.1.$buildNo"
+Write-Host "Stamping FileVersion $fileVer"
 dotnet publish src/UsenetBackup.Cli/UsenetBackup.Cli.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\cli /p:PublishSingleFile=true @verProps
 if ($LASTEXITCODE -ne 0) { throw "CLI publish failed" }
 dotnet publish src/UsenetBackup.Service/UsenetBackup.Service.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\service /p:PublishSingleFile=true @verProps
