@@ -66,6 +66,7 @@ public static class Dashboard
                 dashboardPort = config.DashboardPort,
                 dashboardBind = config.DashboardBind,
                 jobs = config.Jobs,
+                nntp = config.Nntp,
             }));
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
@@ -86,6 +87,19 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, name, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/nntp", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            NntpConfig? nntp;
+            try { nntp = await request.ReadFromJsonAsync<NntpConfig>(); }
+            catch { return Results.BadRequest(new { error = "Invalid NNTP JSON." }); }
+            if (nntp is null)
+                return Results.BadRequest(new { error = "Empty NNTP config." });
+            var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -255,6 +269,28 @@ public static class DashboardApi
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: job '{name}' deleted");
             return (200, new { });
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = ex.Message });
+        }
+    }
+
+    public static (int Status, object Payload) UpdateNntp(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, NntpConfig nntp,
+        Action<string>? log = null)
+    {
+        // Empty host clears the Usenet configuration.
+        config.Nntp = string.IsNullOrWhiteSpace(nntp.Host) ? null : nntp;
+        try
+        {
+            // Validate NNTP fields if a host is set; Validate() also checks that
+            // no job has auto-upload without a provider.
+            config.Validate();
+            config.Save(configPath);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
+            return (200, config.Nntp ?? new NntpConfig());
         }
         catch (Exception ex)
         {
@@ -487,11 +523,27 @@ public static class DashboardHtml
                     <option value="full">Full</option>
                   </select></label>
                   <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
+                  <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload to Usenet after backup</label>
                 </div>
                 <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
                   <button class="accent" onclick="saveJob()">Save</button>
                   <button onclick="hideJobForm()">Cancel</button>
+                </div>
+              </div>
+              <div class="card">
+                <h2 style="margin-top:0">Usenet provider</h2>
+                <p style="color:var(--text-2);margin-top:0">Used for automatic uploads. The password is set via the <code>USENETBACKUP_NNTP_PASSWORD</code> environment variable on the service account — it is never stored in the config file.</p>
+                <div class="form-grid">
+                  <label>Host<input id="nntp-host" type="text" placeholder="news.example.com"></label>
+                  <label>Port<input id="nntp-port" type="number" min="1" max="65535" value="119"></label>
+                  <label>Username<input id="nntp-user" type="text" placeholder="(optional)"></label>
+                  <label>Connections<input id="nntp-conn" type="number" min="1" max="10" value="2"></label>
+                  <label class="check"><input id="nntp-ssl" type="checkbox"> Use SSL (port 563)</label>
+                </div>
+                <div id="nntp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button class="accent" onclick="saveNntp()">Save Usenet settings</button>
                 </div>
               </div>
               <div class="foot">Changes are saved to service.json and take effect immediately. The service does not need to restart.</div>
@@ -605,12 +657,19 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}<br>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.autoUpload ? ' · auto-upload' : ''}<br>
                 ${esc(j.source)} → ${esc(j.repo)}</div>
               </div>
               <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
               <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
             </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
+          // Load Usenet provider settings
+          const nntp = cfg.nntp || {};
+          document.getElementById('nntp-host').value = nntp.host || '';
+          document.getElementById('nntp-port').value = nntp.port || 119;
+          document.getElementById('nntp-user').value = nntp.username || '';
+          document.getElementById('nntp-conn').value = nntp.connections || 2;
+          document.getElementById('nntp-ssl').checked = !!nntp.ssl;
         }
         function showJobForm(job) {
           editingJob = job ? job.name : null;
@@ -621,6 +680,7 @@ public static class DashboardHtml
           document.getElementById('jf-repo').value = job ? job.repo : '';
           document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
+          document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
           // Parse schedule
           const sched = job ? job.schedule : 'daily 02:00';
           if (sched.startsWith('daily ')) {
@@ -661,6 +721,7 @@ public static class DashboardHtml
             schedule,
             mode: document.getElementById('jf-mode').value,
             backupPrivilege: document.getElementById('jf-priv').checked,
+            autoUpload: document.getElementById('jf-autoupload').checked,
           };
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           try {
@@ -688,6 +749,29 @@ public static class DashboardHtml
             loadSettings();
             load();
           } catch (e) { alert(e.message); }
+        }
+        async function saveNntp() {
+          const errBox = document.getElementById('nntp-error');
+          const nntp = {
+            host: document.getElementById('nntp-host').value.trim(),
+            port: parseInt(document.getElementById('nntp-port').value, 10) || 119,
+            username: document.getElementById('nntp-user').value.trim(),
+            ssl: document.getElementById('nntp-ssl').checked,
+            connections: parseInt(document.getElementById('nntp-conn').value, 10) || 2,
+          };
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          try {
+            await api('/api/config/nntp', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+              body: JSON.stringify(nntp),
+            });
+            errBox.style.display = 'none';
+            loadSettings();
+          } catch (e) {
+            errBox.textContent = e.message;
+            errBox.style.display = '';
+          }
         }
         // Load settings when the tab is opened
         document.querySelector('[data-view="settings"]').addEventListener('click', loadSettings);

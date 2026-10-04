@@ -4,6 +4,28 @@ using System.Text.Json.Serialization;
 namespace UsenetBackup.Core.Service;
 
 /// <summary>
+/// Usenet (NNTP) provider configuration. The password is NEVER stored here —
+/// it comes from the USENETBACKUP_NNTP_PASSWORD environment variable at runtime.
+/// </summary>
+public sealed class NntpConfig
+{
+    [JsonPropertyName("host")]
+    public string Host { get; set; } = "";
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 119;
+
+    [JsonPropertyName("username")]
+    public string Username { get; set; } = "";
+
+    [JsonPropertyName("ssl")]
+    public bool Ssl { get; set; }
+
+    [JsonPropertyName("connections")]
+    public int Connections { get; set; } = 2;
+}
+
+/// <summary>
 /// One scheduled backup job from the service configuration file.
 /// </summary>
 public sealed class BackupJobConfig
@@ -31,6 +53,10 @@ public sealed class BackupJobConfig
     /// <summary>Read files with Windows backup privilege to bypass exclusive locks (Windows only, admin required).</summary>
     [JsonPropertyName("backup-privilege")]
     public bool BackupPrivilege { get; set; }
+
+    /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
+    [JsonPropertyName("auto-upload")]
+    public bool AutoUpload { get; set; }
 }
 
 /// <summary>
@@ -51,6 +77,14 @@ public sealed class ServiceConfig
 
     [JsonPropertyName("jobs")]
     public List<BackupJobConfig> Jobs { get; set; } = new();
+
+    /// <summary>
+    /// Usenet provider for automatic uploads. Null/empty host means no Usenet
+    /// configured; jobs with auto-upload will fail with a clear error.
+    /// The password comes from USENETBACKUP_NNTP_PASSWORD, never from this file.
+    /// </summary>
+    [JsonPropertyName("nntp")]
+    public NntpConfig? Nntp { get; set; }
 
     public static ServiceConfig Load(string path)
     {
@@ -110,6 +144,16 @@ public sealed class ServiceConfig
             if (job.Mode is not ("incremental" or "full"))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown mode '{job.Mode}' (expected \"incremental\" or \"full\").");
+            if (job.AutoUpload && (Nntp is null || string.IsNullOrWhiteSpace(Nntp.Host)))
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
+        }
+        if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
+        {
+            if (Nntp.Port is < 1 or > 65535)
+                throw new InvalidOperationException($"nntp.port {Nntp.Port} is out of range.");
+            if (Nntp.Connections < 1 || Nntp.Connections > 10)
+                throw new InvalidOperationException("nntp.connections must be between 1 and 10.");
         }
     }
 }

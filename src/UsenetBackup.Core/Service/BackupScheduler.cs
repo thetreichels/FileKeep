@@ -116,12 +116,14 @@ public sealed class JobState
 public sealed class BackupScheduler
 {
     public const string PassphraseEnvVar = "USENETBACKUP_PASSPHRASE";
+    public const string NntpPasswordEnvVar = "USENETBACKUP_NNTP_PASSWORD";
 
     private readonly List<JobState> _jobs;
     private readonly IClock _clock;
     private readonly TimeSpan _pollInterval;
     private readonly Action<string>? _log;
     private readonly object _runGate = new(); // runs never overlap
+    private NntpConfig? _nntp;
 
     public IReadOnlyList<JobState> Jobs => _jobs;
     public DateTime StartedLocal { get; }
@@ -133,6 +135,7 @@ public sealed class BackupScheduler
         _pollInterval = pollInterval ?? TimeSpan.FromSeconds(30);
         _log = log;
         StartedLocal = _clock.Now;
+        _nntp = config.Nntp;
         _jobs = config.Jobs.Select(j =>
         {
             var schedule = ScheduleParser.Parse(j.Schedule);
@@ -150,6 +153,7 @@ public sealed class BackupScheduler
         lock (_runGate)
         {
             var now = _clock.Now;
+            _nntp = config.Nntp;
             var oldByName = _jobs.ToDictionary(j => j.Config.Name,
                 StringComparer.OrdinalIgnoreCase);
             _jobs.Clear();
@@ -256,6 +260,21 @@ public sealed class BackupScheduler
             OperationLog.Append(job.Repo, "scheduled-backup",
                 $"job={job.Name} id={manifest.BackupId} type={manifest.Type} files={manifest.Files.Count}");
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
+
+            // Auto-upload to Usenet if configured.
+            if (job.AutoUpload)
+            {
+                try { AutoUploadToUsenet(job, manifest.BackupId, passphrase); }
+                catch (Exception ex)
+                {
+                    // Upload failure doesn't fail the backup itself, but it's logged
+                    // and reported so the user knows the backup isn't on Usenet yet.
+                    Log($"job '{job.Name}': auto-upload FAILED: {ex.Message}");
+                    OperationLog.Append(job.Repo, "auto-upload-failed",
+                        $"job={job.Name} id={manifest.BackupId} error={ex.Message}");
+                }
+            }
+
             return new JobRunResult
             {
                 JobName = job.Name,
@@ -293,6 +312,54 @@ public sealed class BackupScheduler
         catch
         {
             // Best effort.
+        }
+    }
+
+    /// <summary>
+    /// Uploads a completed backup's chunks to Usenet. The NNTP password comes
+    /// from the USENETBACKUP_NNTP_PASSWORD environment variable and is never
+    /// stored. Throws on failure; the caller logs it.
+    /// </summary>
+    private void AutoUploadToUsenet(BackupJobConfig job, string backupId, string passphrase)
+    {
+        var nntp = _nntp;
+        if (nntp is null || string.IsNullOrWhiteSpace(nntp.Host))
+            throw new InvalidOperationException("Auto-upload enabled but no Usenet provider configured.");
+        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+        if (string.IsNullOrEmpty(nntpPassword))
+            throw new InvalidOperationException(
+                $"Auto-upload requires the {NntpPasswordEnvVar} environment variable.");
+
+        Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
+        using var repo = BackupRepository.Open(job.Repo, passphrase);
+        var manifest = repo.LoadManifest(backupId);
+        string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToArray();
+
+        using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
+        client.Connect();
+        try
+        {
+            if (!string.IsNullOrEmpty(nntp.Username))
+                client.Authenticate(nntp.Username, nntpPassword);
+            using var store = new Nntp.NntpBlobStore(client, "alt.binaries.test", repo.RepoId, repo.CatalogPath);
+            int uploaded = 0, skipped = 0;
+            foreach (var chunkId in chunkIds)
+            {
+                if (store.Exists(chunkId)) skipped++;
+                else
+                {
+                    store.Put(chunkId, repo.GetChunkBlob(chunkId));
+                    uploaded++;
+                }
+            }
+            repo.UploadManifest(backupId, store);
+            OperationLog.Append(job.Repo, "auto-upload",
+                $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
+            Log($"job '{job.Name}': auto-upload complete ({uploaded} posted, {skipped} already present)");
+        }
+        finally
+        {
+            try { client.Quit(); } catch { /* best effort */ }
         }
     }
 
