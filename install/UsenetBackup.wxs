@@ -46,7 +46,6 @@
                         ErrorControl="normal" />
         <ServiceControl Id="BackupServiceControl"
                         Name="UsenetBackup"
-                        Start="install"
                         Stop="both"
                         Remove="uninstall"
                         Wait="true" />
