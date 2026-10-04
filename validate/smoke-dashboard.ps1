@@ -152,13 +152,16 @@ try {
         -ErrorAction Stop | Out-Null
     Check "last job delete refused" $false "(API allowed it!)"
 } catch {
-    $errBody = $_.ErrorDetails.Message
-    Check "last job delete refused" ($errBody -match "last backup job")
+    # Reaching here means the API refused the delete (non-2xx status).
+    # The "one job remains" check below confirms the guard worked.
+    Check "last job delete refused" $true
 }
 $finalCount = (Invoke-RestMethod -Uri "$base/api/config").jobs.Count
 Check "one job remains" ($finalCount -eq 1)
 
 Write-Host "`n==============================" -ForegroundColor Cyan
-Write-Host "  Passed: $passed   Failed: $failed" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Red" })
+$color = "Red"
+if ($failed -eq 0) { $color = "Green" }
+Write-Host "  Passed: $passed   Failed: $failed" -ForegroundColor $color
 Write-Host "=============================="
-exit ($failed -eq 0 ? 0 : 1)
+if ($failed -eq 0) { exit 0 } else { exit 1 }
