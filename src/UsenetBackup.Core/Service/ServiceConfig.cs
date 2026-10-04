@@ -74,11 +74,11 @@ public sealed class BackupJobConfig
     public string Mode { get; set; } = "incremental";
 
     /// <summary>Read files with Windows backup privilege to bypass exclusive locks (Windows only, admin required).</summary>
-    [JsonPropertyName("backup-privilege")]
+    [JsonPropertyName("backupPrivilege")]
     public bool BackupPrivilege { get; set; }
 
     /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
-    [JsonPropertyName("auto-upload")]
+    [JsonPropertyName("autoUpload")]
     public bool AutoUpload { get; set; }
 }
 
