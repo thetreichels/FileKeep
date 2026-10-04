@@ -46,7 +46,7 @@ Write-Host "`n[2] POST /api/config/jobs (create)" -ForegroundColor Cyan
 $newJob = @{
     name = "smoke-test-job"
     source = "C:\Windows\Temp"
-    repo = "C:\Windows\Temp\ub-smoke-repo"
+    repo = "C:\ub\testrepo"
     schedule = "interval 60"
     mode = "incremental"
     backupPrivilege = $true
@@ -78,7 +78,7 @@ Write-Host "`n[4] POST /api/config/jobs (edit: disable flags)" -ForegroundColor 
 $editJob = @{
     name = "smoke-test-job"
     source = "C:\Windows\Temp"
-    repo = "C:\Windows\Temp\ub-smoke-repo"
+    repo = "C:\ub\testrepo"
     schedule = "daily 03:00"
     mode = "full"
     backupPrivilege = $false
