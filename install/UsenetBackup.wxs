@@ -11,7 +11,8 @@
   <Package Name="Usenet Backup"
            Version="0.8.0"
            Manufacturer="Usenet Backup"
-           UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD">
+           UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
+           InstallScope="perMachine">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Usenet Backup is already installed." />
 
