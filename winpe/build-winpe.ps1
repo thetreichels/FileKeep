@@ -23,8 +23,35 @@ function Fail($msg) { Write-Error $msg; exit 1 }
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Fail "Run as Administrator."
 }
+# The ADK installer does not put Deployment Tools on PATH, and the tools are
+# not always at the textbook location, so probe the standard kit dirs, then
+# PATH, then search the kit tree (small) before giving up.
+function Find-AdkTool([string]$name) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $kitRoots = @(
+        "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit",
+        "C:\Program Files\Windows Kits\10\Assessment and Deployment Kit"
+    )
+    foreach ($root in $kitRoots) {
+        $probe = Join-Path $root "Deployment Tools\$name"
+        if (Test-Path $probe) { return $probe }
+    }
+    foreach ($root in $kitRoots) {
+        if (Test-Path $root) {
+            $found = Get-ChildItem $root -Filter $name -Recurse -ErrorAction SilentlyContinue |
+                     Select-Object -First 1 -ExpandProperty FullName
+            if ($found) { return $found }
+        }
+    }
+    return $null
+}
 foreach ($tool in @("copype.cmd", "MakeWinPEMedia.cmd")) {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Fail "$tool not found. Install ADK Deployment Tools + WinPE add-on." }
+    $toolPath = Find-AdkTool $tool
+    if (-not $toolPath) { Fail "$tool not found. Install ADK Deployment Tools + WinPE add-on." }
+    $toolDir = Split-Path $toolPath
+    if ($env:PATH -notlike "*$toolDir*") { $env:PATH = "$toolDir;$env:PATH" }
+    Write-Host "$tool -> $toolPath"
 }
 if (-not (Get-Command dism.exe -ErrorAction SilentlyContinue)) { Fail "dism.exe not found." }
 
