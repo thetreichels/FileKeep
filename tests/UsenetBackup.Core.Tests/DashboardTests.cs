@@ -208,6 +208,54 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void UpsertJob_AcceptsAutoUploadWhenProviderConfigured()
+    {
+        // Regression: UpsertJob built its validation config without Nntp,
+        // so any job with AutoUpload=true failed with 400 even when a
+        // provider was configured.
+        var config = MakeConfig();
+        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var job = new BackupJobConfig
+        {
+            Name = "upload-job", Repo = _repoDir, Source = _srcDir,
+            Schedule = "interval 60", Mode = "incremental",
+            BackupPrivilege = false, AutoUpload = true,
+        };
+        var (status, _) = DashboardApi.UpsertJob(config, scheduler, configPath, job);
+        Assert.Equal(200, status);
+        Assert.Contains(config.Jobs, j => j.Name == "upload-job" && j.AutoUpload);
+    }
+
+    [Fact]
+    public void UpsertJob_PreservesAutoUploadOnUpdate()
+    {
+        // Regression: UpsertJob did not copy AutoUpload when updating an
+        // existing job, silently clearing the flag.
+        var config = MakeConfig();
+        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
+        config.Jobs[0].AutoUpload = true;
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var updated = new BackupJobConfig
+        {
+            Name = "docs", Repo = _repoDir, Source = _srcDir,
+            Schedule = "interval 120", Mode = "incremental",
+            BackupPrivilege = true, AutoUpload = true,
+        };
+        var (status, _) = DashboardApi.UpsertJob(config, scheduler, configPath, updated);
+        Assert.Equal(200, status);
+        Assert.True(config.Jobs[0].AutoUpload);
+        Assert.True(config.Jobs[0].BackupPrivilege);
+        Assert.Equal("interval 120", config.Jobs[0].Schedule);
+    }
+
+    [Fact]
     public void NntpConfig_PasswordBlobRoundTrips()
     {
         var config = new ServiceConfig

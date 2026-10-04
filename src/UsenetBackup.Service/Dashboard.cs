@@ -216,6 +216,7 @@ public static class DashboardApi
         {
             DashboardPort = config.DashboardPort,
             DashboardBind = config.DashboardBind,
+            Nntp = config.Nntp,
             Jobs = config.Jobs
                 .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
                 .Concat(new[] { job }).ToList(),
@@ -235,6 +236,7 @@ public static class DashboardApi
             existing.Schedule = job.Schedule;
             existing.Mode = job.Mode;
             existing.BackupPrivilege = job.BackupPrivilege;
+            existing.AutoUpload = job.AutoUpload;
         }
         try
         {
