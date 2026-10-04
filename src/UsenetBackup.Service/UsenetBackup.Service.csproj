@@ -9,6 +9,8 @@
     <AssemblyName>usenet-backup-service</AssemblyName>
       <!-- Single-file self-contained publish: the MSI installs the exe + native deps explicitly. -->
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
 </PropertyGroup>
 
   <ItemGroup>
