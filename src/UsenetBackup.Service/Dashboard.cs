@@ -261,10 +261,9 @@ public static class DashboardApi
             j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
             return (400, new { error = $"Unknown job '{name}'." });
+        if (config.Jobs.Count == 1)
+            return (400, new { error = "Cannot delete the last backup job. The service requires at least one job." });
         config.Jobs.Remove(existing);
-        // Allow zero jobs via the UI (service requires restart with a valid config,
-        // but the UI shouldn't trap the user; Validate() is skipped here and the
-        // file is written as-is — the service will refuse to start until fixed).
         try
         {
             string json = System.Text.Json.JsonSerializer.Serialize(config,

@@ -125,7 +125,14 @@ public sealed class BackupScheduler
     private readonly object _runGate = new(); // runs never overlap
     private NntpConfig? _nntp;
 
-    public IReadOnlyList<JobState> Jobs => _jobs;
+    public IReadOnlyList<JobState> Jobs
+    {
+        get
+        {
+            lock (_runGate)
+                return _jobs.ToList();
+        }
+    }
     public DateTime StartedLocal { get; }
 
     public BackupScheduler(ServiceConfig config, IClock? clock = null,
@@ -197,7 +204,10 @@ public sealed class BackupScheduler
     /// </summary>
     public void RunDueJobs(DateTime now)
     {
-        foreach (var job in _jobs.Where(j => j.NextRunLocal <= now).OrderBy(j => j.NextRunLocal))
+        List<JobState> due;
+        lock (_runGate)
+            due = _jobs.Where(j => j.NextRunLocal <= now).OrderBy(j => j.NextRunLocal).ToList();
+        foreach (var job in due)
             RunOne(job, now);
     }
 
@@ -206,16 +216,20 @@ public sealed class BackupScheduler
     /// </summary>
     public JobRunResult RunJobNow(string name)
     {
-        var job = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException($"Unknown job '{name}'.");
-        JobRunResult result;
+        JobState job;
         lock (_runGate)
-            result = Execute(job.Config, _clock.Now);
-        job.LastResult = result;
-        job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
-        // Re-anchor the schedule so "run now" doesn't cause an immediate re-run.
-        job.NextRunLocal = job.Schedule.NextAfter(_clock.Now);
-        return result;
+        {
+            job = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"Unknown job '{name}'.");
+            // Hold the lock for the entire run so a concurrent ReloadJobs
+            // can't swap the job list out from under us.
+            var result = Execute(job.Config, _clock.Now);
+            job.LastResult = result;
+            job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
+            // Re-anchor the schedule so "run now" doesn't cause an immediate re-run.
+            job.NextRunLocal = job.Schedule.NextAfter(_clock.Now);
+            return result;
+        }
     }
 
     private void RunOne(JobState job, DateTime now)

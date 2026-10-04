@@ -157,4 +157,120 @@ public sealed class DashboardTests : IDisposable
         Assert.False(DashboardApi.ValidateCsrfToken("abc123", ""));
         Assert.False(DashboardApi.ValidateCsrfToken("", "abc123"));
     }
+
+    [Fact]
+    public void DeleteJob_RefusesToDeleteLastJob()
+    {
+        var config = MakeConfig();
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, "docs");
+        Assert.Equal(400, status);
+        using var doc = ToJson(payload);
+        Assert.Contains("last backup job", doc.RootElement.GetProperty("error").GetString());
+        // Job still exists
+        Assert.Single(config.Jobs);
+    }
+
+    [Fact]
+    public void ServiceConfig_RejectsAutoUploadWithoutProvider()
+    {
+        var config = new ServiceConfig
+        {
+            DashboardPort = 15789,
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "daily 02:00", AutoUpload = true },
+            },
+            Nntp = null,
+        };
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("auto-upload", ex.Message);
+    }
+
+    [Fact]
+    public void ServiceConfig_AcceptsAutoUploadWithProvider()
+    {
+        var config = new ServiceConfig
+        {
+            DashboardPort = 15789,
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "daily 02:00", AutoUpload = true },
+            },
+            Nntp = new NntpConfig { Host = "news.example.com", Port = 119 },
+        };
+        config.Validate(); // should not throw
+    }
+
+    [Fact]
+    public void NntpConfig_PasswordBlobRoundTrips()
+    {
+        var config = new ServiceConfig
+        {
+            DashboardPort = 15789,
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "daily 02:00" },
+            },
+            Nntp = new NntpConfig
+            {
+                Host = "news.example.com",
+                Port = 563,
+                Username = "user",
+                Ssl = true,
+                PasswordProtected = "dGVzdC1ibG9i", // base64 "test-blob"
+            },
+        };
+        string path = Path.Combine(_workDir, "nntp-test.json");
+        config.Save(path);
+        string json = File.ReadAllText(path);
+        Assert.Contains("passwordProtected", json);
+        Assert.DoesNotContain("\"password\":", json); // plaintext never persisted
+
+        var loaded = ServiceConfig.Load(path);
+        Assert.Equal("dGVzdC1ibG9i", loaded.Nntp?.PasswordProtected);
+        Assert.True(loaded.Nntp!.HasPassword);
+    }
+
+    [Fact]
+    public void BackupJobConfig_JsonRoundTripsCamelCaseFlags()
+    {
+        // The dashboard UI sends camelCase; the model must accept it.
+        string uiJson = @"{""name"":""Test"",""repo"":""/tmp/r"",""source"":""/tmp/s"",""schedule"":""daily 02:00"",""mode"":""incremental"",""backupPrivilege"":true,""autoUpload"":true}";
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var job = JsonSerializer.Deserialize<BackupJobConfig>(uiJson, opts);
+        Assert.NotNull(job);
+        Assert.True(job.BackupPrivilege);
+        Assert.True(job.AutoUpload);
+    }
+
+    [Fact]
+    public void UpdateNntp_ClearsWhenHostEmpty()
+    {
+        var config = MakeConfig();
+        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var (status, _) = DashboardApi.UpdateNntp(config, scheduler, configPath,
+            new NntpConfig { Host = "" });
+        Assert.Equal(200, status);
+        Assert.Null(config.Nntp);
+    }
+
+    [Fact]
+    public void Dpapi_ThrowsPlatformNotSupportedOnLinux()
+    {
+        if (OperatingSystem.IsWindows())
+            return; // Real DPAPI test needs Windows; validated manually there.
+        Assert.Throws<PlatformNotSupportedException>(() => Dpapi.Protect("test"));
+        Assert.Throws<PlatformNotSupportedException>(() => Dpapi.Unprotect("dGVzdA=="));
+    }
 }
