@@ -4,8 +4,9 @@ using System.Text.Json.Serialization;
 namespace UsenetBackup.Core.Service;
 
 /// <summary>
-/// Usenet (NNTP) provider configuration. The password is NEVER stored here —
-/// it comes from the USENETBACKUP_NNTP_PASSWORD environment variable at runtime.
+/// Usenet (NNTP) provider configuration. The password is stored as a DPAPI-encrypted
+/// blob (Windows only) or supplied via the USENETBACKUP_NNTP_PASSWORD environment variable.
+/// The env var takes precedence when set.
 /// </summary>
 public sealed class NntpConfig
 {
@@ -23,6 +24,28 @@ public sealed class NntpConfig
 
     [JsonPropertyName("connections")]
     public int Connections { get; set; } = 2;
+
+    /// <summary>
+    /// DPAPI-encrypted password (base64). Set via the dashboard; never holds plaintext.
+    /// </summary>
+    [JsonPropertyName("passwordProtected")]
+    public string? PasswordProtected { get; set; }
+
+    /// <summary>
+    /// Plaintext password supplied by the dashboard UI for saving. Serialized as
+    /// <c>"password"</c> on input only; the API encrypts it into
+    /// <see cref="PasswordProtected"/> and nulls this before persisting.
+    /// Not written when null.
+    /// </summary>
+    [JsonPropertyName("password")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PasswordPlaintext { get; set; }
+
+    /// <summary>True if a password is available (stored blob or env var).</summary>
+    [JsonIgnore]
+    public bool HasPassword =>
+        !string.IsNullOrEmpty(PasswordProtected) ||
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD"));
 }
 
 /// <summary>

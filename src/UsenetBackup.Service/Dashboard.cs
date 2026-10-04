@@ -66,7 +66,16 @@ public static class Dashboard
                 dashboardPort = config.DashboardPort,
                 dashboardBind = config.DashboardBind,
                 jobs = config.Jobs,
-                nntp = config.Nntp,
+                // Never expose the encrypted password blob to the UI.
+                nntp = config.Nntp == null ? null : new
+                {
+                    host = config.Nntp.Host,
+                    port = config.Nntp.Port,
+                    username = config.Nntp.Username,
+                    ssl = config.Nntp.Ssl,
+                    connections = config.Nntp.Connections,
+                    hasPassword = config.Nntp.HasPassword,
+                },
             }));
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
@@ -281,7 +290,21 @@ public static class DashboardApi
         Action<string>? log = null)
     {
         // Empty host clears the Usenet configuration.
-        config.Nntp = string.IsNullOrWhiteSpace(nntp.Host) ? null : nntp;
+        if (string.IsNullOrWhiteSpace(nntp.Host))
+        {
+            config.Nntp = null;
+        }
+        else
+        {
+            // If a new plaintext password was supplied, encrypt it via DPAPI.
+            // If blank, keep the existing stored blob (the UI never receives the password).
+            string? blobToKeep = config.Nntp?.PasswordProtected;
+            if (!string.IsNullOrEmpty(nntp.PasswordPlaintext))
+                blobToKeep = Dpapi.Protect(nntp.PasswordPlaintext);
+            nntp.PasswordProtected = blobToKeep;
+            nntp.PasswordPlaintext = null; // never persist plaintext
+            config.Nntp = nntp;
+        }
         try
         {
             // Validate NNTP fields if a host is set; Validate() also checks that
@@ -290,7 +313,19 @@ public static class DashboardApi
             config.Save(configPath);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
-            return (200, config.Nntp ?? new NntpConfig());
+            // Never return the encrypted blob to the UI; just report whether one is stored.
+            object safe = config.Nntp is null
+                ? new { hasPassword = false }
+                : new
+                {
+                    host = config.Nntp.Host,
+                    port = config.Nntp.Port,
+                    username = config.Nntp.Username,
+                    ssl = config.Nntp.Ssl,
+                    connections = config.Nntp.Connections,
+                    hasPassword = config.Nntp.HasPassword,
+                };
+            return (200, safe);
         }
         catch (Exception ex)
         {
@@ -533,14 +568,16 @@ public static class DashboardHtml
               </div>
               <div class="card">
                 <h2 style="margin-top:0">Usenet provider</h2>
-                <p style="color:var(--text-2);margin-top:0">Used for automatic uploads. The password is set via the <code>USENETBACKUP_NNTP_PASSWORD</code> environment variable on the service account — it is never stored in the config file.</p>
+                <p style="color:var(--text-2);margin-top:0">Used for automatic uploads. The password is encrypted with Windows DPAPI and stored in the config file — only this machine's service account can decrypt it. Leave blank to keep the existing saved password.</p>
                 <div class="form-grid">
                   <label>Host<input id="nntp-host" type="text" placeholder="news.example.com"></label>
                   <label>Port<input id="nntp-port" type="number" min="1" max="65535" value="119"></label>
                   <label>Username<input id="nntp-user" type="text" placeholder="(optional)"></label>
+                  <label>Password<input id="nntp-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
                   <label>Connections<input id="nntp-conn" type="number" min="1" max="10" value="2"></label>
                   <label class="check"><input id="nntp-ssl" type="checkbox"> Use SSL (port 563)</label>
                 </div>
+                <div id="nntp-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
                 <div id="nntp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
                   <button class="accent" onclick="saveNntp()">Save Usenet settings</button>
@@ -668,8 +705,11 @@ public static class DashboardHtml
           document.getElementById('nntp-host').value = nntp.host || '';
           document.getElementById('nntp-port').value = nntp.port || 119;
           document.getElementById('nntp-user').value = nntp.username || '';
+          document.getElementById('nntp-pass').value = '';
           document.getElementById('nntp-conn').value = nntp.connections || 2;
           document.getElementById('nntp-ssl').checked = !!nntp.ssl;
+          document.getElementById('nntp-status').textContent =
+            nntp.host ? (nntp.hasPassword ? 'Password: saved ✓' : 'Password: not set') : '';
         }
         function showJobForm(job) {
           editingJob = job ? job.name : null;
@@ -756,6 +796,7 @@ public static class DashboardHtml
             host: document.getElementById('nntp-host').value.trim(),
             port: parseInt(document.getElementById('nntp-port').value, 10) || 119,
             username: document.getElementById('nntp-user').value.trim(),
+            password: document.getElementById('nntp-pass').value,
             ssl: document.getElementById('nntp-ssl').checked,
             connections: parseInt(document.getElementById('nntp-conn').value, 10) || 2,
           };

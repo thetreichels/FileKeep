@@ -325,10 +325,14 @@ public sealed class BackupScheduler
         var nntp = _nntp;
         if (nntp is null || string.IsNullOrWhiteSpace(nntp.Host))
             throw new InvalidOperationException("Auto-upload enabled but no Usenet provider configured.");
+        // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
         string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword))
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.Username))
             throw new InvalidOperationException(
-                $"Auto-upload requires the {NntpPasswordEnvVar} environment variable.");
+                $"Auto-upload requires a password: enter it in the dashboard Usenet settings " +
+                $"or set the {NntpPasswordEnvVar} environment variable.");
 
         Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
         using var repo = BackupRepository.Open(job.Repo, passphrase);
@@ -340,7 +344,7 @@ public sealed class BackupScheduler
         try
         {
             if (!string.IsNullOrEmpty(nntp.Username))
-                client.Authenticate(nntp.Username, nntpPassword);
+                client.Authenticate(nntp.Username, nntpPassword!);
             using var store = new Nntp.NntpBlobStore(client, "alt.binaries.test", repo.RepoId, repo.CatalogPath);
             int uploaded = 0, skipped = 0;
             foreach (var chunkId in chunkIds)
