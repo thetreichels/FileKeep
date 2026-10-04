@@ -62,7 +62,7 @@
     <!-- Service config example + recovery runbook -->
     <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
-        <File Source="$(var.SrcRoot)\UsenetBackup.Service\service.example.json" Name="service.example.json" />
+        <File Source="$(var.SrcRoot)\src\UsenetBackup.Service\service.example.json" Name="service.example.json" />
         <File Source="$(var.SrcRoot)\docs\RECOVERY.md" Name="RECOVERY.md" />
       </Component>
     </ComponentGroup>
