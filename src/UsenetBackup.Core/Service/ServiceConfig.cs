@@ -70,6 +70,23 @@ public sealed class ServiceConfig
         return config;
     }
 
+    /// <summary>
+    /// Validates and writes the configuration to <paramref name="path"/>
+    /// (used by the dashboard Settings UI). Writes atomically via a temp file.
+    /// </summary>
+    public void Save(string path)
+    {
+        Validate();
+        string json = JsonSerializer.Serialize(this, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
+        string tmp = path + ".tmp";
+        File.WriteAllText(tmp, json);
+        File.Move(tmp, path, overwrite: true);
+    }
+
     public void Validate()
     {
         if (DashboardPort is < 1 or > 65535)

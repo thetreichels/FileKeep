@@ -56,7 +56,7 @@ return 0;
 async Task RunAllAsync(CancellationToken ct)
 {
     await Task.WhenAll(
-        Dashboard.RunAsync(config, scheduler, ct, Log),
+        Dashboard.RunAsync(config, scheduler, configPath, ct, Log),
         scheduler.RunAsync(ct));
 }
 

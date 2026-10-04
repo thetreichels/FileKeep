@@ -141,6 +141,39 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// Replaces the job list with a new configuration (from the Settings UI).
+    /// Existing run state (last results, failure counts) is preserved for jobs
+    /// whose names match; new jobs start fresh.
+    /// </summary>
+    public void ReloadJobs(ServiceConfig config)
+    {
+        lock (_runGate)
+        {
+            var now = _clock.Now;
+            var oldByName = _jobs.ToDictionary(j => j.Config.Name,
+                StringComparer.OrdinalIgnoreCase);
+            _jobs.Clear();
+            foreach (var jc in config.Jobs)
+            {
+                var schedule = ScheduleParser.Parse(jc.Schedule);
+                var state = new JobState(jc, schedule, schedule.NextAfter(now));
+                // Preserve run history for unchanged jobs.
+                if (oldByName.TryGetValue(jc.Name, out var old))
+                {
+                    state.LastResult = old.LastResult;
+                    state.ConsecutiveFailures = old.ConsecutiveFailures;
+                    // Keep the earlier next-run if the schedule didn't change.
+                    if (string.Equals(old.Config.Schedule, jc.Schedule,
+                            StringComparison.Ordinal) && old.NextRunLocal > now)
+                        state.NextRunLocal = old.NextRunLocal;
+                }
+                _jobs.Add(state);
+            }
+            Log($"reloaded {_jobs.Count} job(s) from configuration");
+        }
+    }
+
+    /// <summary>
     /// Main loop: runs until <paramref name="stopping"/> is cancelled.
     /// </summary>
     public async Task RunAsync(CancellationToken stopping)

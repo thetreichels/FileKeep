@@ -15,7 +15,7 @@ namespace UsenetBackup.Service;
 public static class Dashboard
 {
     public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
-        CancellationToken ct, Action<string>? log = null)
+        string configPath, CancellationToken ct, Action<string>? log = null)
     {
         // Per-startup CSRF token for state-changing endpoints. The dashboard
         // has no login, so without this any website you visit could trigger
@@ -55,6 +55,37 @@ public static class Dashboard
         app.MapGet("/api/log", (string repo, int lines = 100) =>
         {
             var (status, payload) = DashboardApi.GetLog(config, repo, lines);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        // Settings UI: read and update the backup job configuration.
+        // All writes require the CSRF token and are validated before saving.
+        app.MapGet("/api/config", () =>
+            Results.Json(new
+            {
+                dashboardPort = config.DashboardPort,
+                dashboardBind = config.DashboardBind,
+                jobs = config.Jobs,
+            }));
+
+        app.MapPost("/api/config/jobs", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            BackupJobConfig? job;
+            try { job = await request.ReadFromJsonAsync<BackupJobConfig>(); }
+            catch { return Results.BadRequest(new { error = "Invalid job JSON." }); }
+            if (job is null)
+                return Results.BadRequest(new { error = "Empty job." });
+            var (status, payload) = DashboardApi.UpsertJob(config, scheduler, configPath, job, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapDelete("/api/config/jobs/{name}", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, name, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -141,6 +172,94 @@ public static class DashboardApi
             return (200, Array.Empty<string>());
         string[] all = File.ReadAllLines(path);
         return (200, all.TakeLast(Math.Clamp(lines, 1, 1000)).ToArray());
+    }
+
+    /// <summary>
+    /// Adds a new job or updates an existing one (matched by name, case-insensitive).
+    /// Validates, saves to disk, and reloads the scheduler. Returns (200, job) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) UpsertJob(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, BackupJobConfig job,
+        Action<string>? log = null)
+    {
+        if (string.IsNullOrWhiteSpace(job.Name))
+            return (400, new { error = "Job name is required." });
+        if (string.IsNullOrWhiteSpace(job.Repo))
+            return (400, new { error = "Repo path is required." });
+        if (string.IsNullOrWhiteSpace(job.Source))
+            return (400, new { error = "Source path is required." });
+        // Validate schedule format and mode via a temporary config.
+        var test = new ServiceConfig
+        {
+            DashboardPort = config.DashboardPort,
+            DashboardBind = config.DashboardBind,
+            Jobs = config.Jobs
+                .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
+                .Concat(new[] { job }).ToList(),
+        };
+        try { test.Validate(); }
+        catch (Exception ex) { return (400, new { error = ex.Message }); }
+
+        // Apply to the live config.
+        var existing = config.Jobs.FirstOrDefault(j =>
+            j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+            config.Jobs.Add(job);
+        else
+        {
+            existing.Repo = job.Repo;
+            existing.Source = job.Source;
+            existing.Schedule = job.Schedule;
+            existing.Mode = job.Mode;
+            existing.BackupPrivilege = job.BackupPrivilege;
+        }
+        try
+        {
+            config.Save(configPath);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: job '{job.Name}' saved");
+            return (200, job);
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Deletes a job by name. Saves to disk and reloads the scheduler.
+    /// Returns (200, {}) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) DeleteJob(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, string name,
+        Action<string>? log = null)
+    {
+        var existing = config.Jobs.FirstOrDefault(j =>
+            j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+            return (400, new { error = $"Unknown job '{name}'." });
+        config.Jobs.Remove(existing);
+        // Allow zero jobs via the UI (service requires restart with a valid config,
+        // but the UI shouldn't trap the user; Validate() is skipped here and the
+        // file is written as-is — the service will refuse to start until fixed).
+        try
+        {
+            string json = System.Text.Json.JsonSerializer.Serialize(config,
+                new System.Text.Json.JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                });
+            File.WriteAllText(configPath + ".tmp", json);
+            File.Move(configPath + ".tmp", configPath, overwrite: true);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: job '{name}' deleted");
+            return (200, new { });
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = ex.Message });
+        }
     }
 }
 
@@ -258,6 +377,15 @@ public static class DashboardHtml
           .view { display: none; }
           .view.active { display: block; }
           .foot { color: var(--text-2); font-size: 12px; margin-top: 32px; }
+          /* Settings form */
+          .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+          .form-grid label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 13px; }
+          .form-grid label.check { flex-direction: row; align-items: center; font-weight: 400; }
+          .form-grid input[type=text], .form-grid input[type=time], .form-grid input[type=number] {
+            font-family: inherit; font-size: 14px; padding: 6px 10px;
+            border: 1px solid #d1d1d1; border-radius: 4px; background: #fbfbfb; color: var(--text);
+          }
+          .form-grid input[type=checkbox] { width: 16px; height: 16px; }
           /* Dark mode: follow the OS color scheme, Windows 11 dark palette. */
           @media (prefers-color-scheme: dark) {
             :root {
@@ -280,6 +408,9 @@ public static class DashboardHtml
             .pill { background: #1d3325; }
             .pill.fail { background: #3a2320; }
             .pill.idle { background: #2d2d2d; }
+            .form-grid input[type=text], .form-grid input[type=time], .form-grid input[type=number] {
+              background: #2d2d2d; border-color: #3a3a3a; color: var(--text);
+            }
           }
         </style>
         </head>
@@ -293,6 +424,7 @@ public static class DashboardHtml
             <a class="nav-item active" data-view="overview">Overview</a>
             <a class="nav-item" data-view="backups">Backups</a>
             <a class="nav-item" data-view="log">Operations log</a>
+            <a class="nav-item" data-view="settings">Settings</a>
           </nav>
           <main>
             <div class="view active" id="view-overview">
@@ -328,6 +460,41 @@ public static class DashboardHtml
             <div class="view" id="view-log">
               <h1>Operations log</h1>
               <div class="card"><pre id="log">(loading…)</pre></div>
+            </div>
+            <div class="view" id="view-settings">
+              <h1>Settings</h1>
+              <div class="card">
+                <h2 style="margin-top:0">Backup jobs</h2>
+                <div id="settingsJobs"><p style="color:var(--text-2)">Loading…</p></div>
+                <div style="margin-top:16px">
+                  <button class="accent" onclick="showJobForm()">Add job</button>
+                </div>
+              </div>
+              <div class="card" id="jobFormCard" style="display:none">
+                <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
+                <div class="form-grid">
+                  <label>Name<input id="jf-name" type="text" placeholder="Documents"></label>
+                  <label>Source folder<input id="jf-source" type="text" placeholder="C:\Users\You\Documents"></label>
+                  <label>Repository folder<input id="jf-repo" type="text" placeholder="D:\Backups\Documents"></label>
+                  <label>Schedule<select id="jf-schedType">
+                    <option value="daily">Daily at…</option>
+                    <option value="interval">Every N minutes</option>
+                  </select></label>
+                  <label id="jf-dailyWrap">Time (HH:mm)<input id="jf-daily" type="time" value="02:00"></label>
+                  <label id="jf-intervalWrap" style="display:none">Minutes<input id="jf-interval" type="number" min="5" value="60"></label>
+                  <label>Mode<select id="jf-mode">
+                    <option value="incremental">Incremental</option>
+                    <option value="full">Full</option>
+                  </select></label>
+                  <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
+                </div>
+                <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button class="accent" onclick="saveJob()">Save</button>
+                  <button onclick="hideJobForm()">Cancel</button>
+                </div>
+              </div>
+              <div class="foot">Changes are saved to service.json and take effect immediately. The service does not need to restart.</div>
             </div>
           </main>
         </div>
@@ -424,6 +591,106 @@ public static class DashboardHtml
             document.getElementById('log').textContent = lines.join('\n') || '(empty)';
           } catch (e) { document.getElementById('log').textContent = e.message; }
         }
+        // ---- Settings ----
+        let editingJob = null;
+        document.getElementById('jf-schedType').addEventListener('change', e => {
+          const daily = e.target.value === 'daily';
+          document.getElementById('jf-dailyWrap').style.display = daily ? '' : 'none';
+          document.getElementById('jf-intervalWrap').style.display = daily ? 'none' : '';
+        });
+        async function loadSettings() {
+          const cfg = await api('/api/config');
+          const box = document.getElementById('settingsJobs');
+          box.innerHTML = cfg.jobs.map(j => `
+            <div class="row">
+              <div class="grow">
+                <div class="name">${esc(j.name)}</div>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}<br>
+                ${esc(j.source)} → ${esc(j.repo)}</div>
+              </div>
+              <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
+              <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
+            </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
+        }
+        function showJobForm(job) {
+          editingJob = job ? job.name : null;
+          document.getElementById('jobFormTitle').textContent = job ? 'Edit backup job' : 'Add backup job';
+          document.getElementById('jf-name').value = job ? job.name : '';
+          document.getElementById('jf-name').disabled = !!job;
+          document.getElementById('jf-source').value = job ? job.source : '';
+          document.getElementById('jf-repo').value = job ? job.repo : '';
+          document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
+          document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
+          // Parse schedule
+          const sched = job ? job.schedule : 'daily 02:00';
+          if (sched.startsWith('daily ')) {
+            document.getElementById('jf-schedType').value = 'daily';
+            document.getElementById('jf-daily').value = sched.slice(6);
+            document.getElementById('jf-dailyWrap').style.display = '';
+            document.getElementById('jf-intervalWrap').style.display = 'none';
+          } else if (sched.startsWith('interval ')) {
+            document.getElementById('jf-schedType').value = 'interval';
+            document.getElementById('jf-interval').value = sched.slice(9);
+            document.getElementById('jf-dailyWrap').style.display = 'none';
+            document.getElementById('jf-intervalWrap').style.display = '';
+          }
+          document.getElementById('jf-error').style.display = 'none';
+          document.getElementById('jobFormCard').style.display = '';
+          document.getElementById('jobFormCard').scrollIntoView({behavior:'smooth',block:'nearest'});
+        }
+        function hideJobForm() {
+          document.getElementById('jobFormCard').style.display = 'none';
+          editingJob = null;
+        }
+        function editJob(name) {
+          api('/api/config').then(cfg => {
+            const job = cfg.jobs.find(j => j.name === name);
+            if (job) showJobForm(job);
+          });
+        }
+        async function saveJob() {
+          const errBox = document.getElementById('jf-error');
+          const schedType = document.getElementById('jf-schedType').value;
+          const schedule = schedType === 'daily'
+            ? 'daily ' + document.getElementById('jf-daily').value
+            : 'interval ' + document.getElementById('jf-interval').value;
+          const job = {
+            name: document.getElementById('jf-name').value.trim(),
+            source: document.getElementById('jf-source').value.trim(),
+            repo: document.getElementById('jf-repo').value.trim(),
+            schedule,
+            mode: document.getElementById('jf-mode').value,
+            backupPrivilege: document.getElementById('jf-priv').checked,
+          };
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          try {
+            await api('/api/config/jobs', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+              body: JSON.stringify(job),
+            });
+            hideJobForm();
+            loadSettings();
+            load(); // refresh overview
+          } catch (e) {
+            errBox.textContent = e.message;
+            errBox.style.display = '';
+          }
+        }
+        async function deleteJob(name) {
+          if (!confirm(`Delete backup job "${name}"?`)) return;
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          try {
+            await api('/api/config/jobs/' + encodeURIComponent(name), {
+              method: 'DELETE',
+              headers: { 'X-CSRF-Token': csrf },
+            });
+            loadSettings();
+            load();
+          } catch (e) { alert(e.message); }
+        }
+        // Load settings when the tab is opened
+        document.querySelector('[data-view="settings"]').addEventListener('click', loadSettings);
         load();
         setInterval(load, 30000);
         </script>
