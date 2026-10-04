@@ -3,13 +3,13 @@
      The apps publish as single-file executables (PublishSingleFile in the
      csproj), so the payload is a handful of explicit files — no harvesting.
      Build on Windows with the WiX v5 dotnet tool:
-       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o usenet-backup-0.8.0-x64.msi install/UsenetBackup.wxs
+       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Usenet Backup"
-           Version="0.8.0"
+           Version="0.8.1"
            Manufacturer="Usenet Backup"
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
            Scope="perMachine">
