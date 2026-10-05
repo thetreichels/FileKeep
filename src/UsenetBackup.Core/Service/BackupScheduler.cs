@@ -440,11 +440,21 @@ public sealed class BackupScheduler
                                 parityUploaded++;
                             }
                         }
-                        Log($"job '{job.Name}': uploaded {parityUploaded} parity blocks to {nntp.Host}");
+                        Log($"job '{job.Name}': uploaded {parityUploaded} XOR parity blocks to {nntp.Host}");
                     }
                     else if (redundancy == "par2")
                     {
-                        Log($"job '{job.Name}': PAR2 not yet implemented, skipping for {nntp.Host}");
+                        var parityBlocks = Redundancy.Par2Redundancy.GenerateParity(
+                            chunkIds, id => repo.GetChunkBlob(id));
+                        foreach (var (parityId, parityBytes) in parityBlocks)
+                        {
+                            if (!store.Exists(parityId))
+                            {
+                                store.Put(parityId, parityBytes);
+                                parityUploaded++;
+                            }
+                        }
+                        Log($"job '{job.Name}': uploaded {parityUploaded} PAR2 parity blocks to {nntp.Host}");
                     }
                     repo.UploadManifest(backupId, store);
                     // Track upload for expiration monitoring
