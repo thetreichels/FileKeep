@@ -135,7 +135,7 @@ public sealed class BackupScheduler
     private readonly TimeSpan _pollInterval;
     private readonly Action<string>? _log;
     private readonly object _runGate = new(); // runs never overlap
-    private NntpConfig? _nntp;
+    private IReadOnlyList<NntpConfig> _nntpProviders = Array.Empty<NntpConfig>();
 
     public IReadOnlyList<JobState> Jobs
     {
@@ -154,7 +154,7 @@ public sealed class BackupScheduler
         _pollInterval = pollInterval ?? TimeSpan.FromSeconds(30);
         _log = log;
         StartedLocal = _clock.Now;
-        _nntp = config.Nntp;
+        _nntpProviders = config.EffectiveProviders;
         _jobs = config.Jobs.Select(j =>
         {
             var schedule = ScheduleParser.Parse(j.Schedule);
@@ -172,7 +172,7 @@ public sealed class BackupScheduler
         lock (_runGate)
         {
             var now = _clock.Now;
-            _nntp = config.Nntp;
+            _nntpProviders = config.EffectiveProviders;
             var oldByName = _jobs.ToDictionary(j => j.Config.Name,
                 StringComparer.OrdinalIgnoreCase);
             _jobs.Clear();
@@ -379,49 +379,67 @@ public sealed class BackupScheduler
     /// </summary>
     private void AutoUploadToUsenet(BackupJobConfig job, string backupId, string passphrase)
     {
-        var nntp = _nntp;
-        if (nntp is null || string.IsNullOrWhiteSpace(nntp.Host))
+        var providers = _nntpProviders;
+        if (providers.Count == 0)
             throw new InvalidOperationException("Auto-upload enabled but no Usenet provider configured.");
-        // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
-        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.Username))
-            throw new InvalidOperationException(
-                $"Auto-upload requires a password: enter it in the dashboard Usenet settings " +
-                $"or set the {NntpPasswordEnvVar} environment variable.");
 
-        Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
         using var repo = BackupRepository.Open(job.Repo, passphrase);
         var manifest = repo.LoadManifest(backupId);
         string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToArray();
 
-        using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
-        client.Connect();
-        try
+        List<string> errors = new();
+        foreach (var nntp in providers)
         {
-            if (!string.IsNullOrEmpty(nntp.Username))
-                client.Authenticate(nntp.Username, nntpPassword!);
-            using var store = new Nntp.NntpBlobStore(client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
-            int uploaded = 0, skipped = 0;
-            foreach (var chunkId in chunkIds)
+            if (string.IsNullOrWhiteSpace(nntp.Host))
+                continue;
+            // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
+            string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+                nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.Username))
             {
-                if (store.Exists(chunkId)) skipped++;
-                else
+                errors.Add($"{nntp.Host}: password not configured");
+                continue;
+            }
+
+            Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
+            try
+            {
+                using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
+                client.Connect();
+                try
                 {
-                    store.Put(chunkId, repo.GetChunkBlob(chunkId));
-                    uploaded++;
+                    if (!string.IsNullOrEmpty(nntp.Username))
+                        client.Authenticate(nntp.Username, nntpPassword!);
+                    using var store = new Nntp.NntpBlobStore(client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+                    int uploaded = 0, skipped = 0;
+                    foreach (var chunkId in chunkIds)
+                    {
+                        if (store.Exists(chunkId)) skipped++;
+                        else
+                        {
+                            store.Put(chunkId, repo.GetChunkBlob(chunkId));
+                            uploaded++;
+                        }
+                    }
+                    repo.UploadManifest(backupId, store);
+                    OperationLog.Append(job.Repo, "auto-upload",
+                        $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
+                    Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");
+                }
+                finally
+                {
+                    try { client.Quit(); } catch { /* best effort */ }
                 }
             }
-            repo.UploadManifest(backupId, store);
-            OperationLog.Append(job.Repo, "auto-upload",
-                $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
-            Log($"job '{job.Name}': auto-upload complete ({uploaded} posted, {skipped} already present)");
+            catch (Exception ex)
+            {
+                errors.Add($"{nntp.Host}: {ex.Message}");
+                Log($"job '{job.Name}': auto-upload to {nntp.Host} FAILED: {ex.Message}");
+            }
         }
-        finally
-        {
-            try { client.Quit(); } catch { /* best effort */ }
-        }
+        if (errors.Count == providers.Count)
+            throw new InvalidOperationException($"Auto-upload failed on all {providers.Count} provider(s): {string.Join("; ", errors)}");
     }
 
     private void Log(string message) => _log?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");

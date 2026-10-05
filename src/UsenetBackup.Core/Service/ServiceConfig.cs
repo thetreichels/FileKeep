@@ -119,6 +119,24 @@ public sealed class ServiceConfig
     [JsonPropertyName("nntp")]
     public NntpConfig? Nntp { get; set; }
 
+    /// <summary>
+    /// Multiple Usenet providers for redundancy. If set, uploads go to all
+    /// providers; downloads try each in order until the chunk is found.
+    /// If empty, falls back to <see cref="Nntp"/> for backward compatibility.
+    /// </summary>
+    [JsonPropertyName("nntpProviders")]
+    public List<NntpConfig> NntpProviders { get; set; } = new();
+
+    /// <summary>
+    /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
+    /// otherwise the legacy single Nntp config as a singleton list.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<NntpConfig> EffectiveProviders =>
+        NntpProviders.Count > 0 ? NntpProviders :
+        Nntp is not null ? new[] { Nntp } :
+        Array.Empty<NntpConfig>();
+
     public static ServiceConfig Load(string path)
     {
         string json;
