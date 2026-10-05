@@ -32,6 +32,19 @@ public sealed class BackupRepository : IDisposable
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
     }
 
+    /// <summary>
+    /// Opens a repo using a custom blob store (e.g., HttpBlobStore for LAN restores).
+    /// The repo directory must still exist locally for manifests and catalog.
+    /// </summary>
+    internal BackupRepository(string root, RepositoryConfig config, byte[] key, IBlobStore blobs)
+    {
+        _root = root;
+        _config = config;
+        _key = key;
+        _blobs = blobs;
+        _catalog = new Catalog(Path.Combine(root, "catalog.db"));
+    }
+
     // ---------- lifecycle ----------
 
     public static BackupRepository Init(
@@ -83,6 +96,28 @@ public sealed class BackupRepository : IDisposable
         byte[] key = KeyDerivation.DeriveKey(
             passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);
         return new BackupRepository(Path.GetFullPath(repoPath), config, key);
+    }
+
+    /// <summary>
+    /// Opens a repo using a custom blob store (e.g., HttpBlobStore for LAN).
+    /// Manifests and catalog are still read from the local repo directory.
+    /// </summary>
+    public static BackupRepository OpenWithStore(string repoPath, string passphrase, IBlobStore blobs)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(passphrase);
+        ArgumentNullException.ThrowIfNull(blobs);
+        string configPath = Path.Combine(repoPath, "repo.json");
+        if (!File.Exists(configPath))
+            throw new InvalidOperationException($"No repository found at {repoPath} (missing repo.json).");
+
+        var config = JsonSerializer.Deserialize<RepositoryConfig>(File.ReadAllText(configPath))
+            ?? throw new InvalidDataException("repo.json is corrupt.");
+        if (config.FormatVersion != FormatVersion)
+            throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
+
+        byte[] key = KeyDerivation.DeriveKey(
+            passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);
+        return new BackupRepository(Path.GetFullPath(repoPath), config, key, blobs);
     }
 
     // ---------- backup ----------

@@ -24,6 +24,7 @@ try
         "manifest-discover" => ManifestDiscover(args[1..]),
         "nzb-generate" => NzbGenerate(args[1..]),
         "download" => Download(args[1..]),
+        "serve" => Serve(args[1..]),
         _ => Unknown(args[0]),
     };
 }
@@ -53,6 +54,7 @@ static void PrintUsage()
               [--newsgroup GROUP] [--poster POSTER]
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
+          usenet-backup serve <repo> [--port PORT] [--bind ADDR]
           (--user also accepts --username as an alias)
 
         --parent turns the backup into an incremental against that parent
@@ -218,8 +220,11 @@ static int RestoreDisk(string[] args)
 static int Restore(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir>"); return 2; }
-    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--store URL]"); return 2; }
+    string? storeUrl = GetOption(args, "--store");
+    using var repo = storeUrl is not null
+        ? BackupRepository.OpenWithStore(pos[0], GetPassphrase(args), new UsenetBackup.Core.Lan.HttpBlobStore(storeUrl))
+        : BackupRepository.Open(pos[0], GetPassphrase(args));
     repo.Restore(pos[1], pos[2]);
     Console.WriteLine($"Restored backup {pos[1]} to {Path.GetFullPath(pos[2])}.");
     return 0;
@@ -456,5 +461,141 @@ static int Download(string[] args)
     finally
     {
         client.Quit();
+    }
+}
+
+/// <summary>
+/// Serves a repo's chunks over HTTP for LAN restores.
+/// Usage: usenet-backup serve &lt;repo&gt; [--port PORT] [--bind ADDR]
+/// Endpoints: GET/HEAD /chunks/{id}, POST /chunks/{id}, GET /count
+/// </summary>
+static int Serve(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: serve <repo> [--port PORT] [--bind ADDR]"); return 2; }
+    string repoPath = Path.GetFullPath(pos[0]);
+    int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : 8477;
+    string bind = GetOption(args, "--bind") ?? "0.0.0.0";
+
+    using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
+    string chunksDir = Path.Combine(repoPath, "chunks");
+
+    var listener = new System.Net.HttpListener();
+    listener.Prefixes.Add($"http://{bind}:{port}/");
+    try
+    {
+        listener.Start();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: cannot listen on {bind}:{port}: {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine($"Serving repo {repoPath} on http://{bind}:{port}/ (Ctrl+C to stop)");
+    Console.WriteLine($"LAN clients: usenet-backup restore --store http://<this-ip>:{port} <backup-id> <dest>");
+
+    var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+    try
+    {
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var ctx = listener.GetContextAsync().GetAwaiter().GetResult();
+            _ = System.Threading.Tasks.Task.Run(() => HandleServeRequest(ctx, chunksDir));
+        }
+    }
+    catch (OperationCanceledException) { }
+    finally
+    {
+        listener.Stop();
+    }
+    Console.WriteLine("Server stopped.");
+    return 0;
+}
+
+static void HandleServeRequest(System.Net.HttpListenerContext ctx, string chunksDir)
+{
+    try
+    {
+        string path = ctx.Request.Url?.AbsolutePath ?? "/";
+        string method = ctx.Request.HttpMethod;
+
+        if (path == "/count" && method == "GET")
+        {
+            long count = Directory.Exists(chunksDir)
+                ? Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories).Length
+                : 0;
+            byte[] buf = System.Text.Encoding.UTF8.GetBytes(count.ToString());
+            ctx.Response.ContentType = "text/plain";
+            ctx.Response.OutputStream.Write(buf, 0, buf.Length);
+            ctx.Response.StatusCode = 200;
+        }
+        else if (path.StartsWith("/chunks/", StringComparison.Ordinal))
+        {
+            string chunkId = path["/chunks/".Length..];
+            if (chunkId.Length != 64 || !chunkId.All(Uri.IsHexDigit))
+            {
+                ctx.Response.StatusCode = 400;
+            }
+            else
+            {
+                // Chunks are stored sharded: chunks/ab/cd/abcdef... (first 2+2 chars as dirs)
+                string chunkPath = Path.Combine(chunksDir, chunkId[..2], chunkId[2..4], chunkId);
+                if (!File.Exists(chunkPath))
+                {
+                    // Fallback: flat layout
+                    chunkPath = Path.Combine(chunksDir, chunkId);
+                }
+                if (method == "HEAD")
+                {
+                    ctx.Response.StatusCode = File.Exists(chunkPath) ? 200 : 404;
+                }
+                else if (method == "GET")
+                {
+                    if (!File.Exists(chunkPath))
+                    {
+                        ctx.Response.StatusCode = 404;
+                    }
+                    else
+                    {
+                        byte[] data = File.ReadAllBytes(chunkPath);
+                        ctx.Response.ContentType = "application/octet-stream";
+                        ctx.Response.ContentLength64 = data.Length;
+                        ctx.Response.OutputStream.Write(data, 0, data.Length);
+                        ctx.Response.StatusCode = 200;
+                    }
+                }
+                else if (method == "POST")
+                {
+                    // LAN backup target: store incoming chunk
+                    using var ms = new MemoryStream();
+                    ctx.Request.InputStream.CopyTo(ms);
+                    byte[] data = ms.ToArray();
+                    string dir = Path.Combine(chunksDir, chunkId[..2], chunkId[2..4]);
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllBytes(Path.Combine(dir, chunkId), data);
+                    ctx.Response.StatusCode = 200;
+                }
+                else
+                {
+                    ctx.Response.StatusCode = 405;
+                }
+            }
+        }
+        else
+        {
+            ctx.Response.StatusCode = 404;
+        }
+    }
+    catch (Exception ex)
+    {
+        try { ctx.Response.StatusCode = 500; } catch { }
+        Console.Error.WriteLine($"serve error: {ex.Message}");
+    }
+    finally
+    {
+        try { ctx.Response.OutputStream.Close(); } catch { }
     }
 }
