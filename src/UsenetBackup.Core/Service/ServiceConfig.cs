@@ -90,6 +90,7 @@ public sealed class BackupJobConfig
     /// </summary>
     [JsonPropertyName("autoVerify")]
     public bool AutoVerify { get; set; }
+}
 
 /// <summary>
 /// Service configuration, loaded from JSON (see <c>service.example.json</c>).
