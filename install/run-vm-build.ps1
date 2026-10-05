@@ -171,7 +171,7 @@ foreach ($f in $required) {
 }
 
 Write-Host "=== 4/5 Building MSI ==="
-wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
+wix build -arch x64 -d SrcRoot=C:\ub\usenet-backup -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item C:\ub\usenet-backup-0.8.1-x64.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
