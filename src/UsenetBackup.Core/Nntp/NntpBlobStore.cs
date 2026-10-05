@@ -149,10 +149,22 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// </summary>
     public int PostManifestIndex(string yearMonth, IReadOnlyList<string> backupIds)
     {
-        // Find the next version by probing: STAT v1, v2, ... until 430.
+        // Find the latest version by probing: STAT v1, v2, ... until 430.
         int version = 1;
+        int latestVersion = 0;
         while (_client.Stat(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version)))
+        {
+            latestVersion = version;
             version++;
+        }
+        // If the latest version already has identical content, don't re-post.
+        // This makes re-upload idempotent.
+        if (latestVersion > 0)
+        {
+            var existing = GetLatestManifestIndex(yearMonth);
+            if (existing is not null && existing.SequenceEqual(backupIds))
+                return latestVersion;
+        }
         string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
         string body = string.Join("\n", backupIds);
         string article = BuildIndexArticle(yearMonth, version, body);

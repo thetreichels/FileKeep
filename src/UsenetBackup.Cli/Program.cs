@@ -362,7 +362,9 @@ static int ManifestDiscover(string[] args)
     try
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
-        var found = repo.DiscoverRemoteManifests(store);
+        // Use the monthly index (STAT probes) instead of LISTGROUP, which is
+        // infeasible on large groups (e.g., alt.binaries.test has billions).
+        var found = repo.DiscoverRemoteManifestsViaIndex(store);
         if (found.Count == 0)
         {
             Console.WriteLine("No remote manifests newer than local.");
