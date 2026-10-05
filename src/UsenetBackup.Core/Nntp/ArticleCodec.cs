@@ -139,7 +139,8 @@ public static class ArticleCodec
         if (!headers.TryGetValue("X-UsenetBackup-Manifest", out string? backupId) ||
             string.IsNullOrEmpty(backupId))
             throw new InvalidDataException("Article is not a usenet-backup manifest.");
-        byte[] blob = YEnc.Decode(articleText[(split + 4)..]);
+        string body = articleText[(split + (articleText[split..].StartsWith("\r\n\r\n") ? 4 : 2))..];
+        byte[] blob = YEnc.Decode(body);
         return (backupId, blob);
     }
     public static (string ChunkId, byte[] Blob) ParseArticle(string articleText)

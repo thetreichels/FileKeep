@@ -91,13 +91,6 @@ public sealed class BackupJobConfig
     [JsonPropertyName("autoVerify")]
     public bool AutoVerify { get; set; }
 
-    /// <summary>
-    /// Verify schedule: <c>"after-backup"</c> (default, runs right after each
-    /// backup) or <c>"daily HH:mm"</c> (verifies the latest backup on a schedule).
-    /// </summary>
-    [JsonPropertyName("verifySchedule")]
-    public string VerifySchedule { get; set; } = "after-backup";
-
 /// <summary>
 /// Service configuration, loaded from JSON (see <c>service.example.json</c>).
 /// </summary>

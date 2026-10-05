@@ -308,7 +308,7 @@ public sealed class BackupScheduler
             // Auto-verify if configured (default: after each backup).
             bool verifyFailed = false;
             string? verifyError = null;
-            if (job.AutoVerify && job.VerifySchedule == "after-backup")
+            if (job.AutoVerify)
             {
                 try
                 {

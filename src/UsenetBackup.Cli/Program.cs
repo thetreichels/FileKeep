@@ -475,7 +475,12 @@ static int Serve(string[] args)
     if (pos.Length < 1) { Console.Error.WriteLine("error: serve <repo> [--port PORT] [--bind ADDR]"); return 2; }
     string repoPath = Path.GetFullPath(pos[0]);
     int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : 8477;
-    string bind = GetOption(args, "--bind") ?? "0.0.0.0";
+    string bind = GetOption(args, "--bind") ?? "127.0.0.1";
+    if (bind == "0.0.0.0")
+    {
+        Console.WriteLine("WARNING: Binding to all interfaces with no authentication. " +
+            "Anyone on your network can read your (encrypted) chunks.");
+    }
 
     using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
     string chunksDir = Path.Combine(repoPath, "chunks");
@@ -541,13 +546,8 @@ static void HandleServeRequest(System.Net.HttpListenerContext ctx, string chunks
             }
             else
             {
-                // Chunks are stored sharded: chunks/ab/cd/abcdef... (first 2+2 chars as dirs)
-                string chunkPath = Path.Combine(chunksDir, chunkId[..2], chunkId[2..4], chunkId);
-                if (!File.Exists(chunkPath))
-                {
-                    // Fallback: flat layout
-                    chunkPath = Path.Combine(chunksDir, chunkId);
-                }
+                // Chunks are stored sharded: chunks/ab/cdef... (first 2 chars as dir)
+                string chunkPath = Path.Combine(chunksDir, chunkId[..2], chunkId[2..]);
                 if (method == "HEAD")
                 {
                     ctx.Response.StatusCode = File.Exists(chunkPath) ? 200 : 404;
@@ -573,9 +573,9 @@ static void HandleServeRequest(System.Net.HttpListenerContext ctx, string chunks
                     using var ms = new MemoryStream();
                     ctx.Request.InputStream.CopyTo(ms);
                     byte[] data = ms.ToArray();
-                    string dir = Path.Combine(chunksDir, chunkId[..2], chunkId[2..4]);
+                    string dir = Path.Combine(chunksDir, chunkId[..2]);
                     Directory.CreateDirectory(dir);
-                    File.WriteAllBytes(Path.Combine(dir, chunkId), data);
+                    File.WriteAllBytes(Path.Combine(dir, chunkId[2..]), data);
                     ctx.Response.StatusCode = 200;
                 }
                 else

@@ -237,6 +237,7 @@ public static class DashboardApi
             existing.Mode = job.Mode;
             existing.BackupPrivilege = job.BackupPrivilege;
             existing.AutoUpload = job.AutoUpload;
+            existing.AutoVerify = job.AutoVerify;
         }
         try
         {
