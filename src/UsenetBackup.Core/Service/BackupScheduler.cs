@@ -88,6 +88,12 @@ public sealed class JobRunResult
     public string? BackupId { get; init; }
     public int Files { get; init; }
     public string? Error { get; init; }
+    /// <summary>
+    /// True when the backup succeeded but auto-upload to Usenet failed.
+    /// The backup is safe locally; Usenet copy is missing.
+    /// </summary>
+    public bool AutoUploadFailed { get; init; }
+    public string? AutoUploadError { get; init; }
 }
 
 /// <summary>
@@ -276,13 +282,17 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
 
             // Auto-upload to Usenet if configured.
+            bool autoUploadFailed = false;
+            string? autoUploadError = null;
             if (job.AutoUpload)
             {
                 try { AutoUploadToUsenet(job, manifest.BackupId, passphrase); }
                 catch (Exception ex)
                 {
-                    // Upload failure doesn't fail the backup itself, but it's logged
-                    // and reported so the user knows the backup isn't on Usenet yet.
+                    // Upload failure doesn't fail the backup itself, but it's tracked
+                    // in the result so the dashboard can warn the user.
+                    autoUploadFailed = true;
+                    autoUploadError = ex.Message;
                     Log($"job '{job.Name}': auto-upload FAILED: {ex.Message}");
                     OperationLog.Append(job.Repo, "auto-upload-failed",
                         $"job={job.Name} id={manifest.BackupId} error={ex.Message}");
@@ -296,6 +306,8 @@ public sealed class BackupScheduler
                 Success = true,
                 BackupId = manifest.BackupId,
                 Files = manifest.Files.Count,
+                AutoUploadFailed = autoUploadFailed,
+                AutoUploadError = autoUploadError,
             };
         }
         catch (Exception ex)
@@ -359,7 +371,7 @@ public sealed class BackupScheduler
         {
             if (!string.IsNullOrEmpty(nntp.Username))
                 client.Authenticate(nntp.Username, nntpPassword!);
-            using var store = new Nntp.NntpBlobStore(client, "alt.binaries.test", repo.RepoId, repo.CatalogPath);
+            using var store = new Nntp.NntpBlobStore(client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
             int uploaded = 0, skipped = 0;
             foreach (var chunkId in chunkIds)
             {

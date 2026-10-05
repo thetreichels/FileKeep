@@ -594,7 +594,7 @@ public static class DashboardHtml
           if (!r.ok) throw new Error(await r.text());
           return r.status === 202 ? null : r.json();
         }
-        function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+        function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
         let jobNames = [];
         document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
           document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));

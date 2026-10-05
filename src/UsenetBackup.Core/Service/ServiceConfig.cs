@@ -25,6 +25,9 @@ public sealed class NntpConfig
     [JsonPropertyName("connections")]
     public int Connections { get; set; } = 2;
 
+    [JsonPropertyName("newsgroup")]
+    public string Newsgroup { get; set; } = "alt.binaries.test";
+
     /// <summary>
     /// DPAPI-encrypted password (base64). Set via the dashboard; never holds plaintext.
     /// </summary>
