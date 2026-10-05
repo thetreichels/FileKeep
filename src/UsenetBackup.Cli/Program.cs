@@ -53,6 +53,7 @@ static void PrintUsage()
               [--newsgroup GROUP] [--poster POSTER]
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
+          (--user also accepts --username as an alias)
 
         --parent turns the backup into an incremental against that parent
         manifest. Unchanged files (same size + mtime) reuse the parent's
@@ -276,7 +277,7 @@ static NntpClient ConnectNntp(string[] args)
     try
     {
         client.Connect();
-        string? user = GetOption(args, "--user");
+        string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
         if (!string.IsNullOrEmpty(user))
             client.Authenticate(user, GetNntpPassword(args));
         return client;
