@@ -57,6 +57,32 @@ public sealed class HttpBlobStore : IBlobStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Lists backup IDs available on the LAN server.
+    /// </summary>
+    public IReadOnlyList<string> ListManifestIds()
+    {
+        using var resp = _http.GetAsync($"{_baseUrl}/manifests").GetAwaiter().GetResult();
+        resp.EnsureSuccessStatusCode();
+        string json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        return System.Text.Json.JsonSerializer.Deserialize<string[]>(json)
+            ?? Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// Fetches a manifest JSON from the LAN server. Returns null if not found.
+    /// </summary>
+    public string? GetManifestJson(string backupId)
+    {
+        if (backupId.Length != 32 || !backupId.All(Uri.IsHexDigit))
+            throw new ArgumentException("Backup ID must be 32 hex chars.", nameof(backupId));
+        using var resp = _http.GetAsync($"{_baseUrl}/manifests/{backupId}").GetAwaiter().GetResult();
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            return null;
+        resp.EnsureSuccessStatusCode();
+        return resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+    }
+
     private static void ValidateChunkId(string chunkIdHex)
     {
         if (chunkIdHex.Length != 64 || !chunkIdHex.All(Uri.IsHexDigit))

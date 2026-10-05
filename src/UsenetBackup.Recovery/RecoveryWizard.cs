@@ -1,3 +1,4 @@
+using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Recovery;
 
@@ -52,6 +53,8 @@ public sealed class RecoveryWizard : Form
     private readonly ListBox _backupList = new();
     private readonly Label _backupDetail = new();
     private readonly Button _checkRemote = new();
+    private readonly Button _checkLan = new();
+    private readonly TextBox _lanServer = new();
 
     // Page 4: download
     private readonly TextBox _nzbPath = new();
@@ -437,6 +440,19 @@ public sealed class RecoveryWizard : Form
         _checkRemote.Click += CheckRemote_Click;
         p.Controls.Add(_checkRemote);
 
+        // LAN server input and check button
+        var lanLabel = new Label { Text = "LAN server (e.g., 192.168.1.10:8477):", Location = new Point(310, 348), Size = new Size(200, 20) };
+        p.Controls.Add(lanLabel);
+        _lanServer.Location = new Point(310, 368);
+        _lanServer.Size = new Size(150, 24);
+        _lanServer.PlaceholderText = "192.168.1.10:8477";
+        p.Controls.Add(_lanServer);
+        _checkLan.Text = "Check LAN…";
+        _checkLan.Location = new Point(470, 366);
+        _checkLan.Size = new Size(106, 28);
+        _checkLan.Click += CheckLan_Click;
+        p.Controls.Add(_checkLan);
+
         _backupList.SelectedIndexChanged += (_, _) =>
         {
             if (_backupList.SelectedItem is BackupSummaryView b)
@@ -499,6 +515,74 @@ public sealed class RecoveryWizard : Form
         finally
         {
             _checkRemote.Enabled = true;
+        }
+    }
+
+    private async void CheckLan_Click(object? sender, EventArgs e)
+    {
+        string server = _lanServer.Text.Trim();
+        if (string.IsNullOrEmpty(server))
+        {
+            SetStatus("Enter a LAN server address (e.g., 192.168.1.10:8477).", isError: true);
+            return;
+        }
+        if (!server.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !server.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            server = "http://" + server;
+
+        _checkLan.Enabled = false;
+        try
+        {
+            var found = await Task.Run(() =>
+            {
+                using var store = new UsenetBackup.Core.Lan.HttpBlobStore(server);
+                var ids = store.ListManifestIds();
+                var repo = _state.OpenRepo();
+                var result = new List<(string BackupId, BackupManifest Manifest)>();
+                foreach (string id in ids)
+                {
+                    string? json = store.GetManifestJson(id);
+                    if (json is null) continue;
+                    // Check if already local
+                    string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
+                    if (File.Exists(localPath)) continue;
+                    var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(json);
+                    if (manifest is not null)
+                        result.Add((id, manifest));
+                }
+                return result;
+            });
+            if (found.Count == 0)
+            {
+                SetStatus("No backups on LAN server newer than this USB stick.");
+            }
+            else
+            {
+                // Save LAN manifests locally
+                foreach (var (id, manifest) in found)
+                {
+                    string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
+                    // Re-fetch to save (we already have it, but this is simpler)
+                    using var store = new UsenetBackup.Core.Lan.HttpBlobStore(server);
+                    string? json = store.GetManifestJson(id);
+                    if (json is not null)
+                        File.WriteAllText(localPath, json);
+                    _backupList.Items.Add(new BackupSummaryView(
+                        id, manifest.Type + " (from LAN)",
+                        manifest.Snapshot ?? "", manifest.CreatedUtc));
+                }
+                // Store the LAN server for the download phase
+                _state.LanServer = server;
+                SetStatus($"Found {found.Count} backup(s) on LAN — marked '(from LAN)'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus("LAN discovery failed: " + ex.Message, isError: true);
+        }
+        finally
+        {
+            _checkLan.Enabled = true;
         }
     }
 

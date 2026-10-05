@@ -27,6 +27,12 @@ public sealed class WizardState : IDisposable
     public string NntpPassword { get; set; } = "";
     public string Newsgroup { get; set; } = "";
 
+    /// <summary>
+    /// LAN server URL (e.g., http://192.168.1.10:8477) for LAN restores.
+    /// Set when user checks LAN; null if not using LAN.
+    /// </summary>
+    public string? LanServer { get; set; }
+
     /// <summary>Selected backup ID, or null if none selected yet.</summary>
     public string? SelectedBackupId { get; set; }
 

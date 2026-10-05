@@ -485,7 +485,6 @@ static int Serve(string[] args)
     }
 
     using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
-    string chunksDir = Path.Combine(repoPath, "chunks");
 
     var listener = new System.Net.HttpListener();
     listener.Prefixes.Add($"http://{bind}:{port}/");
@@ -510,7 +509,7 @@ static int Serve(string[] args)
         while (!cts.Token.IsCancellationRequested)
         {
             var ctx = listener.GetContextAsync().GetAwaiter().GetResult();
-            _ = System.Threading.Tasks.Task.Run(() => HandleServeRequest(ctx, chunksDir));
+            _ = System.Threading.Tasks.Task.Run(() => HandleServeRequest(ctx, repoPath));
         }
     }
     catch (OperationCanceledException) { }
@@ -522,8 +521,10 @@ static int Serve(string[] args)
     return 0;
 }
 
-static void HandleServeRequest(System.Net.HttpListenerContext ctx, string chunksDir)
+static void HandleServeRequest(System.Net.HttpListenerContext ctx, string repoRoot)
 {
+    string chunksDir = Path.Combine(repoRoot, "chunks");
+    string manifestsDir = Path.Combine(repoRoot, "manifests");
     try
     {
         string path = ctx.Request.Url?.AbsolutePath ?? "/";
@@ -538,6 +539,46 @@ static void HandleServeRequest(System.Net.HttpListenerContext ctx, string chunks
             ctx.Response.ContentType = "text/plain";
             ctx.Response.OutputStream.Write(buf, 0, buf.Length);
             ctx.Response.StatusCode = 200;
+        }
+        else if (path == "/manifests" && method == "GET")
+        {
+            // List available backup IDs (filenames without .json)
+            var ids = Directory.Exists(manifestsDir)
+                ? Directory.GetFiles(manifestsDir, "*.json")
+                    .Select(f => Path.GetFileNameWithoutExtension(f))
+                    .OrderBy(id => id)
+                    .ToArray()
+                : Array.Empty<string>();
+            string json = System.Text.Json.JsonSerializer.Serialize(ids);
+            byte[] buf = System.Text.Encoding.UTF8.GetBytes(json);
+            ctx.Response.ContentType = "application/json";
+            ctx.Response.OutputStream.Write(buf, 0, buf.Length);
+            ctx.Response.StatusCode = 200;
+        }
+        else if (path.StartsWith("/manifests/", StringComparison.Ordinal) && method == "GET")
+        {
+            string backupId = path["/manifests/".Length..];
+            // Validate: 32 hex chars (backup IDs are hex)
+            if (backupId.Length != 32 || !backupId.All(Uri.IsHexDigit))
+            {
+                ctx.Response.StatusCode = 400;
+            }
+            else
+            {
+                string manifestPath = Path.Combine(manifestsDir, backupId + ".json");
+                if (!File.Exists(manifestPath))
+                {
+                    ctx.Response.StatusCode = 404;
+                }
+                else
+                {
+                    byte[] data = File.ReadAllBytes(manifestPath);
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = data.Length;
+                    ctx.Response.OutputStream.Write(data, 0, data.Length);
+                    ctx.Response.StatusCode = 200;
+                }
+            }
         }
         else if (path.StartsWith("/chunks/", StringComparison.Ordinal))
         {
