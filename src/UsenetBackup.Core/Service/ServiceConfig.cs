@@ -83,7 +83,20 @@ public sealed class BackupJobConfig
     /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
     [JsonPropertyName("autoUpload")]
     public bool AutoUpload { get; set; }
-}
+
+    /// <summary>
+    /// Automatically verify the backup after it completes (checks all chunk
+    /// hashes). Catches bitrot and corruption early.
+    /// </summary>
+    [JsonPropertyName("autoVerify")]
+    public bool AutoVerify { get; set; }
+
+    /// <summary>
+    /// Verify schedule: <c>"after-backup"</c> (default, runs right after each
+    /// backup) or <c>"daily HH:mm"</c> (verifies the latest backup on a schedule).
+    /// </summary>
+    [JsonPropertyName("verifySchedule")]
+    public string VerifySchedule { get; set; } = "after-backup";
 
 /// <summary>
 /// Service configuration, loaded from JSON (see <c>service.example.json</c>).

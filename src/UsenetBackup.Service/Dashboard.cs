@@ -560,6 +560,7 @@ public static class DashboardHtml
                   </select></label>
                   <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
                   <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload to Usenet after backup</label>
+                  <label class="check"><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
                 </div>
                 <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
@@ -722,6 +723,7 @@ public static class DashboardHtml
           document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
+          document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
           // Parse schedule
           const sched = job ? job.schedule : 'daily 02:00';
           if (sched.startsWith('daily ')) {
@@ -763,6 +765,7 @@ public static class DashboardHtml
             mode: document.getElementById('jf-mode').value,
             backupPrivilege: document.getElementById('jf-priv').checked,
             autoUpload: document.getElementById('jf-autoupload').checked,
+            autoVerify: document.getElementById('jf-autoverify').checked,
           };
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           try {

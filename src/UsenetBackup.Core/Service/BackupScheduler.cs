@@ -94,6 +94,12 @@ public sealed class JobRunResult
     /// </summary>
     public bool AutoUploadFailed { get; init; }
     public string? AutoUploadError { get; init; }
+    /// <summary>
+    /// True when auto-verify ran and found corruption. The backup may be
+    /// damaged — investigate immediately.
+    /// </summary>
+    public bool VerifyFailed { get; init; }
+    public string? VerifyError { get; init; }
 }
 
 /// <summary>
@@ -299,6 +305,29 @@ public sealed class BackupScheduler
                 }
             }
 
+            // Auto-verify if configured (default: after each backup).
+            bool verifyFailed = false;
+            string? verifyError = null;
+            if (job.AutoVerify && job.VerifySchedule == "after-backup")
+            {
+                try
+                {
+                    Log($"job '{job.Name}': auto-verifying {manifest.BackupId}...");
+                    repo.Verify(manifest.BackupId);
+                    Log($"job '{job.Name}': auto-verify OK.");
+                    OperationLog.Append(job.Repo, "auto-verify",
+                        $"job={job.Name} id={manifest.BackupId} result=ok");
+                }
+                catch (Exception ex)
+                {
+                    verifyFailed = true;
+                    verifyError = ex.Message;
+                    Log($"job '{job.Name}': auto-verify FAILED: {ex.Message}");
+                    OperationLog.Append(job.Repo, "auto-verify-failed",
+                        $"job={job.Name} id={manifest.BackupId} error={ex.Message}");
+                }
+            }
+
             return new JobRunResult
             {
                 JobName = job.Name,
@@ -308,6 +337,8 @@ public sealed class BackupScheduler
                 Files = manifest.Files.Count,
                 AutoUploadFailed = autoUploadFailed,
                 AutoUploadError = autoUploadError,
+                VerifyFailed = verifyFailed,
+                VerifyError = verifyError,
             };
         }
         catch (Exception ex)
