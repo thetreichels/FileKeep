@@ -98,6 +98,14 @@ public sealed class BackupJobConfig
     /// </summary>
     [JsonPropertyName("autoVerify")]
     public bool AutoVerify { get; set; }
+
+    /// <summary>
+    /// Redundancy mode for Usenet uploads: "none" (default), "xor" (single
+    /// parity block per 10 chunks, recovers 1 missing), or "par2"
+    /// (Reed-Solomon, recovers up to 3 missing per 10 chunks).
+    /// </summary>
+    [JsonPropertyName("redundancyMode")]
+    public string RedundancyMode { get; set; } = "none";
 }
 
 /// <summary>

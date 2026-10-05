@@ -238,6 +238,7 @@ public static class DashboardApi
             existing.BackupPrivilege = job.BackupPrivilege;
             existing.AutoUpload = job.AutoUpload;
             existing.AutoVerify = job.AutoVerify;
+            existing.RedundancyMode = job.RedundancyMode;
         }
         try
         {
@@ -562,6 +563,13 @@ public static class DashboardHtml
                   <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
                   <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload to Usenet after backup</label>
                   <label class="check"><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
+                  <label>Usenet redundancy:
+                    <select id="jf-redundancy">
+                      <option value="none">None</option>
+                      <option value="xor">XOR parity (recovers 1 missing chunk)</option>
+                      <option value="par2">PAR2 (recovers up to 3 missing — coming soon)</option>
+                    </select>
+                  </label>
                 </div>
                 <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
@@ -725,6 +733,7 @@ public static class DashboardHtml
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
           document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
+          document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
           // Parse schedule
           const sched = job ? job.schedule : 'daily 02:00';
           if (sched.startsWith('daily ')) {
@@ -767,6 +776,7 @@ public static class DashboardHtml
             backupPrivilege: document.getElementById('jf-priv').checked,
             autoUpload: document.getElementById('jf-autoupload').checked,
             autoVerify: document.getElementById('jf-autoverify').checked,
+            redundancyMode: document.getElementById('jf-redundancy').value,
           };
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           try {
