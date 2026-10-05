@@ -76,6 +76,17 @@ public static class Dashboard
                     connections = config.Nntp.Connections,
                     hasPassword = config.Nntp.HasPassword,
                 },
+                nntpProviders = config.NntpProviders.Select(p => new
+                {
+                    host = p.Host,
+                    port = p.Port,
+                    username = p.Username,
+                    ssl = p.Ssl,
+                    connections = p.Connections,
+                    retentionDays = p.RetentionDays,
+                    redundancyMode = p.RedundancyMode,
+                    hasPassword = p.HasPassword,
+                }).ToList(),
             }));
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
@@ -109,6 +120,19 @@ public static class Dashboard
             if (nntp is null)
                 return Results.BadRequest(new { error = "Empty NNTP config." });
             var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/nntp-providers", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            List<NntpConfig>? providers;
+            try { providers = await request.ReadFromJsonAsync<List<NntpConfig>>(); }
+            catch { return Results.BadRequest(new { error = "Invalid providers JSON." }); }
+            if (providers is null)
+                return Results.BadRequest(new { error = "Empty providers list." });
+            var (status, payload) = DashboardApi.UpdateNntpProviders(config, scheduler, configPath, providers, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -329,6 +353,35 @@ public static class DashboardApi
                     hasPassword = config.Nntp.HasPassword,
                 };
             return (200, safe);
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = ex.Message });
+        }
+    }
+
+    public static (int Status, object Payload) UpdateNntpProviders(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, List<NntpConfig> providers,
+        Action<string>? log = null)
+    {
+        // Validate each provider
+        foreach (var p in providers)
+        {
+            if (string.IsNullOrWhiteSpace(p.Host))
+                return (400, new { error = "Provider host is required." });
+            if (p.Port is < 1 or > 65535)
+                return (400, new { error = $"Port {p.Port} is out of range." });
+            if (p.Connections is < 1 or > 10)
+                return (400, new { error = $"Connections must be 1-10 (got {p.Connections})." });
+        }
+        config.NntpProviders = providers;
+        try
+        {
+            config.Validate();
+            config.Save(configPath);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: {providers.Count} Usenet provider(s) saved");
+            return (200, new { count = providers.Count });
         }
         catch (Exception ex)
         {
@@ -594,6 +647,16 @@ public static class DashboardHtml
                   <button class="accent" onclick="saveNntp()">Save Usenet settings</button>
                 </div>
               </div>
+              <div class="card" style="margin-top:16px">
+                <h3>Additional Usenet Providers (for redundancy)</h3>
+                <p style="color:var(--text-2);margin-top:0">Add backup providers. Uploads go to all providers; downloads try each in order. Each provider has its own connections, retention, and redundancy settings.</p>
+                <div id="provider-list"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button onclick="addProvider()">Add provider</button>
+                  <button class="accent" onclick="saveProviders()">Save providers</button>
+                </div>
+                <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
+              </div>
               <div class="foot">Changes are saved to service.json and take effect immediately. The service does not need to restart.</div>
             </div>
           </main>
@@ -721,6 +784,8 @@ public static class DashboardHtml
           document.getElementById('nntp-ssl').checked = !!nntp.ssl;
           document.getElementById('nntp-status').textContent =
             nntp.host ? (nntp.hasPassword ? 'Password: saved ✓' : 'Password: not set') : '';
+          // Load additional providers
+          renderProviders(cfg.nntpProviders || []);
         }
         function showJobForm(job) {
           editingJob = job ? job.name : null;
@@ -827,6 +892,90 @@ public static class DashboardHtml
           } catch (e) {
             errBox.textContent = e.message;
             errBox.style.display = '';
+          }
+        }
+        // Multi-provider management
+        function renderProviders(providers) {
+          const list = document.getElementById('provider-list');
+          list.innerHTML = '';
+          (providers || []).forEach((p, idx) => {
+            const div = document.createElement('div');
+            div.className = 'form-grid';
+            div.style.cssText = 'border:1px solid var(--border);padding:12px;margin-bottom:8px;border-radius:6px';
+            div.innerHTML = `
+              <label>Host<input data-p="${idx}" data-f="host" type="text" value="${esc(p.host||'')}" placeholder="news.example.com"></label>
+              <label>Port<input data-p="${idx}" data-f="port" type="number" min="1" max="65535" value="${p.port||119}"></label>
+              <label>Username<input data-p="${idx}" data-f="username" type="text" value="${esc(p.username||'')}"></label>
+              <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="10" value="${p.connections||2}"></label>
+              <label>Retention (days)<input data-p="${idx}" data-f="retentionDays" type="number" min="1" value="${p.retentionDays||1095}"></label>
+              <label>Redundancy<select data-p="${idx}" data-f="redundancyMode">
+                <option value="" ${!p.redundancyMode?'selected':''}>Use job default</option>
+                <option value="none" ${p.redundancyMode==='none'?'selected':''}>None</option>
+                <option value="xor" ${p.redundancyMode==='xor'?'selected':''}>XOR parity</option>
+                <option value="par2" ${p.redundancyMode==='par2'?'selected':''}>PAR2</option>
+              </select></label>
+              <label class="check"><input data-p="${idx}" data-f="ssl" type="checkbox" ${p.ssl?'checked':''}> SSL</label>
+              <button onclick="removeProvider(${idx})" style="grid-column:1/-1">Remove</button>
+            `;
+            list.appendChild(div);
+          });
+        }
+        function addProvider() {
+          const list = document.getElementById('provider-list');
+          const idx = list.children.length;
+          const div = document.createElement('div');
+          div.className = 'form-grid';
+          div.style.cssText = 'border:1px solid var(--border);padding:12px;margin-bottom:8px;border-radius:6px';
+          div.innerHTML = `
+            <label>Host<input data-p="${idx}" data-f="host" type="text" placeholder="news.example.com"></label>
+            <label>Port<input data-p="${idx}" data-f="port" type="number" value="119"></label>
+            <label>Username<input data-p="${idx}" data-f="username" type="text"></label>
+            <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="10" value="2"></label>
+            <label>Retention (days)<input data-p="${idx}" data-f="retentionDays" type="number" value="1095"></label>
+            <label>Redundancy<select data-p="${idx}" data-f="redundancyMode">
+              <option value="">Use job default</option><option value="none">None</option>
+              <option value="xor">XOR parity</option><option value="par2">PAR2</option>
+            </select></label>
+            <label class="check"><input data-p="${idx}" data-f="ssl" type="checkbox"> SSL</label>
+            <button onclick="removeProvider(${idx})" style="grid-column:1/-1">Remove</button>
+          `;
+          list.appendChild(div);
+        }
+        function removeProvider(idx) {
+          const list = document.getElementById('provider-list');
+          if (list.children[idx]) list.children[idx].remove();
+          // Re-index remaining
+          Array.from(list.children).forEach((div, newIdx) => {
+            div.querySelectorAll('[data-p]').forEach(el => el.setAttribute('data-p', newIdx));
+            const btn = div.querySelector('button');
+            if (btn) btn.setAttribute('onclick', `removeProvider(${newIdx})`);
+          });
+        }
+        async function saveProviders() {
+          const list = document.getElementById('provider-list');
+          const providers = [];
+          Array.from(list.children).forEach(div => {
+            const p = {};
+            div.querySelectorAll('[data-f]').forEach(el => {
+              const f = el.getAttribute('data-f');
+              if (el.type === 'checkbox') p[f] = el.checked;
+              else if (el.type === 'number') p[f] = parseInt(el.value, 10) || 0;
+              else p[f] = el.value.trim();
+            });
+            if (p.host) providers.push(p);
+          });
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          const status = document.getElementById('provider-status');
+          try {
+            await api('/api/config/nntp-providers', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+              body: JSON.stringify(providers),
+            });
+            status.textContent = `Saved ${providers.length} provider(s).`;
+            loadSettings();
+          } catch (e) {
+            status.textContent = 'Error: ' + e.message;
           }
         }
         // Load settings when the tab is opened
