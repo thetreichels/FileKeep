@@ -765,11 +765,13 @@ public static class DashboardHtml
         async function loadExpiration(jobs) {
           const box = document.getElementById('expiration');
           try {
-            const all = [];
-            for (const j of jobs) {
-              const items = await api('/api/expiration?repo=' + encodeURIComponent(j.repo) + '&warnDays=90');
-              items.forEach(x => all.push({ ...x, jobName: j.name }));
-            }
+            // Fetch all jobs in parallel, not sequentially
+            const results = await Promise.all(jobs.map(j =>
+              api('/api/expiration?repo=' + encodeURIComponent(j.repo) + '&warnDays=90')
+                .then(items => items.map(x => ({ ...x, jobName: j.name })))
+                .catch(() => []) // Skip failed jobs, don't break the whole list
+            ));
+            const all = results.flat();
             if (!all.length) {
               box.innerHTML = '<p style="color:var(--text-2)">No uploads expiring within 90 days.</p>';
               return;

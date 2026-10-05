@@ -5,6 +5,12 @@ namespace UsenetBackup.Core.Redundancy;
 /// Groups chunks into sets of N data + 1 parity (XOR of the group).
 /// Recovers any single missing/corrupted chunk per group.
 /// </summary>
+/// <remarks>
+/// Limitation: all chunks in a group must have identical encrypted sizes.
+/// Groups with varying sizes (e.g., the last chunk of a file being smaller)
+/// are skipped — no parity is generated for them. This is fail-closed:
+/// such chunks simply have no parity protection, rather than incorrect parity.
+/// </remarks>
 public static class XorParity
 {
     /// <summary>Number of data chunks per parity group.</summary>
@@ -26,8 +32,12 @@ public static class XorParity
             if (group.Count < 2)
                 continue; // Need at least 2 for parity to be useful
 
-            // XOR all chunks in the group
+            // XOR all chunks in the group.
+            // All chunks must have identical sizes; skip groups with varying
+            // sizes (e.g., last chunk of a file) rather than generating
+            // incorrect parity.
             byte[]? parity = null;
+            bool sizeMismatch = false;
             foreach (string chunkId in group)
             {
                 byte[] bytes = getChunkBytes(chunkId);
@@ -38,11 +48,16 @@ public static class XorParity
                 else
                 {
                     if (bytes.Length != parity.Length)
-                        throw new InvalidDataException("Chunk size mismatch in parity group.");
+                    {
+                        sizeMismatch = true;
+                        break;
+                    }
                     for (int j = 0; j < parity.Length; j++)
                         parity[j] ^= bytes[j];
                 }
             }
+            if (sizeMismatch)
+                continue; // Skip groups with varying chunk sizes
 
             string parityId = MakeParityId(group);
             result[parityId] = parity!;

@@ -5,6 +5,12 @@ namespace UsenetBackup.Core.Redundancy;
 /// Groups chunks into sets of 10 data + 3 parity (configurable).
 /// Can recover up to 3 missing chunks per group.
 /// </summary>
+/// <remarks>
+/// Limitation: all chunks in a group must have identical encrypted sizes.
+/// Groups with varying sizes (e.g., the last chunk of a file being smaller)
+/// are skipped — no parity is generated for them. This is fail-closed:
+/// such chunks simply have no parity protection, rather than incorrect parity.
+/// </remarks>
 public static class Par2Redundancy
 {
     /// <summary>Number of data chunks per group.</summary>
@@ -29,15 +35,27 @@ public static class Par2Redundancy
             if (group.Count < 2)
                 continue;
 
-            // Pad group to DataShards with zero shards if needed
+            // Pad group to DataShards with zero shards if needed.
+            // All chunks must have identical sizes; skip groups with varying
+            // sizes (e.g., last chunk of a file) rather than generating
+            // incorrect parity.
             var dataShards = new byte[DataShards][];
             int shardSize = -1;
+            bool sizeMismatch = false;
             for (int j = 0; j < DataShards; j++)
             {
                 if (j < group.Count)
                 {
                     dataShards[j] = getChunkBytes(group[j]);
-                    if (shardSize < 0) shardSize = dataShards[j].Length;
+                    if (shardSize < 0)
+                    {
+                        shardSize = dataShards[j].Length;
+                    }
+                    else if (dataShards[j].Length != shardSize)
+                    {
+                        sizeMismatch = true;
+                        break;
+                    }
                 }
                 else
                 {
@@ -45,6 +63,8 @@ public static class Par2Redundancy
                     dataShards[j] = new byte[shardSize];
                 }
             }
+            if (sizeMismatch)
+                continue; // Skip groups with varying chunk sizes
 
             byte[][] parityShards = rs.Encode(dataShards);
             for (int p = 0; p < parityShards.Length; p++)
