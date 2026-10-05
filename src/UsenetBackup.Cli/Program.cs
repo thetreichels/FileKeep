@@ -685,7 +685,7 @@ static int ExpirationCheck(string[] args)
         retentionByHost.TryGetValue(host, out int days) ? days : defaultRetention;
 
     var tracker = new UsenetBackup.Core.Nntp.UsenetUploadTracker(repoPath);
-    var expiring = tracker.GetExpiring(null!, GetRetention, warnDays);
+    var expiring = tracker.GetExpiring(GetRetention, warnDays);
 
     if (expiring.Count == 0)
     {

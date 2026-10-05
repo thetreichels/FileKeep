@@ -8,6 +8,13 @@ namespace UsenetBackup.Core.Nntp;
 /// and authenticated). Operations acquire a connection, use it exclusively,
 /// then release it back to the pool. Thread-safe.
 /// </summary>
+/// <remarks>
+/// The constructor connects and authenticates all <see cref="Size"/> clients
+/// upfront, so network failures surface early. This means the constructor
+/// performs network I/O and may throw <see cref="NntpException"/> or
+/// <see cref="System.Net.Sockets.SocketException"/> if the server is
+/// unreachable or credentials are invalid.
+/// </remarks>
 public sealed class NntpConnectionPool : IDisposable
 {
     private readonly ConcurrentQueue<NntpClient> _available = new();

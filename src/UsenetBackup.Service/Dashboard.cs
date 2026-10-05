@@ -107,7 +107,7 @@ public static class Dashboard
                     retentionByHost.TryGetValue(host, out int days) ? days : 1095;
 
                 var tracker = new UsenetUploadTracker(repo);
-                var expiring = tracker.GetExpiring(null!, GetRetention, warnDays);
+                var expiring = tracker.GetExpiring(GetRetention, warnDays);
                 return Results.Json(expiring.Select(x => new
                 {
                     backupId = x.Record.BackupId,

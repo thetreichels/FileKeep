@@ -51,7 +51,6 @@ public sealed class UsenetUploadTracker
     /// Gets backups that will expire within the warning window.
     /// </summary>
     public IReadOnlyList<(UploadRecord Record, DateTime ExpiresUtc, int DaysLeft)> GetExpiring(
-        IReadOnlyList<Service.ServiceConfig> _,
         Func<string, int> getRetentionDays,
         int warnDays = 90)
     {
