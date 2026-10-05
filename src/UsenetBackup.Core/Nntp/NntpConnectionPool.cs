@@ -11,8 +11,14 @@ namespace UsenetBackup.Core.Nntp;
 public sealed class NntpConnectionPool : IDisposable
 {
     private readonly ConcurrentQueue<NntpClient> _available = new();
+    private readonly List<NntpClient> _allClients = new(); // tracks every client for Dispose
     private readonly SemaphoreSlim _semaphore;
+    private readonly object _allClientsLock = new();
     private readonly int _size;
+    private readonly string _username;
+    private readonly string _password;
+    private readonly bool _useTls;
+    private readonly TimeSpan? _timeout;
     private bool _disposed;
 
     public int Size => _size;
@@ -35,44 +41,72 @@ public sealed class NntpConnectionPool : IDisposable
         Host = host;
         Port = port;
         _size = size;
+        _useTls = useTls;
+        _username = username ?? "";
+        _password = password ?? "";
+        _timeout = timeout;
         _semaphore = new SemaphoreSlim(size, size);
 
         // Connect all clients upfront so failures surface early.
-        var connected = new List<NntpClient>(size);
         try
         {
             for (int i = 0; i < size; i++)
             {
-                var client = new NntpClient(host, port, useTls, timeout);
-                client.Connect();
-                if (!string.IsNullOrEmpty(username))
-                    client.Authenticate(username, password ?? "");
-                connected.Add(client);
+                var client = CreateConnectedClient();
+                lock (_allClientsLock)
+                    _allClients.Add(client);
                 _available.Enqueue(client);
             }
         }
         catch
         {
-            foreach (var c in connected)
-                try { c.Dispose(); } catch { }
-            _semaphore.Dispose();
+            Dispose();
             throw;
         }
     }
 
+    private NntpClient CreateConnectedClient()
+    {
+        var client = new NntpClient(Host, Port, _useTls, _timeout);
+        client.Connect();
+        if (!string.IsNullOrEmpty(_username))
+            client.Authenticate(_username, _password);
+        return client;
+    }
+
     /// <summary>
     /// Acquires a connection from the pool. Blocks if all are in use.
+    /// Dead connections are transparently replaced.
     /// Call <see cref="Release"/> when done (prefer try/finally).
     /// </summary>
     public NntpClient Acquire()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _semaphore.Wait();
-        if (_available.TryDequeue(out var client))
-            return client;
-        // Should not happen: semaphore guarantees availability.
-        _semaphore.Release();
-        throw new InvalidOperationException("Connection pool exhausted.");
+        try
+        {
+            if (_available.TryDequeue(out var client))
+            {
+                // Health check: replace dead connections instead of handing them out.
+                if (!client.IsConnected)
+                {
+                    try { client.Dispose(); } catch { }
+                    lock (_allClientsLock)
+                        _allClients.Remove(client);
+                    client = CreateConnectedClient();
+                    lock (_allClientsLock)
+                        _allClients.Add(client);
+                }
+                return client;
+            }
+            // Should not happen: semaphore guarantees availability.
+            throw new InvalidOperationException("Connection pool exhausted.");
+        }
+        catch
+        {
+            _semaphore.Release();
+            throw;
+        }
     }
 
     /// <summary>Returns a connection to the pool.</summary>
@@ -110,8 +144,18 @@ public sealed class NntpConnectionPool : IDisposable
         if (!_disposed)
         {
             _disposed = true;
-            while (_available.TryDequeue(out var client))
+            // Dispose ALL clients, including any currently checked out.
+            // Checked-out clients will be disposed again on Release (harmless).
+            List<NntpClient> toDispose;
+            lock (_allClientsLock)
+            {
+                toDispose = new List<NntpClient>(_allClients);
+                _allClients.Clear();
+            }
+            foreach (var client in toDispose)
                 try { client.Dispose(); } catch { }
+            // Drain the queue (clients already disposed above).
+            while (_available.TryDequeue(out _)) { }
             _semaphore.Dispose();
         }
     }
