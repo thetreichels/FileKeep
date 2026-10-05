@@ -567,7 +567,7 @@ public static class DashboardHtml
                     <select id="jf-redundancy">
                       <option value="none">None</option>
                       <option value="xor">XOR parity (recovers 1 missing chunk)</option>
-                      <option value="par2">PAR2 (recovers up to 3 missing — coming soon)</option>
+                      <option value="par2">PAR2 (recovers up to 3 missing)</option>
                     </select>
                   </label>
                 </div>
