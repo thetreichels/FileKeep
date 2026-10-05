@@ -736,6 +736,18 @@ public sealed class BackupRepository : IDisposable
                 throw new InvalidDataException(
                     $"File hash mismatch (manifest {entry.Sha256}, actual {actual}).");
         }
+        catch
+        {
+            // Clean up partial file on failure; don't leave 0-byte corpses.
+            outStream?.Dispose();
+            outStream = null;
+            if (outPath is not null && File.Exists(outPath))
+            {
+                try { File.Delete(outPath); }
+                catch { /* best effort */ }
+            }
+            throw;
+        }
         finally
         {
             outStream?.Dispose();

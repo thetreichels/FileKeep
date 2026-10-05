@@ -156,8 +156,12 @@ public sealed class NntpClient : IDisposable
     }
 
     /// <summary>
+    /// <summary>
     /// Lists message-IDs in a newsgroup via LISTGROUP. Used by the recovery
     /// wizard to discover manifest articles newer than the USB stick.
+    /// WARNING: This downloads the entire group listing. On large public
+    /// groups (e.g., alt.binaries.test with billions of articles) this is
+    /// infeasible. A safeguard aborts if the listing exceeds 100k entries.
     /// </summary>
     public IReadOnlyList<string> ListGroup(string newsgroup)
     {
@@ -165,6 +169,7 @@ public sealed class NntpClient : IDisposable
         var (code, _) = SendCommand($"LISTGROUP {newsgroup}");
         if (code != 211)
             throw new NntpException($"LISTGROUP {newsgroup} failed: {code}");
+        const int maxArticles = 100_000;
         var result = new List<string>();
         foreach (string line in ReadMultiline().Split('\n'))
         {
@@ -175,6 +180,11 @@ public sealed class NntpClient : IDisposable
             int space = t.IndexOf(' ');
             if (space > 0 && space + 1 < t.Length)
                 result.Add(t[(space + 1)..].Trim());
+            if (result.Count > maxArticles)
+                throw new InvalidOperationException(
+                    $"Newsgroup {newsgroup} has more than {maxArticles:N0} articles; " +
+                    "manifest discovery via LISTGROUP is infeasible. " +
+                    "Provide backup IDs directly instead.");
         }
         return result;
     }

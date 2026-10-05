@@ -100,8 +100,8 @@ they never silently change `v1`.
    69/69 tests; backup-privilege path needs Windows validation)
 7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
    ✅ done (`v0.7-service-gui-installer`, 85/85 tests; service + localhost
-   web dashboard + PS installer + recovery runbook — WiX MSI and a
-   purpose-built WinPE ISO still need Windows tooling)
+   web dashboard + PS installer + recovery runbook — WiX MSI and WinPE ISO
+   built and validated on Azure VM 2026-10-04; see VERIFICATION_REPORT.md)
 8. **USB recovery wizard.** WinForms wizard (`usenet-backup-recovery`,
    self-contained for WinPE): repo location → credentials (with early
    passphrase check) → pick backup → download → verify → restore, with
@@ -186,9 +186,9 @@ Usenet, `verify`, then `restore` (or `restore-disk` for images).
 - **Service account.** The installer defaults to LocalSystem (needed for
   backup privilege); pass `-ServiceAccount "NT SERVICE\UsenetBackup"` for least
   privilege when no job uses backup privilege.
-- **Dependencies.** The vendored `SQLitePCLRaw.lib.e_sqlite3` 2.1.11
-  carries a known high-severity advisory; it only ever opens the app's
-  own `catalog.db`, but upgrade it when dependencies are next touched.
+- **Dependencies.** `SQLitePCLRaw.lib.e_sqlite3` was upgraded from 2.1.11 to 2.1.12
+  on 2026-10-04 to patch CVE-2025-6965 (High, CVSS 9.8). `dotnet list package
+  --vulnerable` reports clean.
 
 ## Status
 

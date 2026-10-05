@@ -62,7 +62,33 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         }
         string article = ArticleCodec.BuildArticle(chunkIdHex, _repoId, blob, _newsgroup, _from);
         _client.Post(article);
+        // POST returned 240, but the article may not be retrievable yet
+        // (propagation delay). Confirm via STAT with retry before journaling,
+        // otherwise a subsequent download would fail with 430.
+        WaitForArticle(messageId);
         _journal.RecordUpload(messageId, chunkIdHex);
+    }
+
+    /// <summary>
+    /// Waits for a newly-posted article to become retrievable via STAT,
+    /// with exponential backoff. Throws if the article never appears.
+    /// </summary>
+    private void WaitForArticle(string messageId)
+    {
+        const int maxAttempts = 6;
+        int delayMs = 500;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            if (_client.Stat(messageId))
+                return;
+            if (attempt < maxAttempts)
+            {
+                Thread.Sleep(delayMs);
+                delayMs *= 2; // 0.5s, 1s, 2s, 4s, 8s = ~15.5s total
+            }
+        }
+        throw new InvalidDataException(
+            $"Article {messageId} was posted but never became retrievable (STAT failed after {maxAttempts} attempts).");
     }
 
     public byte[] Get(string chunkIdHex)
