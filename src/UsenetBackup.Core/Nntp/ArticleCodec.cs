@@ -47,6 +47,43 @@ public static class ArticleCodec
         return backupId.Length == 32 && backupId.All(Uri.IsHexDigit) ? backupId : null;
     }
 
+    /// <summary>
+    /// Message-ID for a versioned monthly manifest index:
+    /// &lt;YYYY-MM.&lt;repo-id&gt;.index.&lt;version&gt;@usenet-backup&gt;.
+    /// Each index version supersedes the previous; the wizard STATs
+    /// version 1, 2, 3... until 430 to find the latest. Articles are
+    /// immutable on Usenet, so updates require new versions.
+    /// </summary>
+    public static string MakeManifestIndexMessageId(string repoId, string yearMonth, int version) =>
+        $"<{yearMonth}.{repoId}.index.{version}@{MessageIdDomain}>";
+
+    /// <summary>
+    /// Parses a manifest index message-ID, returning (yearMonth, version)
+    /// if it belongs to this repo; otherwise null.
+    /// </summary>
+    public static (string YearMonth, int Version)? TryParseManifestIndexMessageId(string messageId, string repoId)
+    {
+        // Format: <YYYY-MM.<repoid>.index.<version>@usenet-backup>
+        string suffix = $".{repoId}.index.";
+        string domain = $"@{MessageIdDomain}>";
+        if (!messageId.StartsWith("<", StringComparison.Ordinal) ||
+            !messageId.EndsWith(domain, StringComparison.Ordinal))
+            return null;
+        string inner = messageId[1..^domain.Length]; // strip < and @usenet-backup>
+        int idx = inner.IndexOf(suffix, StringComparison.Ordinal);
+        if (idx < 0)
+            return null;
+        string yearMonth = inner[..idx];
+        string versionStr = inner[(idx + suffix.Length)..];
+        // Validate YYYY-MM format
+        if (yearMonth.Length != 7 || yearMonth[4] != '-' ||
+            !yearMonth[..4].All(char.IsDigit) || !yearMonth[5..].All(char.IsDigit))
+            return null;
+        if (!int.TryParse(versionStr, out int version) || version < 1)
+            return null;
+        return (yearMonth, version);
+    }
+
     public static string BuildArticle(
         string chunkIdHex, string repoId, byte[] blob, string newsgroup, string from)
     {

@@ -143,6 +143,96 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     }
 
     /// <summary>
+    /// Posts a versioned monthly manifest index. Each version supersedes the
+    /// previous (Usenet articles are immutable). The index lists all backup
+    /// IDs for the given year-month. Returns the version number posted.
+    /// </summary>
+    public int PostManifestIndex(string yearMonth, IReadOnlyList<string> backupIds)
+    {
+        // Find the next version by probing: STAT v1, v2, ... until 430.
+        int version = 1;
+        while (_client.Stat(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version)))
+            version++;
+        string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
+        string body = string.Join("\n", backupIds);
+        string article = BuildIndexArticle(yearMonth, version, body);
+        _client.Post(article);
+        WaitForArticle(messageId);
+        return version;
+    }
+
+    /// <summary>
+    /// Fetches the latest manifest index for a year-month by probing versions
+    /// until STAT returns 430. Returns null if no index exists for that month.
+    /// </summary>
+    public IReadOnlyList<string>? GetLatestManifestIndex(string yearMonth)
+    {
+        int latestVersion = 0;
+        int version = 1;
+        // Probe versions until we hit a 430 (not found).
+        // Cap at 1000 to avoid infinite loop on misbehaving servers.
+        while (version <= 1000)
+        {
+            string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
+            if (!_client.Stat(messageId))
+                break;
+            latestVersion = version;
+            version++;
+        }
+        if (latestVersion == 0)
+            return null;
+        string latestId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, latestVersion);
+        string? article = _client.GetArticle(latestId);
+        if (article is null)
+            return null;
+        // Parse the body: one backup ID per line.
+        var (_, body) = ParseIndexArticle(article);
+        return body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    private string BuildIndexArticle(string yearMonth, int version, string body)
+    {
+        string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
+        var sb = new System.Text.StringBuilder();
+        sb.Append("From: ").Append(_from).Append("\r\n");
+        sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
+        sb.Append("Subject: [usenet-backup] manifest-index ").Append(yearMonth).Append(" v").Append(version).Append("\r\n");
+        sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
+        sb.Append("Content-Type: text/plain; charset=utf-8\r\n");
+        sb.Append("\r\n");
+        sb.Append(body);
+        return sb.ToString();
+    }
+
+    private static (string MessageId, string Body) ParseIndexArticle(string article)
+    {
+        // Split headers from body on the first blank line.
+        int sep = article.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        int skip = 4;
+        if (sep < 0)
+        {
+            sep = article.IndexOf("\n\n", StringComparison.Ordinal);
+            skip = 2;
+        }
+        if (sep < 0)
+            throw new InvalidDataException("Article has no header/body separator.");
+        string headers = article[..sep];
+        string body = article[(sep + skip)..];
+        // Extract Message-ID
+        string messageId = "";
+        foreach (string line in headers.Split('\n'))
+        {
+            string t = line.Trim();
+            if (t.StartsWith("Message-ID:", StringComparison.OrdinalIgnoreCase))
+            {
+                messageId = t["Message-ID:".Length..].Trim();
+                break;
+            }
+        }
+        return (messageId, body);
+    }
+
+    /// <summary>
     /// Scans the newsgroup for manifest articles belonging to this repo.
     /// Returns their backup IDs.
     /// </summary>

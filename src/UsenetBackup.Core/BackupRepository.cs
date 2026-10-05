@@ -537,12 +537,36 @@ public sealed class BackupRepository : IDisposable
         {
             remote.PostManifest(backupId, encrypted);
             OperationLog.Append(_root, "manifest-upload", $"id={backupId}");
+            // Update the monthly manifest index (versioned; Usenet articles are immutable).
+            UpdateManifestIndex(remote);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(plaintext);
             CryptographicOperations.ZeroMemory(encrypted);
         }
+    }
+
+    /// <summary>
+    /// Posts/updates the versioned monthly manifest index listing all local
+    /// backup IDs for the current year-month. Each upload creates a new
+    /// version; discovery fetches the latest via STAT probing.
+    /// </summary>
+    private void UpdateManifestIndex(NntpBlobStore remote)
+    {
+        string yearMonth = DateTime.UtcNow.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture);
+        string manifestsDir = Path.Combine(_root, "manifests");
+        if (!Directory.Exists(manifestsDir))
+            return;
+        var backupIds = Directory.GetFiles(manifestsDir, "*.json")
+            .Select(f => Path.GetFileNameWithoutExtension(f))
+            .Where(id => id.Length == 32 && id.All(Uri.IsHexDigit))
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToList();
+        if (backupIds.Count == 0)
+            return;
+        int version = remote.PostManifestIndex(yearMonth, backupIds);
+        OperationLog.Append(_root, "manifest-index-upload", $"ym={yearMonth} v={version} count={backupIds.Count}");
     }
 
     /// <summary>
@@ -592,6 +616,67 @@ public sealed class BackupRepository : IDisposable
             finally
             {
                 CryptographicOperations.ZeroMemory(plaintext);
+            }
+        }
+        return result.OrderByDescending(m => m.Manifest.CreatedUtc).ToList();
+    }
+
+    /// <summary>
+    /// Discovers remote manifests via versioned monthly index articles,
+    /// without scanning the newsgroup. Walks backward from the current
+    /// month, STAT-probing for index versions. Each STAT is a single
+    /// round-trip; a 60-day gap costs ~4 STATs, not a 16.9B-article LISTGROUP.
+    /// </summary>
+    /// <param name="monthsBack">How many months to search backward (default 12).</param>
+    public IReadOnlyList<RemoteManifest> DiscoverRemoteManifestsViaIndex(
+        NntpBlobStore remote, int monthsBack = 12)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<RemoteManifest>();
+        DateTime now = DateTime.UtcNow;
+        for (int m = 0; m < monthsBack; m++)
+        {
+            DateTime dt = now.AddMonths(-m);
+            string yearMonth = dt.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture);
+            IReadOnlyList<string>? backupIds = remote.GetLatestManifestIndex(yearMonth);
+            if (backupIds is null)
+                continue;
+            foreach (string backupId in backupIds)
+            {
+                if (!seen.Add(backupId))
+                    continue; // already processed from a newer month
+                string localPath = Path.Combine(_root, "manifests", backupId + ".json");
+                if (File.Exists(localPath))
+                    continue; // already on USB
+                byte[]? encrypted = remote.GetManifest(backupId);
+                if (encrypted is null)
+                    continue;
+                byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
+                byte[] plaintext;
+                try
+                {
+                    plaintext = ChunkCrypto.Decrypt(encrypted, _key, aad);
+                }
+                catch (CryptographicException ex)
+                {
+                    throw new InvalidDataException(
+                        $"Remote manifest {backupId} failed authentication (wrong passphrase or tampered).", ex);
+                }
+                try
+                {
+                    string json = System.Text.Encoding.UTF8.GetString(plaintext);
+                    var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(json)
+                        ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
+                    if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
+                        throw new InvalidDataException(
+                            $"Remote manifest backup ID mismatch (expected {backupId}).");
+                    result.Add(new RemoteManifest(backupId, manifest));
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(plaintext);
+                }
             }
         }
         return result.OrderByDescending(m => m.Manifest.CreatedUtc).ToList();
