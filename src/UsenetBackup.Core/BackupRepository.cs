@@ -516,7 +516,7 @@ public sealed class BackupRepository : IDisposable
     /// <param name="progress">Called as (done, total) after each chunk.</param>
     public DownloadResult DownloadChunks(
         NzbDocument nzb,
-        NntpBlobStore remote,
+        IBlobStore remote,
         Action<int, int>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(nzb);
@@ -577,7 +577,7 @@ public sealed class BackupRepository : IDisposable
     private byte[]? TryReconstructChunk(
         string chunkId,
         IReadOnlyList<string> allChunkIds,
-        NntpBlobStore remote)
+        IBlobStore remote)
     {
         // Try XOR parity first (simpler, single parity block)
         var xorGroup = Redundancy.XorParity.GetGroupFor(chunkId, allChunkIds);

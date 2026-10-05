@@ -125,6 +125,15 @@ public sealed class WizardState : IDisposable
         if (Nzb is null)
             throw new InvalidOperationException("Load an NZB first.");
         var repo = OpenRepo();
+
+        // If a LAN server was discovered, download chunks from it via HTTP.
+        // Otherwise fall back to Usenet via NNTP.
+        if (!string.IsNullOrWhiteSpace(LanServer))
+        {
+            using var remote = new Lan.HttpBlobStore(LanServer);
+            return repo.DownloadChunks(Nzb, remote, progress);
+        }
+
         var client = new NntpClient(NntpHost, NntpPort, NntpSsl);
         try
         {
