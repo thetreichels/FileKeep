@@ -11,7 +11,8 @@ namespace UsenetBackup.Core.Nntp;
 /// </summary>
 public sealed class NntpBlobStore : IBlobStore, IDisposable
 {
-    private readonly NntpClient _client;
+    private readonly NntpClient? _client; // single-client mode (legacy)
+    private readonly NntpConnectionPool? _pool; // pooled mode
     private readonly string _newsgroup;
     private readonly string _from;
     private readonly string _repoId;
@@ -27,11 +28,52 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
-        _client = client;
+        _client = client ?? throw new ArgumentNullException(nameof(client));
         _newsgroup = newsgroup;
         _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
+    }
+
+    /// <summary>
+    /// Creates a store backed by a connection pool for parallel operations.
+    /// Each operation acquires a connection, uses it exclusively, and releases it.
+    /// </summary>
+    public NntpBlobStore(
+        NntpConnectionPool pool,
+        string newsgroup,
+        string repoId,
+        string catalogDbPath,
+        string from = "usenet-backup")
+    {
+        ArgumentException.ThrowIfNullOrEmpty(newsgroup);
+        ArgumentException.ThrowIfNullOrEmpty(repoId);
+        _pool = pool ?? throw new ArgumentNullException(nameof(pool));
+        _newsgroup = newsgroup;
+        _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
+        _repoId = repoId;
+        _journal = new Catalog(catalogDbPath);
+    }
+
+    /// <summary>True if this store uses a connection pool (parallel-capable).</summary>
+    public bool IsPooled => _pool is not null;
+
+    /// <summary>Number of connections in the pool, or 1 for single-client mode.</summary>
+    public int ConnectionCount => _pool?.Size ?? 1;
+
+    private T UseClient<T>(Func<NntpClient, T> action)
+    {
+        if (_pool is not null)
+            return _pool.Use(action);
+        return action(_client!);
+    }
+
+    private void UseClient(Action<NntpClient> action)
+    {
+        if (_pool is not null)
+            _pool.Use(action);
+        else
+            action(_client!);
     }
 
     public bool Exists(string chunkIdHex)
@@ -40,7 +82,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
         if (_journal.IsUploaded(messageId))
             return true;
-        if (_client.Stat(messageId))
+        if (UseClient(c => c.Stat(messageId)))
         {
             _journal.RecordUpload(messageId, chunkIdHex); // adopt into journal
             return true;
@@ -55,13 +97,13 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
         if (_journal.IsUploaded(messageId))
             return; // resume fast path: already posted
-        if (_client.Stat(messageId))
+        if (UseClient(c => c.Stat(messageId)))
         {
             _journal.RecordUpload(messageId, chunkIdHex); // server already has it
             return;
         }
         string article = ArticleCodec.BuildArticle(chunkIdHex, _repoId, blob, _newsgroup, _from);
-        _client.Post(article);
+        UseClient(c => c.Post(article));
         // POST returned 240, but the article may not be retrievable yet
         // (propagation delay). Confirm via STAT with retry before journaling,
         // otherwise a subsequent download would fail with 430.
@@ -79,7 +121,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         int delayMs = 500;
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            if (_client.Stat(messageId))
+            if (UseClient(c => c.Stat(messageId)))
                 return;
             if (attempt < maxAttempts)
             {
@@ -95,7 +137,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         ValidateChunkId(chunkIdHex);
         string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
-        string? article = _client.GetArticle(messageId);
+        string? article = UseClient(c => c.GetArticle(messageId));
         if (article is null)
             throw new InvalidDataException(
                 $"Chunk {chunkIdHex} not found on the NNTP server (message-ID {messageId}).");
@@ -119,11 +161,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         ArgumentNullException.ThrowIfNull(encryptedBlob);
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
-        if (_client.Stat(messageId))
+        if (UseClient(c => c.Stat(messageId)))
             return; // already posted
         string article = ArticleCodec.BuildManifestArticle(
             backupId, _repoId, encryptedBlob, _newsgroup, _from);
-        _client.Post(article);
+        UseClient(c => c.Post(article));
     }
 
     /// <summary>
@@ -132,7 +174,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public byte[]? GetManifest(string backupId)
     {
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
-        string? article = _client.GetArticle(messageId);
+        string? article = UseClient(c => c.GetArticle(messageId));
         if (article is null)
             return null;
         var (id, blob) = ArticleCodec.ParseManifestArticle(article);
@@ -152,7 +194,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         // Find the latest version by probing: STAT v1, v2, ... until 430.
         int version = 1;
         int latestVersion = 0;
-        while (_client.Stat(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version)))
+        while (UseClient(c => c.Stat(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version))))
         {
             latestVersion = version;
             version++;
@@ -168,7 +210,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
         string body = string.Join("\n", backupIds);
         string article = BuildIndexArticle(yearMonth, version, body);
-        _client.Post(article);
+        UseClient(c => c.Post(article));
         WaitForArticle(messageId);
         return version;
     }
@@ -186,7 +228,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         while (version <= 1000)
         {
             string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
-            if (!_client.Stat(messageId))
+            if (!UseClient(c => c.Stat(messageId)))
                 break;
             latestVersion = version;
             version++;
@@ -194,7 +236,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, latestVersion);
-        string? article = _client.GetArticle(latestId);
+        string? article = UseClient(c => c.GetArticle(latestId));
         if (article is null)
             return null;
         // Parse the body: one backup ID per line.
@@ -251,7 +293,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public IReadOnlyList<string> ListManifestIds()
     {
         var result = new List<string>();
-        foreach (string msgId in _client.ListGroup(_newsgroup))
+        foreach (string msgId in UseClient(c => c.ListGroup(_newsgroup)))
         {
             string? backupId = ArticleCodec.TryParseManifestMessageId(msgId, _repoId);
             if (backupId is not null)

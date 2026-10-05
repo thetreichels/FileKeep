@@ -371,8 +371,8 @@ public static class DashboardApi
                 return (400, new { error = "Provider host is required." });
             if (p.Port is < 1 or > 65535)
                 return (400, new { error = $"Port {p.Port} is out of range." });
-            if (p.Connections is < 1 or > 10)
-                return (400, new { error = $"Connections must be 1-10 (got {p.Connections})." });
+            if (p.Connections is < 1 or > 100)
+                return (400, new { error = $"Connections must be 1-100 (got {p.Connections})." });
         }
         config.NntpProviders = providers;
         try
@@ -638,7 +638,7 @@ public static class DashboardHtml
                   <label>Port<input id="nntp-port" type="number" min="1" max="65535" value="119"></label>
                   <label>Username<input id="nntp-user" type="text" placeholder="(optional)"></label>
                   <label>Password<input id="nntp-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-                  <label>Connections<input id="nntp-conn" type="number" min="1" max="10" value="2"></label>
+                  <label>Connections<input id="nntp-conn" type="number" min="1" max="100" value="10"></label>
                   <label class="check"><input id="nntp-ssl" type="checkbox"> Use SSL (port 563)</label>
                 </div>
                 <div id="nntp-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
@@ -780,7 +780,7 @@ public static class DashboardHtml
           document.getElementById('nntp-port').value = nntp.port || 119;
           document.getElementById('nntp-user').value = nntp.username || '';
           document.getElementById('nntp-pass').value = '';
-          document.getElementById('nntp-conn').value = nntp.connections || 2;
+          document.getElementById('nntp-conn').value = nntp.connections || 10;
           document.getElementById('nntp-ssl').checked = !!nntp.ssl;
           document.getElementById('nntp-status').textContent =
             nntp.host ? (nntp.hasPassword ? 'Password: saved ✓' : 'Password: not set') : '';
@@ -878,7 +878,7 @@ public static class DashboardHtml
             username: document.getElementById('nntp-user').value.trim(),
             password: document.getElementById('nntp-pass').value,
             ssl: document.getElementById('nntp-ssl').checked,
-            connections: parseInt(document.getElementById('nntp-conn').value, 10) || 2,
+            connections: parseInt(document.getElementById('nntp-conn').value, 10) || 10,
           };
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           try {
@@ -906,7 +906,7 @@ public static class DashboardHtml
               <label>Host<input data-p="${idx}" data-f="host" type="text" value="${esc(p.host||'')}" placeholder="news.example.com"></label>
               <label>Port<input data-p="${idx}" data-f="port" type="number" min="1" max="65535" value="${p.port||119}"></label>
               <label>Username<input data-p="${idx}" data-f="username" type="text" value="${esc(p.username||'')}"></label>
-              <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="10" value="${p.connections||2}"></label>
+              <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="100" value="${p.connections||10}"></label>
               <label>Retention (days)<input data-p="${idx}" data-f="retentionDays" type="number" min="1" value="${p.retentionDays||1095}"></label>
               <label>Redundancy<select data-p="${idx}" data-f="redundancyMode">
                 <option value="" ${!p.redundancyMode?'selected':''}>Use job default</option>
@@ -930,7 +930,7 @@ public static class DashboardHtml
             <label>Host<input data-p="${idx}" data-f="host" type="text" placeholder="news.example.com"></label>
             <label>Port<input data-p="${idx}" data-f="port" type="number" value="119"></label>
             <label>Username<input data-p="${idx}" data-f="username" type="text"></label>
-            <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="10" value="2"></label>
+            <label>Connections<input data-p="${idx}" data-f="connections" type="number" min="1" max="100" value="10"></label>
             <label>Retention (days)<input data-p="${idx}" data-f="retentionDays" type="number" value="1095"></label>
             <label>Redundancy<select data-p="${idx}" data-f="redundancyMode">
               <option value="">Use job default</option><option value="none">None</option>

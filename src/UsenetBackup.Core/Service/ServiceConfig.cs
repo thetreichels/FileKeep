@@ -23,7 +23,7 @@ public sealed class NntpConfig
     public bool Ssl { get; set; }
 
     [JsonPropertyName("connections")]
-    public int Connections { get; set; } = 2;
+    public int Connections { get; set; } = 10;
 
     [JsonPropertyName("newsgroup")]
     public string Newsgroup { get; set; } = "alt.binaries.test";
@@ -227,8 +227,8 @@ public sealed class ServiceConfig
         {
             if (Nntp.Port is < 1 or > 65535)
                 throw new InvalidOperationException($"nntp.port {Nntp.Port} is out of range.");
-            if (Nntp.Connections < 1 || Nntp.Connections > 10)
-                throw new InvalidOperationException("nntp.connections must be between 1 and 10.");
+            if (Nntp.Connections < 1 || Nntp.Connections > 100)
+                throw new InvalidOperationException("nntp.connections must be between 1 and 100.");
         }
     }
 }

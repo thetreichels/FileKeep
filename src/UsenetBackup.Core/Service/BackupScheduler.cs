@@ -405,27 +405,32 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
             try
             {
-                using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
-                client.Connect();
-                try
+                // Use a connection pool for parallel uploads.
+                // Connections setting controls the pool size (1-100, default 10).
+                using var pool = new Nntp.NntpConnectionPool(
+                    nntp.Host, nntp.Port, nntp.Ssl,
+                    nntp.Username, nntpPassword, nntp.Connections);
+                using var store = new Nntp.NntpBlobStore(pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+                // Determine redundancy mode: per-provider override, else job default
+                string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
+                    ? nntp.RedundancyMode
+                    : job.RedundancyMode;
+                int uploaded = 0, skipped = 0;
+                // Parallel upload using the connection pool.
+                // Each thread acquires a connection, uploads, releases it.
+                var parallelOptions = new ParallelOptions
                 {
-                    if (!string.IsNullOrEmpty(nntp.Username))
-                        client.Authenticate(nntp.Username, nntpPassword!);
-                    using var store = new Nntp.NntpBlobStore(client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
-                    // Determine redundancy mode: per-provider override, else job default
-                    string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
-                        ? nntp.RedundancyMode
-                        : job.RedundancyMode;
-                    int uploaded = 0, skipped = 0;
-                    foreach (var chunkId in chunkIds)
+                    MaxDegreeOfParallelism = nntp.Connections
+                };
+                Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
+                {
+                    if (store.Exists(chunkId)) Interlocked.Increment(ref skipped);
+                    else
                     {
-                        if (store.Exists(chunkId)) skipped++;
-                        else
-                        {
-                            store.Put(chunkId, repo.GetChunkBlob(chunkId));
-                            uploaded++;
-                        }
+                        store.Put(chunkId, repo.GetChunkBlob(chunkId));
+                        Interlocked.Increment(ref uploaded);
                     }
+                });
                     // Generate and upload XOR parity blocks if enabled
                     int parityUploaded = 0;
                     if (redundancy == "xor")
@@ -463,11 +468,6 @@ public sealed class BackupScheduler
                     OperationLog.Append(job.Repo, "auto-upload",
                         $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
                     Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");
-                }
-                finally
-                {
-                    try { client.Quit(); } catch { /* best effort */ }
-                }
             }
             catch (Exception ex)
             {
