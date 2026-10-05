@@ -423,6 +423,9 @@ public sealed class BackupScheduler
                         }
                     }
                     repo.UploadManifest(backupId, store);
+                    // Track upload for expiration monitoring
+                    var tracker = new Nntp.UsenetUploadTracker(job.Repo);
+                    tracker.RecordUpload(backupId, nntp.Host, nntp.Newsgroup);
                     OperationLog.Append(job.Repo, "auto-upload",
                         $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
                     Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");

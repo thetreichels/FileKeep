@@ -29,6 +29,14 @@ public sealed class NntpConfig
     public string Newsgroup { get; set; } = "alt.binaries.test";
 
     /// <summary>
+    /// Usenet retention in days for this provider. Backups uploaded longer ago
+    /// than this are considered expired. Default 1095 (3 years). Set to match
+    /// your provider's actual retention (varies by provider).
+    /// </summary>
+    [JsonPropertyName("retentionDays")]
+    public int RetentionDays { get; set; } = 1095;
+
+    /// <summary>
     /// DPAPI-encrypted password (base64). Set via the dashboard; never holds plaintext.
     /// </summary>
     [JsonPropertyName("passwordProtected")]

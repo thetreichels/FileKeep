@@ -24,6 +24,7 @@ try
         "manifest-discover" => ManifestDiscover(args[1..]),
         "nzb-generate" => NzbGenerate(args[1..]),
         "download" => Download(args[1..]),
+        "expiration-check" => ExpirationCheck(args[1..]),
         "serve" => Serve(args[1..]),
         _ => Unknown(args[0]),
     };
@@ -55,6 +56,7 @@ static void PrintUsage()
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
           usenet-backup serve <repo> [--port PORT] [--bind ADDR]
+          usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS]
           (--user also accepts --username as an alias)
 
         --parent turns the backup into an incremental against that parent
@@ -641,4 +643,35 @@ static void HandleServeRequest(System.Net.HttpListenerContext ctx, string repoRo
     {
         try { ctx.Response.OutputStream.Close(); } catch { }
     }
+}
+
+/// <summary>
+/// Checks Usenet upload expiration status.
+/// Usage: usenet-backup expiration-check &lt;repo&gt; [--warn-days DAYS] [--retention-days DAYS]
+/// Lists backups whose Usenet copies are expired or expiring soon.
+/// </summary>
+static int ExpirationCheck(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: expiration-check <repo> [--warn-days DAYS]"); return 2; }
+    string repoPath = Path.GetFullPath(pos[0]);
+    int warnDays = int.TryParse(GetOption(args, "--warn-days"), out int w) ? w : 90;
+    int defaultRetention = int.TryParse(GetOption(args, "--retention-days"), out int r) ? r : 1095;
+
+    var tracker = new UsenetBackup.Core.Nntp.UsenetUploadTracker(repoPath);
+    var expiring = tracker.GetExpiring(null!, host => defaultRetention, warnDays);
+
+    if (expiring.Count == 0)
+    {
+        Console.WriteLine($"No Usenet uploads expiring within {warnDays} days.");
+        return 0;
+    }
+
+    Console.WriteLine($"Usenet uploads expiring within {warnDays} days (retention: {defaultRetention} days):");
+    foreach (var (record, expires, daysLeft) in expiring)
+    {
+        string status = daysLeft < 0 ? "EXPIRED" : $"{daysLeft}d left";
+        Console.WriteLine($"  {record.BackupId[..8]}…  {record.ProviderHost}  uploaded {record.UploadedUtc:u}  expires {expires:u}  [{status}]");
+    }
+    return expiring.Any(x => x.DaysLeft < 0) ? 1 : 0;
 }
