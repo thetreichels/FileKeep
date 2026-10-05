@@ -56,7 +56,7 @@ static void PrintUsage()
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
           usenet-backup serve <repo> [--port PORT] [--bind ADDR]
-          usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS]
+          usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
           (--user also accepts --username as an alias)
 
         --parent turns the backup into an incremental against that parent
@@ -658,8 +658,34 @@ static int ExpirationCheck(string[] args)
     int warnDays = int.TryParse(GetOption(args, "--warn-days"), out int w) ? w : 90;
     int defaultRetention = int.TryParse(GetOption(args, "--retention-days"), out int r) ? r : 1095;
 
+    // Build per-provider retention map from service config if provided.
+    // Otherwise fall back to the default for all hosts.
+    var retentionByHost = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    string? configPath = GetOption(args, "--config");
+    if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
+    {
+        try
+        {
+            var svcConfig = UsenetBackup.Core.Service.ServiceConfig.Load(configPath);
+            if (svcConfig.Nntp is not null && !string.IsNullOrWhiteSpace(svcConfig.Nntp.Host))
+                retentionByHost[svcConfig.Nntp.Host] = svcConfig.Nntp.RetentionDays;
+            foreach (var p in svcConfig.NntpProviders)
+            {
+                if (!string.IsNullOrWhiteSpace(p.Host))
+                    retentionByHost[p.Host] = p.RetentionDays;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"warning: could not load service config '{configPath}': {ex.Message}");
+        }
+    }
+
+    int GetRetention(string host) =>
+        retentionByHost.TryGetValue(host, out int days) ? days : defaultRetention;
+
     var tracker = new UsenetBackup.Core.Nntp.UsenetUploadTracker(repoPath);
-    var expiring = tracker.GetExpiring(null!, host => defaultRetention, warnDays);
+    var expiring = tracker.GetExpiring(null!, GetRetention, warnDays);
 
     if (expiring.Count == 0)
     {
@@ -667,11 +693,12 @@ static int ExpirationCheck(string[] args)
         return 0;
     }
 
-    Console.WriteLine($"Usenet uploads expiring within {warnDays} days (retention: {defaultRetention} days):");
+    Console.WriteLine($"Usenet uploads expiring within {warnDays} days:");
     foreach (var (record, expires, daysLeft) in expiring)
     {
+        int retention = GetRetention(record.ProviderHost);
         string status = daysLeft < 0 ? "EXPIRED" : $"{daysLeft}d left";
-        Console.WriteLine($"  {record.BackupId[..8]}…  {record.ProviderHost}  uploaded {record.UploadedUtc:u}  expires {expires:u}  [{status}]");
+        Console.WriteLine($"  {record.BackupId[..8]}…  {record.ProviderHost}  uploaded {record.UploadedUtc:u}  expires {expires:u}  (retention {retention}d)  [{status}]");
     }
     return expiring.Any(x => x.DaysLeft < 0) ? 1 : 0;
 }

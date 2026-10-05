@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using UsenetBackup.Core;
+using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Service;
 
 namespace UsenetBackup.Service;
@@ -88,6 +89,40 @@ public static class Dashboard
                     hasPassword = p.HasPassword,
                 }).ToList(),
             }));
+
+        app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
+        {
+            try
+            {
+                // Build per-provider retention map from service config
+                var retentionByHost = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                if (config.Nntp is not null && !string.IsNullOrWhiteSpace(config.Nntp.Host))
+                    retentionByHost[config.Nntp.Host] = config.Nntp.RetentionDays;
+                foreach (var p in config.NntpProviders)
+                {
+                    if (!string.IsNullOrWhiteSpace(p.Host))
+                        retentionByHost[p.Host] = p.RetentionDays;
+                }
+                int GetRetention(string host) =>
+                    retentionByHost.TryGetValue(host, out int days) ? days : 1095;
+
+                var tracker = new UsenetUploadTracker(repo);
+                var expiring = tracker.GetExpiring(null!, GetRetention, warnDays);
+                return Results.Json(expiring.Select(x => new
+                {
+                    backupId = x.Record.BackupId,
+                    providerHost = x.Record.ProviderHost,
+                    uploadedUtc = x.Record.UploadedUtc,
+                    expiresUtc = x.ExpiresUtc,
+                    daysLeft = x.DaysLeft,
+                    retentionDays = GetRetention(x.Record.ProviderHost),
+                }).ToList());
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
         {
@@ -566,6 +601,8 @@ public static class DashboardHtml
               </div>
               <h2>Backup jobs</h2>
               <div class="card" id="jobs" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
+              <h2>Usenet expiration warnings</h2>
+              <div class="card" id="expiration" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
               <div class="foot">Backups are encrypted locally and posted to Usenet. Your passphrase never leaves this machine's memory.</div>
             </div>
             <div class="view" id="view-backups">
@@ -717,11 +754,38 @@ public static class DashboardHtml
               </div>
               <button onclick="runJob('${esc(j.name)}')">Run now</button>
             </div>`).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
+          // Load expiration warnings for each job's repo
+          loadExpiration(s.jobs);
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
           loadLog();
+        }
+        async function loadExpiration(jobs) {
+          const box = document.getElementById('expiration');
+          try {
+            const all = [];
+            for (const j of jobs) {
+              const items = await api('/api/expiration?repo=' + encodeURIComponent(j.repo) + '&warnDays=90');
+              items.forEach(x => all.push({ ...x, jobName: j.name }));
+            }
+            if (!all.length) {
+              box.innerHTML = '<p style="color:var(--text-2)">No uploads expiring within 90 days.</p>';
+              return;
+            }
+            all.sort((a, b) => a.daysLeft - b.daysLeft);
+            box.innerHTML = all.map(x => `
+              <div class="row">
+                <div class="grow">
+                  <div class="name">${esc(x.backupId.substring(0, 8))}… <span style="color:${x.daysLeft < 0 ? 'var(--bad)' : 'var(--warn)'}">${x.daysLeft < 0 ? 'EXPIRED' : x.daysLeft + 'd left'}</span></div>
+                  <div class="meta">${esc(x.jobName)} · ${esc(x.providerHost)} · retention ${x.retentionDays}d<br>
+                  Uploaded: ${esc(x.uploadedUtc)} · Expires: ${esc(x.expiresUtc)}</div>
+                </div>
+              </div>`).join('');
+          } catch (e) {
+            box.innerHTML = '<p style="color:var(--bad)">Could not load expiration data: ' + esc(e.message) + '</p>';
+          }
         }
         async function runJob(name) {
           const csrf = document.querySelector('meta[name=csrf-token]').content;
