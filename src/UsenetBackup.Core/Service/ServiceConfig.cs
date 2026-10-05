@@ -37,6 +37,14 @@ public sealed class NntpConfig
     public int RetentionDays { get; set; } = 1095;
 
     /// <summary>
+    /// Redundancy mode for this provider: "none", "xor", or "par2".
+    /// If empty, falls back to the job's RedundancyMode.
+    /// Use stronger redundancy for less reliable providers.
+    /// </summary>
+    [JsonPropertyName("redundancyMode")]
+    public string RedundancyMode { get; set; } = "";
+
+    /// <summary>
     /// DPAPI-encrypted password (base64). Set via the dashboard; never holds plaintext.
     /// </summary>
     [JsonPropertyName("passwordProtected")]

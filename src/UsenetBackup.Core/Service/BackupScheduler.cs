@@ -412,6 +412,10 @@ public sealed class BackupScheduler
                     if (!string.IsNullOrEmpty(nntp.Username))
                         client.Authenticate(nntp.Username, nntpPassword!);
                     using var store = new Nntp.NntpBlobStore(client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+                    // Determine redundancy mode: per-provider override, else job default
+                    string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
+                        ? nntp.RedundancyMode
+                        : job.RedundancyMode;
                     int uploaded = 0, skipped = 0;
                     foreach (var chunkId in chunkIds)
                     {
@@ -421,6 +425,26 @@ public sealed class BackupScheduler
                             store.Put(chunkId, repo.GetChunkBlob(chunkId));
                             uploaded++;
                         }
+                    }
+                    // Generate and upload XOR parity blocks if enabled
+                    int parityUploaded = 0;
+                    if (redundancy == "xor")
+                    {
+                        var parityBlocks = Redundancy.XorParity.GenerateParity(
+                            chunkIds, id => repo.GetChunkBlob(id));
+                        foreach (var (parityId, parityBytes) in parityBlocks)
+                        {
+                            if (!store.Exists(parityId))
+                            {
+                                store.Put(parityId, parityBytes);
+                                parityUploaded++;
+                            }
+                        }
+                        Log($"job '{job.Name}': uploaded {parityUploaded} parity blocks to {nntp.Host}");
+                    }
+                    else if (redundancy == "par2")
+                    {
+                        Log($"job '{job.Name}': PAR2 not yet implemented, skipping for {nntp.Host}");
                     }
                     repo.UploadManifest(backupId, store);
                     // Track upload for expiration monitoring
