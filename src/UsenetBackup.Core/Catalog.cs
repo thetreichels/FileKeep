@@ -9,6 +9,7 @@ namespace UsenetBackup.Core;
 public sealed class Catalog : IDisposable
 {
     private readonly SqliteConnection _conn;
+    private readonly object _lock = new(); // SQLite connection is not thread-safe
     private bool _disposed;
 
     public Catalog(string dbPath)
@@ -66,28 +67,37 @@ public sealed class Catalog : IDisposable
     /// </summary>
     public void RecordUpload(string messageId, string chunkId)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR IGNORE INTO uploads(message_id, chunk_id, uploaded_utc) VALUES($mid, $cid, $ts)";
-        cmd.Parameters.AddWithValue("$mid", messageId);
-        cmd.Parameters.AddWithValue("$cid", chunkId);
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
-        cmd.ExecuteNonQuery();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "INSERT OR IGNORE INTO uploads(message_id, chunk_id, uploaded_utc) VALUES($mid, $cid, $ts)";
+            cmd.Parameters.AddWithValue("$mid", messageId);
+            cmd.Parameters.AddWithValue("$cid", chunkId);
+            cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     public bool IsUploaded(string messageId)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM uploads WHERE message_id = $mid";
-        cmd.Parameters.AddWithValue("$mid", messageId);
-        using var r = cmd.ExecuteReader();
-        return r.Read();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM uploads WHERE message_id = $mid";
+            cmd.Parameters.AddWithValue("$mid", messageId);
+            using var r = cmd.ExecuteReader();
+            return r.Read();
+        }
     }
 
     public long UploadedCount()
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM uploads";
-        return (long)cmd.ExecuteScalar()!;
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM uploads";
+            return (long)cmd.ExecuteScalar()!;
+        }
     }
 
     /// <summary>
