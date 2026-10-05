@@ -522,8 +522,14 @@ public sealed class BackupRepository : IDisposable
         ArgumentNullException.ThrowIfNull(nzb);
         ArgumentNullException.ThrowIfNull(remote);
 
-        int downloaded = 0, alreadyPresent = 0;
+        int downloaded = 0, alreadyPresent = 0, reconstructed = 0;
         var files = nzb.Files;
+        // Collect all chunk IDs for parity group lookup
+        var allChunkIds = files.Select(f => f.ChunkId)
+            .Where(id => id is not null)
+            .Cast<string>()
+            .ToList();
+
         for (int i = 0; i < files.Count; i++)
         {
             string? chunkId = files[i].ChunkId;
@@ -539,9 +545,21 @@ public sealed class BackupRepository : IDisposable
             }
             else
             {
-                // ARTICLE + yEnc CRC-32 + header chunk-ID check inside.
-                byte[] blob = remote.Get(chunkId);
-                VerifyDownloadedBlob(chunkId, blob);
+                byte[]? blob = null;
+                try
+                {
+                    // ARTICLE + yEnc CRC-32 + header chunk-ID check inside.
+                    blob = remote.Get(chunkId);
+                    VerifyDownloadedBlob(chunkId, blob);
+                }
+                catch (Exception)
+                {
+                    // Chunk missing or corrupted — try parity reconstruction
+                    blob = TryReconstructChunk(chunkId, allChunkIds, remote);
+                    if (blob is null)
+                        throw; // Reconstruction failed, rethrow original
+                    reconstructed++;
+                }
                 _blobs.Put(chunkId, blob);
                 _catalog.RecordChunk(chunkId, blob.Length);
                 _catalog.RecordDownload(messageId, chunkId);
@@ -549,7 +567,106 @@ public sealed class BackupRepository : IDisposable
             }
             progress?.Invoke(i + 1, files.Count);
         }
-        return new DownloadResult(downloaded, alreadyPresent, files.Count);
+        return new DownloadResult(downloaded, alreadyPresent, files.Count, reconstructed);
+    }
+
+    /// <summary>
+    /// Attempts to reconstruct a missing chunk using XOR or PAR2 parity.
+    /// Returns null if reconstruction is not possible.
+    /// </summary>
+    private byte[]? TryReconstructChunk(
+        string chunkId,
+        IReadOnlyList<string> allChunkIds,
+        NntpBlobStore remote)
+    {
+        // Try XOR parity first (simpler, single parity block)
+        var xorGroup = Redundancy.XorParity.GetGroupFor(chunkId, allChunkIds);
+        if (xorGroup.Count >= 2)
+        {
+            string parityId = Redundancy.XorParity.MakeParityId(xorGroup);
+            try
+            {
+                byte[] parityBytes = remote.Get(parityId);
+                byte[]? reconstructed = Redundancy.XorParity.Reconstruct(
+                    chunkId, xorGroup,
+                    id => {
+                        try {
+                            if (_blobs.Exists(id)) return _blobs.Get(id);
+                            return remote.Get(id);
+                        } catch { return null; }
+                    },
+                    parityBytes);
+                if (reconstructed is not null)
+                {
+                    // Verify the reconstructed chunk
+                    try {
+                        VerifyDownloadedBlob(chunkId, reconstructed);
+                        return reconstructed;
+                    } catch { /* verification failed */ }
+                }
+            }
+            catch { /* parity not available */ }
+        }
+
+        // Try PAR2 (Reed-Solomon, up to 3 missing)
+        // PAR2 groups are 10 data shards; find which group this chunk belongs to
+        int chunkIndex = -1;
+        for (int i = 0; i < allChunkIds.Count; i++)
+        {
+            if (allChunkIds[i] == chunkId) { chunkIndex = i; break; }
+        }
+        if (chunkIndex >= 0)
+        {
+            int groupStart = (chunkIndex / Redundancy.Par2Redundancy.DataShards) * Redundancy.Par2Redundancy.DataShards;
+            var group = allChunkIds.Skip(groupStart).Take(Redundancy.Par2Redundancy.DataShards).ToList();
+            if (group.Count >= 2)
+            {
+                try
+                {
+                    var rs = new Redundancy.ReedSolomon(
+                        Redundancy.Par2Redundancy.DataShards,
+                        Redundancy.Par2Redundancy.ParityShards);
+                    // Collect available shards
+                    var shards = new byte[Redundancy.Par2Redundancy.DataShards + Redundancy.Par2Redundancy.ParityShards][];
+                    var present = new bool[shards.Length];
+                    int idx = 0;
+                    foreach (string id in group)
+                    {
+                        try {
+                            if (_blobs.Exists(id)) { shards[idx] = _blobs.Get(id); present[idx] = true; }
+                            else { shards[idx] = remote.Get(id); present[idx] = true; }
+                        } catch { present[idx] = false; shards[idx] = new byte[0]; }
+                        idx++;
+                    }
+                    // Fetch parity shards
+                    for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
+                    {
+                        string parityId = Redundancy.Par2Redundancy.MakeParityId(group, p);
+                        try {
+                            shards[idx] = remote.Get(parityId);
+                            present[idx] = true;
+                        } catch { present[idx] = false; shards[idx] = new byte[0]; }
+                        idx++;
+                    }
+                    // Pad remaining if group was partial
+                    while (idx < shards.Length) { present[idx] = false; shards[idx] = new byte[0]; idx++; }
+
+                    byte[][] recovered = rs.Reconstruct(shards, present);
+                    int dataIdx = group.IndexOf(chunkId);
+                    if (dataIdx >= 0)
+                    {
+                        byte[] candidate = recovered[dataIdx];
+                        try {
+                            VerifyDownloadedBlob(chunkId, candidate);
+                            return candidate;
+                        } catch { /* verification failed */ }
+                    }
+                }
+                catch { /* reconstruction failed */ }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

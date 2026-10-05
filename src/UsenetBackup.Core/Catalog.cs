@@ -165,4 +165,4 @@ public sealed class Catalog : IDisposable
 public sealed record BackupSummary(string BackupId, string Type, string Source, DateTime CreatedUtc);
 
 /// <summary>Outcome of <see cref="BackupRepository.DownloadChunks"/>.</summary>
-public sealed record DownloadResult(int Downloaded, int AlreadyPresent, int Total);
+public sealed record DownloadResult(int Downloaded, int AlreadyPresent, int Total, int Reconstructed = 0);
