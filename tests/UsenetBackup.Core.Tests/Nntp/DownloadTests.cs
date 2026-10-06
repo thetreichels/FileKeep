@@ -242,17 +242,22 @@ public sealed class DownloadTests : IDisposable
 
         // Tamper with the FIRST article in NZB order (generator sorts chunk
         // IDs), so the failure hits before anything is downloaded.
+        // Corrupt the CRC-32 in the =yend trailer — deterministic, unlike
+        // flipping a data character which can hit escape sequences or
+        // line breaks and produce non-CRC errors (flaky).
         string victim = fx.ChunkIds.OrderBy(x => x, StringComparer.Ordinal).First();
         string msgKey = _server.Articles.Keys.First(k => k.Contains(victim));
         string original = _server.Articles[msgKey];
-        int bodyAt = original.IndexOf("=ybegin", StringComparison.Ordinal);
-        Assert.True(bodyAt > 0);
-        int eol = original.IndexOf("\r\n", bodyAt, StringComparison.Ordinal);
-        int flipAt = eol + 12; // inside the yEnc data, past the =ybegin line
-        Assert.True(flipAt < original.Length);
-        char[] tampered = original.ToCharArray();
-        tampered[flipAt] = tampered[flipAt] == 'A' ? 'B' : 'A';
-        _server.Articles[msgKey] = new string(tampered);
+        int crcAt = original.IndexOf("crc32=", StringComparison.Ordinal);
+        Assert.True(crcAt > 0);
+        int crcValAt = crcAt + "crc32=".Length;
+        int crcEol = original.IndexOf("\r\n", crcValAt, StringComparison.Ordinal);
+        Assert.True(crcEol > crcValAt);
+        string tampered = original.Substring(0, crcValAt)
+            + new string('0', crcEol - crcValAt)
+            + original.Substring(crcEol);
+        Assert.NotEqual(original, tampered);
+        _server.Articles[msgKey] = tampered;
 
         using (var client = Connect())
         using (var remote = new NntpBlobStore(client, "alt.binaries.test", fx.Repo.RepoId,
