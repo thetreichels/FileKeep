@@ -313,7 +313,9 @@ static int NntpUpload(string[] args)
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var manifest = repo.LoadManifest(pos[1]);
-    string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToArray();
+    // Chunk order MUST match NzbGenerator.Generate (sorted by ID) so that
+    // parity groups align between upload and download reconstruction.
+    string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().OrderBy(id => id, StringComparer.Ordinal).ToArray();
 
     using var client = ConnectNntp(args);
     try
