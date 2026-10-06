@@ -23,7 +23,8 @@ public static class XorParity
     /// </summary>
     public static IReadOnlyDictionary<string, byte[]> GenerateParity(
         IReadOnlyList<string> chunkIds,
-        Func<string, byte[]> getChunkBytes)
+        Func<string, byte[]> getChunkBytes,
+        Action<string>? logWarning = null)
     {
         var result = new Dictionary<string, byte[]>();
         for (int i = 0; i < chunkIds.Count; i += GroupSize)
@@ -57,7 +58,13 @@ public static class XorParity
                 }
             }
             if (sizeMismatch)
+            {
+                logWarning?.Invoke(
+                    $"XOR parity: skipping group starting at {group[0]} " +
+                    $"({group.Count} chunks) due to varying chunk sizes. " +
+                    "These chunks will have no parity protection.");
                 continue; // Skip groups with varying chunk sizes
+            }
 
             string parityId = MakeParityId(group);
             result[parityId] = parity!;

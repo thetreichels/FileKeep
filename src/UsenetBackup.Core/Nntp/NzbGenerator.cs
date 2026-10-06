@@ -34,11 +34,8 @@ public static class NzbGenerator
         ArgumentNullException.ThrowIfNull(getUploadTimeUtc);
         ArgumentNullException.ThrowIfNull(options);
 
-        string[] chunkIds = manifest.Files
-            .SelectMany(f => f.Chunks)
-            .Distinct()
-            .OrderBy(id => id, StringComparer.Ordinal)
-            .ToArray();
+        // MUST use ChunkOrdering for parity group alignment (see b1921c8)
+        string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
 
         // Write through a MemoryStream so the declared encoding (UTF-8, no BOM)
         // matches the actual bytes; the CLI writes the text back as UTF-8.

@@ -385,9 +385,8 @@ public sealed class BackupScheduler
 
         using var repo = BackupRepository.Open(job.Repo, passphrase);
         var manifest = repo.LoadManifest(backupId);
-        // Chunk order MUST match NzbGenerator.Generate (sorted by ID) so that
-        // parity groups align between upload and download reconstruction.
-        string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().OrderBy(id => id, StringComparer.Ordinal).ToArray();
+        // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
+        string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
 
         List<string> errors = new();
         foreach (var nntp in providers)

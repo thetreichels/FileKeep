@@ -313,9 +313,8 @@ static int NntpUpload(string[] args)
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var manifest = repo.LoadManifest(pos[1]);
-    // Chunk order MUST match NzbGenerator.Generate (sorted by ID) so that
-    // parity groups align between upload and download reconstruction.
-    string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().OrderBy(id => id, StringComparer.Ordinal).ToArray();
+    // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
+    string[] chunkIds = UsenetBackup.Core.ChunkOrdering.GetOrderedChunkIds(manifest);
 
     using var client = ConnectNntp(args);
     try

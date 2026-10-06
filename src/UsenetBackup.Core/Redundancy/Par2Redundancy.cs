@@ -24,7 +24,8 @@ public static class Par2Redundancy
     /// </summary>
     public static IReadOnlyDictionary<string, byte[]> GenerateParity(
         IReadOnlyList<string> chunkIds,
-        Func<string, byte[]> getChunkBytes)
+        Func<string, byte[]> getChunkBytes,
+        Action<string>? logWarning = null)
     {
         var result = new Dictionary<string, byte[]>();
         var rs = new ReedSolomon(DataShards, ParityShards);
@@ -64,7 +65,13 @@ public static class Par2Redundancy
                 }
             }
             if (sizeMismatch)
+            {
+                logWarning?.Invoke(
+                    $"PAR2 parity: skipping group starting at {group[0]} " +
+                    $"({group.Count} chunks) due to varying chunk sizes. " +
+                    "These chunks will have no parity protection.");
                 continue; // Skip groups with varying chunk sizes
+            }
 
             byte[][] parityShards = rs.Encode(dataShards);
             for (int p = 0; p < parityShards.Length; p++)

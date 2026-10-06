@@ -952,13 +952,19 @@ public sealed class BackupRepository : IDisposable
         using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Stream? outStream = null;
         string? outPath = null;
+        string? tempPath = null;
         try
         {
             if (!verifyOnly && destDir is not null)
             {
                 outPath = Path.Combine(destDir, entry.Path.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
-                outStream = new FileStream(outPath, FileMode.Create, FileAccess.Write);
+                // Write to temp file first; rename to final path only after
+                // hash verification succeeds. This is atomic on the same
+                // filesystem and eliminates any window where a partial file
+                // is visible at the destination path.
+                tempPath = outPath + ".tmp-" + Guid.NewGuid().ToString("N")[..8];
+                outStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write);
             }
 
             foreach (string chunkId in entry.Chunks)
@@ -972,15 +978,25 @@ public sealed class BackupRepository : IDisposable
             if (!actual.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"File hash mismatch (manifest {entry.Sha256}, actual {actual}).");
+
+            // Hash verified — atomically move temp file to final path
+            if (tempPath is not null && outPath is not null)
+            {
+                outStream?.Dispose();
+                outStream = null;
+                File.Move(tempPath, outPath, overwrite: true);
+                tempPath = null; // Moved successfully, don't delete
+            }
         }
         catch
         {
-            // Clean up partial file on failure; don't leave 0-byte corpses.
+            // Clean up temp file on failure; final path is never touched
+            // unless the hash verified successfully.
             outStream?.Dispose();
             outStream = null;
-            if (outPath is not null && File.Exists(outPath))
+            if (tempPath is not null && File.Exists(tempPath))
             {
-                try { File.Delete(outPath); }
+                try { File.Delete(tempPath); }
                 catch { /* best effort */ }
             }
             throw;
