@@ -423,13 +423,24 @@ public sealed class BackupScheduler
                 {
                     MaxDegreeOfParallelism = nntp.Connections
                 };
+                // Progress tracker: logs every 5 min with rolling throughput ETA.
+                // Shows "measuring..." until enough data (10 chunks + 30s), then
+                // real estimates that refine as more data arrives.
+                using var progress = new UploadProgressTracker(
+                    Log, job.Name, nntp.Host, chunkIds.Length);
                 Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
                 {
-                    if (store.Exists(chunkId)) Interlocked.Increment(ref skipped);
+                    if (store.Exists(chunkId))
+                    {
+                        Interlocked.Increment(ref skipped);
+                        progress.RecordSkipped(1);
+                    }
                     else
                     {
-                        store.Put(chunkId, repo.GetChunkBlob(chunkId));
+                        byte[] blob = repo.GetChunkBlob(chunkId);
+                        store.Put(chunkId, blob);
                         Interlocked.Increment(ref uploaded);
+                        progress.RecordUploaded(1, blob.Length);
                     }
                 });
                     // Generate and upload XOR parity blocks if enabled
