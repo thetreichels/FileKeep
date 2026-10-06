@@ -71,17 +71,22 @@ public sealed class ReedSolomon
             parity[i] = new byte[shardSize];
 
         // Matrix multiplication: parity = parityMatrix * data
-        for (int p = 0; p < _parityShards; p++)
+        // Loop order optimized for cache locality: iterate data shards outer,
+        // bytes middle, parity shards inner. This accesses dataShards[d]
+        // sequentially (good) instead of striding across 10 arrays for each
+        // byte position (bad).
+        for (int d = 0; d < _dataShards; d++)
         {
+            byte[] dataShard = dataShards[d];
             for (int b = 0; b < shardSize; b++)
             {
-                byte sum = 0;
-                for (int d = 0; d < _dataShards; d++)
+                byte val = dataShard[b];
+                if (val == 0) continue; // Skip zero bytes (common in padded shards)
+                for (int p = 0; p < _parityShards; p++)
                 {
-                    sum = GaloisField.Add(sum,
-                        GaloisField.Mul(_parityMatrix[p, d], dataShards[d][b]));
+                    parity[p][b] = GaloisField.Add(parity[p][b],
+                        GaloisField.Mul(_parityMatrix[p, d], val));
                 }
-                parity[p][b] = sum;
             }
         }
         return parity;

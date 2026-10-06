@@ -445,7 +445,7 @@ public sealed class BackupRepository : IDisposable
             ArrayPool<byte>.Shared.Return(chunkBuf);
         }
 
-        string actual = Convert.ToHexString(imageHash.GetHashAndReset()).ToLowerInvariant();
+        string actual = Convert.ToHexString(imageHash.GetHashAndReset());
         if (!string.Equals(actual, entry.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException(
                 $"Restored image hash mismatch for backup {backupId}: manifest says {entry.Sha256}, wrote {actual}.");
@@ -958,7 +958,7 @@ public sealed class BackupRepository : IDisposable
                 outStream?.Write(plaintext, 0, plaintext.Length);
             }
 
-            string actual = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
+            string actual = Convert.ToHexString(fileHash.GetHashAndReset());
             if (!actual.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"File hash mismatch (manifest {entry.Sha256}, actual {actual}).");
