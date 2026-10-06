@@ -166,4 +166,36 @@ public sealed class XorParityTests
         Assert.Equal(expected.Length, reconstructed!.Length);
         Assert.Equal(expected, reconstructed);
     }
+
+    [Fact]
+    public void Reconstruct_NegativeLengthInHeader_ReturnsNull()
+    {
+        var chunkIds = Enumerable.Range(0, 10).Select(i => i.ToString("x64")).ToList();
+        var chunks = chunkIds.ToDictionary(id => id, id => new byte[100]);
+        var parity = XorParity.GenerateParity(chunkIds, id => chunks[id]);
+        byte[] parityData = (byte[])parity.Values.First().Clone();
+
+        // Corrupt: set first length to -1
+        BitConverter.GetBytes(-1).CopyTo(parityData, 8);
+
+        chunks.Remove(chunkIds[0]);
+        var ex = Record.Exception(() => XorParity.Reconstruct(
+            chunkIds[0], chunkIds, id => chunks.GetValueOrDefault(id), parityData));
+        Assert.Null(ex); // Must not throw
+    }
+
+    [Fact]
+    public void Reconstruct_CorruptMagic_ReturnsNull()
+    {
+        var chunkIds = Enumerable.Range(0, 10).Select(i => i.ToString("x64")).ToList();
+        var chunks = chunkIds.ToDictionary(id => id, id => new byte[100]);
+        var parity = XorParity.GenerateParity(chunkIds, id => chunks[id]);
+        byte[] parityData = (byte[])parity.Values.First().Clone();
+        parityData[0] = (byte)'Z';
+
+        chunks.Remove(chunkIds[0]);
+        byte[]? result = XorParity.Reconstruct(
+            chunkIds[0], chunkIds, id => chunks.GetValueOrDefault(id), parityData);
+        Assert.Null(result);
+    }
 }

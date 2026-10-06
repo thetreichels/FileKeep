@@ -125,7 +125,7 @@ public static class XorParity
 
         // Trim to original length
         int originalLen = originalLengths[missingIndex];
-        if (originalLen > maxLen)
+        if (originalLen < 0 || originalLen > maxLen)
             return null; // Corrupt header
 
         byte[] trimmed = new byte[originalLen];

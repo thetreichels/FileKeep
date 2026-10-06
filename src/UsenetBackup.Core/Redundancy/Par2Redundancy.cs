@@ -179,6 +179,8 @@ public static class Par2Redundancy
                 if (idx < groupChunkIds.Count)
                 {
                     int originalLen = originalLengths[idx];
+                    if (originalLen < 0 || originalLen > maxLen)
+                        return null; // Corrupt header
                     byte[] trimmed = new byte[originalLen];
                     Array.Copy(reconstructed[idx], trimmed, Math.Min(originalLen, reconstructed[idx].Length));
                     result[groupChunkIds[idx]] = trimmed;
@@ -253,7 +255,7 @@ public static class Par2Redundancy
     /// </summary>
     public static string MakeParityId(IReadOnlyList<string> groupChunkIds, int parityIndex)
     {
-        string input = $"par2:{parityIndex}:" + string.Join(",", groupChunkIds.OrderBy(id => id));
+        string input = $"par2:{parityIndex}:" + string.Join(",", groupChunkIds.OrderBy(id => id, StringComparer.Ordinal));
         byte[] hash = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(hash).ToLowerInvariant();
