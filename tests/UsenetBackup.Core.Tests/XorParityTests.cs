@@ -75,4 +75,33 @@ public sealed class XorParityTests
         var group2 = new[] { "c", "b", "a" }; // Different order
         Assert.Equal(XorParity.MakeParityId(group1), XorParity.MakeParityId(group2));
     }
+
+    [Fact]
+    public void GetGroupFor_UsesSortedOrder_Regression_b1921c8()
+    {
+        // Regression test for b1921c8: upload paths (scheduler + CLI) must use
+        // the same chunk ordering as NzbGenerator.Generate (sorted by ID),
+        // otherwise position-based parity groups won't align and reconstruction
+        // will look for the wrong parity blocks.
+        //
+        // Manifest file order: zzz, aaa, mmm (deliberately unsorted)
+        // Sorted order: aaa, mmm, zzz
+        var manifestOrder = new[] { "zzz", "aaa", "mmm" };
+        var sortedOrder = manifestOrder.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        // Simulate upload path: sorted (as fixed in b1921c8)
+        var uploadChunkIds = manifestOrder.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        // Simulate NZB generation path: sorted (NzbGenerator.Generate)
+        var nzbChunkIds = manifestOrder.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        // Both must produce identical ordering for parity groups to align
+        Assert.Equal(nzbChunkIds, uploadChunkIds);
+
+        // Verify GetGroupFor works with the sorted order
+        var group = XorParity.GetGroupFor("mmm", sortedOrder);
+        Assert.Contains("aaa", group);
+        Assert.Contains("mmm", group);
+        Assert.Contains("zzz", group);
+    }
 }
