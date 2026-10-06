@@ -438,28 +438,30 @@ public sealed class BackupScheduler
                     {
                         var parityBlocks = Redundancy.XorParity.GenerateParity(
                             chunkIds, id => repo.GetChunkBlob(id));
-                        foreach (var (parityId, parityBytes) in parityBlocks)
+                        // Upload parity blocks in parallel using the connection pool
+                        Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
                         {
-                            if (!store.Exists(parityId))
+                            if (!store.Exists(kvp.Key))
                             {
-                                store.Put(parityId, parityBytes);
-                                parityUploaded++;
+                                store.Put(kvp.Key, kvp.Value);
+                                Interlocked.Increment(ref parityUploaded);
                             }
-                        }
+                        });
                         Log($"job '{job.Name}': uploaded {parityUploaded} XOR parity blocks to {nntp.Host}");
                     }
                     else if (redundancy == "par2")
                     {
                         var parityBlocks = Redundancy.Par2Redundancy.GenerateParity(
                             chunkIds, id => repo.GetChunkBlob(id));
-                        foreach (var (parityId, parityBytes) in parityBlocks)
+                        // Upload parity blocks in parallel using the connection pool
+                        Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
                         {
-                            if (!store.Exists(parityId))
+                            if (!store.Exists(kvp.Key))
                             {
-                                store.Put(parityId, parityBytes);
-                                parityUploaded++;
+                                store.Put(kvp.Key, kvp.Value);
+                                Interlocked.Increment(ref parityUploaded);
                             }
-                        }
+                        });
                         Log($"job '{job.Name}': uploaded {parityUploaded} PAR2 parity blocks to {nntp.Host}");
                     }
                     repo.UploadManifest(backupId, store);
