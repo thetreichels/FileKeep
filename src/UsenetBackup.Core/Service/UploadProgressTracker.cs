@@ -143,4 +143,50 @@ public sealed class UploadProgressTracker : IDisposable
             _timer.Dispose();
         }
     }
+
+    /// <summary>
+    /// Returns current progress snapshot for dashboard API.
+    /// </summary>
+    public object GetSnapshot()
+    {
+        lock (_lock)
+        {
+            PruneOld();
+            int done = _uploaded + _skipped;
+            double pct = _totalChunks > 0 ? 100.0 * done / _totalChunks : 0;
+            var elapsed = DateTime.UtcNow - _startTime;
+
+            long windowBytes = _recent.Sum(r => r.Bytes);
+            double windowSecs = Math.Min(Window.TotalSeconds, Math.Max(1, elapsed.TotalSeconds));
+            double bytesPerSec = windowBytes / windowSecs;
+
+            bool hasEnoughData = _uploaded >= 10 && elapsed.TotalSeconds >= 30;
+
+            string? eta = null;
+            if (hasEnoughData && bytesPerSec > 0)
+            {
+                double avgBytesPerChunk = _uploaded > 0 ? (double)_bytesUploaded / _uploaded : 0;
+                int remainingChunks = _totalChunks - done;
+                long estRemainingBytes = (long)(remainingChunks * avgBytesPerChunk);
+                if (estRemainingBytes > 0)
+                {
+                    var remaining = TimeSpan.FromSeconds(estRemainingBytes / bytesPerSec);
+                    eta = FormatDuration(remaining);
+                }
+            }
+
+            return new
+            {
+                jobName = _jobName,
+                host = _host,
+                doneChunks = done,
+                totalChunks = _totalChunks,
+                percent = Math.Round(pct, 1),
+                bytesPerSec = (long)bytesPerSec,
+                eta = eta, // null if still measuring
+                measuring = !hasEnoughData,
+                elapsedSecs = (int)elapsed.TotalSeconds,
+            };
+        }
+    }
 }

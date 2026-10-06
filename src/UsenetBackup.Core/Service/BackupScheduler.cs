@@ -137,6 +137,12 @@ public sealed class BackupScheduler
     private readonly object _runGate = new(); // runs never overlap
     private IReadOnlyList<NntpConfig> _nntpProviders = Array.Empty<NntpConfig>();
 
+    /// <summary>
+    /// Currently active upload progress tracker, or null if no upload in progress.
+    /// Used by the dashboard to show progress bar and current speed.
+    /// </summary>
+    public UploadProgressTracker? ActiveUpload { get; private set; }
+
     public IReadOnlyList<JobState> Jobs
     {
         get
@@ -426,23 +432,32 @@ public sealed class BackupScheduler
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
                 // real estimates that refine as more data arrives.
+                // Exposed via ActiveUpload for dashboard progress bar.
                 using var progress = new UploadProgressTracker(
                     Log, job.Name, nntp.Host, chunkIds.Length);
-                Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
+                ActiveUpload = progress;
+                try
                 {
-                    if (store.Exists(chunkId))
+                    Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
                     {
-                        Interlocked.Increment(ref skipped);
-                        progress.RecordSkipped(1);
-                    }
-                    else
-                    {
-                        byte[] blob = repo.GetChunkBlob(chunkId);
-                        store.Put(chunkId, blob);
-                        Interlocked.Increment(ref uploaded);
-                        progress.RecordUploaded(1, blob.Length);
-                    }
-                });
+                        if (store.Exists(chunkId))
+                        {
+                            Interlocked.Increment(ref skipped);
+                            progress.RecordSkipped(1);
+                        }
+                        else
+                        {
+                            byte[] blob = repo.GetChunkBlob(chunkId);
+                            store.Put(chunkId, blob);
+                            Interlocked.Increment(ref uploaded);
+                            progress.RecordUploaded(1, blob.Length);
+                        }
+                    });
+                }
+                finally
+                {
+                    ActiveUpload = null;
+                }
                     // Generate and upload XOR parity blocks if enabled
                     int parityUploaded = 0;
                     if (redundancy == "xor")

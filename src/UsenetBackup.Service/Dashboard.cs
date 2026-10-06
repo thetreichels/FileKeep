@@ -124,6 +124,14 @@ public static class Dashboard
             }
         });
 
+        app.MapGet("/api/upload-progress", () =>
+        {
+            var tracker = scheduler.ActiveUpload;
+            if (tracker is null)
+                return Results.Json(new { active = false });
+            return Results.Json(new { active = true, progress = tracker.GetSnapshot() });
+        });
+
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -601,6 +609,19 @@ public static class DashboardHtml
               </div>
               <h2>Backup jobs</h2>
               <div class="card" id="jobs" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
+              <div class="card" id="uploadProgress" style="display:none; margin-top:12px">
+                <div class="row">
+                  <div class="grow">
+                    <div class="name" id="upTitle">Uploading…</div>
+                    <div class="meta" id="upMeta"></div>
+                  </div>
+                  <div class="name" id="upSpeed" style="white-space:nowrap"></div>
+                </div>
+                <div style="background:var(--bg-2); border-radius:4px; height:8px; margin-top:8px; overflow:hidden">
+                  <div id="upBar" style="background:var(--accent); height:100%; width:0%; transition:width 0.5s"></div>
+                </div>
+                <div class="meta" id="upEta" style="margin-top:4px"></div>
+              </div>
               <h2>Usenet expiration warnings</h2>
               <div class="card" id="expiration" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
               <div class="foot">Backups are encrypted locally and posted to Usenet. Your passphrase never leaves this machine's memory.</div>
@@ -756,6 +777,8 @@ public static class DashboardHtml
             </div>`).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
           // Load expiration warnings for each job's repo
           loadExpiration(s.jobs);
+          // Start upload progress polling
+          startUploadPolling();
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
@@ -788,6 +811,33 @@ public static class DashboardHtml
           } catch (e) {
             box.innerHTML = '<p style="color:var(--bad)">Could not load expiration data: ' + esc(e.message) + '</p>';
           }
+        }
+        let uploadPollTimer = null;
+        function startUploadPolling() {
+          if (uploadPollTimer) return;
+          const poll = async () => {
+            try {
+              const res = await api('/api/upload-progress');
+              const card = document.getElementById('uploadProgress');
+              if (!res.active) {
+                card.style.display = 'none';
+                return;
+              }
+              const p = res.progress;
+              card.style.display = 'block';
+              document.getElementById('upTitle').textContent = 'Uploading to ' + p.host;
+              document.getElementById('upMeta').textContent = p.jobName + ' — ' + p.doneChunks + '/' + p.totalChunks + ' chunks';
+              document.getElementById('upBar').style.width = p.percent + '%';
+              const bps = p.bytesPerSec;
+              const speed = bps >= 1024*1024 ? (bps/(1024*1024)).toFixed(1) + ' MB/s' : Math.round(bps/1024) + ' KB/s';
+              document.getElementById('upSpeed').textContent = speed;
+              document.getElementById('upEta').textContent = p.measuring
+                ? 'Measuring throughput...'
+                : (p.eta ? '~' + p.eta + ' remaining' : 'Almost done');
+            } catch (e) { /* ignore poll errors */ }
+          };
+          poll();
+          uploadPollTimer = setInterval(poll, 5000); // Poll every 5 seconds
         }
         async function runJob(name) {
           const csrf = document.querySelector('meta[name=csrf-token]').content;
