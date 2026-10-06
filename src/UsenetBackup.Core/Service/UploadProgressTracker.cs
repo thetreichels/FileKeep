@@ -17,6 +17,7 @@ public sealed class UploadProgressTracker : IDisposable
     private int _uploaded;
     private int _skipped;
     private long _bytesUploaded;
+    private string _phase = "chunks";
 
     // Rolling window: track completions in last 5 minutes
     private readonly Queue<(DateTime Time, long Bytes)> _recent = new();
@@ -58,6 +59,18 @@ public sealed class UploadProgressTracker : IDisposable
         }
     }
 
+    /// <summary>
+    /// Sets the current upload phase for dashboard display
+    /// (e.g., "chunks", "parity", "manifest").
+    /// </summary>
+    public void SetPhase(string phase)
+    {
+        lock (_lock)
+        {
+            _phase = phase;
+        }
+    }
+
     private void PruneOld()
     {
         var cutoff = DateTime.UtcNow - Window;
@@ -85,7 +98,7 @@ public sealed class UploadProgressTracker : IDisposable
                 string reason = _uploaded < 10
                     ? $"({_uploaded}/10 chunks sampled)"
                     : $"({(int)elapsed.TotalSeconds}s/30s elapsed)";
-                _log($"job '{_jobName}': uploading to {_host}... {done}/{_totalChunks} chunks ({pct:F1}%) — measuring throughput {reason}...");
+                _log($"job '{_jobName}': uploading {_phase} to {_host}... {done}/{_totalChunks} ({pct:F1}%) — measuring throughput {reason}...");
             }
             else
             {
@@ -121,7 +134,7 @@ public sealed class UploadProgressTracker : IDisposable
                     ? $"{bytesPerSec/(1024*1024):F1} MB/s"
                     : $"{bytesPerSec/1024:F0} KB/s";
 
-                _log($"job '{_jobName}': uploading to {_host}... {done}/{_totalChunks} chunks ({pct:F1}%) — {rate}, {eta}{confidence}");
+                _log($"job '{_jobName}': uploading {_phase} to {_host}... {done}/{_totalChunks} ({pct:F1}%) — {rate}, {eta}{confidence}");
             }
         }
     }
@@ -186,6 +199,7 @@ public sealed class UploadProgressTracker : IDisposable
                 eta = eta, // null if still measuring
                 measuring = !hasEnoughData,
                 elapsedSecs = (int)elapsed.TotalSeconds,
+                phase = _phase,
             };
         }
     }

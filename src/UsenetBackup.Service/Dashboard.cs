@@ -825,8 +825,8 @@ public static class DashboardHtml
               }
               const p = res.progress;
               card.style.display = 'block';
-              document.getElementById('upTitle').textContent = 'Uploading to ' + p.host;
-              document.getElementById('upMeta').textContent = p.jobName + ' — ' + p.doneChunks + '/' + p.totalChunks + ' chunks';
+              document.getElementById('upTitle').textContent = 'Uploading ' + p.phase + ' to ' + p.host;
+              document.getElementById('upMeta').textContent = p.jobName + ' — ' + p.doneChunks + '/' + p.totalChunks + ' items';
               document.getElementById('upBar').style.width = p.percent + '%';
               const bps = p.bytesPerSec;
               const speed = bps >= 1024*1024 ? (bps/(1024*1024)).toFixed(1) + ' MB/s' : Math.round(bps/1024) + ' KB/s';

@@ -429,15 +429,30 @@ public sealed class BackupScheduler
                 {
                     MaxDegreeOfParallelism = nntp.Connections
                 };
+                // Generate parity blocks upfront so the progress tracker knows
+                // the full scope: chunks + parity + manifest (+ index).
+                IReadOnlyDictionary<string, byte[]> parityBlocks =
+                    new Dictionary<string, byte[]>();
+                if (redundancy == "xor")
+                    parityBlocks = Redundancy.XorParity.GenerateParity(
+                        chunkIds, id => repo.GetChunkBlob(id));
+                else if (redundancy == "par2")
+                    parityBlocks = Redundancy.Par2Redundancy.GenerateParity(
+                        chunkIds, id => repo.GetChunkBlob(id));
+
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
                 // real estimates that refine as more data arrives.
                 // Exposed via ActiveUpload for dashboard progress bar.
+                // Total covers chunks + parity + manifest + index so the bar
+                // doesn't hit 100% and vanish while work remains.
+                int totalUnits = chunkIds.Length + parityBlocks.Count + 2;
                 using var progress = new UploadProgressTracker(
-                    Log, job.Name, nntp.Host, chunkIds.Length);
+                    Log, job.Name, nntp.Host, totalUnits);
                 ActiveUpload = progress;
                 try
                 {
+                    progress.SetPhase("chunks");
                     Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
                     {
                         if (store.Exists(chunkId))
@@ -453,50 +468,51 @@ public sealed class BackupScheduler
                             progress.RecordUploaded(1, blob.Length);
                         }
                     });
-                }
-                finally
-                {
-                    ActiveUpload = null;
-                }
-                    // Generate and upload XOR parity blocks if enabled
-                    int parityUploaded = 0;
-                    if (redundancy == "xor")
+
+                    // Upload parity blocks (tracked; previously invisible)
+                    int parityUploaded = 0, paritySkipped = 0;
+                    if (parityBlocks.Count > 0)
                     {
-                        var parityBlocks = Redundancy.XorParity.GenerateParity(
-                            chunkIds, id => repo.GetChunkBlob(id));
-                        // Upload parity blocks in parallel using the connection pool
+                        progress.SetPhase("parity");
+                        string parityLabel = redundancy == "xor" ? "XOR" : "PAR2";
                         Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
                         {
                             if (!store.Exists(kvp.Key))
                             {
                                 store.Put(kvp.Key, kvp.Value);
                                 Interlocked.Increment(ref parityUploaded);
+                                progress.RecordUploaded(1, kvp.Value.Length);
                             }
-                        });
-                        Log($"job '{job.Name}': uploaded {parityUploaded} XOR parity blocks to {nntp.Host}");
-                    }
-                    else if (redundancy == "par2")
-                    {
-                        var parityBlocks = Redundancy.Par2Redundancy.GenerateParity(
-                            chunkIds, id => repo.GetChunkBlob(id));
-                        // Upload parity blocks in parallel using the connection pool
-                        Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
-                        {
-                            if (!store.Exists(kvp.Key))
+                            else
                             {
-                                store.Put(kvp.Key, kvp.Value);
-                                Interlocked.Increment(ref parityUploaded);
+                                Interlocked.Increment(ref paritySkipped);
+                                progress.RecordSkipped(1);
                             }
                         });
-                        Log($"job '{job.Name}': uploaded {parityUploaded} PAR2 parity blocks to {nntp.Host}");
+                        Log($"job '{job.Name}': uploaded {parityUploaded} {parityLabel} parity blocks to {nntp.Host}" +
+                            (paritySkipped > 0 ? $" ({paritySkipped} already present)" : ""));
                     }
-                    repo.UploadManifest(backupId, store);
+
+                    // Manifest + index (tracked; previously invisible)
+                    progress.SetPhase("manifest");
+                    int manifestArticles = repo.UploadManifest(backupId, store);
+                    progress.RecordUploaded(manifestArticles, 0);
+                    // Reconcile: we reserved 2 slots; mark any unused as skipped
+                    // so the bar reaches exactly 100%.
+                    if (manifestArticles < 2)
+                        progress.RecordSkipped(2 - manifestArticles);
+
                     // Track upload for expiration monitoring
                     var tracker = new Nntp.UsenetUploadTracker(job.Repo);
                     tracker.RecordUpload(backupId, nntp.Host, nntp.Newsgroup);
                     OperationLog.Append(job.Repo, "auto-upload",
                         $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
                     Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");
+                }
+                finally
+                {
+                    ActiveUpload = null;
+                }
             }
             catch (Exception ex)
             {

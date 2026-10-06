@@ -660,7 +660,7 @@ public sealed class BackupRepository : IDisposable
     /// it to the backup ID); without the passphrase it is opaque bytes.
     /// Idempotent: skips when the article already exists.
     /// </summary>
-    public void UploadManifest(string backupId, NntpBlobStore remote)
+    public int UploadManifest(string backupId, NntpBlobStore remote)
     {
         ArgumentNullException.ThrowIfNull(remote);
         string manifestPath = Path.Combine(_root, "manifests", backupId + ".json");
@@ -674,7 +674,8 @@ public sealed class BackupRepository : IDisposable
             remote.PostManifest(backupId, encrypted);
             OperationLog.Append(_root, "manifest-upload", $"id={backupId}");
             // Update the monthly manifest index (versioned; Usenet articles are immutable).
-            UpdateManifestIndex(remote);
+            bool indexPosted = UpdateManifestIndex(remote);
+            return indexPosted ? 2 : 1;
         }
         finally
         {
@@ -688,21 +689,22 @@ public sealed class BackupRepository : IDisposable
     /// backup IDs for the current year-month. Each upload creates a new
     /// version; discovery fetches the latest via STAT probing.
     /// </summary>
-    private void UpdateManifestIndex(NntpBlobStore remote)
+    private bool UpdateManifestIndex(NntpBlobStore remote)
     {
         string yearMonth = DateTime.UtcNow.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture);
         string manifestsDir = Path.Combine(_root, "manifests");
         if (!Directory.Exists(manifestsDir))
-            return;
+            return false;
         var backupIds = Directory.GetFiles(manifestsDir, "*.json")
             .Select(f => Path.GetFileNameWithoutExtension(f))
             .Where(id => id.Length == 32 && id.All(Uri.IsHexDigit))
             .OrderBy(id => id, StringComparer.Ordinal)
             .ToList();
         if (backupIds.Count == 0)
-            return;
+            return false;
         int version = remote.PostManifestIndex(yearMonth, backupIds);
         OperationLog.Append(_root, "manifest-index-upload", $"ym={yearMonth} v={version} count={backupIds.Count}");
+        return true;
     }
 
     /// <summary>
