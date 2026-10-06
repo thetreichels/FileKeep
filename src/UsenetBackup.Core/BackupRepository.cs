@@ -609,61 +609,45 @@ public sealed class BackupRepository : IDisposable
         }
 
         // Try PAR2 (Reed-Solomon, up to 3 missing)
-        // PAR2 groups are 10 data shards; find which group this chunk belongs to
-        int chunkIndex = -1;
-        for (int i = 0; i < allChunkIds.Count; i++)
+        // Uses Par2Redundancy.Reconstruct which handles the length header
+        // and trims reconstructed shards to original sizes.
+        var par2Group = Redundancy.Par2Redundancy.GetGroupFor(chunkId, allChunkIds);
+        if (par2Group.Count >= 2)
         {
-            if (allChunkIds[i] == chunkId) { chunkIndex = i; break; }
-        }
-        if (chunkIndex >= 0)
-        {
-            int groupStart = (chunkIndex / Redundancy.Par2Redundancy.DataShards) * Redundancy.Par2Redundancy.DataShards;
-            var group = allChunkIds.Skip(groupStart).Take(Redundancy.Par2Redundancy.DataShards).ToList();
-            if (group.Count >= 2)
+            try
             {
-                try
+                // Fetch available parity blocks
+                var parityDatas = new List<byte[]>();
+                for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
                 {
-                    var rs = new Redundancy.ReedSolomon(
-                        Redundancy.Par2Redundancy.DataShards,
-                        Redundancy.Par2Redundancy.ParityShards);
-                    // Collect available shards
-                    var shards = new byte[Redundancy.Par2Redundancy.DataShards + Redundancy.Par2Redundancy.ParityShards][];
-                    var present = new bool[shards.Length];
-                    int idx = 0;
-                    foreach (string id in group)
-                    {
-                        try {
-                            if (_blobs.Exists(id)) { shards[idx] = _blobs.Get(id); present[idx] = true; }
-                            else { shards[idx] = remote.Get(id); present[idx] = true; }
-                        } catch { present[idx] = false; shards[idx] = new byte[0]; }
-                        idx++;
-                    }
-                    // Fetch parity shards
-                    for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
-                    {
-                        string parityId = Redundancy.Par2Redundancy.MakeParityId(group, p);
-                        try {
-                            shards[idx] = remote.Get(parityId);
-                            present[idx] = true;
-                        } catch { present[idx] = false; shards[idx] = new byte[0]; }
-                        idx++;
-                    }
-                    // Pad remaining if group was partial
-                    while (idx < shards.Length) { present[idx] = false; shards[idx] = new byte[0]; idx++; }
+                    string parityId = Redundancy.Par2Redundancy.MakeParityId(par2Group, p);
+                    try {
+                        parityDatas.Add(remote.Get(parityId));
+                    } catch { /* parity block not available */ }
+                }
 
-                    byte[][] recovered = rs.Reconstruct(shards, present);
-                    int dataIdx = group.IndexOf(chunkId);
-                    if (dataIdx >= 0)
+                if (parityDatas.Count > 0)
+                {
+                    var reconstructed = Redundancy.Par2Redundancy.Reconstruct(
+                        par2Group,
+                        id => {
+                            try {
+                                if (_blobs.Exists(id)) return _blobs.Get(id);
+                                return remote.Get(id);
+                            } catch { return null; }
+                        },
+                        parityDatas);
+
+                    if (reconstructed is not null && reconstructed.TryGetValue(chunkId, out byte[]? candidate))
                     {
-                        byte[] candidate = recovered[dataIdx];
                         try {
                             VerifyDownloadedBlob(chunkId, candidate);
                             return candidate;
                         } catch { /* verification failed */ }
                     }
                 }
-                catch { /* reconstruction failed */ }
             }
+            catch { /* reconstruction failed */ }
         }
 
         return null;

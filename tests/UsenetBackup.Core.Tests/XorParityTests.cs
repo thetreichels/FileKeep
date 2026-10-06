@@ -71,8 +71,8 @@ public sealed class XorParityTests
     [Fact]
     public void MakeParityId_IsDeterministic()
     {
-        var group1 = new[] { "a", "b", "c" };
-        var group2 = new[] { "c", "b", "a" }; // Different order
+        var group1 = new[] { "aa", "bb", "cc" };
+        var group2 = new[] { "cc", "bb", "aa" }; // Different order
         Assert.Equal(XorParity.MakeParityId(group1), XorParity.MakeParityId(group2));
     }
 
@@ -103,5 +103,67 @@ public sealed class XorParityTests
         Assert.Contains("aaa", group);
         Assert.Contains("mmm", group);
         Assert.Contains("zzz", group);
+    }
+
+    [Fact]
+    public void GenerateParity_SupportsVaryingSizes()
+    {
+        // Chunks with different sizes (e.g., last chunk of file is smaller)
+        var chunkIds = new[] { "aa", "bb", "cc" };
+        var original = new Dictionary<string, byte[]>
+        {
+            ["aa"] = new byte[100],
+            ["bb"] = new byte[50],  // Smaller
+            ["cc"] = new byte[100],
+        };
+        new Random(42).NextBytes(original["aa"]);
+        new Random(43).NextBytes(original["bb"]);
+        new Random(44).NextBytes(original["cc"]);
+
+        var chunks = new Dictionary<string, byte[]>(original);
+        var parity = XorParity.GenerateParity(chunkIds, id => chunks[id]);
+
+        Assert.Single(parity); // One parity block generated (not skipped)
+
+        // Remove the small chunk, reconstruct it
+        byte[] parityData = parity.Values.First();
+        byte[] expected = (byte[])original["bb"].Clone();
+        chunks.Remove("bb");
+
+        byte[]? reconstructed = XorParity.Reconstruct(
+            "bb", chunkIds, id => chunks.GetValueOrDefault(id), parityData);
+
+        Assert.NotNull(reconstructed);
+        Assert.Equal(50, reconstructed!.Length); // Trimmed to original size
+        Assert.Equal(expected, reconstructed);
+    }
+
+    [Fact]
+    public void Reconstruct_TrimsToOriginalLength()
+    {
+        var chunkIds = new[] { "aa", "bb", "cc" };
+        var original = new Dictionary<string, byte[]>
+        {
+            ["aa"] = new byte[100],
+            ["bb"] = new byte[37],  // Odd size
+            ["cc"] = new byte[100],
+        };
+        var rand = new Random(123);
+        foreach (var kv in original) rand.NextBytes(kv.Value);
+
+        var chunks = new Dictionary<string, byte[]>(original);
+        var parity = XorParity.GenerateParity(chunkIds, id => chunks[id]);
+        byte[] parityData = parity.Values.First();
+
+        // Save original for comparison, then remove
+        byte[] expected = (byte[])original["bb"].Clone();
+        chunks.Remove("bb");
+
+        byte[]? reconstructed = XorParity.Reconstruct(
+            "bb", chunkIds, id => chunks.GetValueOrDefault(id), parityData);
+
+        Assert.NotNull(reconstructed);
+        Assert.Equal(expected.Length, reconstructed!.Length);
+        Assert.Equal(expected, reconstructed);
     }
 }

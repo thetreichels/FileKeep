@@ -6,20 +6,29 @@ namespace UsenetBackup.Core.Redundancy;
 /// Recovers any single missing/corrupted chunk per group.
 /// </summary>
 /// <remarks>
-/// Limitation: all chunks in a group must have identical encrypted sizes.
-/// Groups with varying sizes (e.g., the last chunk of a file being smaller)
-/// are skipped — no parity is generated for them. This is fail-closed:
-/// such chunks simply have no parity protection, rather than incorrect parity.
+/// Supports varying chunk sizes: smaller chunks are zero-padded to the
+/// maximum size in the group, and original lengths are stored in the parity
+/// header. During reconstruction, the recovered chunk is trimmed to its
+/// original length before hash verification.
+///
+/// Parity data format:
+///   [magic:4] = "XOR1"
+///   [numChunks:4] (little-endian int32)
+///   [len0:4][len1:4]...[lenN:4] (little-endian int32 each)
+///   [parity bytes...] (maxLen bytes)
 /// </remarks>
 public static class XorParity
 {
     /// <summary>Number of data chunks per parity group.</summary>
     public const int GroupSize = 10;
 
+    private static readonly byte[] Magic = "XOR1"u8.ToArray();
+    private const int HeaderFixedSize = 8; // magic(4) + numChunks(4)
+
     /// <summary>
     /// Generates parity blocks for a set of chunk IDs. Returns a map from
-    /// parity chunk ID to the parity bytes. The parity chunk ID is derived
-    /// deterministically: "parity-" + SHA256(group chunk IDs).
+    /// parity chunk ID to the parity bytes (including length header).
+    /// The parity chunk ID is derived deterministically from group chunk IDs.
     /// </summary>
     public static IReadOnlyDictionary<string, byte[]> GenerateParity(
         IReadOnlyList<string> chunkIds,
@@ -33,41 +42,33 @@ public static class XorParity
             if (group.Count < 2)
                 continue; // Need at least 2 for parity to be useful
 
-            // XOR all chunks in the group.
-            // All chunks must have identical sizes; skip groups with varying
-            // sizes (e.g., last chunk of a file) rather than generating
-            // incorrect parity.
-            byte[]? parity = null;
-            bool sizeMismatch = false;
+            // Collect chunks and find max length
+            var chunks = new List<byte[]>();
+            int maxLen = 0;
+            var originalLengths = new List<int>();
             foreach (string chunkId in group)
             {
                 byte[] bytes = getChunkBytes(chunkId);
-                if (parity is null)
-                {
-                    parity = (byte[])bytes.Clone();
-                }
-                else
-                {
-                    if (bytes.Length != parity.Length)
-                    {
-                        sizeMismatch = true;
-                        break;
-                    }
-                    for (int j = 0; j < parity.Length; j++)
-                        parity[j] ^= bytes[j];
-                }
-            }
-            if (sizeMismatch)
-            {
-                logWarning?.Invoke(
-                    $"XOR parity: skipping group starting at {group[0]} " +
-                    $"({group.Count} chunks) due to varying chunk sizes. " +
-                    "These chunks will have no parity protection.");
-                continue; // Skip groups with varying chunk sizes
+                chunks.Add(bytes);
+                originalLengths.Add(bytes.Length);
+                if (bytes.Length > maxLen)
+                    maxLen = bytes.Length;
             }
 
+            // XOR padded chunks
+            byte[] parity = new byte[maxLen];
+            foreach (byte[] bytes in chunks)
+            {
+                for (int j = 0; j < bytes.Length; j++)
+                    parity[j] ^= bytes[j];
+                // Bytes beyond bytes.Length are XORed with 0 (no-op, already zero)
+            }
+
+            // Build parity data with length header
+            byte[] parityData = BuildParityData(parity, originalLengths);
+
             string parityId = MakeParityId(group);
-            result[parityId] = parity!;
+            result[parityId] = parityData;
         }
         return result;
     }
@@ -75,18 +76,32 @@ public static class XorParity
     /// <summary>
     /// Reconstructs a missing chunk using parity and the other chunks in its group.
     /// Returns null if reconstruction is not possible (more than 1 missing).
+    /// The returned bytes are trimmed to the original chunk length.
     /// </summary>
     public static byte[]? Reconstruct(
         string missingChunkId,
         IReadOnlyList<string> groupChunkIds,
         Func<string, byte[]?> getChunkBytesOrNull,
-        byte[] parityBytes)
+        byte[] parityData)
     {
+        // Parse header
+        if (!TryParseHeader(parityData, out int[]? originalLengths, out byte[]? parityBytes))
+            return null;
+
+        if (originalLengths!.Length != groupChunkIds.Count)
+            return null;
+
+        int missingIndex = IndexOf(groupChunkIds, missingChunkId);
+        if (missingIndex < 0)
+            return null;
+
+        int maxLen = parityBytes!.Length;
         byte[] result = (byte[])parityBytes.Clone();
         int missingCount = 0;
 
-        foreach (string chunkId in groupChunkIds)
+        for (int idx = 0; idx < groupChunkIds.Count; idx++)
         {
+            string chunkId = groupChunkIds[idx];
             if (chunkId == missingChunkId)
             {
                 missingCount++;
@@ -100,43 +115,102 @@ public static class XorParity
                     return null; // Can't recover more than 1
                 continue;
             }
-            if (bytes.Length != result.Length)
-                return null;
-            for (int i = 0; i < result.Length; i++)
-                result[i] ^= bytes[i];
+            // XOR available bytes (only up to their actual length; rest is zero padding)
+            for (int j = 0; j < bytes.Length && j < maxLen; j++)
+                result[j] ^= bytes[j];
         }
 
-        return missingCount == 1 ? result : null;
+        if (missingCount != 1)
+            return null;
+
+        // Trim to original length
+        int originalLen = originalLengths[missingIndex];
+        if (originalLen > maxLen)
+            return null; // Corrupt header
+
+        byte[] trimmed = new byte[originalLen];
+        Array.Copy(result, trimmed, originalLen);
+        return trimmed;
     }
 
     /// <summary>
-    /// Deterministic parity chunk ID from the group members.
+    /// Builds parity data with length header.
+    /// </summary>
+    private static byte[] BuildParityData(byte[] parity, List<int> originalLengths)
+    {
+        int headerSize = HeaderFixedSize + originalLengths.Count * 4;
+        byte[] data = new byte[headerSize + parity.Length];
+        Magic.CopyTo(data, 0);
+        BitConverter.GetBytes(originalLengths.Count).CopyTo(data, 4);
+        for (int i = 0; i < originalLengths.Count; i++)
+            BitConverter.GetBytes(originalLengths[i]).CopyTo(data, 8 + i * 4);
+        parity.CopyTo(data, headerSize);
+        return data;
+    }
+
+    /// <summary>
+    /// Parses parity data header. Returns false if invalid.
+    /// </summary>
+    private static bool TryParseHeader(byte[] data, out int[]? lengths, out byte[]? parity)
+    {
+        lengths = null;
+        parity = null;
+        if (data.Length < HeaderFixedSize)
+            return false;
+        if (data[0] != Magic[0] || data[1] != Magic[1] || data[2] != Magic[2] || data[3] != Magic[3])
+            return false;
+
+        int numChunks = BitConverter.ToInt32(data, 4);
+        if (numChunks <= 0 || numChunks > 100)
+            return false;
+
+        int headerSize = HeaderFixedSize + numChunks * 4;
+        if (data.Length < headerSize)
+            return false;
+
+        lengths = new int[numChunks];
+        for (int i = 0; i < numChunks; i++)
+            lengths[i] = BitConverter.ToInt32(data, 8 + i * 4);
+
+        parity = new byte[data.Length - headerSize];
+        Array.Copy(data, headerSize, parity, 0, parity.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// Finds the parity group containing the given chunk ID.
+    /// </summary>
+    public static List<string> GetGroupFor(string chunkId, IReadOnlyList<string> allChunkIds)
+    {
+        int index = IndexOf(allChunkIds, chunkId);
+        if (index < 0)
+            return new List<string>();
+        int groupStart = (index / GroupSize) * GroupSize;
+        return allChunkIds.Skip(groupStart).Take(GroupSize).ToList();
+    }
+
+    /// <summary>
+    /// Deterministic parity chunk ID from group chunk IDs (order-insensitive).
     /// </summary>
     public static string MakeParityId(IReadOnlyList<string> groupChunkIds)
     {
-        string input = "parity:" + string.Join(",", groupChunkIds.OrderBy(id => id));
-        byte[] hash = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(input));
-        return Convert.ToHexString(hash).ToLowerInvariant();
+        var sorted = groupChunkIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        foreach (string id in sorted)
+        {
+            byte[] bytes = Convert.FromHexString(id);
+            sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+        }
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        byte[] hash = sha.Hash!;
+        return "parity-xor-" + Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    /// <summary>
-    /// Gets the group that a chunk belongs to, given the full ordered list.
-    /// </summary>
-    public static IReadOnlyList<string> GetGroupFor(string chunkId, IReadOnlyList<string> allChunkIds)
+    private static int IndexOf(IReadOnlyList<string> list, string value)
     {
-        int index = -1;
-        for (int i = 0; i < allChunkIds.Count; i++)
-        {
-            if (allChunkIds[i] == chunkId)
-            {
-                index = i;
-                break;
-            }
-        }
-        if (index < 0)
-            return Array.Empty<string>();
-        int groupStart = (index / GroupSize) * GroupSize;
-        return allChunkIds.Skip(groupStart).Take(GroupSize).ToList();
+        for (int i = 0; i < list.Count; i++)
+            if (list[i] == value)
+                return i;
+        return -1;
     }
 }
