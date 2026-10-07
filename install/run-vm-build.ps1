@@ -8,6 +8,81 @@
 
 $ErrorActionPreference = "Stop"
 
+# Code signing configuration (all optional - build works without signing).
+# Set these as environment variables on the build VM:
+#   UB_SIGN_THUMBPRINT - Certificate thumbprint in LocalMachine\My store
+#   UB_SIGN_PFX        - Path to .pfx/.p12 certificate file
+#   UB_SIGN_PFX_PASSWORD - Password for the PFX file (consider using a secure vault)
+#   UB_SKIP_SIGNING    - Set to "1" to explicitly skip signing
+#
+# The signing step uses signtool.exe from the Windows SDK. Timestamping is
+# always applied so signatures remain valid after the cert expires.
+
+function Invoke-CodeSigning {
+    param([string[]]$Files)
+
+    if ($env:UB_SKIP_SIGNING -eq "1") {
+        Write-Host "  Signing skipped (UB_SKIP_SIGNING=1)."
+        return
+    }
+
+    $signtool = $null
+    foreach ($p in @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe",
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+    )) {
+        if (Test-Path $p) { $signtool = $p; break }
+    }
+    if (-not $signtool) {
+        $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+    }
+    if (-not $signtool) {
+        Write-Host "  WARNING: signtool.exe not found - skipping code signing."
+        Write-Host "  Install the Windows SDK to enable signing."
+        return
+    }
+
+    $timestampUrl = "http://timestamp.digicert.com"
+    $signed = 0
+
+    foreach ($f in $Files) {
+        if (-not (Test-Path $f)) {
+            Write-Host "  WARNING: file not found, skipping: $f"
+            continue
+        }
+
+        $args = @("sign", "/tr", $timestampUrl, "/td", "sha256", "/fd", "sha256")
+
+        if ($env:UB_SIGN_THUMBPRINT) {
+            $args += @("/sha1", $env:UB_SIGN_THUMBPRINT)
+            Write-Host "  Signing $f with cert thumbprint $($env:UB_SIGN_THUMBPRINT.Substring(0,8))..."
+        } elseif ($env:UB_SIGN_PFX) {
+            $args += @("/f", $env:UB_SIGN_PFX)
+            if ($env:UB_SIGN_PFX_PASSWORD) {
+                $args += @("/p", $env:UB_SIGN_PFX_PASSWORD)
+            }
+            Write-Host "  Signing $f with PFX $env:UB_SIGN_PFX..."
+        } else {
+            Write-Host "  No signing certificate configured (set UB_SIGN_THUMBPRINT or UB_SIGN_PFX)."
+            Write-Host "  Skipping code signing - build will be unsigned."
+            return
+        }
+
+        $args += $f
+        & $signtool @args
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed for $f" }
+
+        # Verify the signature
+        & $signtool verify /pa $f | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Signature verification failed for $f" }
+
+        Write-Host "  Signed and verified: $f"
+        $signed++
+    }
+
+    Write-Host "  Signed $signed file(s)."
+}
+
 # Log everything to C:\ub\build.log: RDP drops do not kill the script on the
 # VM, so if the session disconnects, reconnect and read the log for progress.
 $transcript = "C:\ub\build.log"
@@ -17,7 +92,7 @@ Write-Host "Logging to $transcript"
 
 try {
 
-Write-Host "=== 1/5 Writing embedded installer source + WinPE script ==="
+Write-Host "=== 1/6 Writing embedded installer source + WinPE script ==="
 $wxsB64 = @"
 PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCEtLSBXaVggdjUgaW5zdGFsbGVyIGZvciBVc2VuZXQgQmFja3VwLgogICAgIFRoZSBhcHBzIHB1Ymxpc2ggYXMgc2luZ2xlLWZpbGUgZXhlY3V0YWJsZXMgKFB1Ymxpc2hTaW5nbGVGaWxlIGluIHRoZQogICAgIGNzcHJvaiksIHNvIHRoZSBwYXlsb2FkIGlzIGEgaGFuZGZ1bCBvZiBleHBsaWNpdCBmaWxlcyDigJQgbm8gaGFydmVzdGluZy4KICAgICBCdWlsZCBvbiBXaW5kb3dzIHdpdGggdGhlIFdpWCB2NSBkb3RuZXQgdG9vbDoKICAgICAgIHdpeCBidWlsZCAtYXJjaCB4NjQgLWQgU3JjUm9vdD1DOlx1YlxzcmMgLWQgQ2xpQmluPUM6XHViXHB1Ymxpc2hcY2xpIC1kIFNlcnZpY2VCaW49QzpcdWJccHVibGlzaFxzZXJ2aWNlIC1kIFJlY292ZXJ5QmluPUM6XHViXHB1Ymxpc2hccmVjb3ZlcnkgLW8gdXNlbmV0LWJhY2t1cC0wLjguMS14NjQubXNpIGluc3RhbGwvVXNlbmV0QmFja3VwLnd4cwogICAgIElNUE9SVEFOVDogcmUtcHVibGlzaCB3aXRoIHRoZSBjdXJyZW50IGNzcHJvaiAoc2luZ2xlLWZpbGUpIGJlZm9yZSBidWlsZGluZzsKICAgICB0aGUgTVNJIGluc3RhbGxzIG9ubHkgdGhlIGZpbGVzIGxpc3RlZCBiZWxvdy4KLS0+CjxXaXggeG1sbnM9Imh0dHA6Ly93aXh0b29sc2V0Lm9yZy9zY2hlbWFzL3Y0L3d4cyI+CiAgPFBhY2thZ2UgTmFtZT0iVXNlbmV0IEJhY2t1cCIKICAgICAgICAgICBWZXJzaW9uPSIwLjguMSIKICAgICAgICAgICBNYW51ZmFjdHVyZXI9IlVzZW5ldCBCYWNrdXAiCiAgICAgICAgICAgVXBncmFkZUNvZGU9IkY2RTBENkQxLTYxQTEtNDg0My04N0I5LTI4MjVBNDdBMThERCIKICAgICAgICAgICBTY29wZT0icGVyTWFjaGluZSI+CgogICAgPE1ham9yVXBncmFkZSBEb3duZ3JhZGVFcnJvck1lc3NhZ2U9IkEgbmV3ZXIgdmVyc2lvbiBvZiBVc2VuZXQgQmFja3VwIGlzIGFscmVhZHkgaW5zdGFsbGVkLiIgLz4KCiAgICA8TWVkaWEgSWQ9IjEiIENhYmluZXQ9InByb2R1Y3QuY2FiIiBFbWJlZENhYj0ieWVzIiAvPgoKICAgIDxTdGFuZGFyZERpcmVjdG9yeSBJZD0iUHJvZ3JhbUZpbGVzNjQzMkZvbGRlciI+CiAgICAgIDxEaXJlY3RvcnkgSWQ9IklOU1RBTExGT0xERVIiIE5hbWU9IlVzZW5ldEJhY2t1cCI+CiAgICAgICAgPERpcmVjdG9yeSBJZD0iQ0xJRElSIiBOYW1lPSJjbGkiIC8+CiAgICAgICAgPERpcmVjdG9yeSBJZD0iU0VSVklDRURJUiIgTmFtZT0ic2VydmljZSIgLz4KICAgICAgICA8RGlyZWN0b3J5IElkPSJXSVpBUkRESVIiIE5hbWU9IndpemFyZCIgLz4KICAgICAgPC9EaXJlY3Rvcnk+CiAgICA8L1N0YW5kYXJkRGlyZWN0b3J5PgoKICAgIDwhLS0gQ0xJIChzaW5nbGUtZmlsZSBleGU7IG5hdGl2ZSBTUUxpdGUgaXMgYnVuZGxlZCBpbnNpZGUpIC0tPgogICAgPENvbXBvbmVudEdyb3VwIElkPSJDbGlGaWxlcyIgRGlyZWN0b3J5PSJDTElESVIiPgogICAgICA8Q29tcG9uZW50IElkPSJDbGlFeGUiIEd1aWQ9IioiPgogICAgICAgIDxGaWxlIElkPSJDbGlFeGVGaWxlIiBTb3VyY2U9IiQodmFyLkNsaUJpbilcdXNlbmV0LWJhY2t1cC5leGUiIEtleVBhdGg9InllcyIgLz4KICAgICAgICA8UmVtb3ZlRm9sZGVyIElkPSJSZW1vdmVDbGlEaXIiIERpcmVjdG9yeT0iQ0xJRElSIiBPbj0idW5pbnN0YWxsIiAvPgogICAgICA8L0NvbXBvbmVudD4KICAgIDwvQ29tcG9uZW50R3JvdXA+CgogICAgPENvbXBvbmVudEdyb3VwIElkPSJTZXJ2aWNlUmVnaXN0cmF0aW9uIiBEaXJlY3Rvcnk9IlNFUlZJQ0VESVIiPgogICAgICA8Q29tcG9uZW50IElkPSJTZXJ2aWNlRXhlY3V0YWJsZSI+CiAgICAgICAgPEZpbGUgSWQ9IlNlcnZpY2VFeGUiIFNvdXJjZT0iJCh2YXIuU2VydmljZUJpbilcdXNlbmV0LWJhY2t1cC1zZXJ2aWNlLmV4ZSIgS2V5UGF0aD0ieWVzIiAvPgogICAgICAgIDxTZXJ2aWNlSW5zdGFsbCBJZD0iQmFja3VwU2VydmljZSIKICAgICAgICAgICAgICAgICAgICAgICAgVHlwZT0ib3duUHJvY2VzcyIKICAgICAgICAgICAgICAgICAgICAgICAgTmFtZT0iVXNlbmV0QmFja3VwIgogICAgICAgICAgICAgICAgICAgICAgICBEaXNwbGF5TmFtZT0iVXNlbmV0IEJhY2t1cCBTZXJ2aWNlIgogICAgICAgICAgICAgICAgICAgICAgICBEZXNjcmlwdGlvbj0iU2NoZWR1bGVkIGVuY3J5cHRlZCBiYWNrdXBzIHRvIFVzZW5ldC4iCiAgICAgICAgICAgICAgICAgICAgICAgIFN0YXJ0PSJhdXRvIgogICAgICAgICAgICAgICAgICAgICAgICBBY2NvdW50PSJMb2NhbFN5c3RlbSIKICAgICAgICAgICAgICAgICAgICAgICAgRXJyb3JDb250cm9sPSJub3JtYWwiIC8+CiAgICAgICAgPFNlcnZpY2VDb250cm9sIElkPSJCYWNrdXBTZXJ2aWNlQ29udHJvbCIKICAgICAgICAgICAgICAgICAgICAgICAgTmFtZT0iVXNlbmV0QmFja3VwIgogICAgICAgICAgICAgICAgICAgICAgICBTdG9wPSJib3RoIgogICAgICAgICAgICAgICAgICAgICAgICBSZW1vdmU9InVuaW5zdGFsbCIKICAgICAgICAgICAgICAgICAgICAgICAgV2FpdD0idHJ1ZSIgLz4KICAgICAgICA8UmVtb3ZlRm9sZGVyIElkPSJSZW1vdmVTZXJ2aWNlRGlyIiBEaXJlY3Rvcnk9IlNFUlZJQ0VESVIiIE9uPSJ1bmluc3RhbGwiIC8+CiAgICAgIDwvQ29tcG9uZW50PgogICAgPC9Db21wb25lbnRHcm91cD4KCiAgICA8IS0tIFJlY292ZXJ5IHdpemFyZCAoc2luZ2xlLWZpbGUgZXhlOyBuYXRpdmUgU1FMaXRlIGlzIGJ1bmRsZWQgaW5zaWRlKSAtLT4KICAgIDxDb21wb25lbnRHcm91cCBJZD0iUmVjb3ZlcnlGaWxlcyIgRGlyZWN0b3J5PSJXSVpBUkRESVIiPgogICAgICA8Q29tcG9uZW50IElkPSJSZWNvdmVyeUV4ZSIgR3VpZD0iKiI+CiAgICAgICAgPEZpbGUgSWQ9IlJlY292ZXJ5RXhlRmlsZSIgU291cmNlPSIkKHZhci5SZWNvdmVyeUJpbilcdXNlbmV0LWJhY2t1cC1yZWNvdmVyeS5leGUiIEtleVBhdGg9InllcyIgLz4KICAgICAgICA8UmVtb3ZlRm9sZGVyIElkPSJSZW1vdmVXaXphcmREaXIiIERpcmVjdG9yeT0iV0laQVJERElSIiBPbj0idW5pbnN0YWxsIiAvPgogICAgICA8L0NvbXBvbmVudD4KICAgIDwvQ29tcG9uZW50R3JvdXA+CgogICAgPCEtLSBTZXJ2aWNlIGNvbmZpZyBleGFtcGxlICsgcmVjb3ZlcnkgcnVuYm9vayAtLT4KICAgIDxDb21wb25lbnRHcm91cCBJZD0iRG9jcyIgRGlyZWN0b3J5PSJJTlNUQUxMRk9MREVSIj4KICAgICAgPENvbXBvbmVudCBJZD0iRG9jc0NvbXBvbmVudCIgR3VpZD0iNDM2MzFGMDAtMjZDQi00NkE3LUJEOEYtMzhEQjQ0RUM0QTU0Ij4KICAgICAgICA8RmlsZSBTb3VyY2U9IiQodmFyLlNyY1Jvb3QpXHNyY1xVc2VuZXRCYWNrdXAuU2VydmljZVxzZXJ2aWNlLmV4YW1wbGUuanNvbiIgTmFtZT0ic2VydmljZS5leGFtcGxlLmpzb24iIC8+CiAgICAgICAgPEZpbGUgU291cmNlPSIkKHZhci5TcmNSb290KVxkb2NzXFJFQ09WRVJZLm1kIiBOYW1lPSJSRUNPVkVSWS5tZCIgLz4KICAgICAgICA8UmVtb3ZlRm9sZGVyIElkPSJSZW1vdmVJbnN0YWxsRGlyIiBEaXJlY3Rvcnk9IklOU1RBTExGT0xERVIiIE9uPSJ1bmluc3RhbGwiIC8+CiAgICAgIDwvQ29tcG9uZW50PgogICAgPC9Db21wb25lbnRHcm91cD4KCiAgICA8RmVhdHVyZSBJZD0iUHJvZHVjdEZlYXR1cmUiIFRpdGxlPSJVc2VuZXQgQmFja3VwIiBMZXZlbD0iMSI+CiAgICAgIDxDb21wb25lbnRHcm91cFJlZiBJZD0iQ2xpRmlsZXMiIC8+CiAgICAgIDxDb21wb25lbnRHcm91cFJlZiBJZD0iU2VydmljZVJlZ2lzdHJhdGlvbiIgLz4KICAgICAgPENvbXBvbmVudEdyb3VwUmVmIElkPSJSZWNvdmVyeUZpbGVzIiAvPgogICAgICA8Q29tcG9uZW50R3JvdXBSZWYgSWQ9IkRvY3MiIC8+CiAgICA8L0ZlYXR1cmU+CiAgPC9QYWNrYWdlPgo8L1dpeD4K
 "@
@@ -137,7 +212,7 @@ b3IgTWFrZVdpblBFTWVkaWEgL1VGRCkuIgo=
 Write-Host ("  UsenetBackup.wxs: {0:N0} bytes" -f (Get-Item C:\ub\src\install\UsenetBackup.wxs).Length)
 Write-Host ("  build-winpe.ps1:  {0:N0} bytes" -f (Get-Item C:\ub\src\winpe\build-winpe.ps1).Length)
 
-Write-Host "=== 2/5 Re-publishing apps as single-file ==="
+Write-Host "=== 2/6 Re-publishing apps as single-file ==="
 # Single source root used consistently: the script cds here AND passes it to
 # WiX as SrcRoot. (Previously these were two different hardcoded paths,
 # forcing a manual copy to both locations.)
@@ -163,7 +238,7 @@ if ($LASTEXITCODE -ne 0) { throw "Service publish failed" }
 dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\recovery /p:PublishSingleFile=true @verProps
 if ($LASTEXITCODE -ne 0) { throw "Recovery publish failed" }
 
-Write-Host "=== 3/5 Verifying required MSI payload files ==="
+Write-Host "=== 3/6 Verifying required MSI payload files ==="
 $required = @(
     "C:\ub\publish\cli\usenet-backup.exe",
     "C:\ub\publish\service\usenet-backup-service.exe",
@@ -174,13 +249,24 @@ foreach ($f in $required) {
     else { throw "MISSING required MSI payload: $f" }
 }
 
-Write-Host "=== 4/5 Building MSI ==="
+Write-Host "=== 4/6 Building MSI ==="
+# Sign the executables BEFORE building the MSI so the signed binaries are packaged.
+Write-Host "  Signing executables..."
+Invoke-CodeSigning -Files @(
+    "C:\ub\publish\cli\usenet-backup.exe",
+    "C:\ub\publish\service\usenet-backup-service.exe",
+    "C:\ub\publish\recovery\usenet-backup-recovery.exe"
+)
+
 wix build -arch x64 -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item C:\ub\usenet-backup-0.8.1-x64.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
-Write-Host "=== 5/5 Test install + verify + uninstall ==="
+Write-Host "=== 5/6 Signing MSI ==="
+Invoke-CodeSigning -Files @("C:\ub\usenet-backup-0.8.1-x64.msi")
+
+Write-Host "=== 6/6 Test install + verify + uninstall ==="
 Start-Process msiexec -ArgumentList "/i", "C:\ub\usenet-backup-0.8.1-x64.msi", "/qn" -Wait
 Start-Sleep 15
 foreach ($c in @("C:\Program Files\UsenetBackup\cli\usenet-backup.exe",
