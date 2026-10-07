@@ -138,7 +138,11 @@ Write-Host ("  UsenetBackup.wxs: {0:N0} bytes" -f (Get-Item C:\ub\src\install\Us
 Write-Host ("  build-winpe.ps1:  {0:N0} bytes" -f (Get-Item C:\ub\src\winpe\build-winpe.ps1).Length)
 
 Write-Host "=== 2/5 Re-publishing apps as single-file ==="
-cd C:\ub\src
+# Single source root used consistently: the script cds here AND passes it to
+# WiX as SrcRoot. (Previously these were two different hardcoded paths,
+# forcing a manual copy to both locations.)
+$srcRoot = "C:\ub\src"
+cd $srcRoot
 # Stamp file versions so Windows Installer replaces binaries on upgrade/reinstall.
 # (Without this, every build carries the default FileVersion 1.0.0.0 and a
 # reinstall silently keeps the previously installed binaries.)
@@ -171,7 +175,7 @@ foreach ($f in $required) {
 }
 
 Write-Host "=== 4/5 Building MSI ==="
-wix build -arch x64 -d SrcRoot=C:\ub\usenet-backup -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
+wix build -arch x64 -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\usenet-backup-0.8.1-x64.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item C:\ub\usenet-backup-0.8.1-x64.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)

@@ -67,11 +67,22 @@
       </Component>
     </ComponentGroup>
 
+    <!-- Remove empty install directories on uninstall (WiX doesn't do this by default) -->
+    <ComponentGroup Id="CleanupFolders" Directory="INSTALLFOLDER">
+      <Component Id="CleanupFoldersComponent" Guid="*">
+        <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
+        <RemoveFolder Id="RemoveServiceDir" Directory="SERVICEDIR" On="uninstall" />
+        <RemoveFolder Id="RemoveWizardDir" Directory="WIZARDDIR" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
     <Feature Id="ProductFeature" Title="Usenet Backup" Level="1">
       <ComponentGroupRef Id="CliFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
+      <ComponentGroupRef Id="CleanupFolders" />
     </Feature>
   </Package>
 </Wix>

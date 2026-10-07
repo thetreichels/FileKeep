@@ -243,13 +243,15 @@ public sealed class NntpClient : IDisposable
 
     private void Disconnect()
     {
-        try { _writer?.Dispose(); } catch { }
-        try { _reader?.Dispose(); } catch { }
+        // Never throw from Dispose: swallow teardown errors, but note them
+        // in debug output for connection-leak diagnostics.
+        try { _writer?.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"NntpClient.Disconnect: writer dispose failed: {ex.Message}"); }
+        try { _reader?.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"NntpClient.Disconnect: reader dispose failed: {ex.Message}"); }
         // The transport stream is owned by the client in both modes:
         // TCP/TLS streams are created here; a pre-connected stream is
         // ownership-transferred by the Stream constructor.
-        try { _ownedStream?.Dispose(); } catch { }
-        try { _tcp?.Dispose(); } catch { }
+        try { _ownedStream?.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"NntpClient.Disconnect: stream dispose failed: {ex.Message}"); }
+        try { _tcp?.Dispose(); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"NntpClient.Disconnect: tcp dispose failed: {ex.Message}"); }
         _writer = null;
         _reader = null;
         _ownedStream = null;
