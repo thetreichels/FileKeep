@@ -30,6 +30,7 @@
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
         <File Id="CliExeFile" Source="$(var.CliBin)\usenet-backup.exe" KeyPath="yes" />
+        <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
 
@@ -49,6 +50,7 @@
                         Stop="both"
                         Remove="uninstall"
                         Wait="true" />
+        <RemoveFolder Id="RemoveServiceDir" Directory="SERVICEDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
 
@@ -56,6 +58,7 @@
     <ComponentGroup Id="RecoveryFiles" Directory="WIZARDDIR">
       <Component Id="RecoveryExe" Guid="*">
         <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\usenet-backup-recovery.exe" KeyPath="yes" />
+        <RemoveFolder Id="RemoveWizardDir" Directory="WIZARDDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
 
@@ -64,15 +67,6 @@
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
         <File Source="$(var.SrcRoot)\src\UsenetBackup.Service\service.example.json" Name="service.example.json" />
         <File Source="$(var.SrcRoot)\docs\RECOVERY.md" Name="RECOVERY.md" />
-      </Component>
-    </ComponentGroup>
-
-    <!-- Remove empty install directories on uninstall (WiX doesn't do this by default) -->
-    <ComponentGroup Id="CleanupFolders" Directory="INSTALLFOLDER">
-      <Component Id="CleanupFoldersComponent" Guid="*">
-        <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
-        <RemoveFolder Id="RemoveServiceDir" Directory="SERVICEDIR" On="uninstall" />
-        <RemoveFolder Id="RemoveWizardDir" Directory="WIZARDDIR" On="uninstall" />
         <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
     </ComponentGroup>
@@ -82,7 +76,6 @@
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
-      <ComponentGroupRef Id="CleanupFolders" />
     </Feature>
   </Package>
 </Wix>
