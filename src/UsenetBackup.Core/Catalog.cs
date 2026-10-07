@@ -14,7 +14,12 @@ public sealed class Catalog : IDisposable
 
     public Catalog(string dbPath)
     {
-        _conn = new SqliteConnection($"Data Source={dbPath}");
+        // Pooling=false: a pooled connection keeps the catalog.db file handle
+        // open after Dispose, which blocks file moves/deletes/scans on Windows
+        // (and breaks tests that read the raw file after closing the repo).
+        // These are short-lived per-operation connections; the pool buys
+        // nothing and the lingering lock is a correctness bug.
+        _conn = new SqliteConnection($"Data Source={dbPath};Pooling=false");
         _conn.Open();
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
