@@ -7,7 +7,7 @@ namespace UsenetBackup.Core.Recovery;
 /// <summary>
 /// Testable workflow state for the recovery wizard. The WinForms UI is a thin
 /// shell over this: each wizard page reads/writes these properties and calls
-/// these methods. All Usenet Backup directives apply (no invented crypto,
+/// these methods. All FileKeep directives apply (no invented crypto,
 /// fails-closed verification, append-only logging).
 /// </summary>
 public sealed class WizardState : IDisposable
