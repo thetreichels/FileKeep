@@ -201,7 +201,7 @@ public sealed class BackupRepository : IDisposable
         ISnapshotProvider snap = snapshotProvider ?? (owned = new NullSnapshotProvider(fullSource));
         try
         {
-            return BackupDirectoryFromRoot(fullSource, snap, parent);
+            return BackupDirectoryFromRoot(fullSource, snap, parent, verificationMode);
         }
         finally
         {
@@ -209,7 +209,7 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent)
+    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode)
     {
         string readRoot = snap.SnapshotRoot;
         if (!Directory.Exists(readRoot))
