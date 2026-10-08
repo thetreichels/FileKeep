@@ -30,6 +30,7 @@
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
         <File Id="CliExeFile" Source="$(var.CliBin)\usenet-backup.exe" KeyPath="yes" />
+        <RemoveFile Id="RemoveCliPdb" Directory="CLIDIR" Name="*.pdb" On="uninstall" />
         <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
@@ -50,6 +51,13 @@
                         Stop="both"
                         Remove="uninstall"
                         Wait="true" />
+        <!-- Clean up runtime-created files (service writes config/logs here, single-file exe extracts native libs) -->
+        <RemoveFile Id="RemoveServiceJson" Directory="SERVICEDIR" Name="service.json" On="uninstall" />
+        <RemoveFile Id="RemoveServiceLog" Directory="SERVICEDIR" Name="service.log" On="uninstall" />
+        <RemoveFile Id="RemoveSqliteDll" Directory="SERVICEDIR" Name="e_sqlite3.dll" On="uninstall" />
+        <RemoveFile Id="RemoveServicePdb" Directory="SERVICEDIR" Name="*.pdb" On="uninstall" />
+        <RemoveFile Id="RemoveAspNetDll" Directory="SERVICEDIR" Name="aspnetcorev2_inprocess.dll" On="uninstall" />
+        <RemoveFile Id="RemoveWebConfig" Directory="SERVICEDIR" Name="web.config" On="uninstall" />
         <RemoveFolder Id="RemoveServiceDir" Directory="SERVICEDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
