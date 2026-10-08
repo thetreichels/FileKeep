@@ -74,18 +74,30 @@ public sealed class ReedSolomon
             throw new InvalidOperationException(
                 $"Not enough shards to reconstruct: have {presentCount}, need {_dataShards}.");
 
-        // ReedSolomonFast.Reconstruct fills missing shards in place.
-        // It needs a mutable array; copy to avoid mutating the caller's.
-        byte[][] working = new byte[_totalShards][];
-        Array.Copy(shards, working, _totalShards);
-
-        // For missing shards, ReedSolomonFast allocates if null.
-        // Ensure present shards are not null.
+        // ReedSolomonFast.Reconstruct fills missing shards in place into
+        // caller-provided buffers. Allocate buffers for missing shards.
+        int shardSize = 0;
         for (int i = 0; i < _totalShards; i++)
         {
-            if (shardPresent[i] && working[i] is null)
-                throw new InvalidOperationException(
-                    $"Shard {i} marked present but is null.");
+            if (shardPresent[i])
+            {
+                if (shards[i] is null)
+                    throw new InvalidOperationException(
+                        $"Shard {i} marked present but is null.");
+                shardSize = shards[i]!.Length;
+                break;
+            }
+        }
+        if (shardSize == 0)
+            throw new InvalidOperationException("Cannot determine shard size: no present shards.");
+
+        byte[][] working = new byte[_totalShards][];
+        for (int i = 0; i < _totalShards; i++)
+        {
+            if (shardPresent[i])
+                working[i] = shards[i]!;
+            else
+                working[i] = new byte[shardSize]; // allocated, filled in place
         }
 
         bool[] present = (bool[])shardPresent.Clone();
