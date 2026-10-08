@@ -137,7 +137,7 @@ public sealed class DashboardTests : IDisposable
     public void HtmlPage_ContainsDashboardElements()
     {
         string html = DashboardHtml.Page("test-csrf-token");
-        Assert.Contains("<title>Usenet Backup</title>", html);
+        Assert.Contains("<title>FileKeep</title>", html);
         Assert.Contains("name=\"csrf-token\" content=\"test-csrf-token\"", html);
         Assert.Contains("X-CSRF-Token", html);
         Assert.Contains("/api/status", html);
