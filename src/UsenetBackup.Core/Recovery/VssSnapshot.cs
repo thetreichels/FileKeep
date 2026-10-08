@@ -199,15 +199,17 @@ public sealed class VssSnapshot : ISnapshotProvider, IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
 
         // Fail-safe: if the engine never called Complete(), the backup did
         // not succeed — abort the VSS writer session rather than leaving
-        // writers dangling.
+        // writers dangling. This must run BEFORE _disposed is set:
+        // SignalAndWait rejects calls once the object is marked disposed,
+        // so setting the flag first would silently swallow the abort.
         if (!_finalized)
         {
             Abort();
         }
+        _disposed = true;
     }
 }
 

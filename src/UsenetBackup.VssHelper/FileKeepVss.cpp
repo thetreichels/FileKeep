@@ -8,6 +8,7 @@
 //   FileKeepVss.exe --volume C: [--timeout 3600]
 //   → stdout: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3\n
 //   → stdin:  "complete\n" → BackupComplete, delete snapshot, exit 0
+//       (exit 4 if BackupComplete itself failed — data intact, writers not finalized)
 //   → stdin:  "abort\n"    → AbortBackup, delete snapshot, exit 3
 //   → stdin:  EOF          → AbortBackup, delete snapshot, exit 3
 //   → timeout              → AbortBackup, delete snapshot, exit 2
@@ -329,13 +330,18 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
             async->Release();
         }
         writersEngaged = false;
-        if (FAILED(hr)) {
-            fwprintf(stderr, L"Warning: BackupComplete failed: 0x%08X\n", hr);
-            // Continue to delete the snapshot anyway.
+        bool finalizeFailed = FAILED(hr);
+        if (finalizeFailed) {
+            // Fail closed: the backup data is intact, but writer
+            // finalization failed (logs not truncated, writers may be in a
+            // bad state). Delete the snapshot, but report the failure with
+            // a distinct exit code so the managed engine throws from
+            // Complete() instead of seeing success.
+            fwprintf(stderr, L"BackupComplete failed: 0x%08X\n", hr);
         }
         deleteSnapshot();
         cleanup();
-        return 0;
+        return finalizeFailed ? 4 : 0;
     }
 
     // Abort path: timeout, "abort", EOF, or wait error.

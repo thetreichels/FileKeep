@@ -91,6 +91,7 @@ closed — never silently degrade to a live copy and label it an "image."
   FileKeepVss.exe --volume C: --timeout 3600
   → stdout: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3
   → stdin: "complete\n" → BackupComplete, delete snapshot, exit 0
+      (exit 4 if BackupComplete itself failed — data intact, writers not finalized)
   → stdin: "abort\n"    → AbortBackup, delete snapshot, exit 3
   → stdin: EOF          → AbortBackup, delete snapshot, exit 3 (fail-safe)
   → timeout             → AbortBackup, delete snapshot, exit 2
