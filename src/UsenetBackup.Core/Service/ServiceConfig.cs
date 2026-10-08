@@ -108,6 +108,14 @@ public sealed class BackupJobConfig
     public bool AutoVerify { get; set; }
 
     /// <summary>
+    /// How incremental backup determines unchanged files: "fast" (default,
+    /// size+mtime metadata only), "verify" (metadata + SHA-256 check of
+    /// apparent matches), or "paranoid" (SHA-256 every file).
+    /// </summary>
+    [JsonPropertyName("verificationMode")]
+    public string VerificationMode { get; set; } = "fast";
+
+    /// <summary>
     /// Redundancy mode for Usenet uploads: "none" (default), "xor" (single
     /// parity block per 10 chunks, recovers 1 missing), or "par2"
     /// (Reed-Solomon, recovers up to 3 missing per 10 chunks).
