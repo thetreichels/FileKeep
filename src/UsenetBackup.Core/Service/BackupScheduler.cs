@@ -286,7 +286,8 @@ public sealed class BackupScheduler
                     .FirstOrDefault()?.BackupId;
                 manifest = parent is null
                     ? repo.BackupDirectory(job.Source, snap)
-                    : repo.BackupIncremental(job.Source, parent, snap);
+                    : repo.BackupIncremental(job.Source, parent, snap,
+                        VerificationModeParser.Parse(job.VerificationMode));
             }
 
             OperationLog.Append(job.Repo, "scheduled-backup",
