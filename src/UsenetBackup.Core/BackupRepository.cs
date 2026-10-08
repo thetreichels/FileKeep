@@ -23,6 +23,9 @@ public sealed class BackupRepository : IDisposable
     private readonly Catalog _catalog;
     private bool _disposed;
 
+    /// <summary>Repository root directory (for tracker files, etc.).</summary>
+    public string RepoRoot => _root;
+
     private BackupRepository(string root, RepositoryConfig config, byte[] key)
     {
         _root = root;
