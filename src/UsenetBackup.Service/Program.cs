@@ -20,14 +20,14 @@ static string DefaultConfigPath()
 string? configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
 
 // First-run: if the config doesn't exist, seed it from the example file
-// installed in the parent directory (Program Files\UsenetBackup).
+// installed in the docs subdirectory (Program Files\UsenetBackup\docs).
 // This preserves the old workflow where users copied service.example.json to service.json.
 if (!File.Exists(configPath))
 {
     string? parentDir = Path.GetDirectoryName(AppContext.BaseDirectory);
     string examplePath = parentDir != null
-        ? Path.Combine(parentDir, "service.example.json")
-        : "service.example.json";
+        ? Path.Combine(parentDir, "docs", "service.example.json")
+        : Path.Combine("docs", "service.example.json");
     if (File.Exists(examplePath))
     {
         File.Copy(examplePath, configPath);

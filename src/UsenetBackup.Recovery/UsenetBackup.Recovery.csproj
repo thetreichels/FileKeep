@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <RootNamespace>UsenetBackup.Recovery</RootNamespace>
-    <AssemblyName>usenet-backup-recovery</AssemblyName>
+    <AssemblyName>UsenetBackupRecovery</AssemblyName>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <OutputType>WinExe</OutputType>

@@ -70,12 +70,12 @@ chunk before you trust the restore.
 
 ### B. Whole disk / bare metal (WinPE)
 
-Run `usenet-backup-recovery.exe` from the USB stick and follow the
+Run `UsenetBackupRecovery.exe` from the USB stick and follow the
 wizard, or use the CLI steps below.
 
 1. Boot WinPE with networking (`wpeinit`, then `ipconfig` to confirm).
 2. From your USB stick (or a network share), get:
-   `usenet-backup.exe` (self-contained), `repo.json`, `manifests/`,
+   `UsenetBackup.exe` (self-contained), `repo.json`, `manifests/`,
    `catalog.db`, and the NZB of the disk-image backup.
 3. Reassemble the repo metadata as in scenario A on a scratch volume
    (e.g. `X:\repo` — WinPE RAM disk — for small repos, or a USB disk).

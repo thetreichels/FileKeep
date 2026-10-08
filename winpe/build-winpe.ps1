@@ -119,13 +119,13 @@ echo  Usenet Backup Recovery Environment
 echo ================================================
 echo.
 echo  Tools in X:\usenet-backup\ :
-echo    usenet-backup.exe           (CLI)
-echo    wizard\usenet-backup-recovery.exe  (GUI wizard)
+echo    UsenetBackup.exe           (CLI)
+echo    wizard\UsenetBackupRecovery.exe  (GUI wizard)
 echo    RECOVERY.md                 (runbook)
 echo.
 echo  Start networking if needed: wpeinit
 echo  Launching recovery wizard...
-start "" X:\usenet-backup\wizard\usenet-backup-recovery.exe --win95
+start "" X:\usenet-backup\wizard\UsenetBackupRecovery.exe --win95
 echo.
 cmd
 '@

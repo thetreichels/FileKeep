@@ -23,13 +23,14 @@
         <Directory Id="CLIDIR" Name="cli" />
         <Directory Id="SERVICEDIR" Name="service" />
         <Directory Id="WIZARDDIR" Name="wizard" />
+        <Directory Id="DOCSDIR" Name="docs" />
       </Directory>
     </StandardDirectory>
 
     <!-- CLI (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
-        <File Id="CliExeFile" Source="$(var.CliBin)\usenet-backup.exe" KeyPath="yes" />
+        <File Id="CliExeFile" Source="$(var.CliBin)\UsenetBackup.exe" KeyPath="yes" />
         <RemoveFile Id="RemoveCliPdb" Directory="CLIDIR" Name="*.pdb" On="uninstall" />
         <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
       </Component>
@@ -37,7 +38,7 @@
 
     <ComponentGroup Id="ServiceRegistration" Directory="SERVICEDIR">
       <Component Id="ServiceExecutable">
-        <File Id="ServiceExe" Source="$(var.ServiceBin)\usenet-backup-service.exe" KeyPath="yes" />
+        <File Id="ServiceExe" Source="$(var.ServiceBin)\UsenetBackupService.exe" KeyPath="yes" />
         <ServiceInstall Id="BackupService"
                         Type="ownProcess"
                         Name="UsenetBackup"
@@ -65,16 +66,17 @@
     <!-- Recovery wizard (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="RecoveryFiles" Directory="WIZARDDIR">
       <Component Id="RecoveryExe" Guid="*">
-        <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\usenet-backup-recovery.exe" KeyPath="yes" />
+        <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\UsenetBackupRecovery.exe" KeyPath="yes" />
         <RemoveFolder Id="RemoveWizardDir" Directory="WIZARDDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
 
     <!-- Service config example + recovery runbook -->
-    <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
+    <ComponentGroup Id="Docs" Directory="DOCSDIR">
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
         <File Source="$(var.SrcRoot)\src\UsenetBackup.Service\service.example.json" Name="service.example.json" />
         <File Source="$(var.SrcRoot)\docs\RECOVERY.md" Name="RECOVERY.md" />
+        <RemoveFolder Id="RemoveDocsDir" Directory="DOCSDIR" On="uninstall" />
         <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
     </ComponentGroup>

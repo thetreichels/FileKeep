@@ -82,8 +82,8 @@ if (-not $RepoRoot) { $RepoRoot = $repoRootDir }
 # --- locate / publish binaries ---
 Check "Prerequisites: binaries" {
     if ($CliDir -and $ServiceDir) {
-        Assert-True (Test-Path (Join-Path $CliDir "usenet-backup.exe")) "usenet-backup.exe not found in $CliDir"
-        Assert-True (Test-Path (Join-Path $ServiceDir "usenet-backup-service.exe")) "usenet-backup-service.exe not found in $ServiceDir"
+        Assert-True (Test-Path (Join-Path $CliDir "UsenetBackup.exe")) "UsenetBackup.exe not found in $CliDir"
+        Assert-True (Test-Path (Join-Path $ServiceDir "UsenetBackupService.exe")) "UsenetBackupService.exe not found in $ServiceDir"
     } else {
         Assert-True ($null -ne (Get-Command dotnet -ErrorAction SilentlyContinue)) ".NET SDK not found; install it or pass -CliDir and -ServiceDir."
         # The repo's nuget.config points at a sandbox-only vendored feed
@@ -108,7 +108,7 @@ Check "Prerequisites: binaries" {
 }
 if (@($results | Where-Object { $_.Result -eq "FAIL" }).Count -gt 0) { Report; exit 1 }
 
-$cli = Join-Path $CliDir "usenet-backup.exe"
+$cli = Join-Path $CliDir "UsenetBackup.exe"
 $work = Join-Path $WorkRoot ([guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $repo = Join-Path $work "repo"
