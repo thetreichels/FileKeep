@@ -168,13 +168,14 @@ static int Init(string[] args)
 static int Backup(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege]"); return 2; }
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--verify <fast|verify|paranoid>]"); return 2; }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     string? parent = GetOption(args, "--parent");
+    var verifyMode = VerificationModeParser.Parse(GetOption(args, "--verify"));
     using ISnapshotProvider? snap = HasFlag(args, "--backup-privilege") ? new BackupPrivilegeSnapshotProvider(pos[1]) : null;
     var manifest = parent is null
         ? repo.BackupDirectory(pos[1], snap)
-        : repo.BackupIncremental(pos[1], parent, snap);
+        : repo.BackupIncremental(pos[1], parent, snap, verifyMode);
     Console.WriteLine($"{manifest.Type} backup {manifest.BackupId}" +
         (manifest.ParentId is null ? "" : $" (parent {manifest.ParentId})") +
         (manifest.Snapshot is null ? "" : $" [snapshot: {manifest.Snapshot}]") +
