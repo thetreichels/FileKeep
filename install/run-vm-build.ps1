@@ -258,16 +258,16 @@ Invoke-CodeSigning -Files @(
     "C:\ub\publish\recovery\FileKeepRecovery.exe"
 )
 
-wix build -arch x64 -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\filekeep-0.8.1-x64.msi install/UsenetBackup.wxs
+wix build -arch x64 -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o C:\ub\filekeep-0.8.1.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
-$msi = Get-Item C:\ub\filekeep-0.8.1-x64.msi
+$msi = Get-Item C:\ub\filekeep-0.8.1.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
 Write-Host "=== 5/6 Signing MSI ==="
-Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.1-x64.msi")
+Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.1.msi")
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
-Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.1-x64.msi", "/qn" -Wait
+Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.1.msi", "/qn" -Wait
 Start-Sleep 15
 foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
                  "C:\Program Files\FileKeep\service\FileKeepService.exe",
@@ -280,7 +280,7 @@ Write-Host $svc
 if ($svc -notmatch "RUNNING") { Write-Host "  NOTE: service not running after install (expected: registered auto-start, starts on first boot / service start)" }
 
 Write-Host "  Uninstalling..."
-Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.8.1-x64.msi", "/qn" -Wait
+Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.8.1.msi", "/qn" -Wait
 Start-Sleep 10
 if (Test-Path "C:\Program Files\FileKeep") { throw "Uninstall left files behind" }
 Write-Host "  Uninstall clean."
