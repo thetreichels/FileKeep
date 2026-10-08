@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Installs (or uninstalls) the Usenet Backup Windows service.
+    Installs (or uninstalls) the FileKeep Windows service.
 
 .DESCRIPTION
     Copies the published service binary to the install directory, registers
@@ -49,7 +49,7 @@ param(
     [string]$Source = "",
     [string]$Config = "",
     [string]$InstallDir = "C:\Program Files\UsenetBackup",
-    [string]$ServiceName = "UsenetBackup",
+    [string]$ServiceName = "FileKeep",
     [string]$ServiceAccount = "",
     [SecureString]$Passphrase,
     [switch]$Uninstall
@@ -106,9 +106,9 @@ if ($LASTEXITCODE -eq 0) {
     sc.exe config $ServiceName binPath= $binPath @objArg | Out-Null
 } else {
     Write-Host "Creating service $ServiceName..."
-    $out = sc.exe create $ServiceName binPath= $binPath @objArg start= auto DisplayName= "Usenet Backup Service"
+    $out = sc.exe create $ServiceName binPath= $binPath @objArg start= auto DisplayName= "FileKeep Service"
     if ($LASTEXITCODE -ne 0) { Fail "sc.exe create failed: $out" }
-    sc.exe description $ServiceName "Scheduled encrypted backups to Usenet (usenet-backup)." | Out-Null
+    sc.exe description $ServiceName "Scheduled encrypted backups to Usenet (FileKeep)." | Out-Null
 }
 
 Write-Host "Starting service..."
