@@ -19,6 +19,10 @@
          GHSA-2m69-gcr7-jv3q, SQLite < 3.50.2 memory corruption) with 2.1.12
          which bundles patched SQLite 3.53.3. -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <!-- Reed-Solomon erasure coding: proven library replaces handmade
+         implementation (which had a singular-matrix bug for certain
+         erasure patterns). MIT licensed, pure managed C#. -->
+    <PackageReference Include="ReedSolomonFast" Version="1.1.1" />
   </ItemGroup>
 
 </Project>
