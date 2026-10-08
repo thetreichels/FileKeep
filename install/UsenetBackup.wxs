@@ -88,8 +88,8 @@
       <ComponentGroupRef Id="Docs" />
     </Feature>
 
-    <!-- Add/Remove Programs icon -->
-    <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />
-    <Property Id="ARPPRODUCTICON" Value="FileKeepIcon" />
+    <!-- Add/Remove Programs icon (disabled: assets/filekeep.ico not in repo) -->
+    <!-- <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" /> -->
+    <!-- <Property Id="ARPPRODUCTICON" Value="FileKeepIcon" /> -->
   </Package>
 </Wix>
