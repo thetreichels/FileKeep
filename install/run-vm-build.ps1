@@ -1,4 +1,4 @@
-# Self-contained VM build for Usenet Backup.
+# Self-contained VM build for FileKeep.
 # Embeds the fixed installer source + WinPE script (base64) so only ONE file
 # needs to be transferred - no URLs to go stale.
 #
