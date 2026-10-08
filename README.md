@@ -1,4 +1,4 @@
-# Usenet Backup
+# FileKeep
 
 Open-source Windows backup application providing full and incremental
 system-image backups, using Usenet as an encrypted long-term storage backend.
