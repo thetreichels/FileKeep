@@ -86,7 +86,7 @@ public sealed class RecoveryWizard : Form
     public RecoveryWizard(bool win95 = false)
     {
         _win95 = win95;
-        Text = "Usenet Backup — USB Recovery";
+        Text = "FileKeep — USB Recovery";
 
         if (win95)
             BuildWin95Shell();
