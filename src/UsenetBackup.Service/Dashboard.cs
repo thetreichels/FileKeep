@@ -450,7 +450,7 @@ public static class DashboardHtml
         <meta charset="utf-8">
         <meta name="csrf-token" content="{{CSRF_TOKEN}}">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Usenet Backup</title>
+        <title>FileKeep</title>
         <style>
           /* Windows 11 Settings page styling: Segoe UI Variable, cards, accent button. */
           :root {
@@ -589,7 +589,7 @@ public static class DashboardHtml
           <nav>
             <div class="nav-brand">
               <div class="glyph">⛁</div>
-              <div><div class="t1">Usenet Backup</div><div class="t2">Service settings</div></div>
+              <div><div class="t1">FileKeep</div><div class="t2">Service settings</div></div>
             </div>
             <a class="nav-item active" data-view="overview">Overview</a>
             <a class="nav-item" data-view="backups">Backups</a>
