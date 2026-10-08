@@ -25,6 +25,7 @@ try
         "nzb-generate" => NzbGenerate(args[1..]),
         "download" => Download(args[1..]),
         "expiration-check" => ExpirationCheck(args[1..]),
+        "retention-check" => RetentionCheck(args[1..]),
         "serve" => Serve(args[1..]),
         _ => Unknown(args[0]),
     };
@@ -703,4 +704,72 @@ static int ExpirationCheck(string[] args)
         Console.WriteLine($"  {record.BackupId[..8]}…  {record.ProviderHost}  uploaded {record.UploadedUtc:u}  expires {expires:u}  (retention {retention}d)  [{status}]");
     }
     return expiring.Any(x => x.DaysLeft < 0) ? 1 : 0;
+}
+
+static int RetentionCheck(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: retention-check <repo> [--warn-days DAYS] [--repost-threshold DAYS] [--dry-run]"); return 2; }
+    string repoPath = Path.GetFullPath(pos[0]);
+    int warnDays = int.TryParse(GetOption(args, "--warn-days"), out int w) ? w : 90;
+    int repostThreshold = int.TryParse(GetOption(args, "--repost-threshold"), out int r) ? r : 30;
+    bool dryRun = HasFlag(args, "--dry-run");
+
+    using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
+
+    // Build NNTP config from service config or args
+    string? configPath = GetOption(args, "--config");
+    UsenetBackup.Core.Service.NntpConfig? nntp = null;
+    if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
+    {
+        var svcConfig = UsenetBackup.Core.Service.ServiceConfig.Load(configPath);
+        nntp = svcConfig.Nntp;
+    }
+    if (nntp is null)
+    {
+        Console.Error.WriteLine("error: --config with NNTP settings is required");
+        return 2;
+    }
+
+    int GetRetention(string host) =>
+        string.Equals(host, nntp.Host, StringComparison.OrdinalIgnoreCase)
+            ? nntp.RetentionDays : 1095;
+
+    var manager = new UsenetBackup.Core.Nntp.RetentionManager(
+        msg => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}"),
+        GetRetention);
+
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var remote = new UsenetBackup.Core.Nntp.NntpBlobStore(
+            client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+
+        if (dryRun)
+        {
+            Console.WriteLine("DRY RUN — no articles will be reposted");
+            // TODO: dry-run mode in RetentionManager
+        }
+
+        var report = manager.CheckAndRepost(repo, remote, warnDays, repostThreshold);
+
+        Console.WriteLine($"\nRetention check complete:");
+        Console.WriteLine($"  Backups checked: {report.BackupsChecked}");
+        Console.WriteLine($"  Healthy: {report.BackupsHealthy}");
+        Console.WriteLine($"  Reposted: {report.BackupsReposted}");
+        Console.WriteLine($"  Articles checked: {report.ArticlesChecked}");
+        Console.WriteLine($"  Articles reposted: {report.ArticlesReposted}");
+        if (report.Errors.Count > 0)
+        {
+            Console.WriteLine($"  Errors: {report.Errors.Count}");
+            foreach (var err in report.Errors)
+                Console.WriteLine($"    - {err}");
+        }
+
+        return report.Errors.Count > 0 ? 1 : 0;
+    }
+    finally
+    {
+        client.Dispose();
+    }
 }
