@@ -90,8 +90,19 @@ closed — never silently degrade to a live copy and label it an "image."
   ```
   FileKeepVss.exe --volume C: --timeout 3600
   → stdout: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3
-  → stdin: "done\n" or EOF → deletes snapshot, exits 0
+  → stdin: "complete\n" → BackupComplete, delete snapshot, exit 0
+  → stdin: "abort\n"    → AbortBackup, delete snapshot, exit 3
+  → stdin: EOF          → AbortBackup, delete snapshot, exit 3 (fail-safe)
+  → timeout             → AbortBackup, delete snapshot, exit 2
   ```
+- **VSS protocol:** The helper implements the full `IVssBackupComponents`
+  backup sequence: `InitializeForBackup` → `SetContext(VSS_CTX_BACKUP)` →
+  `GatherWriterMetadata` → `SetBackupState(VSS_BT_FULL)` →
+  `StartSnapshotSet` → `AddToSnapshotSet` → `PrepareForBackup` →
+  `DoSnapshotSet` → `BackupComplete` (on "complete") or `AbortBackup`
+  (on "abort"/EOF/timeout). `BackupComplete`/`AbortBackup` are the writer
+  finalization calls that pair with `PrepareForBackup`; without them,
+  writers (SQL Server, etc.) are left dangling with un-truncated logs.
 - **Verdict:** Recommended. Smallest trusted computing base, cleanest
   failure mode, testable in isolation.
 
