@@ -113,10 +113,17 @@ public sealed class ReedSolomon
         int shardSize = -1;
         for (int i = 0; i < _totalShards; i++)
         {
-            if (shardPresent[i] && shards[i] is not null)
+            if (shardPresent[i])
             {
-                shardSize = shards[i]!.Length;
-                break;
+                if (shards[i] is null)
+                    throw new InvalidOperationException(
+                        $"Shard {i} marked present but is null.");
+                if (shardSize < 0)
+                    shardSize = shards[i]!.Length;
+                else if (shards[i]!.Length != shardSize)
+                    throw new InvalidOperationException(
+                        $"Shard {i} has length {shards[i]!.Length}, expected {shardSize}. " +
+                        "All shards must be the same size.");
             }
         }
         if (shardSize < 0)
