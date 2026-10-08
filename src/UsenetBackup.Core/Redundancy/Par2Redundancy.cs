@@ -113,14 +113,28 @@ public static class Par2Redundancy
 
         int maxLen = 0;
         var parityShards = new List<byte[]>();
+        int[]? firstLengths = null;
         foreach (byte[] data in parityDatas)
         {
-            if (!TryParseHeader(data, out _, out byte[]? parity))
+            if (!TryParseHeader(data, out int[]? lengths, out byte[]? parity))
+                return null;
+            // Cross-validate: all parity blocks must agree on the header.
+            // A mismatched header means corruption; fail cleanly rather than
+            // doing math on inconsistent inputs.
+            if (firstLengths is null)
+                firstLengths = lengths;
+            else if (!lengths!.SequenceEqual(firstLengths))
                 return null;
             parityShards.Add(parity!);
             if (parity!.Length > maxLen)
                 maxLen = parity.Length;
         }
+
+        // All parity shards must have the same length. A truncated parity
+        // block would otherwise shrink maxLen and silently corrupt the
+        // reconstruction math.
+        if (parityShards.Any(p => p.Length != maxLen))
+            return null;
 
         var rs = new ReedSolomon(DataShards, ParityShards);
 
