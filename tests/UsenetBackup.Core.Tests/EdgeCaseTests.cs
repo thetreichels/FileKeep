@@ -142,4 +142,46 @@ public sealed class EdgeCaseTests : IDisposable
 
         Assert.Equal(data, File.ReadAllBytes(RestoredPath(dest, rel)));
     }
+
+    [Theory]
+    [InlineData(VerificationMode.Fast, false)]    // Fast is fooled by spoofed metadata
+    [InlineData(VerificationMode.Verify, true)]  // Verify catches it via hash
+    [InlineData(VerificationMode.Paranoid, true)] // Paranoid catches it via hash
+    public void Incremental_DetectsSpoofedMtime(VerificationMode mode, bool shouldDetect)
+    {
+        // Setup: file with known content
+        byte[] original = new byte[1024];
+        new Random(42).NextBytes(original);
+        WriteSrc("spoof.txt", original);
+
+        using var repo = InitRepo();
+        var parent = repo.BackupDirectory(_srcDir);
+
+        // Attack: change contents, restore original size and mtime
+        byte[] modified = new byte[1024];
+        new Random(99).NextBytes(modified);
+        string fullPath = Path.Combine(_srcDir, "spoof.txt");
+        File.WriteAllBytes(fullPath, modified);
+        var parentEntry = parent.Files.First(f => f.Path == "spoof.txt");
+        File.SetLastWriteTimeUtc(fullPath, parentEntry.MtimeUtc);
+
+        // Sanity: size and mtime now match parent
+        Assert.Equal(parentEntry.Size, new FileInfo(fullPath).Length);
+        Assert.Equal(parentEntry.MtimeUtc, File.GetLastWriteTimeUtc(fullPath));
+
+        // Incremental with the given mode
+        var inc = repo.BackupIncremental(_srcDir, parent.BackupId, null, mode);
+        var incEntry = inc.Files.First(f => f.Path == "spoof.txt");
+
+        if (shouldDetect)
+        {
+            // The change was detected: new chunks, different hash
+            Assert.NotEqual(parentEntry.Sha256, incEntry.Sha256);
+        }
+        else
+        {
+            // Fast mode is fooled: reuses parent entry
+            Assert.Equal(parentEntry.Sha256, incEntry.Sha256);
+        }
+    }
 }
