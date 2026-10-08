@@ -87,5 +87,9 @@
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
     </Feature>
+
+    <!-- Add/Remove Programs icon -->
+    <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FileKeepIcon" />
   </Package>
 </Wix>
