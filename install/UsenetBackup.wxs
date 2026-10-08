@@ -8,18 +8,18 @@
      the MSI installs only the files listed below.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Usenet Backup"
+  <Package Name="FileKeep"
            Version="0.8.1"
-           Manufacturer="Usenet Backup"
+           Manufacturer="J. Treichel"
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
            Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Usenet Backup is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of FileKeep is already installed." />
 
     <Media Id="1" Cabinet="product.cab" EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="UsenetBackup">
+      <Directory Id="INSTALLFOLDER" Name="FileKeep">
         <Directory Id="CLIDIR" Name="cli" />
         <Directory Id="SERVICEDIR" Name="service" />
         <Directory Id="WIZARDDIR" Name="wizard" />
@@ -30,7 +30,7 @@
     <!-- CLI (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
-        <File Id="CliExeFile" Source="$(var.CliBin)\UsenetBackup.exe" KeyPath="yes" />
+        <File Id="CliExeFile" Source="$(var.CliBin)\FileKeep.exe" KeyPath="yes" />
         <RemoveFile Id="RemoveCliPdb" Directory="CLIDIR" Name="*.pdb" On="uninstall" />
         <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
       </Component>
@@ -38,17 +38,17 @@
 
     <ComponentGroup Id="ServiceRegistration" Directory="SERVICEDIR">
       <Component Id="ServiceExecutable">
-        <File Id="ServiceExe" Source="$(var.ServiceBin)\UsenetBackupService.exe" KeyPath="yes" />
+        <File Id="ServiceExe" Source="$(var.ServiceBin)\FileKeepService.exe" KeyPath="yes" />
         <ServiceInstall Id="BackupService"
                         Type="ownProcess"
-                        Name="UsenetBackup"
-                        DisplayName="Usenet Backup Service"
+                        Name="FileKeep"
+                        DisplayName="FileKeep Service"
                         Description="Scheduled encrypted backups to Usenet."
                         Start="auto"
                         Account="LocalSystem"
                         ErrorControl="normal" />
         <ServiceControl Id="BackupServiceControl"
-                        Name="UsenetBackup"
+                        Name="FileKeep"
                         Stop="both"
                         Remove="uninstall"
                         Wait="true" />
@@ -66,7 +66,7 @@
     <!-- Recovery wizard (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="RecoveryFiles" Directory="WIZARDDIR">
       <Component Id="RecoveryExe" Guid="*">
-        <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\UsenetBackupRecovery.exe" KeyPath="yes" />
+        <File Id="RecoveryExeFile" Source="$(var.RecoveryBin)\FileKeepRecovery.exe" KeyPath="yes" />
         <RemoveFolder Id="RemoveWizardDir" Directory="WIZARDDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
@@ -81,7 +81,7 @@
       </Component>
     </ComponentGroup>
 
-    <Feature Id="ProductFeature" Title="Usenet Backup" Level="1">
+    <Feature Id="ProductFeature" Title="FileKeep" Level="1">
       <ComponentGroupRef Id="CliFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />

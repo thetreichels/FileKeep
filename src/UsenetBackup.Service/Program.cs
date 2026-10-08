@@ -9,7 +9,7 @@ static string DefaultConfigPath()
         // for standard users and services shouldn't write there.
         string dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "UsenetBackup");
+            "FileKeep");
         Directory.CreateDirectory(dir);
         return Path.Combine(dir, "service.json");
     }
@@ -20,7 +20,7 @@ static string DefaultConfigPath()
 string? configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
 
 // First-run: if the config doesn't exist, seed it from the example file
-// installed in the docs subdirectory (Program Files\UsenetBackup\docs).
+// installed in the docs subdirectory (Program Files\FileKeep\docs).
 // This preserves the old workflow where users copied service.example.json to service.json.
 if (!File.Exists(configPath))
 {
@@ -64,7 +64,7 @@ void Log(string message)
 var scheduler = new BackupScheduler(config, log: Log);
 
 Console.WriteLine(
-    $"usenet-backup-service: {config.Jobs.Count} job(s); " +
+    $"filekeep-service: {config.Jobs.Count} job(s); " +
     $"dashboard at http://{config.DashboardBind}:{config.DashboardPort}/");
 Console.WriteLine(
     $"Scheduled backups need the {BackupScheduler.PassphraseEnvVar} environment variable.");
@@ -81,7 +81,7 @@ if (consoleMode)
     return 0;
 }
 
-WindowsServiceHost.Run("UsenetBackup", RunAllAsync);
+WindowsServiceHost.Run("FileKeep", RunAllAsync);
 return 0;
 
 async Task RunAllAsync(CancellationToken ct)
