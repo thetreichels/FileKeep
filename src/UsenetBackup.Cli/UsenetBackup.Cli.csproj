@@ -8,6 +8,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>UsenetBackup.Cli</RootNamespace>
     <AssemblyName>FileKeep</AssemblyName>
+    <ApplicationIcon>../../assets/filekeep.ico</ApplicationIcon>
       <!-- Single-file self-contained publish: the MSI installs the exe + native deps explicitly. -->
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
