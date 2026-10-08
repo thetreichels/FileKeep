@@ -300,6 +300,82 @@ public sealed class Par2RedundancyTests
         Assert.True(tested > 0);
     }
 
+    [Fact]
+    public void Reconstruct_RecoversWhenParityBlocksMissing()
+    {
+        // Lose 1 data chunk AND 1 parity block: 9 data + 2 parity = 11 >= 10, should recover
+        var chunks = MakeChunks(10, 512);
+        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+        var parityList = parity.Values.Take(2).ToList(); // Drop one parity block
+
+        string missing = ids[4];
+        var remaining = chunks.Where(kv => kv.Key != missing)
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var result = Par2Redundancy.Reconstruct(
+            ids,
+            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
+            parityList);
+
+        Assert.NotNull(result);
+        Assert.Equal(chunks[missing], result![missing]);
+    }
+
+    [Fact]
+    public void Reconstruct_InconsistentHeaders_ReturnsNull()
+    {
+        // Two parity blocks with different length headers: must fail cleanly,
+        // not do math on inconsistent inputs.
+        var chunks = MakeChunks(10, 512);
+        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+        var parityList = parity.Values.ToList();
+
+        // Corrupt the second block's header: change first length entry
+        byte[] evil = (byte[])parityList[1].Clone();
+        BitConverter.GetBytes(999).CopyTo(evil, 8);
+        parityList[1] = evil;
+
+        string missing = ids[0];
+        var remaining = chunks.Where(kv => kv.Key != missing)
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var result = Par2Redundancy.Reconstruct(
+            ids,
+            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
+            parityList);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void Reconstruct_TruncatedParity_ReturnsNull()
+    {
+        // A truncated parity block must not shrink the shard size and
+        // silently corrupt reconstruction.
+        var chunks = MakeChunks(10, 512);
+        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+        var parityList = parity.Values.ToList();
+
+        // Truncate the last parity block's payload (keep header intact)
+        byte[] truncated = new byte[parityList[2].Length - 100];
+        Array.Copy(parityList[2], truncated, truncated.Length);
+        parityList[2] = truncated;
+
+        string missing = ids[0];
+        var remaining = chunks.Where(kv => kv.Key != missing)
+            .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var result = Par2Redundancy.Reconstruct(
+            ids,
+            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
+            parityList);
+
+        Assert.Null(result);
+    }
+
     private static IEnumerable<int[]> Combinations(int n, int k)
     {
         int[] result = new int[k];
