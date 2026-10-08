@@ -79,7 +79,7 @@ public sealed class RetentionManager
             report.BackupsChecked++;
             try
             {
-                bool reposted = CheckBackup(repo, remote, record, daysLeft,
+                bool reposted = CheckBackup(repo, remote, tracker, record, daysLeft,
                     repostThresholdDays, sampleSize, report);
                 if (reposted)
                     report.BackupsReposted++;
@@ -102,6 +102,7 @@ public sealed class RetentionManager
     private bool CheckBackup(
         BackupRepository repo,
         NntpBlobStore remote,
+        UsenetUploadTracker tracker,
         UsenetUploadTracker.UploadRecord record,
         int daysLeft,
         int repostThresholdDays,
