@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- WiX v5 installer for Usenet Backup.
+<!-- WiX v5 installer for FileKeep.
      The apps publish as single-file executables (PublishSingleFile in the
      csproj), so the payload is a handful of explicit files — no harvesting.
      Build on Windows with the WiX v5 dotnet tool:
