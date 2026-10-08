@@ -142,15 +142,25 @@ public sealed class BackupRepository : IDisposable
     /// the parent's chunk list without re-reading. The resulting manifest
     /// is self-contained: it lists every file with complete chunk lists,
     /// so restore/verify never need the parent.
+    ///
+    /// The <paramref name="verificationMode"/> controls how "unchanged" is
+    /// determined: <see cref="VerificationMode.Fast"/> uses metadata only,
+    /// <see cref="VerificationMode.Verify"/> adds SHA-256 confirmation for
+    /// metadata matches, <see cref="VerificationMode.Paranoid"/> hashes
+    /// every file.
     /// </summary>
-    public BackupManifest BackupIncremental(string sourceDir, string parentBackupId, ISnapshotProvider? snapshotProvider = null)
+    public BackupManifest BackupIncremental(
+        string sourceDir,
+        string parentBackupId,
+        ISnapshotProvider? snapshotProvider = null,
+        VerificationMode verificationMode = VerificationMode.Fast)
     {
         var parent = LoadManifest(parentBackupId); // validates parent root hash
         if (parent.ChunkSize != _config.ChunkSize)
             throw new InvalidOperationException(
                 $"Parent backup {parentBackupId} uses chunk size {parent.ChunkSize}, " +
                 $"but this repository uses {_config.ChunkSize}.");
-        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider);
+        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode);
         manifest.Type = "inc";
         manifest.ParentId = parentBackupId;
         return FinalizeManifest(manifest);
@@ -173,7 +183,11 @@ public sealed class BackupRepository : IDisposable
         return manifest;
     }
 
-    private BackupManifest BackupDirectoryInternal(string sourceDir, BackupManifest? parent, ISnapshotProvider? snapshotProvider)
+    private BackupManifest BackupDirectoryInternal(
+        string sourceDir,
+        BackupManifest? parent,
+        ISnapshotProvider? snapshotProvider,
+        VerificationMode verificationMode = VerificationMode.Fast)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
@@ -234,7 +248,7 @@ public sealed class BackupRepository : IDisposable
                 string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
                 if (parentByPath is not null &&
                     parentByPath.TryGetValue(rel, out var parentEntry) &&
-                    IsUnchanged(full, parentEntry))
+                    IsUnchangedForMode(full, parentEntry, snap, verificationMode))
                 {
                     manifest.Files.Add(parentEntry);
                 }
@@ -296,6 +310,74 @@ public sealed class BackupRepository : IDisposable
                 return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Determines if a file is unchanged according to the verification mode.
+    ///
+    /// <list type="bullet">
+    /// <item><description>
+    /// <see cref="VerificationMode.Fast"/>: metadata (size+mtime) only.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="VerificationMode.Verify"/>: metadata fast path, plus
+    /// SHA-256 verification for files that pass. Catches timestamp spoofing.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="VerificationMode.Paranoid"/>: SHA-256 every file, ignore
+    /// metadata entirely.
+    /// </description></item>
+    /// </list>
+    /// </summary>
+    private bool IsUnchangedForMode(
+        string fullPath,
+        FileEntry parentEntry,
+        ISnapshotProvider snap,
+        VerificationMode mode)
+    {
+        // Symlinks: metadata check is sufficient in all modes (target is
+        // the content; hashing doesn't apply).
+        bool isLink = (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0;
+        if (isLink)
+            return IsUnchanged(fullPath, parentEntry);
+
+        switch (mode)
+        {
+            case VerificationMode.Fast:
+                return IsUnchanged(fullPath, parentEntry);
+
+            case VerificationMode.Verify:
+                // Fast path first; if metadata matches, verify with hash.
+                if (!IsUnchanged(fullPath, parentEntry))
+                    return false;
+                return HashMatches(fullPath, parentEntry, snap);
+
+            case VerificationMode.Paranoid:
+                // Skip metadata entirely; hash everything.
+                return HashMatches(fullPath, parentEntry, snap);
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode));
+        }
+    }
+
+    /// <summary>
+    /// Computes SHA-256 of the file and compares to the parent entry's hash.
+    /// </summary>
+    private bool HashMatches(string fullPath, FileEntry parentEntry, ISnapshotProvider snap)
+    {
+        try
+        {
+            using var stream = snap.OpenRead(fullPath);
+            string hash = Hashing.Sha256Hex(stream);
+            return string.Equals(hash, parentEntry.Sha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // If we can't read the file, it's not "unchanged" — let the
+            // backup path handle (and report) the error.
+            return false;
+        }
     }
 
     private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer)
