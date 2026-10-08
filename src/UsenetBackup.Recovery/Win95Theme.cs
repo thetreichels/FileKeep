@@ -7,7 +7,7 @@ namespace UsenetBackup.Recovery;
 /// Windows 95 Setup aesthetic for the USB/WinPE recovery environment:
 /// teal desktop, navy gradient title bar, classic 3D gray dialog with a
 /// step list on the left, MS Sans Serif. Comfort, not trickery — the
-/// window title and branding stay "Usenet Backup".
+/// window title and branding stay "FileKeep".
 /// </summary>
 internal static class Win95Theme
 {
