@@ -113,6 +113,45 @@ public sealed class ReedSolomonTests
     }
 
     [Fact]
+    public void Reconstruct_RejectsMismatchedShardSizes()
+    {
+        var rs = new ReedSolomon(4, 2);
+        var data = new byte[4][];
+        for (int i = 0; i < 4; i++) data[i] = new byte[100];
+        byte[][] parity = rs.Encode(data);
+
+        byte[][] shards = new byte[6][];
+        var present = new bool[6];
+        for (int i = 0; i < 4; i++) { shards[i] = data[i]; present[i] = true; }
+        for (int i = 0; i < 2; i++) { shards[4 + i] = parity[i]; present[4 + i] = true; }
+
+        // Corrupt: one shard shorter than the rest
+        shards[1] = new byte[50];
+
+        Assert.Throws<InvalidOperationException>(() => rs.Reconstruct(shards, present));
+    }
+
+    [Fact]
+    public void Reconstruct_RejectsNullShardMarkedPresent()
+    {
+        var rs = new ReedSolomon(4, 2);
+        var data = new byte[4][];
+        for (int i = 0; i < 4; i++) data[i] = new byte[100];
+        byte[][] parity = rs.Encode(data);
+
+        byte[][] shards = new byte[6][];
+        var present = new bool[6];
+        for (int i = 0; i < 4; i++) { shards[i] = data[i]; present[i] = true; }
+        for (int i = 0; i < 2; i++) { shards[4 + i] = parity[i]; present[4 + i] = true; }
+
+        // Mark present but null: must throw cleanly, not NullReferenceException
+        shards[2] = null!;
+        present[2] = true;
+
+        Assert.Throws<InvalidOperationException>(() => rs.Reconstruct(shards, present));
+    }
+
+    [Fact]
     public void Par2Redundancy_GeneratesThreePerGroup()
     {
         var chunkIds = Enumerable.Range(0, 10).Select(i => i.ToString("x64")).ToList();
