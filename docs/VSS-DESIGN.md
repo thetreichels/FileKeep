@@ -110,23 +110,90 @@ closed — never silently degrade to a live copy and label it an "image."
 
 ## 4. Recommended architecture
 
+VSS must not be part of the chunk engine. The snapshot is a provider
+that sits above the existing pipeline — everything already built
+(chunking, deduplication, SHA-256, AES-GCM, manifests, incrementals,
+NZBs, NNTP, parity) remains unchanged.
+
+```
+             ┌──────────────────────┐
+             │ Backup orchestration │
+             └──────────┬───────────┘
+                        │
+               snapshot provider
+                        │
+          ┌─────────────┴─────────────┐
+          │                           │
+       No snapshot                  VSS
+          │                           │
+      live files              frozen filesystem
+          │                           │
+          └─────────────┬─────────────┘
+                        ▼
+                Backup file reader
+                        │
+                        ▼
+                    Chunking
+                        │
+                        ▼
+                 SHA-256 / AES-GCM
+                        │
+                        ▼
+                 Local / Usenet
+```
+
+The concrete flow:
+
 ```
 ┌─────────────────────────────────────────────────┐
 │ FileKeep backup engine (managed, unelevated)     │
 │                                                  │
 │  1. Job requests "crash-consistent image"        │
-│  2. Spawns FileKeepVss.exe --volume C:           │
-│  3. Reads snapshot path from stdout              │
-│  4. Backs up files from snapshot path            │
+│  2. Resolves ISnapshotProvider for "vss"         │
+│  3. Provider spawns FileKeepVss.exe --volume C:   │
+│  4. Reads snapshot path from stdout              │
+│  5. Backs up files from snapshot path            │
 │     (existing chunking/encryption/pipeline)      │
-│  5. Signals "done" on stdin                      │
-│  6. Helper deletes snapshot, exits               │
+│  6. Signals "done" on stdin                      │
+│  7. Helper deletes snapshot, exits               │
 │                                                  │
 │  If helper exits non-zero at any point:          │
 │  → job fails with "VSS snapshot failed: <reason>"│
 │  → NO fallback to live copy                     │
 └─────────────────────────────────────────────────┘
 ```
+
+### Consistency scope for v1
+
+Two levels exist:
+
+- **Crash-consistent:** The snapshot freezes the volume at an instant.
+  Dramatically better than reading a live filesystem. This is the
+  target for FileKeep's first VSS implementation.
+- **Application-consistent:** VSS writers (SQL Server, Exchange,
+  Windows system components) are notified and prepare their data.
+  This uses standard VSS backup semantics — FileKeep coordinates
+  with writers, it does not invent application-specific handling.
+
+For v1, target standard VSS backup semantics (crash-consistent with
+writer coordination where writers exist). Do not attempt custom
+per-application quiescing.
+
+### VSS file backup vs raw disk imaging
+
+These are different and must not be conflated:
+
+- **File-level VSS backup:** VSS snapshot → read `C:\` files →
+  FileKeep chunks. Good for restoring files and rebuilding Windows.
+- **Raw disk image:** Physical disk → block reader → FileKeep chunks.
+  Fundamentally different: no filesystem awareness, no VSS writer
+  coordination, different restore path.
+
+VSS helps with filesystem/application consistency but does not make
+arbitrary raw-block imaging equivalent to a traditional Windows image
+backup. If FileKeep promises "restore the entire Windows installation
+from USB," the documentation must state exactly which method was used
+and what guarantees it provides.
 
 ### Privilege model
 
@@ -185,7 +252,131 @@ closed — never silently degrade to a live copy and label it an "image."
 
 ---
 
-## 6. Open questions
+## 6. Manifest terminology
+
+The manifest must record exactly which snapshot provider was used —
+never claim VSS unless VSS actually succeeded.
+
+```json
+"snapshot": {
+    "provider": "vss"
+}
+```
+
+Valid values:
+
+| Value | Meaning |
+|-------|---------|
+| `none` | Live file copy, no snapshot |
+| `backup-privilege` | Live copy with backup privilege (bypasses ACLs, still live) |
+| `vss` | Genuine VSS snapshot was created and used |
+
+Rules:
+
+- `provider: vss` is written **only** when the VSS helper exited
+  successfully and the backup actually read from the snapshot path.
+- If VSS was requested but failed, the backup fails. It does not
+  silently fall back to `none` or `backup-privilege` and it does not
+  write `provider: vss`.
+- This preserves the earlier correction that renamed the misleading
+  "vss" flag to "backup-privilege" — that flag was never VSS, and the
+  new `vss` value is reserved for the real thing.
+
+---
+
+## 7. Test strategy
+
+Unit tests cannot prove VSS works. Three layers:
+
+### Layer 1 — Mock/unit tests (run anywhere)
+
+- Provider selection (none vs backup-privilege vs vss)
+- Path translation (volume → snapshot device path)
+- Snapshot lifecycle (create → use → delete)
+- Cleanup on normal and abnormal termination
+- Failure handling (helper non-zero exit → job fails closed)
+- Cancellation (job cancelled mid-snapshot → cleanup runs)
+- Manifest metadata (correct `provider` value written)
+
+### Layer 2 — Windows integration tests (real Windows required)
+
+The critical proof — point-in-time behavior:
+
+```
+create test file
+       ↓
+start VSS snapshot
+       ↓
+modify original file
+       ↓
+read snapshot
+       ↓
+verify snapshot contains OLD version
+```
+
+Also test:
+
+- Locked files (readable via snapshot, not via live path)
+- Files modified during backup (snapshot version wins)
+- Deleted files (still present in snapshot)
+- Renamed files
+- Large files
+- Multiple volumes
+- Snapshot creation failure (fail closed)
+- Snapshot deletion (no orphans)
+- Process interruption (helper killed → snapshot cleaned up)
+
+### Layer 3 — Full bare-metal recovery test
+
+```
+Windows installation
+       ↓
+FileKeep VSS backup
+       ↓
+encrypt/chunk
+       ↓
+Usenet
+       ↓
+destroy/replace disk
+       ↓
+FileKeep recovery USB
+       ↓
+download
+       ↓
+reconstruct
+       ↓
+restore
+       ↓
+boot Windows
+```
+
+This is the test that ultimately matters. It proves the entire chain,
+not just that VSS compiled.
+
+---
+
+## 8. VSS milestone
+
+A focused milestone — not a broad feature sprint. The chunk store,
+crypto, NZB, NNTP, Reed-Solomon, and manifest format are untouched
+except for the small `snapshot.provider` metadata addition.
+
+- [ ] Restore `VssSnapshotProvider` as a real `ISnapshotProvider`
+- [ ] Create the smallest possible native VSS helper (`FileKeepVss.exe`)
+- [ ] Implement snapshot creation/deletion
+- [ ] Implement volume/path translation
+- [ ] Connect to existing `ISnapshotProvider`
+- [ ] Add Windows-only integration tests (Layer 2)
+- [ ] Add point-in-time proof test (modify-after-snapshot)
+- [ ] Add failure/cleanup tests
+- [ ] Add manifest `"provider": "vss"`
+- [ ] Make `--vss` fail closed if VSS unavailable
+- [ ] Run a complete FileKeep backup through VSS
+- [ ] Perform an actual bare-metal recovery test (Layer 3)
+
+---
+
+## 9. Open questions
 
 1. **C++/CLI vs pure C++ for the helper?** Pure C++ with direct COM
    calls avoids the C++/CLI single-file publish problem entirely.
