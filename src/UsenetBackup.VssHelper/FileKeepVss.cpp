@@ -1,19 +1,33 @@
 // FileKeepVss.exe — Minimal VSS shadow copy helper for FileKeep.
 //
 // Creates a VSS shadow copy of a volume, prints the snapshot device path
-// to stdout, waits for a "done" signal on stdin (or timeout), then deletes
-// the snapshot.
+// to stdout, waits for a completion signal on stdin (or timeout), then
+// finalizes the VSS backup session and deletes the snapshot.
 //
 // Protocol:
 //   FileKeepVss.exe --volume C: [--timeout 3600]
 //   → stdout: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3\n
-//   → stdin:  "done\n" or EOF → deletes snapshot, exits 0
-//   → timeout → deletes snapshot, exits 2
-//   → any VSS failure → exits 1 with error on stderr
+//   → stdin:  "complete\n" → BackupComplete, delete snapshot, exit 0
+//   → stdin:  "abort\n"    → AbortBackup, delete snapshot, exit 3
+//   → stdin:  EOF          → AbortBackup, delete snapshot, exit 3
+//   → timeout              → AbortBackup, delete snapshot, exit 2
+//   → any VSS failure      → exit 1 with error on stderr
 //
-// This is intentionally minimal: ~300 lines, no dependencies beyond the
-// Windows SDK. The backup engine (managed) spawns this process and never
-// touches COM itself.
+// VSS backup protocol implemented:
+//   CreateVssBackupComponents → InitializeForBackup → SetContext(VSS_CTX_BACKUP)
+//   → GatherWriterMetadata → SetBackupState(FULL) → StartSnapshotSet
+//   → AddToSnapshotSet → PrepareForBackup → DoSnapshotSet
+//   → (engine copies data from snapshot)
+//   → BackupComplete (on "complete") or AbortBackup (on "abort"/EOF/timeout)
+//   → DeleteSnapshots
+//
+// BackupComplete/AbortBackup are the writer finalization calls that pair
+// with PrepareForBackup. Without them, writers (SQL Server, etc.) are left
+// in a dangling "backup in progress" state: transaction logs are never
+// truncated and subsequent backups may misbehave.
+//
+// This is intentionally minimal: no dependencies beyond the Windows SDK.
+// The backup engine (managed) spawns this process and never touches COM itself.
 
 #define _WIN32_DCOM
 #include <windows.h>
@@ -21,6 +35,7 @@
 #include <vswriter.h>
 #include <vsbackup.h>
 
+#include <cctype>
 #include <cstdio>
 #include <string>
 #include <chrono>
@@ -35,15 +50,22 @@ void PrintUsage() {
         "Usage: FileKeepVss.exe --volume <drive> [--timeout <seconds>]\n"
         "\n"
         "Creates a VSS shadow copy, prints the snapshot device path to stdout,\n"
-        "waits for \"done\" on stdin (or timeout), then deletes the snapshot.\n"
+        "waits for a completion signal on stdin (or timeout), finalizes the\n"
+        "VSS backup session, then deletes the snapshot.\n"
         "\n"
         "  --volume   Volume to snapshot (e.g., C: or C:\\)\n"
         "  --timeout  Seconds to hold the snapshot (default: 3600)\n"
         "\n"
+        "Completion signals (stdin):\n"
+        "  complete   Backup succeeded → BackupComplete, exit 0\n"
+        "  abort      Backup failed    → AbortBackup, exit 3\n"
+        "  EOF        Treated as abort (fail-safe)\n"
+        "\n"
         "Exit codes:\n"
-        "  0  Snapshot created, used, and deleted cleanly\n"
+        "  0  Snapshot created, backup completed, cleaned up\n"
         "  1  VSS error (see stderr)\n"
-        "  2  Timeout waiting for done signal\n");
+        "  2  Timeout waiting for signal (backup aborted, cleaned up)\n"
+        "  3  Abort signal or EOF (backup aborted, cleaned up)\n");
 }
 
 // Waits for an async VSS job to complete.
@@ -66,6 +88,61 @@ std::wstring NormalizeVolume(const std::wstring& input) {
     return vol;
 }
 
+// Completion signal outcomes.
+enum class SignalResult {
+    Complete,   // engine sent "complete"
+    Abort,      // engine sent "abort" or unrecognized input
+    Eof,        // stdin closed without a signal (fail-safe abort)
+    Timeout,    // timed out waiting (fail-safe abort)
+    Error,      // wait/read error (fail-safe abort)
+};
+
+// Waits for the engine's completion signal on stdin.
+// Only SignalResult::Complete means the backup succeeded; every other
+// outcome must lead to AbortBackup (fail-safe).
+SignalResult WaitForCompletionSignal(DWORD timeoutSecs) {
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdin == nullptr || hStdin == INVALID_HANDLE_VALUE) {
+        fwprintf(stderr, L"No stdin handle; aborting backup\n");
+        return SignalResult::Error;
+    }
+
+    // Guard against DWORD overflow in ms conversion.
+    DWORD waitMs = (timeoutSecs > 4000000) ? INFINITE : timeoutSecs * 1000;
+
+    DWORD waitResult = WaitForSingleObject(hStdin, waitMs);
+    if (waitResult == WAIT_TIMEOUT) {
+        fwprintf(stderr, L"Timeout (%lu seconds) waiting for completion signal; "
+            L"aborting backup\n", timeoutSecs);
+        return SignalResult::Timeout;
+    }
+    if (waitResult != WAIT_OBJECT_0) {
+        fwprintf(stderr, L"Wait for completion signal failed: %lu; aborting backup\n",
+            GetLastError());
+        return SignalResult::Error;
+    }
+
+    // Signaled: data available or pipe closed (EOF).
+    char buffer[256] = {};
+    DWORD bytesRead = 0;
+    BOOL ok = ReadFile(hStdin, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
+    if (!ok || bytesRead == 0) {
+        // EOF: the engine went away without signaling. Fail-safe abort.
+        fwprintf(stderr, L"Stdin closed without completion signal; aborting backup\n");
+        return SignalResult::Eof;
+    }
+
+    buffer[bytesRead] = '\0';
+    std::string signal(buffer);
+    for (auto& c : signal) c = static_cast<char>(std::tolower(
+        static_cast<unsigned char>(c)));
+    if (signal.find("complete") != std::string::npos) {
+        return SignalResult::Complete;
+    }
+    // "abort" or unrecognized input → abort.
+    return SignalResult::Abort;
+}
+
 int Run(const std::wstring& volume, DWORD timeoutSecs) {
     HRESULT hr;
 
@@ -80,12 +157,22 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
     VSS_ID snapshotSetId = GUID_NULL;
     VSS_ID snapshotId = GUID_NULL;
     bool snapshotCreated = false;
+    bool writersEngaged = false;  // true once PrepareForBackup succeeds
 
-    // Ensure cleanup on any exit path
-    auto cleanup = [&]() {
+    // AbortBackup releases writers from the backup session. Must be called
+    // if PrepareForBackup succeeded but the backup did not complete.
+    auto abortWriters = [&]() {
+        if (writersEngaged && backup) {
+            HRESULT ahr = backup->AbortBackup();
+            if (FAILED(ahr)) {
+                fwprintf(stderr, L"Warning: AbortBackup failed: 0x%08X\n", ahr);
+            }
+            writersEngaged = false;
+        }
+    };
+
+    auto deleteSnapshot = [&]() {
         if (snapshotCreated && backup) {
-            // Delete the snapshot. Use VSS_OBJECT_SNAPSHOT to delete
-            // just this snapshot, not the whole set.
             LONG deleted = 0;
             VSS_ID nonDeletedId = GUID_NULL;
             HRESULT dhr = backup->DeleteSnapshots(
@@ -97,7 +184,15 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
             if (FAILED(dhr)) {
                 fwprintf(stderr, L"Warning: DeleteSnapshots failed: 0x%08X\n", dhr);
             }
+            snapshotCreated = false;
         }
+    };
+
+    // Ensure cleanup on any exit path. Note: this does NOT call
+    // AbortBackup — callers must finalize the writer session explicitly
+    // via BackupComplete or abortWriters() before cleanup().
+    auto cleanup = [&]() {
+        deleteSnapshot();
         if (backup) backup->Release();
         CoUninitialize();
     };
@@ -126,6 +221,31 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
         return 1;
     }
 
+    // Gather writer metadata (standard protocol step; enables future
+    // writer status reporting)
+    {
+        IVssAsync* async = nullptr;
+        hr = backup->GatherWriterMetadata(&async);
+        if (SUCCEEDED(hr)) {
+            hr = WaitForAsync(async);
+            async->Release();
+        }
+        if (FAILED(hr)) {
+            fwprintf(stderr, L"GatherWriterMetadata failed: 0x%08X\n", hr);
+            cleanup();
+            return 1;
+        }
+    }
+
+    // Declare this a full backup so writers know to truncate logs etc.
+    // (select components, bootable system state, FULL, no partial files)
+    hr = backup->SetBackupState(TRUE, TRUE, VSS_BT_FULL, FALSE);
+    if (FAILED(hr)) {
+        fwprintf(stderr, L"SetBackupState failed: 0x%08X\n", hr);
+        cleanup();
+        return 1;
+    }
+
     // Start a new snapshot set
     hr = backup->StartSnapshotSet(&snapshotSetId);
     if (FAILED(hr)) {
@@ -146,7 +266,8 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
         return 1;
     }
 
-    // Prepare for backup (notifies writers)
+    // Prepare for backup (notifies writers). From this point on, the
+    // writer session MUST be finalized with BackupComplete or AbortBackup.
     {
         IVssAsync* async = nullptr;
         hr = backup->PrepareForBackup(&async);
@@ -160,6 +281,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
             return 1;
         }
     }
+    writersEngaged = true;
 
     // Create the snapshot
     {
@@ -171,6 +293,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
         }
         if (FAILED(hr)) {
             fwprintf(stderr, L"DoSnapshotSet failed: 0x%08X\n", hr);
+            abortWriters();
             cleanup();
             return 1;
         }
@@ -182,6 +305,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
     hr = backup->GetSnapshotProperties(snapshotId, &prop);
     if (FAILED(hr)) {
         fwprintf(stderr, L"GetSnapshotProperties failed: 0x%08X\n", hr);
+        abortWriters();
         cleanup();
         return 1;
     }
@@ -193,28 +317,32 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
 
     VssFreeSnapshotProperties(&prop);
 
-    // Wait for "done" on stdin or timeout
-    // Use WaitForSingleObject on stdin handle with timeout
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD waitMs = timeoutSecs * 1000;
+    // Wait for the engine to finish copying data from the snapshot.
+    SignalResult signal = WaitForCompletionSignal(timeoutSecs);
 
-    // If stdin is not a console/pipe (e.g., redirected from NUL), we just
-    // wait for the timeout. Check if input is available.
-    DWORD waitResult = WaitForSingleObject(hStdin, waitMs);
-    if (waitResult == WAIT_TIMEOUT) {
-        fwprintf(stderr, L"Timeout (%lu seconds) waiting for done signal\n",
-            timeoutSecs);
+    if (signal == SignalResult::Complete) {
+        // Finalize the writer session: writers can now truncate logs etc.
+        IVssAsync* async = nullptr;
+        hr = backup->BackupComplete(&async);
+        if (SUCCEEDED(hr)) {
+            hr = WaitForAsync(async);
+            async->Release();
+        }
+        writersEngaged = false;
+        if (FAILED(hr)) {
+            fwprintf(stderr, L"Warning: BackupComplete failed: 0x%08X\n", hr);
+            // Continue to delete the snapshot anyway.
+        }
+        deleteSnapshot();
         cleanup();
-        return 2;
+        return 0;
     }
 
-    // Input available (or handle signaled) — read it to confirm "done",
-    // but accept EOF as well. Either way, we clean up.
-    // (We don't strictly validate the content; the engine signals
-    // completion by closing stdin or writing "done".)
-
+    // Abort path: timeout, "abort", EOF, or wait error.
+    abortWriters();
+    deleteSnapshot();
     cleanup();
-    return 0;
+    return (signal == SignalResult::Timeout) ? 2 : 3;
 }
 
 }  // namespace
