@@ -3,6 +3,13 @@ using UsenetBackup.Cli;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 
+/// Free no-signup NNTP server used ONLY as a differential-diagnosis
+/// fallback: if the user's provider is unreachable on every port but this
+/// server answers, the problem is provider/account-specific; if neither
+/// answers, the local network or ISP is likely blocking NNTP.
+/// The probe is connect + greeting only — never authenticates, never posts.
+const string DiagnoseFallbackHost = "freenews.netfront.net";
+
 if (args.Length == 0)
 {
     PrintUsage();
@@ -358,13 +365,6 @@ static int NntpCheck(string[] args)
     Console.WriteLine("NNTP check OK.");
     return 0;
 }
-
-/// Free no-signup NNTP server used ONLY as a differential-diagnosis
-/// fallback: if the user's provider is unreachable on every port but this
-/// server answers, the problem is provider/account-specific; if neither
-/// answers, the local network or ISP is likely blocking NNTP.
-/// The probe is connect + greeting only — never authenticates, never posts.
-const string DiagnoseFallbackHost = "freenews.netfront.net";
 
 /// <summary>
 /// Multi-port connectivity diagnostic. Probes the configured provider on

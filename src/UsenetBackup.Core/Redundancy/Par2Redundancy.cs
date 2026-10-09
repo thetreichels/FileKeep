@@ -123,7 +123,11 @@ public static class Par2Redundancy
 
         // RS1 (legacy handmade Vandermonde) uses a different code path.
         if (version == ParityVersion.RS1)
+        {
+            if (originalLengths is null)
+                return null;
             return ReconstructRS1(groupChunkIds, getChunkBytesOrNull, parityDatas, originalLengths);
+        }
 
         if (originalLengths!.Length != groupChunkIds.Count)
             return null;
