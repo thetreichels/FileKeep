@@ -136,6 +136,8 @@ public sealed class BackupScheduler
     private readonly Action<string>? _log;
     private readonly object _runGate = new(); // runs never overlap
     private IReadOnlyList<NntpConfig> _nntpProviders = Array.Empty<NntpConfig>();
+    private ServiceConfig _config;
+    private DateTime _lastRetentionCheck = DateTime.MinValue;
 
     /// <summary>
     /// Currently active upload progress tracker, or null if no upload in progress.
@@ -160,6 +162,7 @@ public sealed class BackupScheduler
         _pollInterval = pollInterval ?? TimeSpan.FromSeconds(30);
         _log = log;
         StartedLocal = _clock.Now;
+        _config = config;
         _nntpProviders = config.EffectiveProviders;
         _jobs = config.Jobs.Select(j =>
         {
@@ -179,6 +182,7 @@ public sealed class BackupScheduler
         {
             var now = _clock.Now;
             _nntpProviders = config.EffectiveProviders;
+            _config = config;
             var oldByName = _jobs.ToDictionary(j => j.Config.Name,
                 StringComparer.OrdinalIgnoreCase);
             _jobs.Clear();
@@ -211,10 +215,107 @@ public sealed class BackupScheduler
         while (!stopping.IsCancellationRequested)
         {
             RunDueJobs(_clock.Now);
+            RunRetentionIfDue(_clock.Now);
             try { await Task.Delay(_pollInterval, stopping); }
             catch (OperationCanceledException) { break; }
         }
         Log("scheduler stopped");
+    }
+
+    /// <summary>
+    /// Runs retention checks if enabled and the interval has elapsed.
+    /// Exposed for tests.
+    /// </summary>
+    public void RunRetentionIfDue(DateTime now)
+    {
+        if (!_config.RetentionEnabled)
+            return;
+        if (_config.RetentionCheckIntervalHours <= 0)
+            return;
+
+        TimeSpan interval = TimeSpan.FromHours(_config.RetentionCheckIntervalHours);
+        lock (_runGate)
+        {
+            if (now - _lastRetentionCheck < interval)
+                return;
+            _lastRetentionCheck = now;
+        }
+
+        try
+        {
+            RunRetentionChecks();
+        }
+        catch (Exception ex)
+        {
+            Log($"retention check failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Runs RetentionManager.CheckAndRepost for each job's repository.
+    /// </summary>
+    private void RunRetentionChecks()
+    {
+        var providers = _nntpProviders;
+        if (providers.Count == 0)
+        {
+            Log("retention check skipped: no NNTP providers configured");
+            return;
+        }
+
+        // Group jobs by repo to avoid checking the same repo twice
+        var repos = _jobs.Select(j => j.Config.Repo).Distinct().ToList();
+        foreach (string repoPath in repos)
+        {
+            try
+            {
+                RunRetentionForRepo(repoPath, providers);
+            }
+            catch (Exception ex)
+            {
+                Log($"retention check failed for repo '{repoPath}': {ex.Message}");
+            }
+        }
+    }
+
+    private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers)
+    {
+        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+        if (string.IsNullOrEmpty(passphrase))
+        {
+            Log($"retention check skipped for '{repoPath}': no passphrase (set {PassphraseEnvVar})");
+            return;
+        }
+
+        using var repo = BackupRepository.Open(repoPath, passphrase);
+        var messageIndex = new Nntp.ChunkMessageIndex(repo.RepoRoot);
+
+        // Use the first provider (retention is per-provider via tracker)
+        var nntp = providers[0];
+        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+
+        using var pool = new Nntp.NntpConnectionPool(
+            nntp.Host, nntp.Port, nntp.Ssl, nntp.Connections);
+        // TODO: auth with username/password if configured
+
+        using var store = new Nntp.NntpBlobStore(
+            pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
+            messageIndex: messageIndex);
+
+        var manager = new Nntp.RetentionManager(
+            msg => Log($"retention: {msg}"),
+            host => string.Equals(host, nntp.Host, StringComparison.OrdinalIgnoreCase)
+                ? nntp.RetentionDays : 1095);
+
+        var report = manager.CheckAndRepost(
+            repo, store,
+            warnDays: _config.RetentionWarnDays,
+            repostThresholdDays: _config.RetentionRepostThresholdDays);
+
+        Log($"retention check complete for '{repoPath}': {report.BackupsHealthy} healthy, " +
+            $"{report.BackupsRefreshed} refreshed, {report.Errors.Count} errors");
     }
 
     /// <summary>

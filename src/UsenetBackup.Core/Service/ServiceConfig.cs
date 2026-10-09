@@ -169,6 +169,35 @@ public sealed class ServiceConfig
         Nntp is not null ? new[] { Nntp } :
         Array.Empty<NntpConfig>();
 
+    /// <summary>
+    /// Enable automatic retention checks. When true, the scheduler periodically
+    /// runs RetentionManager.CheckAndRepost to keep Usenet articles alive.
+    /// Default true.
+    /// </summary>
+    [JsonPropertyName("retentionEnabled")]
+    public bool RetentionEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Hours between automatic retention checks. Default 24 (daily).
+    /// </summary>
+    [JsonPropertyName("retentionCheckIntervalHours")]
+    public int RetentionCheckIntervalHours { get; set; } = 24;
+
+    /// <summary>
+    /// Backups expiring within this many days are checked for retention.
+    /// Default 90.
+    /// </summary>
+    [JsonPropertyName("retentionWarnDays")]
+    public int RetentionWarnDays { get; set; } = 90;
+
+    /// <summary>
+    /// Backups with at most this many days of retention remaining are
+    /// proactively refreshed. Default 30. Set to 0 to refresh only when
+    /// articles are actually missing.
+    /// </summary>
+    [JsonPropertyName("retentionRepostThresholdDays")]
+    public int RetentionRepostThresholdDays { get; set; } = 30;
+
     public static ServiceConfig Load(string path)
     {
         string json;

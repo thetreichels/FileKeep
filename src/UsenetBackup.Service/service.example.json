@@ -1,6 +1,10 @@
 {
   "dashboardBind": "127.0.0.1",
   "dashboardPort": 15789,
+  "retentionEnabled": true,
+  "retentionCheckIntervalHours": 24,
+  "retentionWarnDays": 90,
+  "retentionRepostThresholdDays": 30,
   "jobs": [
     {
       "mode": "incremental",
