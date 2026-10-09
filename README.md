@@ -13,7 +13,7 @@
 - **Full and incremental backups** of directories and whole disks, with content-defined chunking and cross-backup deduplication
 - **Client-side authenticated encryption** (AES-256-GCM) — the passphrase never leaves your machine and is never stored with the backup data
 - **Usenet as storage** — chunks are posted as yEnc articles to any NNTP provider; NZB indexes track them
-- **Volume Shadow Copy (VSS)** infrastructure for point-in-time snapshots of open and locked files (native helper + managed lifecycle; backup-flow integration in progress)
+- **Volume Shadow Copy (VSS)** snapshots for point-in-time backups of open and locked files — available via `backup --vss` and per scheduled job (`"vss": true` in service config)
 - **Reed–Solomon parity** for recovery from damaged or missing articles
 - **Retention management** — monitors article age against provider retention and reposts with fresh identities before articles expire
 - **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
@@ -57,18 +57,18 @@ FileKeep.exe verify C:\backups\repo2 <backup-id>
 FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `expiration-check`, `list`.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `expiration-check`, `list`.
 
 Backing up locked files (databases, Outlook PSTs, etc.):
 
 ```powershell
 # As administrator: enables SeBackupPrivilege to read exclusively-locked files
 FileKeep.exe backup C:\backups\repo C:\data --backup-privilege
-```
 
-Point-in-time VSS shadow copies are implemented (`FileKeepVss.exe` native helper +
-managed lifecycle with `BackupComplete`/`AbortBackup` writer finalization) and covered
-by tests; CLI/service integration is in progress.
+# Point-in-time VSS shadow copy (Windows only, admin required).
+# The service also supports VSS per scheduled job via the "vss" config flag.
+FileKeep.exe backup C:\backups\repo C:\data --vss
+```
 
 ## Components
 
@@ -88,7 +88,7 @@ by tests; CLI/service integration is in progress.
 3. **Parity** — Reed–Solomon parity shards are generated per chunk group for damage recovery
 4. **Post** — chunks go up as yEnc NNTP articles with deterministic message-IDs; uploads resume after interruption via a local journal plus server STAT checks
 5. **Index** — an NZB 1.1 file maps chunks to articles; the encrypted manifest is also posted so the recovery wizard can discover backups newer than your USB stick
-6. **Retain** — a retention manager periodically STATs articles against provider retention and reposts aging ones under fresh message-IDs before they expire
+6. **Retain** — a retention manager periodically STATs a sample of articles (default 10 per backup — a lightweight health check, not a proof that every article survives) against provider retention. If any sampled article is missing or the backup nears expiry, *all* chunks are republished under fresh message-IDs before the retention clock resets; a partial failure leaves the old timestamp in place so the next run retries
 7. **Restore** — download via NZB, per-chunk authentication and hash verification, decrypt, reassemble; `verify` proves integrity independently of the backup that created it
 
 Every backup is independently verifiable, every uploaded object carries a cryptographic hash, and interrupted uploads/downloads resume where they left off.
@@ -128,9 +128,9 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, and the WinPE recovery environment are implemented and tested; VSS snapshot infrastructure (helper + lifecycle) is implemented and tested with backup-flow integration in progress.
+FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), and the WinPE recovery environment are implemented and tested.
 
-On the roadmap: VSS backup-flow integration, merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
+On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 
 ## License
 
