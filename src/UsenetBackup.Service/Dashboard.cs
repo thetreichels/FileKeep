@@ -80,15 +80,15 @@ public static class Dashboard
 
         // Operations: manual actions for every CLI capability, run in the
         // background like job runs. The UI polls /api/log and /api/status.
-        app.MapPost("/api/operations/upload", async (HttpRequest request) =>
+        app.MapPost("/api/operations/upload", (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var body = request.ReadFromJsonAsync<JsonElement>().GetAwaiter().GetResult();
             string repo = body.GetProperty("repo").GetString() ?? "";
             string backupId = body.GetProperty("backupId").GetString() ?? "";
-            var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            var result = DashboardApi.StartUpload(config, scheduler, repo, backupId);
+            return result.Status == 202 ? Results.Accepted(result.Payload) : Results.BadRequest(result.Payload);
         });
 
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
