@@ -17,6 +17,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     private readonly string _from;
     private readonly string _repoId;
     private readonly Catalog _journal;
+    private readonly ChunkMessageIndex? _messageIndex;
     private bool _disposed;
 
     public NntpBlobStore(
@@ -24,7 +25,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string newsgroup,
         string repoId,
         string catalogDbPath,
-        string from = "usenet-backup")
+        string from = "usenet-backup",
+        ChunkMessageIndex? messageIndex = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
@@ -33,6 +35,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
+        _messageIndex = messageIndex;
     }
 
     /// <summary>
@@ -44,7 +47,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string newsgroup,
         string repoId,
         string catalogDbPath,
-        string from = "usenet-backup")
+        string from = "usenet-backup",
+        ChunkMessageIndex? messageIndex = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
@@ -53,6 +57,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
+        _messageIndex = messageIndex;
     }
 
     /// <summary>True if this store uses a connection pool (parallel-capable).</summary>
@@ -76,10 +81,14 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             action(_client!);
     }
 
+    private string ResolveMessageId(string chunkIdHex) =>
+        _messageIndex?.GetMessageId(chunkIdHex, _repoId)
+            ?? ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
+
     public bool Exists(string chunkIdHex)
     {
         ValidateChunkId(chunkIdHex);
-        string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
+        string messageId = ResolveMessageId(chunkIdHex);
         if (_journal.IsUploaded(messageId))
             return true;
         if (UseClient(c => c.Stat(messageId)))
@@ -88,6 +97,47 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Live server availability check. Unlike <see cref="Exists"/>, this
+    /// NEVER trusts the local journal — it always issues STAT against the
+    /// server. Use for retention health checks, where the journal cannot
+    /// prove the article is still within provider retention.
+    /// </summary>
+    public bool ExistsOnServer(string chunkIdHex)
+    {
+        ValidateChunkId(chunkIdHex);
+        string messageId = ResolveMessageId(chunkIdHex);
+        return UseClient(c => c.Stat(messageId));
+    }
+
+    /// <summary>
+    /// Republication for retention refresh. Posts the chunk under a NEW
+    /// message ID (servers reject duplicate IDs, so reposting the same ID
+    /// does not extend retention), waits until the new article is
+    /// retrievable via STAT, records the new identity in the message index,
+    /// and returns the new message ID.
+    ///
+    /// Unlike <see cref="Put"/>, this NEVER early-returns on journal hit or
+    /// STAT hit — the point is to create a fresh article with a fresh
+    /// retention clock.
+    /// </summary>
+    /// <returns>The new message ID under which the chunk was published.</returns>
+    public string RepublishWithNewIdentity(string chunkIdHex, byte[] blob)
+    {
+        ValidateChunkId(chunkIdHex);
+        ArgumentNullException.ThrowIfNull(blob);
+        string newMessageId = ArticleCodec.MakeRefreshMessageId(chunkIdHex, _repoId);
+        string article = ArticleCodec.BuildArticleWithMessageId(
+            chunkIdHex, newMessageId, blob, _newsgroup, _from);
+        UseClient(c => c.Post(article));
+        // Confirm the new article is retrievable before recording it —
+        // otherwise we'd point the index at a phantom article.
+        WaitForArticle(newMessageId);
+        _journal.RecordUpload(newMessageId, chunkIdHex);
+        _messageIndex?.RecordNewIdentity(chunkIdHex, newMessageId);
+        return newMessageId;
     }
 
     public void Put(string chunkIdHex, byte[] blob)
@@ -136,7 +186,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public byte[] Get(string chunkIdHex)
     {
         ValidateChunkId(chunkIdHex);
-        string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
+        string messageId = ResolveMessageId(chunkIdHex);
         string? article = UseClient(c => c.GetArticle(messageId));
         if (article is null)
             throw new InvalidDataException(

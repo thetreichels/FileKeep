@@ -24,6 +24,20 @@ public static class ArticleCodec
         $"<{chunkIdHex}.{repoId}@{MessageIdDomain}>";
 
     /// <summary>
+    /// Message-ID for a retention-refresh republication.
+    /// Servers reject duplicate message IDs, so refreshing retention requires
+    /// a NEW identity. The timestamp + random suffix guarantees uniqueness
+    /// while keeping the chunk ID recoverable from the ID itself.
+    /// Format: &lt;chunkId.repoId.refresh.&lt;unixTime&gt;.&lt;nonce&gt;@usenet-backup&gt;.
+    /// </summary>
+    public static string MakeRefreshMessageId(string chunkIdHex, string repoId)
+    {
+        long unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string nonce = Guid.NewGuid().ToString("N")[..8];
+        return $"<{chunkIdHex}.{repoId}.refresh.{unixTime}.{nonce}@{MessageIdDomain}>";
+    }
+
+    /// <summary>
     /// Message-ID for an encrypted manifest article:
     /// &lt;manifest.&lt;backup-id&gt;.&lt;repo-id&gt;@usenet-backup&gt;.
     /// Backup IDs are 32-char GUIDs ("N" format). Lets the recovery wizard
@@ -87,6 +101,19 @@ public static class ArticleCodec
     public static string BuildArticle(
         string chunkIdHex, string repoId, byte[] blob, string newsgroup, string from)
     {
+        return BuildArticleWithMessageId(
+            chunkIdHex, MakeMessageId(chunkIdHex, repoId), blob, newsgroup, from);
+    }
+
+    /// <summary>
+    /// Builds an article with an explicit message ID (for retention-refresh
+    /// republications, which must use a NEW identity — servers reject
+    /// duplicate message IDs, so reposting the same ID does not extend
+    /// retention).
+    /// </summary>
+    public static string BuildArticleWithMessageId(
+        string chunkIdHex, string messageId, byte[] blob, string newsgroup, string from)
+    {
         if (chunkIdHex.Length != 64)
             throw new ArgumentException("Chunk ID must be 64 hex chars.", nameof(chunkIdHex));
 
@@ -94,7 +121,7 @@ public static class ArticleCodec
         sb.Append("From: ").Append(from).Append("\r\n");
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: [usenet-backup] chunk ").Append(chunkIdHex).Append("\r\n");
-        sb.Append("Message-ID: ").Append(MakeMessageId(chunkIdHex, repoId)).Append("\r\n");
+        sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("X-UsenetBackup-Chunk: ").Append(chunkIdHex).Append("\r\n");
         sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");

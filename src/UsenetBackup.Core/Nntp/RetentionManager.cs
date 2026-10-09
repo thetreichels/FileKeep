@@ -5,19 +5,22 @@ namespace UsenetBackup.Core.Nntp;
 /// <summary>
 /// Keeps Usenet backups alive as articles approach provider retention limits.
 ///
-/// Lifecycle:
-///   1. Scan upload tracker for backups approaching expiry
-///   2. STAT-check a sample of articles to verify actual availability
-///      (provider retention is advertised, not guaranteed)
-///   3. Repost missing/expired articles from local chunks
-///      (message-IDs are deterministic, so reposting refreshes in place —
-///      no manifest index updates needed)
-///   4. Update the upload tracker with the new upload date
+/// Three outcomes per backup:
+///   1. Present and healthy — all sampled articles STAT-verified on the
+///      server and retention remaining above threshold: no action.
+///   2. Missing — one or more sampled articles absent: republish the missing
+///      chunks under NEW message IDs, STAT-verify each new article, update
+///      the message index, and only then advance the retention timestamp.
+///   3. Approaching expiration — articles present but retention remaining at
+///      or below threshold: republish ALL chunks under new message IDs
+///      (servers reject duplicate IDs, so reposting the same ID does NOT
+///      refresh retention), verify, update the index, then advance the
+///      timestamp.
 ///
-/// This is a first-class subsystem with its own schedule, independent of
-/// backup jobs. It is the component that realizes FileKeep's original
-/// vision: "use Usenet's long retention as a backup cloud and keep the
-/// backup alive."
+/// The retention timestamp is advanced ONLY after every republished article
+/// has been STAT-verified. A partial failure leaves the old timestamp in
+/// place so the next run retries — FileKeep never claims retention it has
+/// not proven.
 /// </summary>
 public sealed class RetentionManager
 {
@@ -32,59 +35,77 @@ public sealed class RetentionManager
         _getRetentionDays = getRetentionDays;
     }
 
+    public enum BackupOutcome
+    {
+        Healthy,
+        RefreshedMissing,
+        RefreshedExpiring,
+        Failed,
+    }
+
     public sealed class RetentionReport
     {
         public int BackupsChecked { get; set; }
         public int BackupsHealthy { get; set; }
-        public int BackupsReposted { get; set; }
+        public int BackupsRefreshed { get; set; }
         public int ArticlesChecked { get; set; }
         public int ArticlesMissing { get; set; }
-        public int ArticlesReposted { get; set; }
+        public int ArticlesRepublished { get; set; }
         public List<string> Errors { get; } = new();
+        public bool DryRun { get; set; }
     }
 
     /// <summary>
-    /// Checks retention health for all tracked uploads and reposts
+    /// Checks retention health for all tracked uploads and refreshes
     /// articles that are missing or approaching expiry.
     /// </summary>
-    /// <param name="repo">Local repository (source of chunks for reposting).</param>
-    /// <param name="remote">NNTP store for STAT checks and reposting.</param>
-    /// <param name="warnDays">
-    /// Backups expiring within this many days are checked. Default 90.
-    /// </param>
+    /// <param name="repo">Local repository (source of chunks for republication).</param>
+    /// <param name="remote">NNTP store for STAT checks and republication.</param>
+    /// <param name="warnDays">Backups expiring within this many days are checked. Default 90.</param>
     /// <param name="repostThresholdDays">
-    /// Backups with fewer than this many days of retention remaining are
-    /// reposted proactively. Default 30. Set to 0 to repost only when
+    /// Backups with at most this many days of retention remaining are
+    /// refreshed proactively. Default 30. Set to 0 to refresh only when
     /// articles are actually missing.
     /// </param>
-    /// <param name="sampleSize">
-    /// Number of articles to STAT-check per backup. Default 10.
-    /// Checks are spread across the chunk list.
+    /// <param name="sampleSize">Articles to STAT-check per backup. Default 10.</param>
+    /// <param name="dryRun">
+    /// When true, reports what WOULD be done without posting anything,
+    /// updating any index, or advancing any timestamp.
     /// </param>
     public RetentionReport CheckAndRepost(
         BackupRepository repo,
         NntpBlobStore remote,
         int warnDays = 90,
         int repostThresholdDays = 30,
-        int sampleSize = 10)
+        int sampleSize = 10,
+        bool dryRun = false)
     {
-        var report = new RetentionReport();
+        var report = new RetentionReport { DryRun = dryRun };
         var tracker = new UsenetUploadTracker(repo.RepoRoot);
 
         var expiring = tracker.GetExpiring(_getRetentionDays, warnDays);
-        _log($"Retention check: {expiring.Count} backup(s) expiring within {warnDays} days");
+        _log($"Retention check: {expiring.Count} backup(s) expiring within {warnDays} days" +
+             (dryRun ? " (DRY RUN — no changes will be made)" : ""));
 
         foreach (var (record, expiresUtc, daysLeft) in expiring)
         {
             report.BackupsChecked++;
             try
             {
-                bool reposted = CheckBackup(repo, remote, tracker, record, daysLeft,
-                    repostThresholdDays, sampleSize, report);
-                if (reposted)
-                    report.BackupsReposted++;
-                else
-                    report.BackupsHealthy++;
+                var outcome = CheckBackup(repo, remote, tracker, record, daysLeft,
+                    repostThresholdDays, sampleSize, report, dryRun);
+                switch (outcome)
+                {
+                    case BackupOutcome.Healthy:
+                        report.BackupsHealthy++;
+                        break;
+                    case BackupOutcome.RefreshedMissing:
+                    case BackupOutcome.RefreshedExpiring:
+                        report.BackupsRefreshed++;
+                        break;
+                    case BackupOutcome.Failed:
+                        break; // error already recorded
+                }
             }
             catch (Exception ex)
             {
@@ -94,12 +115,12 @@ public sealed class RetentionManager
         }
 
         _log($"Retention check complete: {report.BackupsHealthy} healthy, " +
-             $"{report.BackupsReposted} reposted, {report.ArticlesReposted} articles reposted, " +
+             $"{report.BackupsRefreshed} refreshed, {report.ArticlesRepublished} articles republished, " +
              $"{report.Errors.Count} errors");
         return report;
     }
 
-    private bool CheckBackup(
+    private BackupOutcome CheckBackup(
         BackupRepository repo,
         NntpBlobStore remote,
         UsenetUploadTracker tracker,
@@ -107,9 +128,9 @@ public sealed class RetentionManager
         int daysLeft,
         int repostThresholdDays,
         int sampleSize,
-        RetentionReport report)
+        RetentionReport report,
+        bool dryRun)
     {
-        // Load the manifest to get the chunk list
         BackupManifest manifest;
         try
         {
@@ -129,12 +150,12 @@ public sealed class RetentionManager
         if (chunkIds.Count == 0)
         {
             _log($"Backup {record.BackupId}: no chunks, skipping");
-            return false;
+            return BackupOutcome.Healthy;
         }
 
-        // Sample articles across the chunk list for STAT checks
+        // Live STAT checks — never trust the local journal for retention.
         var sample = SampleChunks(chunkIds, sampleSize);
-        int missing = 0;
+        var missingChunks = new List<string>();
 
         foreach (string chunkId in sample)
         {
@@ -142,7 +163,7 @@ public sealed class RetentionManager
             bool exists;
             try
             {
-                exists = remote.Exists(chunkId);
+                exists = remote.ExistsOnServer(chunkId);
             }
             catch
             {
@@ -151,51 +172,72 @@ public sealed class RetentionManager
 
             if (!exists)
             {
-                missing++;
+                missingChunks.Add(chunkId);
                 report.ArticlesMissing++;
             }
         }
 
-        _log($"Backup {record.BackupId}: {sample.Count - missing}/{sample.Count} sampled articles present, " +
-             $"{daysLeft} days retention remaining");
+        _log($"Backup {record.BackupId}: {sample.Count - missingChunks.Count}/{sample.Count} " +
+             $"sampled articles present on server, {daysLeft} days retention remaining");
 
-        // Decide: repost if articles are actually missing, or if we're
-        // within the proactive repost threshold
-        bool shouldRepost = missing > 0 || daysLeft <= repostThresholdDays;
-        if (!shouldRepost)
-            return false;
+        // Outcome 1: present and healthy — nothing to do.
+        if (missingChunks.Count == 0 && daysLeft > repostThresholdDays)
+            return BackupOutcome.Healthy;
 
-        string reason = missing > 0
-            ? $"{missing} sampled articles missing"
+        // Outcome 2 vs 3: missing articles, or merely approaching expiry.
+        bool isMissing = missingChunks.Count > 0;
+        List<string> toRepublish = isMissing
+            ? missingChunks // only the ones actually gone
+            : chunkIds;    // proactive refresh of everything
+
+        string reason = isMissing
+            ? $"{missingChunks.Count} sampled articles missing from server"
             : $"only {daysLeft} days retention remaining (threshold: {repostThresholdDays})";
-        _log($"Reposting backup {record.BackupId}: {reason}");
+        _log($"{(dryRun ? "Would republish" : "Republishing")} {toRepublish.Count} article(s) " +
+             $"for backup {record.BackupId}: {reason}");
 
-        // Repost all chunks (not just the sample — if some are gone,
-        // others may follow)
-        int reposted = 0;
-        foreach (string chunkId in chunkIds)
+        if (dryRun)
+            return isMissing ? BackupOutcome.RefreshedMissing : BackupOutcome.RefreshedExpiring;
+
+        // Republication must fully succeed before the retention clock moves.
+        var failures = new List<string>();
+        int republished = 0;
+        foreach (string chunkId in toRepublish)
         {
             try
             {
-                // Get the chunk bytes from local storage
                 byte[] blob = repo.GetChunkBlob(chunkId);
-                // Repost (Put is idempotent; skips if already present)
-                remote.Put(chunkId, blob);
-                reposted++;
-                report.ArticlesReposted++;
+                // New message identity: the ONLY way to get a fresh retention
+                // clock. RepublishWithNewIdentity STAT-verifies the new
+                // article and updates the message index before returning.
+                string newMessageId = remote.RepublishWithNewIdentity(chunkId, blob);
+                republished++;
+                report.ArticlesRepublished++;
+                _log($"  republished {chunkId[..12]}… as {newMessageId}");
             }
             catch (Exception ex)
             {
-                report.Errors.Add($"Repost {chunkId}: {ex.Message}");
+                failures.Add($"{chunkId}: {ex.Message}");
+                report.Errors.Add($"Republish {chunkId}: {ex.Message}");
             }
         }
 
-        // Update the upload tracker with the new upload date
-        // (this resets the retention clock)
-        tracker.RecordUpload(record.BackupId, record.ProviderHost, record.Newsgroup);
+        if (failures.Count > 0)
+        {
+            // Do NOT advance the timestamp — the backup is not fully
+            // refreshed. The old timestamp stands so the next run retries.
+            _log($"Backup {record.BackupId}: {failures.Count}/{toRepublish.Count} republications " +
+                 $"failed; retention timestamp NOT advanced");
+            return BackupOutcome.Failed;
+        }
 
-        _log($"Reposted {reposted}/{chunkIds.Count} articles for backup {record.BackupId}");
-        return true;
+        // All republished articles STAT-verified — now it is safe to advance
+        // the retention clock.
+        tracker.RecordUpload(record.BackupId, record.ProviderHost, record.Newsgroup);
+        _log($"Backup {record.BackupId}: {republished}/{toRepublish.Count} articles republished " +
+             $"and verified; retention clock reset");
+
+        return isMissing ? BackupOutcome.RefreshedMissing : BackupOutcome.RefreshedExpiring;
     }
 
     /// <summary>

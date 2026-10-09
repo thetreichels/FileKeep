@@ -747,18 +747,18 @@ static int RetentionCheck(string[] args)
 
         if (dryRun)
         {
-            Console.WriteLine("DRY RUN — no articles will be reposted");
-            // TODO: dry-run mode in RetentionManager
+            Console.WriteLine("DRY RUN — no articles will be reposted, no indexes updated, no timestamps advanced");
         }
 
-        var report = manager.CheckAndRepost(repo, remote, warnDays, repostThreshold);
+        var report = manager.CheckAndRepost(repo, remote, warnDays, repostThreshold, dryRun: dryRun);
 
         Console.WriteLine($"\nRetention check complete:");
         Console.WriteLine($"  Backups checked: {report.BackupsChecked}");
         Console.WriteLine($"  Healthy: {report.BackupsHealthy}");
-        Console.WriteLine($"  Reposted: {report.BackupsReposted}");
+        Console.WriteLine($"  Refreshed: {report.BackupsRefreshed}");
         Console.WriteLine($"  Articles checked: {report.ArticlesChecked}");
-        Console.WriteLine($"  Articles reposted: {report.ArticlesReposted}");
+        Console.WriteLine($"  Articles missing: {report.ArticlesMissing}");
+        Console.WriteLine($"  Articles republished: {report.ArticlesRepublished}");
         if (report.Errors.Count > 0)
         {
             Console.WriteLine($"  Errors: {report.Errors.Count}");

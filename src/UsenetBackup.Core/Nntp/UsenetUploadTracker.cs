@@ -31,14 +31,15 @@ public sealed class UsenetUploadTracker
     }
 
     /// <summary>Records a successful upload.</summary>
-    public void RecordUpload(string backupId, string providerHost, string newsgroup)
+    /// <param name="uploadedUtc">Override for tests; defaults to now.</param>
+    public void RecordUpload(string backupId, string providerHost, string newsgroup, DateTime? uploadedUtc = null)
     {
         string key = $"{backupId}@{providerHost}";
         _records[key] = new UploadRecord
         {
             BackupId = backupId,
             ProviderHost = providerHost,
-            UploadedUtc = DateTime.UtcNow,
+            UploadedUtc = uploadedUtc ?? DateTime.UtcNow,
             Newsgroup = newsgroup,
         };
         Save();
