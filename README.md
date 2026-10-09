@@ -1,227 +1,137 @@
 # FileKeep
 
-Open-source Windows backup application providing full and incremental
-system-image backups, using Usenet as an encrypted long-term storage backend.
+![FileKeep icon](assets/filekeep-icon-1024.png)
 
-## Platform
+**Encrypted backups that live on Usenet.** FileKeep is an open-source Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
 
-- Windows 10/11 x64
-- C# / .NET 10
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
+[![Tests](https://img.shields.io/badge/tests-194%2F194-brightgreen.svg)]()
 
-## Requirements
+## What it does
 
-1. Full system image backup
-2. Incremental block-level backups
-3. Windows backup-privilege file access (read locked files)
-4. Client-side authenticated encryption
-5. Deduplication
-6. Configurable chunk size
-7. SHA-256 integrity hashes
-8. PAR2 recovery data
-9. NZB generation
-10. NNTP upload
-11. NZB-based restoration
-12. Multiple Usenet providers
-13. Backup repository catalog
-14. Backup expiration monitoring
-15. Automatic repository verification
-16. Windows service for scheduled backups
-17. GUI for configuration and restoration
-18. Command-line interface for automation
-19. Bootable recovery environment
-20. No proprietary dependencies
+- **Full and incremental backups** of directories and whole disks, with content-defined chunking and cross-backup deduplication
+- **Client-side authenticated encryption** (AES-256-GCM) — the passphrase never leaves your machine and is never stored with the backup data
+- **Usenet as storage** — chunks are posted as yEnc articles to any NNTP provider; NZB indexes track them
+- **Volume Shadow Copy (VSS)** infrastructure for point-in-time snapshots of open and locked files (native helper + managed lifecycle; backup-flow integration in progress)
+- **Reed–Solomon parity** for recovery from damaged or missing articles
+- **Retention management** — monitors article age against provider retention and reposts with fresh identities before articles expire
+- **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
+- **Bootable WinPE recovery environment** (Windows 95 Setup-style wizard) for bare-metal restores
+- **LAN mode** — serve a repository over HTTP so a recovery stick can pull from your NAS instead of re-downloading from Usenet
 
-## Architecture
+## Installation
 
-| Module        | Responsibility                                          |
-|---------------|---------------------------------------------------------|
-| `BackupEngine`  | Orchestrates backup jobs                              |
-| `Repository`    | On-disk catalog, manifests, chunk index                 |
-| `ChunkStore`    | Content-addressed chunk storage (dedup by SHA-256)      |
-| `Encryption`    | Authenticated encryption (AES-256-GCM; boring, standard)|
-| `Deduplication` | Cross-backup dedup via chunk hash index                 |
-| `Manifest`      | Versioned backup manifests (`BACKUP FORMAT v1`)         |
-| `BackupPrivilege` | Windows SeBackupPrivilege locked-file reads          |
-| `Usenet`        | Backend abstraction (local / NAS / Usenet)              |
-| `Nntp`          | NNTP upload/download with resume                        |
-| `Nzb`           | NZB manifest generation and parsing                     |
-| `Par2`          | Parity / recovery data                                  |
-| `Restore`       | Reconstruct VHD/VHDX from repository or NZB+Usenet      |
-| `Scheduler`     | Windows service for scheduled backups                   |
-| `Recovery`      | Bootable recovery environment                           |
-| `UI`            | GUI for configuration and restoration                   |
-| `CLI`           | Command-line interface for automation                   |
+Download `filekeep-0.8.1.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
 
-## Rules
+| Path | Contents |
+|------|----------|
+| `cli\FileKeep.exe` | Command-line interface |
+| `cli\FileKeepVss.exe` | Native VSS snapshot helper |
+| `service\FileKeepService.exe` | Windows service + web dashboard |
+| `wizard\FileKeepRecovery.exe` | Recovery wizard (also used in WinPE) |
+| `docs\` | Recovery runbook and format docs |
 
-- Do not implement cryptographic algorithms ourselves. Use established,
-  boring, conventional implementations and authenticated encryption.
-- Do not store encryption keys with backup data.
-- Every backup must be independently verifiable.
-- Every uploaded object must have a cryptographic hash.
-- Interrupted uploads must resume.
-- Interrupted downloads must resume.
-- Never delete repository data without explicit retention logic.
-- All critical operations must be logged.
-- All modules must have automated tests.
-- Do not proceed to the next subsystem until the current subsystem
-  builds and its tests pass.
+The installer registers the `FileKeep` service (starts on first boot) and otherwise stays out of your way — no Start Menu clutter, no tray icon.
 
-## Backup format stability
+## Quick start
 
-`BACKUP FORMAT v1` is defined in `docs/FORMAT-v1.md` before the first
-production backup is uploaded. Future versions add `v2`, `v3` support —
-they never silently change `v1`.
+```powershell
+# 1. Create a repository (passphrase via env var — never on the command line)
+$env:USENETBACKUP_PASSPHRASE = "your-passphrase"
+FileKeep.exe init C:\backups\repo
 
-## Development order (incremental milestones)
+# 2. Back up a directory (incremental against the previous backup)
+FileKeep.exe backup C:\backups\repo C:\Users\you\Documents --parent <previous-backup-id>
 
-1. **v0.1 — Local repository engine.** Directory → chunk → encrypt →
-   store → manifest. Authenticated encryption (AES-256-GCM, PBKDF2
-   key derivation) included, since milestone 1's own spec requires
-   encrypted chunks. Full round-trip reconstruction verified on test
-   data. No Usenet yet. ✅ done
-2. **v0.2 — Incrementals.** FULL → INC → INC chains against a parent
-   manifest; tests prove only changed blocks produce new chunks.
-3. **v0.3 — Usenet backend.** NNTP adapter behind the storage
-   interface, independent of the repository engine. Minimal NNTP client
-   (AUTH, POST, STAT, ARTICLE), yEnc article codec with CRC-32, deterministic
-   message-IDs, resumable uploads via a catalog journal. ✅ done
-   (`v0.3-nntp-backend`, 46/46 tests)
-4. **v0.4 — NZB generation.** NZB 1.1 index per backup: one file per chunk,
-   one segment per article, deterministic message-IDs, exact article byte
-   sizes, journal-backed upload dates, head meta with the manifest root
-   hash. CLI `nzb-generate` warns about chunks with no upload record. ✅ done
-   (`v0.4-nzb-generation`, 54/54 tests)
-5. **v0.5 — Download/recovery pipeline.** NZB download, repair, decrypt,
-   verify, restore.
-6. **v0.6 — Locked-file reads and system images.** Windows backup-privilege
-   file access (`SeBackupPrivilege`, bypasses exclusive locks), block
-   device imaging, bare-metal recovery. ✅ done (`v0.6-vss-system-images`,
-   69/69 tests; backup-privilege path needs Windows validation)
-7. **v0.7 — Product.** Windows service, GUI, WiX installer, recovery ISO.
-   ✅ done (`v0.7-service-gui-installer`, 85/85 tests; service + localhost
-   web dashboard + PS installer + recovery runbook — WiX MSI and WinPE ISO
-   built and validated on Azure VM 2026-10-04; see VERIFICATION_REPORT.md)
-8. **USB recovery wizard.** WinForms wizard (`usenet-backup-recovery`,
-   self-contained for WinPE): repo location → credentials (with early
-   passphrase check) → pick backup → download → verify → restore, with
-   typed device-path confirmation for disk restores. Workflow logic in
-   `UsenetBackup.Core/Recovery/WizardState.cs`, tested (108/108).
+# 3. Upload to Usenet
+$env:USENETBACKUP_NNTP_PASSWORD = "your-nntp-password"
+FileKeep.exe nntp-upload C:\backups\repo <backup-id> --host news.example.com --user youruser
 
-Each milestone gets a git tag (`v0.1-local-repository`, …) so any
-broken experiment can be rolled back to a known-good state.
+# 4. Generate an NZB index for the backup
+FileKeep.exe nzb-generate C:\backups\repo <backup-id> backup.nzb
 
-## Building
-
-Milestones 1–2 are platform-independent and build/test on Linux:
-
-```sh
-dotnet build UsenetBackup.slnx
-dotnet test UsenetBackup.slnx
+# 5. On another machine: download and restore
+FileKeep.exe download C:\backups\repo2 backup.nzb --host news.example.com --user youruser
+FileKeep.exe verify C:\backups\repo2 <backup-id>
+FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-The backup-privilege file-access path (milestone 6) and running as a Windows service
-(milestone 7) require a Windows 10/11 machine to execute; both compile
-cross-platform and fail fast with a clear error elsewhere. The service
-also runs in `--console` mode on any OS (useful for testing), and the
-dashboard is a localhost web UI reachable from any browser.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `expiration-check`, `list`.
 
-## Service & dashboard (milestone 7)
+Backing up locked files (databases, Outlook PSTs, etc.):
 
-`usenet-backup-service` runs scheduled backups as a Windows service
-(raw SCM P/Invoke, no extra dependencies) and serves a localhost web
-dashboard (the GUI) with job status, manual "run now", backup lists and
-the operations log:
-
-```sh
-# console mode (any OS) — handy for trying it out:
-USENETBACKUP_PASSPHRASE=... usenet-backup-service --console --config service.json
-# then open http://127.0.0.1:15789/
+```powershell
+# As administrator: enables SeBackupPrivilege to read exclusively-locked files
+FileKeep.exe backup C:\backups\repo C:\data --backup-privilege
 ```
 
-`service.json` (see `src/UsenetBackup.Service/service.example.json`)
-defines jobs: repo, source, schedule (`"daily HH:mm"` or
-`"interval N"` minutes), mode (`incremental` — falls back to full when
-no parent exists — or `full`), and `backup-privilege` for locked-file reads.
-The passphrase comes from the `USENETBACKUP_PASSPHRASE` environment
-variable; scheduled runs fail fast with a clear error when it is missing.
-On Windows, `install/install.ps1` (run as admin) publishes, registers
-and starts the service.
+Point-in-time VSS shadow copies are implemented (`FileKeepVss.exe` native helper +
+managed lifecycle with `BackupComplete`/`AbortBackup` writer finalization) and covered
+by tests; CLI/service integration is in progress.
 
-Windows-only paths (backup-privilege file access, SCM hosting) are validated by
-`validate/validate-windows.ps1` — run it as admin on a Windows 10/11
-machine with the .NET SDK (or prebuilt binaries); it publishes, then
-checks backup-privilege locked-file backup, disk-image
-round-trip, and service install → dashboard run → uninstall, cleaning
-up afterwards.
+## Components
 
-Bare-metal recovery is documented in `docs/RECOVERY.md`: the CLI doubles
-as the WinPE recovery tool — boot WinPE, reassemble the repo metadata
-(`repo.json`, `manifests/`, `catalog.db`), `download` the chunks from
-Usenet, `verify`, then `restore` (or `restore-disk` for images).
+| Component | Description |
+|-----------|-------------|
+| **CLI** (`FileKeep.exe`) | Full backup/restore/verify/upload/download/NZB/retention toolkit for automation and scripts |
+| **Service** (`FileKeepService.exe`) | Windows service running scheduled jobs from `service.json`; serves the dashboard at `http://127.0.0.1:15789/` |
+| **Dashboard** | Web UI in the Windows Settings visual language, with OS dark-mode support: job status, run-now, backup lists, operations log, Usenet provider config (passwords stored via DPAPI, never exposed to the UI) |
+| **Recovery wizard** (`FileKeepRecovery.exe`) | Windows 95 Setup-style step-through: unlock repo → pick backup → download → verify → restore |
+| **VSS helper** (`FileKeepVss.exe`) | Minimal native helper implementing the full VSS backup lifecycle (`GatherWriterMetadata` → `PrepareForBackup` → `DoSnapshotSet` → `BackupComplete`/`AbortBackup`), so writers like SQL Server are never left in a dangling backup state |
+| **WinPE ISO** | Bootable recovery environment containing the CLI, recovery wizard, and runbook |
 
-## Security notes
+## How it works
 
-- **Passphrase handling.** The encryption key is derived at runtime
-  (PBKDF2-HMAC-SHA-512, 600,000 iterations) and zeroed on dispose; it is
-  never written to the repo. Prefer the `USENETBACKUP_PASSPHRASE`
-  environment variable or the interactive prompt — `--passphrase` on the
-  command line is visible in the process list (the CLI warns about this).
-  The Windows service reads the passphrase from a machine-level
-  environment variable; treat that machine as trusted, or use DPAPI/a
-  secret store instead.
-- **What's public.** Chunk message-IDs posted to Usenet embed the
-  SHA-256 of the plaintext chunk (required for content addressing and
-  dedup). Ciphertext is safe, but anyone with an NZB can confirm guesses
-  about plaintext. Filenames are plaintext in manifests (v1 tradeoff for
-  independent verifiability). There is no forward secrecy: a compromised
-  passphrase decrypts all past Usenet posts.
-- **Destructive commands.** `restore-disk` overwrites a block device; it
-  requires typing the device path to confirm (or `--yes` for scripts) and
-  refuses when stdin isn't interactive.
-- **Dashboard.** Binds to loopback only, no login. State-changing calls
-  require a per-startup CSRF token (embedded in the served page), but
-  treat it as single-user: don't expose the port, and don't run it on a
-  shared machine without a reverse proxy.
-- **Service account.** The installer defaults to LocalSystem (needed for
-  backup privilege); pass `-ServiceAccount "NT SERVICE\UsenetBackup"` for least
-  privilege when no job uses backup privilege.
-- **Dependencies.** `SQLitePCLRaw.lib.e_sqlite3` was upgraded from 2.1.11 to 2.1.12
-  on 2026-10-04 to patch CVE-2025-6965 (High, CVSS 9.8). `dotnet list package
-  --vulnerable` reports clean.
+1. **Chunk** — files are split into content-defined chunks (~4 MB default), hashed with SHA-256; identical chunks across backups are stored once
+2. **Encrypt** — each chunk is encrypted with AES-256-GCM under a key derived from your passphrase (PBKDF2-HMAC-SHA-512, 600k iterations)
+3. **Parity** — Reed–Solomon parity shards are generated per chunk group for damage recovery
+4. **Post** — chunks go up as yEnc NNTP articles with deterministic message-IDs; uploads resume after interruption via a local journal plus server STAT checks
+5. **Index** — an NZB 1.1 file maps chunks to articles; the encrypted manifest is also posted so the recovery wizard can discover backups newer than your USB stick
+6. **Retain** — a retention manager periodically STATs articles against provider retention and reposts aging ones under fresh message-IDs before they expire
+7. **Restore** — download via NZB, per-chunk authentication and hash verification, decrypt, reassemble; `verify` proves integrity independently of the backup that created it
+
+Every backup is independently verifiable, every uploaded object carries a cryptographic hash, and interrupted uploads/downloads resume where they left off.
+
+## Security model
+
+- **Passphrase handling.** The key is derived at runtime and zeroed on dispose; it is never written to the repository. Prefer the `USENETBACKUP_PASSPHRASE` environment variable or the interactive prompt — `--passphrase` on the command line is visible in the process list (the CLI warns about this).
+- **What's public.** Chunk message-IDs embed the SHA-256 of the plaintext chunk (required for content addressing and dedup). Ciphertext is safe, but anyone with an NZB can confirm guesses about plaintext. Filenames are plaintext in manifests (a v1 tradeoff for independent verifiability). There is no forward secrecy: a compromised passphrase decrypts all past Usenet posts.
+- **Dashboard.** Binds to loopback only. NNTP passwords are stored via Windows DPAPI and never exposed to the UI.
+- **Destructive commands.** `restore-disk` overwrites a block device; it requires typing the device path to confirm (or `--yes` for scripts).
+- **Dependencies.** `dotnet list package --vulnerable` is clean (SQLitePCLRaw CVE-2025-6965 patched via upgrade to 2.1.12).
+
+## Backup format
+
+`BACKUP FORMAT v1` is frozen and documented in [`docs/FORMAT-v1.md`](docs/FORMAT-v1.md). Future versions add `v2`, `v3` readers — they never silently change `v1`. Additional docs:
+
+- [`docs/RECOVERY.md`](docs/RECOVERY.md) — bare-metal recovery runbook
+- [`docs/VSS-DESIGN.md`](docs/VSS-DESIGN.md) — VSS snapshot lifecycle design
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — where the project is headed
+
+## Development
+
+```sh
+dotnet build FileKeep.slnx
+dotnet test FileKeep.slnx   # 194/194 on Windows
+```
+
+The core engine builds and tests cross-platform; Windows-only paths (backup privilege, VSS helper, service hosting, WiX installer) need a Windows 10/11 machine. The service also runs in `--console` mode on any OS for development.
+
+Key engineering rules for contributors:
+
+- No hand-rolled crypto — established, boring, conventional implementations only
+- Never store encryption keys with backup data
+- Every backup independently verifiable; every uploaded object hashed
+- Interrupted transfers resume; no silent data deletion
+- All modules have automated tests; nothing merges red
 
 ## Status
 
-- [x] Milestone 1 (v0.1): local repository engine — directory backup,
-      chunking, AES-256-GCM encryption, manifest, round-trip restore.
-      Tagged `v0.1-local-repository`.
-- [x] Milestone 2 (v0.2): incrementals — parent-linked, self-contained
-      manifests, size+mtime fast path. Tagged `v0.2-incrementals`
-      (plus `v0.2.1` requirements-compliance revision).
-- [x] Milestone 3 (v0.3): Usenet backend adapter — NNTP client, yEnc
-      articles, deterministic message-IDs, resumable uploads.
-      Tagged `v0.3-nntp-backend`.
-- [x] Milestone 4 (v0.4): NZB generation. Tagged `v0.4-nzb-generation`.
-- [x] Milestone 5 (v0.5): download/recovery pipeline — NZB parsing,
-      resumable chunk download with per-chunk authentication and
-      hash verification. Tagged `v0.5-download-pipeline`.
-- [x] Milestone 6 (v0.6): locked-file reads and system images — `ISnapshotProvider`
-      abstraction (live passthrough + Windows backup-privilege reads via
-      `SeBackupPrivilege`/`FILE_FLAG_BACKUP_SEMANTICS`, admin rights required),
-      `backup --backup-privilege`, raw block-device imaging
-      (`backup-disk`/`restore-disk`) through the normal chunk/encrypt/hash
-      pipeline with AES-GCM + SHA-256 fails-closed restore, additive manifest
-      `kind`/`snapshot` fields. Tagged `v0.6-vss-system-images` (tag predates
-      the rename; the mechanism was never Volume Shadow Copy). Note: the
-      backup-privilege path compiles cross-platform but can only be exercised
-      on Windows; all platform-independent behavior is tested on Linux.
-      Reads the live files — not a point-in-time copy.
-- [x] Milestone 7 (v0.7): Windows service, GUI, installer, recovery —
-      `usenet-backup-service`: SCM-hosted Windows service (raw P/Invoke,
-      zero new dependencies) running scheduled `daily HH:mm` / `interval N`
-      backup jobs from `service.json` with failure tracking and resume;
-      localhost web dashboard (status, run-now, backups, operations log);
-      admin PowerShell installer (`install/install.ps1`); bare-metal
-      recovery runbook (`docs/RECOVERY.md`, CLI as the WinPE tool).
-      Tagged `v0.7-service-gui-installer`. Not done here: WiX MSI packaging
-      and a purpose-built WinPE ISO need Windows tooling.
+FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, and the WinPE recovery environment are implemented and tested; VSS snapshot infrastructure (helper + lifecycle) is implemented and tested with backup-flow integration in progress.
+
+On the roadmap: VSS backup-flow integration, merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright © 2026 J. Treichel.
