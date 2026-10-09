@@ -149,7 +149,9 @@ public sealed class RetentionManagerTests : IDisposable
         // A missing sampled article triggers a FULL refresh: every chunk
         // gets a fresh identity so the retention-clock reset is honest.
         Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished);
-        Assert.Equal(postsBefore + fx.ChunkIds.Count, _server.PostCount);
+        // +1 for the message-index publication (published before the
+        // retention clock is advanced).
+        Assert.Equal(postsBefore + fx.ChunkIds.Count + 1, _server.PostCount);
 
         // New identity recorded in the index (per-provider)
         string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
@@ -186,7 +188,8 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(1, report.BackupsRefreshed);
         Assert.Equal(0, report.ArticlesMissing); // nothing was missing...
         Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished); // ...but all refreshed
-        Assert.Equal(postsBefore + fx.ChunkIds.Count, _server.PostCount);
+        // +1 for the message-index publication.
+        Assert.Equal(postsBefore + fx.ChunkIds.Count + 1, _server.PostCount);
 
         // Every chunk now has a new identity (per-provider)
         string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);

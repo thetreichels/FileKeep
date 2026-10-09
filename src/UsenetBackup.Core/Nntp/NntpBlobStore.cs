@@ -333,7 +333,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         if (latestVersion > 0)
         {
             var existing = GetLatestMessageIndex();
-            if (existing is not null && existing == indexJson)
+            if (existing is not null && existing.Trim() == indexJson.Trim())
                 return latestVersion;
         }
         string messageId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
