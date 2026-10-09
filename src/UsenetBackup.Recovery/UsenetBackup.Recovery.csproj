@@ -7,6 +7,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>UsenetBackup.Recovery</RootNamespace>
     <AssemblyName>FileKeepRecovery</AssemblyName>
+    <ApplicationIcon>../../assets/filekeep.ico</ApplicationIcon>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <OutputType>WinExe</OutputType>

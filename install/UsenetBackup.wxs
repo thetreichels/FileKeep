@@ -91,5 +91,9 @@
     <!-- Add/Remove Programs icon -->
     <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />
     <Property Id="ARPPRODUCTICON" Value="FileKeepIcon" />
+
+    <!-- Installer banner (top) and dialog (side) bitmaps -->
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.SrcRoot)/assets/filekeep-banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.SrcRoot)/assets/filekeep-dialog.bmp" />
   </Package>
 </Wix>
