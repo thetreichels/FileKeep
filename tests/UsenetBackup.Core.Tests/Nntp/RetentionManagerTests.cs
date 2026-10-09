@@ -272,6 +272,47 @@ public sealed class RetentionManagerTests : IDisposable
     }
 
     [Fact]
+    public void IndexPublishFailure_TimestampNotAdvanced_RetryOnNextRun()
+    {
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+
+        // Expiring backup that WILL be refreshed...
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        // ...but the message-identity index post is rejected by the server.
+        _server.FailIndexPosts = true;
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        // Chunks WERE republished (server accepted those posts)...
+        Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished);
+        // ...but the refresh is reported as FAILED because the refreshed
+        // identities are not discoverable by other machines.
+        Assert.Equal(0, report.BackupsRefreshed);
+        Assert.NotEmpty(report.Errors);
+        Assert.Contains(report.Errors, e => e.Contains("Index publish"));
+
+        // The retention clock must NOT advance: the old timestamp stands so
+        // the next run retries the full refresh including index publication.
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
+
+        // Next run with a healthy server completes the refresh and advances
+        // the clock (proving the retry path works end to end).
+        _server.FailIndexPosts = false;
+        var log2 = new List<string>();
+        var report2 = CreateManager(log2).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+        Assert.Equal(1, report2.BackupsRefreshed);
+        var record2 = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.True(record2.UploadedUtc > uploaded);
+    }
+
+    [Fact]
     public void MakeRefreshMessageId_Unique()
     {
         string chunkId = new string('a', 64);

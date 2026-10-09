@@ -23,6 +23,13 @@ internal sealed class FakeNntpServer : IDisposable
     public string? RequiredUser { get; set; }
     public string? RequiredPassword { get; set; }
 
+    /// <summary>
+    /// When true, POST of message-index articles (Subject contains
+    /// "[usenet-backup] message-index") is rejected with 441, simulating
+    /// an index-publication failure. Chunk posts are unaffected.
+    /// </summary>
+    public bool FailIndexPosts { get; set; }
+
     /// <summary>Starts the optional TCP listener (loopback, ephemeral port).</summary>
     public int Listen()
     {
@@ -104,6 +111,8 @@ internal sealed class FakeNntpServer : IDisposable
                         string article = ReadArticle(reader);
                         string? msgId = ExtractMessageId(article);
                         if (msgId is null) { writer.WriteLine("441 missing Message-ID"); break; }
+                        if (FailIndexPosts && article.Contains("[usenet-backup] message-index"))
+                        { writer.WriteLine("441 index posting rejected (injected failure)"); break; }
                         Articles[msgId] = article;
                         Interlocked.Increment(ref _postCount);
                         writer.WriteLine("240 article posted");

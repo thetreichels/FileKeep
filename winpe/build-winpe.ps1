@@ -1,18 +1,26 @@
-# Builds a WinPE ISO with the Usenet Backup recovery tools.
+# Builds a WinPE ISO with the FileKeep recovery tools.
 # Run on Windows with the ADK + WinPE add-on installed, as Administrator.
 #
-#   1. Install ADK (Deployment Tools) + WinPE add-on from
-#      https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install/
-#   2. dotnet publish the CLI and wizard (self-contained, win-x64)
-#   3. Run this script: .\winpe\build-winpe.ps1 -SourceDir C:\ub\src
+# Two modes:
+#   1. Source mode (dev): publishes from a source tree.
+#      .\winpe\build-winpe.ps1 -SourceDir C:\ub\src
+#   2. Binary mode (installed): uses pre-published binaries, e.g. from
+#      C:\Program Files\FileKeep. The dashboard's WinPE GUI uses this mode.
+#      .\winpe\build-winpe.ps1 -BinaryDir "C:\Program Files\FileKeep"
 #
-# Output: C:\winpe\usenet-backup-winpe.iso
+# In binary mode the layout is expected to be:
+#   <BinaryDir>\cli\FileKeep.exe
+#   <BinaryDir>\wizard\FileKeepRecovery.exe
+#   <BinaryDir>\docs\RECOVERY.md
+#
+# Output: C:\winpe\filekeep-winpe.iso
 
 param(
     [string]$SourceDir = "C:\ub\src",
+    [string]$BinaryDir = "",
     [string]$WorkDir = "C:\winpe",
     [string]$StageDir = "C:\winpe-stage",
-    [string]$IsoPath = "C:\winpe\usenet-backup-winpe.iso"
+    [string]$IsoPath = "C:\winpe\filekeep-winpe.iso"
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,15 +65,30 @@ if (-not (Get-Command dism.exe -ErrorAction SilentlyContinue)) { Fail "dism.exe 
 
 # --- Publish self-contained binaries ---
 # NOTE: publish into StageDir, NOT WorkDir — WorkDir is wiped below by copype.
-Write-Host "Publishing CLI and recovery wizard (self-contained win-x64)..."
 $cliOut = Join-Path $StageDir "cli"
 $wizOut = Join-Path $StageDir "recovery"
-dotnet publish (Join-Path $SourceDir "src\UsenetBackup.Cli\UsenetBackup.Cli.csproj") `
-    -c Release -r win-x64 --self-contained -o $cliOut
-if ($LASTEXITCODE -ne 0) { Fail "CLI publish failed." }
-dotnet publish (Join-Path $SourceDir "src\UsenetBackup.Recovery\UsenetBackup.Recovery.csproj") `
-    -c Release -r win-x64 --self-contained -o $wizOut
-if ($LASTEXITCODE -ne 0) { Fail "Wizard publish failed." }
+if ($BinaryDir -ne "") {
+    # Binary mode: copy pre-published binaries from the installed layout.
+    # No source tree or dotnet SDK required.
+    Write-Host "Binary mode: copying pre-published binaries from $BinaryDir..."
+    $srcCli = Join-Path $BinaryDir "cli\FileKeep.exe"
+    $srcWiz = Join-Path $BinaryDir "wizard\FileKeepRecovery.exe"
+    if (-not (Test-Path $srcCli)) { Fail "CLI not found: $srcCli" }
+    if (-not (Test-Path $srcWiz)) { Fail "Wizard not found: $srcWiz" }
+    New-Item -ItemType Directory -Force -Path $cliOut | Out-Null
+    New-Item -ItemType Directory -Force -Path $wizOut | Out-Null
+    Copy-Item (Join-Path $BinaryDir "cli\*") $cliOut -Recurse -Force
+    Copy-Item (Join-Path $BinaryDir "wizard\*") $wizOut -Recurse -Force
+}
+else {
+    Write-Host "Publishing CLI and recovery wizard (self-contained win-x64)..."
+    dotnet publish (Join-Path $SourceDir "src\UsenetBackup.Cli\UsenetBackup.Cli.csproj") `
+        -c Release -r win-x64 --self-contained -o $cliOut
+    if ($LASTEXITCODE -ne 0) { Fail "CLI publish failed." }
+    dotnet publish (Join-Path $SourceDir "src\UsenetBackup.Recovery\UsenetBackup.Recovery.csproj") `
+        -c Release -r win-x64 --self-contained -o $wizOut
+    if ($LASTEXITCODE -ne 0) { Fail "Wizard publish failed." }
+}
 
 # --- Build WinPE base ---
 if (Test-Path $WorkDir) { Remove-Item $WorkDir -Recurse -Force }
@@ -99,7 +122,7 @@ try {
     }
 
     # --- Add recovery tools ---
-    $toolsDir = Join-Path $mountDir "usenet-backup"
+    $toolsDir = Join-Path $mountDir "filekeep"
     New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
     Write-Host "Copying CLI..."
     Copy-Item (Join-Path $cliOut "*") $toolsDir -Recurse -Force
@@ -108,7 +131,14 @@ try {
     Write-Host "Copying wizard..."
     Copy-Item (Join-Path $wizOut "*") $wizardDir -Recurse -Force
     Write-Host "Copying recovery runbook..."
-    Copy-Item (Join-Path $SourceDir "docs\RECOVERY.md") $toolsDir -Force
+    $runbookSrc = if ($BinaryDir -ne "") { Join-Path $BinaryDir "docs\RECOVERY.md" } `
+                  else { Join-Path $SourceDir "docs\RECOVERY.md" }
+    if (Test-Path $runbookSrc) {
+        Copy-Item $runbookSrc $toolsDir -Force
+    }
+    else {
+        Write-Host "WARNING: RECOVERY.md not found at $runbookSrc; skipping."
+    }
 
     # --- Startup script: network init + menu ---
     $startnet = @'
@@ -118,14 +148,14 @@ echo ================================================
 echo  Usenet Backup Recovery Environment
 echo ================================================
 echo.
-echo  Tools in X:\usenet-backup\ :
-echo    UsenetBackup.exe           (CLI)
-echo    wizard\UsenetBackupRecovery.exe  (GUI wizard)
-echo    RECOVERY.md                 (runbook)
+echo  Tools in X:\filekeep\ :
+echo    FileKeep.exe                   (CLI)
+echo    wizard\FileKeepRecovery.exe    (GUI wizard)
+echo    RECOVERY.md                    (runbook)
 echo.
 echo  Start networking if needed: wpeinit
 echo  Launching recovery wizard...
-start "" X:\usenet-backup\wizard\UsenetBackupRecovery.exe --win95
+start "" X:\filekeep\wizard\FileKeepRecovery.exe --win95
 echo.
 cmd
 '@

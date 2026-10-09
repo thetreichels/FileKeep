@@ -24,6 +24,7 @@
         <Directory Id="SERVICEDIR" Name="service" />
         <Directory Id="WIZARDDIR" Name="wizard" />
         <Directory Id="DOCSDIR" Name="docs" />
+        <Directory Id="WINPEDIR" Name="winpe" />
       </Directory>
     </StandardDirectory>
 
@@ -84,11 +85,20 @@
       </Component>
     </ComponentGroup>
 
+    <!-- WinPE build script (used by the dashboard's WinPE ISO GUI) -->
+    <ComponentGroup Id="WinPEFiles" Directory="WINPEDIR">
+      <Component Id="WinPEBuildScript" Guid="*">
+        <File Source="$(var.SrcRoot)\winpe\build-winpe.ps1" Name="build-winpe.ps1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveWinPEDir" Directory="WINPEDIR" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
     <Feature Id="ProductFeature" Title="FileKeep" Level="1">
       <ComponentGroupRef Id="CliFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
+      <ComponentGroupRef Id="WinPEFiles" />
     </Feature>
 
     <!-- Add/Remove Programs icon -->

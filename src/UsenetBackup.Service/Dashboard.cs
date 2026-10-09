@@ -1036,8 +1036,9 @@ public static class DashboardApi
             {
                 // Invoke the build-winpe.ps1 script
                 string scriptPath = Path.Combine(AppContext.BaseDirectory, "winpe", "build-winpe.ps1");
+                bool isInstalledLayout = File.Exists(scriptPath);
                 // Fall back to source-relative path during development
-                if (!File.Exists(scriptPath))
+                if (!isInstalledLayout)
                 {
                     // Try to find it relative to the service executable
                     string? dir = Path.GetDirectoryName(AppContext.BaseDirectory);
@@ -1049,10 +1050,23 @@ public static class DashboardApi
                 if (!File.Exists(scriptPath))
                     throw new FileNotFoundException("build-winpe.ps1 not found.");
 
+                // In the installed layout (C:\Program Files\FileKeep\winpe\...),
+                // use binary mode: the script copies pre-published binaries
+                // from the install root instead of requiring a source tree
+                // and dotnet SDK.
+                string binaryDirArg = "";
+                if (isInstalledLayout)
+                {
+                    string? installRoot = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
+                    if (installRoot is not null)
+                        binaryDirArg = $" -BinaryDir \"{installRoot}\"";
+                }
+
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "powershell.exe",
                     Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -IsoPath \"{isoPath}\"" +
+                        binaryDirArg +
                         (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
                     UseShellExecute = false,
                     RedirectStandardOutput = true,

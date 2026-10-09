@@ -240,15 +240,13 @@ public sealed class RetentionManager
             return BackupOutcome.Failed;
         }
 
-        // All republished articles STAT-verified — now it is safe to advance
-        // the retention clock.
-        tracker.RecordUpload(record.BackupId, record.ProviderHost, record.Newsgroup);
-        _log($"Backup {record.BackupId}: {republished}/{toRepublish.Count} articles republished " +
-             $"and verified; retention clock reset");
-
-        // Publish the updated message-identity index so a recovering
-        // machine (or WinPE) can find the refreshed articles. Without
-        // this, cross-machine recovery would use stale message IDs.
+        // Publish the updated message-identity index BEFORE advancing the
+        // retention clock. A recovering machine (or WinPE) can only find
+        // the refreshed articles through this index — if publication fails
+        // while the clock has already advanced, cross-machine recovery
+        // would use stale message IDs while the retention timestamp
+        // claims success. The index publication is therefore part of the
+        // required transaction: it must succeed before the clock moves.
         try
         {
             string indexJson = repo.MessageIndex.ToJson();
@@ -257,12 +255,23 @@ public sealed class RetentionManager
         }
         catch (Exception ex)
         {
-            // Index publication failure is logged but does not fail the
-            // retention refresh — the local index is still correct, and
-            // the next successful run will publish it.
-            _log($"  WARNING: failed to publish message-identity index: {ex.Message}");
-            report.Errors.Add($"Index publish: {ex.Message}");
+            // Do NOT advance the timestamp — the refreshed identities are
+            // not discoverable by other machines. The old timestamp stands
+            // so the next run retries the full refresh including index
+            // publication. (Republishing already-posted chunks again is
+            // wasteful but safe: servers accept new message IDs and the
+            // older articles expire naturally.)
+            _log($"Backup {record.BackupId}: message-identity index publication failed: " +
+                 $"{ex.Message}; retention timestamp NOT advanced");
+            report.Errors.Add($"Index publish {record.BackupId}: {ex.Message}");
+            return BackupOutcome.Failed;
         }
+
+        // All republished articles STAT-verified AND the refreshed identity
+        // index published — now it is safe to advance the retention clock.
+        tracker.RecordUpload(record.BackupId, record.ProviderHost, record.Newsgroup);
+        _log($"Backup {record.BackupId}: {republished}/{toRepublish.Count} articles republished, " +
+             $"verified, and index published; retention clock reset");
 
         return isMissing ? BackupOutcome.RefreshedMissing : BackupOutcome.RefreshedExpiring;
     }

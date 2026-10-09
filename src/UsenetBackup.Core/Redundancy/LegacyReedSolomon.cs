@@ -20,7 +20,7 @@ public sealed class LegacyReedSolomon
 
     /// <param name="dataShards">Number of data shards (e.g., 10).</param>
     /// <param name="parityShards">Number of parity shards (e.g., 3).</param>
-    public ReedSolomon(int dataShards, int parityShards)
+    public LegacyReedSolomon(int dataShards, int parityShards)
     {
         if (dataShards <= 0) throw new ArgumentOutOfRangeException(nameof(dataShards));
         if (parityShards <= 0) throw new ArgumentOutOfRangeException(nameof(parityShards));
