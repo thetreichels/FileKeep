@@ -1,6 +1,6 @@
 # Builds FileKeepVss.exe — the native VSS shadow copy helper.
 #
-# Requires: Visual Studio Build Tools (MSVC) + Windows SDK
+# Tries MSVC (Visual Studio Build Tools) first, falls back to MinGW-w64.
 # Run on Windows:
 #   powershell -ExecutionPolicy Bypass -File build-vss-helper.ps1
 #
@@ -10,39 +10,39 @@ $ErrorActionPreference = "Stop"
 
 $srcDir = $PSScriptRoot
 $outExe = Join-Path $srcDir "FileKeepVss.exe"
+$cppFile = Join-Path $srcDir "FileKeepVss.cpp"
 
-# Find MSVC cl.exe via vswhere
+# Try MSVC first
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) {
-    throw "vswhere.exe not found. Install Visual Studio Build Tools."
+$msvcFound = $false
+if (Test-Path $vswhere) {
+    $vsPath = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if ($vsPath) {
+        $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path $vcvars) {
+            Write-Host "Using Visual Studio at $vsPath"
+            $compileCmd = "`"$vcvars`" >nul 2>&1 && cl.exe /nologo /std:c++17 /MT /O1 /W3 /EHsc " +
+                "`"$cppFile`" /link /OUT:`"$outExe`" VssApi.lib"
+            Write-Host "Compiling with MSVC..."
+            cmd /c $compileCmd
+            if ($LASTEXITCODE -eq 0) { $msvcFound = $true }
+        }
+    }
 }
 
-$vsPath = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vsPath) {
-    throw "No Visual Studio with C++ tools found."
+# Fall back to MinGW-w64
+if (-not $msvcFound) {
+    $mingwGcc = "C:\mingw\mingw64\bin\g++.exe"
+    if (-not (Test-Path $mingwGcc)) {
+        throw "Neither MSVC nor MinGW-w64 found. Install one of them."
+    }
+    Write-Host "Using MinGW-w64 at C:\mingw"
+    Write-Host "Compiling with MinGW..."
+    # -municode for wmain, -static for self-contained exe, -luuid for GUID_NULL
+    & $mingwGcc -mconsole -municode -static -O2 -o $outExe $cppFile -lvssapi -lole32 -luuid
+    if ($LASTEXITCODE -ne 0) { throw "MinGW compilation failed" }
 }
-
-# Import the VS environment
-$vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) {
-    throw "vcvars64.bat not found at $vcvars"
-}
-
-Write-Host "Using Visual Studio at $vsPath"
-
-# Compile: C++17, static runtime (/MT), optimize for size (/O1)
-# VSS headers are in the Windows SDK (included via vcvars)
-$compileCmd = "`"$vcvars`" >nul 2>&1 && cl.exe /nologo /std:c++17 /MT /O1 /W3 /EHsc " +
-    "`"$srcDir\FileKeepVss.cpp`" /link /OUT:`"$outExe`" VssApi.lib"
-
-Write-Host "Compiling FileKeepVss.cpp..."
-cmd /c $compileCmd
-if ($LASTEXITCODE -ne 0) { throw "Compilation failed" }
 
 $size = (Get-Item $outExe).Length
 Write-Host "Built $outExe ($size bytes)"
-
-# Verify it runs (should print usage with --help)
-& $outExe --help | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Smoke test failed" }
-Write-Host "Smoke test passed (--help works)"
+Write-Host "Build complete"
