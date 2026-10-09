@@ -140,7 +140,8 @@ public sealed class WizardState : IDisposable
             client.Connect();
             if (!string.IsNullOrEmpty(NntpUser))
                 client.Authenticate(NntpUser, NntpPassword);
-            using var remote = new NntpBlobStore(client, Newsgroup, repo.RepoId, repo.CatalogPath);
+            using var remote = new NntpBlobStore(client, Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+                providerKey: ChunkMessageIndex.MakeProviderKey(NntpHost, Newsgroup));
             return repo.DownloadChunks(Nzb, remote, progress);
         }
         finally

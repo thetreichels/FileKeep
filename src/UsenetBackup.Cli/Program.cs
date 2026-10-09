@@ -366,7 +366,8 @@ static int NntpUpload(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
         int uploaded = 0, skipped = 0;
         for (int i = 0; i < chunkIds.Length; i++)
         {
@@ -411,7 +412,8 @@ static int ManifestDiscover(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
         // Use the monthly index (STAT probes) instead of LISTGROUP, which is
         // infeasible on large groups (e.g., alt.binaries.test has billions).
         var found = repo.DiscoverRemoteManifestsViaIndex(store);
@@ -499,7 +501,8 @@ static int Download(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
+        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
         DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
         {
             if (done % 25 == 0 || done == total)

@@ -74,7 +74,8 @@ public sealed class RetentionManagerTests : IDisposable
             MessageIndex = new ChunkMessageIndex(outer._repoDir);
             Store = new NntpBlobStore(_client, Newsgroup, RepoId,
                 Path.Combine(outer._workDir, "journal.db"),
-                messageIndex: MessageIndex);
+                messageIndex: MessageIndex,
+                providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
             Tracker = new UsenetUploadTracker(outer._repoDir);
         }
 
@@ -145,12 +146,15 @@ public sealed class RetentionManagerTests : IDisposable
 
         Assert.Equal(1, report.BackupsRefreshed);
         Assert.Equal(1, report.ArticlesMissing);
-        Assert.Equal(1, report.ArticlesRepublished);
-        Assert.Equal(postsBefore + 1, _server.PostCount);
+        // A missing sampled article triggers a FULL refresh: every chunk
+        // gets a fresh identity so the retention-clock reset is honest.
+        Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished);
+        Assert.Equal(postsBefore + fx.ChunkIds.Count, _server.PostCount);
 
-        // New identity recorded in the index
-        Assert.True(fx.MessageIndex.HasNewIdentity(lostChunk));
-        string newId = fx.MessageIndex.GetMessageId(lostChunk, RepoId);
+        // New identity recorded in the index (per-provider)
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, lostChunk));
+        string newId = fx.MessageIndex.GetMessageId(providerKey, lostChunk, RepoId);
         Assert.NotEqual(oldMessageId, newId);
         Assert.Contains(".refresh.", newId);
 
@@ -184,10 +188,11 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished); // ...but all refreshed
         Assert.Equal(postsBefore + fx.ChunkIds.Count, _server.PostCount);
 
-        // Every chunk now has a new identity
+        // Every chunk now has a new identity (per-provider)
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
         foreach (string chunkId in fx.ChunkIds)
         {
-            Assert.True(fx.MessageIndex.HasNewIdentity(chunkId));
+            Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, chunkId));
             Assert.True(fx.Store.ExistsOnServer(chunkId));
         }
 
@@ -218,8 +223,9 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(0, report.ArticlesRepublished);
 
         // Index untouched
+        string dryRunKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
         foreach (string chunkId in fx.ChunkIds)
-            Assert.False(fx.MessageIndex.HasNewIdentity(chunkId));
+            Assert.False(fx.MessageIndex.HasNewIdentity(dryRunKey, chunkId));
 
         // Timestamp untouched
         var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();

@@ -18,6 +18,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     private readonly string _repoId;
     private readonly Catalog _journal;
     private readonly ChunkMessageIndex? _messageIndex;
+    private readonly string? _providerKey;
     private bool _disposed;
 
     public NntpBlobStore(
@@ -26,16 +27,23 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string repoId,
         string catalogDbPath,
         string from = "usenet-backup",
-        ChunkMessageIndex? messageIndex = null)
+        ChunkMessageIndex? messageIndex = null,
+        string? providerKey = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
+        if (messageIndex is not null && string.IsNullOrEmpty(providerKey))
+            throw new ArgumentException(
+                "providerKey is required when messageIndex is provided: the index " +
+                "is per-provider, so lookups need to know which provider's " +
+                "refresh history to use.", nameof(providerKey));
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _newsgroup = newsgroup;
         _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
+        _providerKey = providerKey;
     }
 
     /// <summary>
@@ -48,16 +56,23 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string repoId,
         string catalogDbPath,
         string from = "usenet-backup",
-        ChunkMessageIndex? messageIndex = null)
+        ChunkMessageIndex? messageIndex = null,
+        string? providerKey = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
+        if (messageIndex is not null && string.IsNullOrEmpty(providerKey))
+            throw new ArgumentException(
+                "providerKey is required when messageIndex is provided: the index " +
+                "is per-provider, so lookups need to know which provider's " +
+                "refresh history to use.", nameof(providerKey));
         _pool = pool ?? throw new ArgumentNullException(nameof(pool));
         _newsgroup = newsgroup;
         _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
+        _providerKey = providerKey;
     }
 
     /// <summary>True if this store uses a connection pool (parallel-capable).</summary>
@@ -82,7 +97,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     }
 
     private string ResolveMessageId(string chunkIdHex) =>
-        _messageIndex?.GetMessageId(chunkIdHex, _repoId)
+        _messageIndex?.GetMessageId(_providerKey!, chunkIdHex, _repoId)
             ?? ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
 
     public bool Exists(string chunkIdHex)
@@ -136,7 +151,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         // otherwise we'd point the index at a phantom article.
         WaitForArticle(newMessageId);
         _journal.RecordUpload(newMessageId, chunkIdHex);
-        _messageIndex?.RecordNewIdentity(chunkIdHex, newMessageId);
+        _messageIndex?.RecordNewIdentity(_providerKey!, chunkIdHex, newMessageId);
         return newMessageId;
     }
 

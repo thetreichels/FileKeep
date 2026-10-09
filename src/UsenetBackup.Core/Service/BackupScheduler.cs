@@ -303,7 +303,8 @@ public sealed class BackupScheduler
 
         using var store = new Nntp.NntpBlobStore(
             pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
-            messageIndex: messageIndex);
+            messageIndex: messageIndex,
+            providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
 
         var manager = new Nntp.RetentionManager(
             msg => Log($"retention: {msg}"),
@@ -520,7 +521,8 @@ public sealed class BackupScheduler
                 using var pool = new Nntp.NntpConnectionPool(
                     nntp.Host, nntp.Port, nntp.Ssl,
                     nntp.Username, nntpPassword, nntp.Connections);
-                using var store = new Nntp.NntpBlobStore(pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+                using var store = new Nntp.NntpBlobStore(pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
                 // Determine redundancy mode: per-provider override, else job default
                 string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
                     ? nntp.RedundancyMode

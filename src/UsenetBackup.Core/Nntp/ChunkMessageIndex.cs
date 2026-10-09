@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace UsenetBackup.Core.Nntp;
 
 /// <summary>
-/// Maps chunk IDs to their current Usenet message IDs.
+/// Maps chunk IDs to their current Usenet message IDs, per provider.
 ///
 /// Chunk message IDs are normally deterministic
 /// (&lt;chunkId.repoId@usenet-backup&gt;), but retention refresh republishes
@@ -12,13 +12,20 @@ namespace UsenetBackup.Core.Nntp;
 /// which message ID is currently live for each republished chunk, so
 /// download and existence checks find the refreshed copy.
 ///
+/// The mapping is per provider (keyed by host/newsgroup): a refreshed
+/// message ID posted to provider A does not exist on provider B, so a
+/// global chunk→ID map would cause reads through B to request an article
+/// B never received. Each provider's refresh history is tracked
+/// independently.
+///
 /// Persisted as JSON in the repo root. Writes are atomic (write-temp-then
 /// -rename) so a crash cannot leave a half-written index.
 /// </summary>
 public sealed class ChunkMessageIndex
 {
     private readonly string _path;
-    private Dictionary<string, string> _map; // chunkIdHex -> messageId
+    // providerKey -> (chunkIdHex -> messageId)
+    private Dictionary<string, Dictionary<string, string>> _map;
 
     public ChunkMessageIndex(string repoRoot)
     {
@@ -27,43 +34,81 @@ public sealed class ChunkMessageIndex
     }
 
     /// <summary>
-    /// Gets the live message ID for a chunk. Returns the deterministic ID
-    /// if the chunk was never republished under a new identity.
+    /// Builds the provider key from host and newsgroup.
     /// </summary>
-    public string GetMessageId(string chunkIdHex, string repoId)
+    public static string MakeProviderKey(string host, string newsgroup) =>
+        $"{host?.Trim().ToLowerInvariant()}/{newsgroup?.Trim()}";
+
+    /// <summary>
+    /// Gets the live message ID for a chunk on a provider. Returns the
+    /// deterministic ID if the chunk was never republished under a new
+    /// identity on that provider.
+    /// </summary>
+    public string GetMessageId(string providerKey, string chunkIdHex, string repoId)
     {
-        if (_map.TryGetValue(chunkIdHex, out string? messageId))
+        if (providerKey is not null &&
+            _map.TryGetValue(providerKey, out var byChunk) &&
+            byChunk.TryGetValue(chunkIdHex, out string? messageId))
             return messageId;
         return ArticleCodec.MakeMessageId(chunkIdHex, repoId);
     }
 
     /// <summary>
-    /// Records that a chunk was republished under a new message ID.
-    /// The new ID becomes the live one for subsequent lookups.
+    /// Records that a chunk was republished under a new message ID on a
+    /// provider. The new ID becomes the live one for subsequent lookups
+    /// against that provider.
     /// </summary>
-    public void RecordNewIdentity(string chunkIdHex, string newMessageId)
+    public void RecordNewIdentity(string providerKey, string chunkIdHex, string newMessageId)
     {
-        _map[chunkIdHex] = newMessageId;
+        ArgumentException.ThrowIfNullOrEmpty(providerKey);
+        if (!_map.TryGetValue(providerKey, out var byChunk))
+        {
+            byChunk = new Dictionary<string, string>();
+            _map[providerKey] = byChunk;
+        }
+        byChunk[chunkIdHex] = newMessageId;
         Save();
     }
 
-    /// <summary>True if the chunk has a republished (non-deterministic) identity.</summary>
-    public bool HasNewIdentity(string chunkIdHex) => _map.ContainsKey(chunkIdHex);
+    /// <summary>
+    /// True if the chunk has a republished (non-deterministic) identity on
+    /// the given provider.
+    /// </summary>
+    public bool HasNewIdentity(string providerKey, string chunkIdHex) =>
+        providerKey is not null &&
+        _map.TryGetValue(providerKey, out var byChunk) &&
+        byChunk.ContainsKey(chunkIdHex);
 
-    private Dictionary<string, string> Load()
+    private Dictionary<string, Dictionary<string, string>> Load()
     {
         if (!File.Exists(_path))
-            return new Dictionary<string, string>();
+            return new Dictionary<string, Dictionary<string, string>>();
         try
         {
             string json = File.ReadAllText(_path);
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(json)
-                ?? new Dictionary<string, string>();
+            // Try the current nested format first.
+            var nested = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json);
+            if (nested is not null)
+                return nested;
         }
-        catch
+        catch { /* fall through to legacy attempt */ }
+
+        try
         {
-            return new Dictionary<string, string>();
+            // Legacy flat format (chunkId -> messageId, single global map).
+            // Migrate under a "legacy" provider key so old refresh records
+            // are not silently dropped.
+            string json = File.ReadAllText(_path);
+            var flat = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (flat is not null && flat.Count > 0)
+                return new Dictionary<string, Dictionary<string, string>>
+                {
+                    ["legacy"] = flat
+                };
         }
+        catch { /* corrupt file: start empty */ }
+
+        return new Dictionary<string, Dictionary<string, string>>();
     }
 
     private void Save()

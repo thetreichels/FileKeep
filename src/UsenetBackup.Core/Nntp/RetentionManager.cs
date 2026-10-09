@@ -186,9 +186,18 @@ public sealed class RetentionManager
 
         // Outcome 2 vs 3: missing articles, or merely approaching expiry.
         bool isMissing = missingChunks.Count > 0;
-        List<string> toRepublish = isMissing
-            ? missingChunks // only the ones actually gone
-            : chunkIds;    // proactive refresh of everything
+        // A missing sampled article proves the backup is degrading, but the
+        // sample is only a window (default 10) into potentially hundreds of
+        // articles. Republishing just the missing samples and then resetting
+        // the backup-level timestamp would report a fresh backup age while
+        // unexamined articles sit near expiry — the next scheduled check
+        // would then defer action based on the dishonest timestamp.
+        //
+        // Correct behavior: any missing article triggers a FULL refresh.
+        // Every chunk gets a fresh message identity and a fresh retention
+        // clock, so the timestamp reset that follows is honest. Partial
+        // refresh is never allowed to move the backup-level clock.
+        List<string> toRepublish = chunkIds;
 
         string reason = isMissing
             ? $"{missingChunks.Count} sampled articles missing from server"

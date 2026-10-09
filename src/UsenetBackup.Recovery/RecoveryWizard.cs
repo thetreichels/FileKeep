@@ -483,7 +483,8 @@ public sealed class RecoveryWizard : Form
                         client.Authenticate(_state.NntpUser, _state.NntpPassword);
                     var repo = _state.OpenRepo();
                     using var store = new NntpBlobStore(
-                        client, _state.Newsgroup, repo.RepoId, repo.CatalogPath);
+                        client, _state.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+                        providerKey: ChunkMessageIndex.MakeProviderKey(_state.NntpHost, _state.Newsgroup));
                     return _state.DiscoverRemoteManifests(store);
                 }
                 finally
