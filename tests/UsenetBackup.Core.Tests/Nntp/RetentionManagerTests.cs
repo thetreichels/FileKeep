@@ -119,7 +119,7 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(postsBefore, _server.PostCount); // nothing posted
 
         // Timestamp must be unchanged
-        var record = fx.Tracker.GetAll().Single();
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
         Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
     }
 
@@ -132,11 +132,7 @@ public sealed class RetentionManagerTests : IDisposable
         // Simulate article loss: remove one chunk's article from the server
         string lostChunk = fx.ChunkIds[0];
         string oldMessageId = ArticleCodec.MakeMessageId(lostChunk, RepoId);
-        Assert.True(_server.Articles.TryRemove(oldMessageId, out _),
-            $"Article not found. Server has {_server.Articles.Count} articles. " +
-            $"Looking for '{oldMessageId}'. " +
-            $"First key: '{_server.Articles.Keys.FirstOrDefault()}'. " +
-            $"ChunkIds count: {fx.ChunkIds.Count}.");
+        Assert.True(_server.Articles.TryRemove(oldMessageId, out _));
 
         // In the check window (65 days left) so the missing article is found.
         var uploaded = DateTime.UtcNow.AddDays(-1030);
@@ -161,8 +157,10 @@ public sealed class RetentionManagerTests : IDisposable
         // New article is actually on the server
         Assert.True(fx.Store.ExistsOnServer(lostChunk));
 
-        // Timestamp advanced (only after verification)
-        var record = fx.Tracker.GetAll().Single();
+        // Timestamp advanced (only after verification).
+        // Reload the tracker: CheckAndRepost uses its own instance.
+        var freshTracker = new UsenetUploadTracker(fx.Repo.RepoRoot);
+        var record = freshTracker.GetAll().Single();
         Assert.True(record.UploadedUtc > uploaded);
     }
 
@@ -194,7 +192,7 @@ public sealed class RetentionManagerTests : IDisposable
         }
 
         // Timestamp advanced
-        var record = fx.Tracker.GetAll().Single();
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
         Assert.True(record.UploadedUtc > uploaded);
     }
 
@@ -224,7 +222,7 @@ public sealed class RetentionManagerTests : IDisposable
             Assert.False(fx.MessageIndex.HasNewIdentity(chunkId));
 
         // Timestamp untouched
-        var record = fx.Tracker.GetAll().Single();
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
         Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
     }
 
