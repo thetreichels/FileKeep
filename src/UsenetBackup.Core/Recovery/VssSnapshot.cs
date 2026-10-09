@@ -76,7 +76,12 @@ public sealed class VssSnapshot : UsenetBackup.Core.ISnapshotProvider
         var psi = new ProcessStartInfo
         {
             FileName = _helperPath,
-            Arguments = $"--volume \"{volume}\" --timeout {_timeoutSecs}",
+            // NOTE: volume is intentionally NOT quoted. Path.GetPathRoot
+            // returns e.g. "C:\" — quoting it as "C:\" would place a
+            // backslash before the closing quote, which CommandLineToArgvW
+            // interprets as an escaped literal quote, mangling the argument.
+            // A volume root never contains spaces, so no quoting is needed.
+            Arguments = $"--volume {volume} --timeout {_timeoutSecs}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardInput = true,

@@ -159,17 +159,29 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
     VSS_ID snapshotId = GUID_NULL;
     bool snapshotCreated = false;
     bool writersEngaged = false;  // true once PrepareForBackup succeeds
+    bool snapshotSetStarted = false;  // true once StartSnapshotSet succeeds
 
-    // AbortBackup releases writers from the backup session. Must be called
-    // if PrepareForBackup succeeded but the backup did not complete.
-    auto abortWriters = [&]() {
-        if (writersEngaged && backup) {
+    // AbortBackup releases the in-progress backup session. Must be called
+    // on any failure path after StartSnapshotSet succeeds — otherwise VSS
+    // keeps the snapshot set "in progress" and subsequent runs fail with
+    // VSS_E_SNAPSHOT_SET_IN_PROGRESS (0x80042316). After PrepareForBackup
+    // it additionally releases writers from the backup session.
+    auto abortBackup = [&]() {
+        if (snapshotSetStarted && backup) {
             HRESULT ahr = backup->AbortBackup();
             if (FAILED(ahr)) {
                 fwprintf(stderr, L"Warning: AbortBackup failed: 0x%08X\n", ahr);
             }
+            snapshotSetStarted = false;
             writersEngaged = false;
         }
+    };
+
+    // Legacy alias: aborts the writer session. Prefer abortBackup(), which
+    // also covers the pre-writer window between StartSnapshotSet and
+    // PrepareForBackup.
+    auto abortWriters = [&]() {
+        abortBackup();
     };
 
     auto deleteSnapshot = [&]() {
@@ -254,6 +266,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
         cleanup();
         return 1;
     }
+    snapshotSetStarted = true;
 
     // Add the volume to the set
     hr = backup->AddToSnapshotSet(
@@ -263,6 +276,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
     if (FAILED(hr)) {
         fwprintf(stderr, L"AddToSnapshotSet failed for %ls: 0x%08X\n",
             volume.c_str(), hr);
+        abortBackup();
         cleanup();
         return 1;
     }
@@ -278,6 +292,7 @@ int Run(const std::wstring& volume, DWORD timeoutSecs) {
         }
         if (FAILED(hr)) {
             fwprintf(stderr, L"PrepareForBackup failed: 0x%08X\n", hr);
+            abortBackup();
             cleanup();
             return 1;
         }
