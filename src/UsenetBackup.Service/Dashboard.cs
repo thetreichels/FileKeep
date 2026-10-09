@@ -224,6 +224,23 @@ public static class Dashboard
         app.MapGet("/api/operations/lan-server", () =>
             Results.Json(DashboardApi.GetLanServerStatus()));
 
+        app.MapGet("/api/operations/winpe-prerequisites", () =>
+            Results.Json(DashboardApi.CheckWinPePrerequisites()));
+
+        app.MapGet("/api/operations/winpe-build-status", () =>
+            Results.Json(DashboardApi.GetWinPeBuildStatus()));
+
+        app.MapPost("/api/operations/winpe-build", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string isoPath = body.GetProperty("isoPath").GetString() ?? "";
+            string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
+            var (status, payload) = DashboardApi.StartWinPeBuild(isoPath, sourceDir);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/operations/lan-server/start", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -891,6 +908,180 @@ public static class DashboardApi
 
     private static LanServer? _lanServer;
 
+    /// <summary>WinPE ISO build state.</summary>
+    private static string? _winPeBuildStatus;
+    private static string? _winPeBuildError;
+    private static string? _winPeBuildIsoPath;
+
+    /// <summary>
+    /// Checks prerequisites for WinPE ISO creation: Windows, admin rights,
+    /// ADK Deployment Tools, and WinPE add-on.
+    /// </summary>
+    public static object CheckWinPePrerequisites()
+    {
+        var result = new Dictionary<string, object>();
+        result["isWindows"] = OperatingSystem.IsWindows();
+        if (!OperatingSystem.IsWindows())
+        {
+            result["ready"] = false;
+            result["error"] = "WinPE ISO creation requires Windows.";
+            return result;
+        }
+        bool isAdmin = false;
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            isAdmin = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch { }
+        result["isAdmin"] = isAdmin;
+
+        // Probe for ADK tools
+        string? copype = FindAdkTool("copype.cmd");
+        string? makeWinPe = FindAdkTool("MakeWinPEMedia.cmd");
+        string? oscdimg = FindAdkTool("oscdimg.exe");
+        result["copype"] = copype ?? "";
+        result["makeWinPeMedia"] = makeWinPe ?? "";
+        result["oscdimg"] = oscdimg ?? "";
+        result["adkFound"] = copype is not null && makeWinPe is not null;
+
+        // Check for WinPE add-on (winpe.wim)
+        string? winpeWim = FindWinPeWim();
+        result["winpeWim"] = winpeWim ?? "";
+        result["winpeAddonFound"] = winpeWim is not null;
+
+        bool ready = isAdmin && copype is not null && makeWinPe is not null && winpeWim is not null;
+        result["ready"] = ready;
+        if (!ready)
+        {
+            var missing = new List<string>();
+            if (!isAdmin) missing.Add("Administrator rights (run service as admin or elevate)");
+            if (copype is null || makeWinPe is null) missing.Add("ADK Deployment Tools");
+            if (winpeWim is null) missing.Add("WinPE add-on");
+            result["error"] = "Missing: " + string.Join(", ", missing);
+        }
+        return result;
+    }
+
+    private static string? FindAdkTool(string name)
+    {
+        string[] kitRoots =
+        {
+            @"C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit",
+            @"C:\Program Files\Windows Kits\10\Assessment and Deployment Kit",
+        };
+        foreach (var root in kitRoots)
+        {
+            string probe = Path.Combine(root, "Deployment Tools", name);
+            if (File.Exists(probe))
+                return probe;
+            // Also check architecture subfolders
+            foreach (var arch in new[] { "amd64", "x86" })
+            {
+                string archProbe = Path.Combine(root, "Deployment Tools", arch, name);
+                if (File.Exists(archProbe))
+                    return archProbe;
+            }
+        }
+        return null;
+    }
+
+    private static string? FindWinPeWim()
+    {
+        string[] kitRoots =
+        {
+            @"C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit",
+            @"C:\Program Files\Windows Kits\10\Assessment and Deployment Kit",
+        };
+        foreach (var root in kitRoots)
+        {
+            foreach (var arch in new[] { "amd64", "x86" })
+            {
+                string probe = Path.Combine(root, "Windows Preinstallation Environment", arch, "en-us", "winpe.wim");
+                if (File.Exists(probe))
+                    return probe;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Current WinPE build status for the dashboard.</summary>
+    public static object GetWinPeBuildStatus() =>
+        new { status = _winPeBuildStatus ?? "idle", error = _winPeBuildError ?? "", isoPath = _winPeBuildIsoPath ?? "" };
+
+    /// <summary>
+    /// Starts a WinPE ISO build in the background. Returns 202 if accepted.
+    /// </summary>
+    public static (int Status, object Payload) StartWinPeBuild(string isoPath, string? sourceDir)
+    {
+        if (!OperatingSystem.IsWindows())
+            return (400, new { error = "WinPE ISO creation requires Windows." });
+        if (_winPeBuildStatus == "running")
+            return (400, new { error = "A WinPE build is already running." });
+        if (string.IsNullOrWhiteSpace(isoPath))
+            return (400, new { error = "ISO output path is required." });
+
+        var prereq = CheckWinPePrerequisites() as Dictionary<string, object>;
+        if (prereq is null || !(prereq.TryGetValue("ready", out var ready) && ready is true))
+            return (400, new { error = "Prerequisites not met: " + (prereq?["error"] ?? "unknown") });
+
+        _winPeBuildStatus = "running";
+        _winPeBuildError = null;
+        _winPeBuildIsoPath = isoPath;
+
+        Task.Run(() =>
+        {
+            try
+            {
+                // Invoke the build-winpe.ps1 script
+                string scriptPath = Path.Combine(AppContext.BaseDirectory, "winpe", "build-winpe.ps1");
+                // Fall back to source-relative path during development
+                if (!File.Exists(scriptPath))
+                {
+                    // Try to find it relative to the service executable
+                    string? dir = Path.GetDirectoryName(AppContext.BaseDirectory);
+                    while (dir is not null && !File.Exists(Path.Combine(dir, "winpe", "build-winpe.ps1")))
+                        dir = Path.GetDirectoryName(dir);
+                    if (dir is not null)
+                        scriptPath = Path.Combine(dir, "winpe", "build-winpe.ps1");
+                }
+                if (!File.Exists(scriptPath))
+                    throw new FileNotFoundException("build-winpe.ps1 not found.");
+
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -IsoPath \"{isoPath}\"" +
+                        (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                // Elevation: the service should already be running as admin.
+                // If not, the script will fail with a clear error.
+                using var proc = System.Diagnostics.Process.Start(psi)!;
+                string output = proc.StandardOutput.ReadToEnd();
+                string err = proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+                if (proc.ExitCode != 0)
+                    throw new InvalidOperationException($"build-winpe.ps1 exited {proc.ExitCode}: {err}{output}");
+                if (!File.Exists(isoPath))
+                    throw new FileNotFoundException($"ISO not created at {isoPath}");
+                _winPeBuildStatus = "complete";
+                OperationLog.Append("", "winpe-build", $"iso={isoPath} complete");
+            }
+            catch (Exception ex)
+            {
+                _winPeBuildStatus = "failed";
+                _winPeBuildError = ex.Message;
+                OperationLog.Append("", "winpe-build", $"iso={isoPath} FAILED: {ex.Message}");
+            }
+        });
+        return (202, new { accepted = true });
+    }
+
     /// <summary>Current LAN server state for the dashboard.</summary>
     public static object GetLanServerStatus() =>
         new { running = _lanServer?.IsRunning == true, port = _lanServer?.Port ?? 0 };
@@ -1426,6 +1617,23 @@ public static class DashboardHtml
                 <div id="diagnoseResult" style="margin-top:8px"></div>
               </div>
               <div class="card">
+                <div class="name">Build WinPE ISO</div>
+                <div class="meta">Create a bootable WinPE recovery ISO. Requires ADK + WinPE add-on and Administrator rights.</div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinPePrereqs()">Check prerequisites</button>
+                  <span id="winpe-prereq" style="margin-left:8px"></span>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <input id="winpe-iso" placeholder="C:\winpe\filekeep-winpe.iso" style="flex:1">
+                  <input id="winpe-src" placeholder="Source dir (optional)" style="flex:1">
+                  <button onclick="startWinPeBuild()">Build ISO</button>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinPeStatus()">Check build status</button>
+                  <span id="winpe-status" style="margin-left:8px"></span>
+                </div>
+              </div>
+              <div class="card">
                 <div class="name">Recovery USB</div>
                 <div class="meta">Write a WinPE ISO to a USB drive. Destructive — all data on the drive is destroyed.</div>
                 <div class="row" style="margin-top:8px">
@@ -1897,6 +2105,39 @@ public static class DashboardHtml
               (r.fallback ? `<tr><td><code>${esc(r.fallback.host)}</code></td><td>${esc(r.fallback.result)}</td></tr>` : '') +
               '</tbody></table><p>' + esc(r.diagnosis) + '</p>';
           } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+        }
+        async function checkWinPePrereqs() {
+          const el = document.getElementById('winpe-prereq');
+          el.textContent = 'Checking…';
+          try {
+            const p = await api('/api/operations/winpe-prerequisites');
+            if (p.ready) {
+              el.innerHTML = '<span style="color:green">Ready</span>';
+            } else {
+              el.innerHTML = '<span style="color:red">Not ready: ' + esc(p.error || 'unknown') + '</span>';
+            }
+          } catch (e) { el.innerHTML = '<span style="color:red">' + esc(e.message) + '</span>'; }
+        }
+        async function startWinPeBuild() {
+          const isoPath = document.getElementById('winpe-iso').value.trim();
+          const sourceDir = document.getElementById('winpe-src').value.trim();
+          if (!isoPath) { alert('Enter an ISO output path.'); return; }
+          if (!confirm('Build WinPE ISO at ' + isoPath + '? This takes several minutes.')) return;
+          try {
+            await api('/api/operations/winpe-build', { method: 'POST', body: JSON.stringify({ isoPath, sourceDir: sourceDir || null }) });
+            alert('WinPE build started. Check status for progress.');
+            checkWinPeStatus();
+          } catch (e) { alert('Build failed to start: ' + e.message); }
+        }
+        async function checkWinPeStatus() {
+          const el = document.getElementById('winpe-status');
+          try {
+            const s = await api('/api/operations/winpe-build-status');
+            let html = 'Status: <b>' + esc(s.status) + '</b>';
+            if (s.isoPath) html += ' — ' + esc(s.isoPath);
+            if (s.error) html += ' <span style="color:red">' + esc(s.error) + '</span>';
+            el.innerHTML = html;
+          } catch (e) { el.textContent = e.message; }
         }
         async function listUsbDrives() {
           const box = document.getElementById('usbDrives');
