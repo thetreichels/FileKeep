@@ -34,7 +34,14 @@ public static class UsbDrives
         public uint PropertyId;
         public uint QueryType;
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1)]
-        public byte[] AdditionalParameters = new byte[1];
+        public byte[] AdditionalParameters;
+
+        public STORAGE_PROPERTY_QUERY(uint propertyId, uint queryType)
+        {
+            PropertyId = propertyId;
+            QueryType = queryType;
+            AdditionalParameters = new byte[1];
+        }
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -83,7 +90,7 @@ public static class UsbDrives
     private static bool TryGetBusType(IntPtr h, out STORAGE_BUS_TYPE bus)
     {
         bus = STORAGE_BUS_TYPE.Unknown;
-        var query = new STORAGE_PROPERTY_QUERY { PropertyId = 0, QueryType = 0 };
+        var query = new STORAGE_PROPERTY_QUERY(0, 0);
         int querySize = Marshal.SizeOf(query);
         IntPtr pQuery = Marshal.AllocHGlobal(querySize);
         IntPtr pOut = Marshal.AllocHGlobal(1024);
@@ -107,7 +114,7 @@ public static class UsbDrives
     private static bool TryGetModel(IntPtr h, out string model)
     {
         model = "";
-        var query = new STORAGE_PROPERTY_QUERY { PropertyId = 0, QueryType = 0 };
+        var query = new STORAGE_PROPERTY_QUERY(0, 0);
         int querySize = Marshal.SizeOf(query);
         IntPtr pQuery = Marshal.AllocHGlobal(querySize);
         IntPtr pOut = Marshal.AllocHGlobal(1024);
