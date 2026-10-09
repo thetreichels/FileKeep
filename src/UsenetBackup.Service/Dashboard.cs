@@ -877,7 +877,7 @@ public static class DashboardApi
         {
             try
             {
-                RawDiskWriter.WriteIso(target.DevicePath, isoPath);
+                UsenetBackup.Core.Recovery.RawDiskWriter.WriteIso(target.DevicePath, isoPath);
             }
             catch (Exception ex)
             {
