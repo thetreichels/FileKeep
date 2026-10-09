@@ -373,7 +373,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         if (article is null)
             return null;
         var (_, body) = ParseIndexArticle(article);
-        return body;
+        return body.Trim();
     }
 
     private string BuildIndexArticle(string yearMonth, int version, string body)
