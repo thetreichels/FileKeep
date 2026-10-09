@@ -1797,12 +1797,12 @@ public static class DashboardHtml
           const repo = document.getElementById('op-repo').value;
           const backupId = document.getElementById('disk-backup').value;
           const device = document.getElementById('disk-target').value.trim();
-          const confirm = document.getElementById('disk-confirm').value;
+          const confirmText = document.getElementById('disk-confirm').value;
           if (!backupId) { alert('Select a disk-image backup.'); return; }
           if (!device) { alert('Enter the target device.'); return; }
-          if (confirm.trim() !== device) { alert('Confirmation does not match the device. Aborted.'); return; }
-          if (!confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
-          await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId, device, confirm }) });
+          if (confirmText.trim() !== device) { alert('Confirmation does not match the device. Aborted.'); return; }
+          if (!window.confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
+          await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId, device, confirm: confirmText }) });
           alert('Disk restore started in the background. Watch the Operations log.');
         }
         async function initRepo() {
@@ -1814,12 +1814,12 @@ public static class DashboardHtml
         async function writeUsb() {
           const isoPath = document.getElementById('usb-iso').value.trim();
           const driveNumber = parseInt(document.getElementById('usb-drive').value, 10);
-          const confirm = document.getElementById('usb-confirm').value;
+          const confirmText = document.getElementById('usb-confirm').value;
           if (!isoPath) { alert('Enter the WinPE ISO path.'); return; }
           if (isNaN(driveNumber)) { alert('Enter a drive number.'); return; }
-          if (confirm.trim() !== String(driveNumber)) { alert('Confirmation does not match the drive number. Aborted.'); return; }
-          if (!confirm('This will DESTROY all data on drive ' + driveNumber + '. Continue?')) return;
-          await api('/api/operations/recovery-usb-write', { method: 'POST', body: JSON.stringify({ isoPath, driveNumber, confirm }) });
+          if (confirmText.trim() !== String(driveNumber)) { alert('Confirmation does not match the drive number. Aborted.'); return; }
+          if (!window.confirm('This will DESTROY all data on drive ' + driveNumber + '. Continue?')) return;
+          await api('/api/operations/recovery-usb-write', { method: 'POST', body: JSON.stringify({ isoPath, driveNumber, confirm: confirmText }) });
           alert('USB write started in the background. Watch the Operations log.');
         }
         async function refreshLanStatus() {
