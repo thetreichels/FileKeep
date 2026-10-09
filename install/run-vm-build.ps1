@@ -285,8 +285,18 @@ Write-Host $svc
 if ($svc -notmatch "RUNNING") { Write-Host "  NOTE: service not running after install (expected: registered auto-start, starts on first boot / service start)" }
 
 Write-Host "  Uninstalling..."
-Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.8.1.msi", "/qn" -Wait
-Start-Sleep 10
+# Uninstall by ProductCode from the registered product (not by MSI path),
+# because each build generates a new ProductCode.
+$prod = Get-WmiObject Win32_Product | Where-Object { $_.Name -eq "FileKeep" } | Select-Object -First 1
+if ($prod) {
+    Write-Host ("  Found installed product: {0}" -f $prod.IdentifyingNumber)
+    Start-Process msiexec -ArgumentList "/x", $prod.IdentifyingNumber, "/qn" -Wait
+    Start-Sleep 10
+} else {
+    Write-Host "  WARNING: FileKeep not found in Win32_Product, trying MSI path..."
+    Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.8.1.msi", "/qn" -Wait
+    Start-Sleep 10
+}
 if (Test-Path "C:\Program Files\FileKeep") { throw "Uninstall left files behind" }
 Write-Host "  Uninstall clean."
 
