@@ -49,7 +49,7 @@ static void PrintUsage()
           usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
-          usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER]
+          usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER] [--diagnose]
           usenet-backup nntp-upload <repo> <backup-id> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
           usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
@@ -345,12 +345,147 @@ static NntpClient ConnectNntp(string[] args)
 
 static int NntpCheck(string[] args)
 {
+    if (HasFlag(args, "--diagnose"))
+        return NntpDiagnose(args);
+
     using var client = ConnectNntp(args);
     Console.WriteLine($"Connected: {client.Greeting}");
     client.Quit();
     Console.WriteLine("NNTP check OK.");
     return 0;
 }
+
+/// <summary>
+/// Free no-signup NNTP server used ONLY as a differential-diagnosis
+/// fallback: if the user's provider is unreachable on every port but this
+/// server answers, the problem is provider/account-specific; if neither
+/// answers, the local network or ISP is likely blocking NNTP.
+/// The probe is connect + greeting only — never authenticates, never posts.
+/// </summary>
+private const string DiagnoseFallbackHost = "freenews.netfront.net";
+
+/// <summary>
+/// Multi-port connectivity diagnostic. Probes the configured provider on
+/// 119 (plain), 563 (TLS) and 443 (plain, HTTPS-camouflage), classifies
+/// each failure (timeout/blocked vs auth vs TLS), and falls back to a
+/// free no-signup server to distinguish ISP-level blocking from a
+/// provider/account problem.
+/// </summary>
+static int NntpDiagnose(string[] args)
+{
+    string? host = GetOption(args, "--host");
+    if (string.IsNullOrEmpty(host))
+    {
+        Console.Error.WriteLine("error: nntp-check --diagnose requires --host HOST");
+        return 2;
+    }
+    string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
+    string? password = string.IsNullOrEmpty(user) ? null : GetNntpPassword(args);
+
+    var probes = new (int Port, bool Ssl, string Label)[]
+    {
+        (119, false, "119/plain"),
+        (563, true, "563/TLS"),
+        (443, false, "443/plain"),
+    };
+
+    Console.WriteLine($"Diagnosing NNTP connectivity to {host}...");
+    int okCount = 0;
+    foreach (var (port, ssl, label) in probes)
+    {
+        string result = ProbeNntp(host, port, ssl, user, password);
+        Console.WriteLine($"  port {label}: {result}");
+        if (result.StartsWith("OK", StringComparison.Ordinal))
+            okCount++;
+    }
+
+    if (okCount > 0)
+    {
+        Console.WriteLine($"\n{host} is reachable ({okCount}/3 ports). Use --ssl (port 563) " +
+            "if your ISP interferes with plaintext NNTP on 119.");
+        return 0;
+    }
+
+    // All provider ports failed — differential diagnosis via free server.
+    Console.WriteLine($"\nAll ports failed for {host}. Probing free no-signup server " +
+        $"{DiagnoseFallbackHost}:119 to check whether NNTP is blocked entirely...");
+    string fallback = ProbeNntp(DiagnoseFallbackHost, 119, ssl: false, user: null, password: null);
+    Console.WriteLine($"  fallback {DiagnoseFallbackHost}:119: {fallback}");
+
+    if (fallback.StartsWith("OK", StringComparison.Ordinal))
+    {
+        Console.WriteLine("\nDiagnosis: your network CAN reach NNTP (fallback server answered), " +
+            $"so the problem is specific to {host}: wrong hostname, account issue, " +
+            "or the provider blocking your IP. Check credentials and try their " +
+            "alternate ports/hostnames.");
+    }
+    else
+    {
+        Console.WriteLine("\nDiagnosis: no NNTP server is reachable, including the free fallback. " +
+            "Your ISP or firewall is likely blocking NNTP traffic. Mitigations: " +
+            "use NNTPS on port 563 (encrypted, harder to filter), try port 443, " +
+            "or route NNTP through a VPN.");
+    }
+    return 1;
+}
+
+/// <summary>
+/// Single NNTP probe: connect, read greeting, optionally authenticate.
+/// Returns a short classified result string starting with "OK" on success.
+/// Never throws.
+/// </summary>
+static string ProbeNntp(string host, int port, bool ssl, string? user, string? password)
+{
+    try
+    {
+        using var client = new NntpClient(host, port, ssl);
+        client.Connect();
+        string greeting = client.Greeting ?? "";
+        if (!string.IsNullOrEmpty(user))
+        {
+            try
+            {
+                client.Authenticate(user, password ?? "");
+            }
+            catch (Exception ex)
+            {
+                return $"AUTH FAILED ({ClassifyAuthError(ex)})";
+            }
+        }
+        try { client.Quit(); } catch { /* best effort */ }
+        return $"OK ({Truncate(greeting, 60)})";
+    }
+    catch (Exception ex)
+    {
+        return ClassifyConnectError(ex);
+    }
+}
+
+static string ClassifyConnectError(Exception ex)
+{
+    string msg = ex.Message ?? "";
+    // Timeout or refused = nothing listening / packets dropped (ISP block, firewall, wrong host)
+    if (ex is TimeoutException || msg.Contains("Timed out", StringComparison.OrdinalIgnoreCase))
+        return "BLOCKED/TIMEOUT (no response — ISP or firewall may be filtering this port)";
+    if (msg.Contains("refused", StringComparison.OrdinalIgnoreCase))
+        return "CONNECTION REFUSED (host reachable, port closed)";
+    if (ex is System.Security.Authentication.AuthenticationException || msg.Contains("TLS", StringComparison.OrdinalIgnoreCase) || msg.Contains("SSL", StringComparison.OrdinalIgnoreCase))
+        return $"TLS FAILED ({Truncate(msg, 80)})";
+    if (msg.Contains("No such host", StringComparison.OrdinalIgnoreCase) || msg.Contains("nodename nor servname", StringComparison.OrdinalIgnoreCase))
+        return "DNS FAILED (hostname does not resolve)";
+    return $"FAILED ({Truncate(msg, 80)})";
+}
+
+static string ClassifyAuthError(Exception ex)
+{
+    string msg = ex.Message ?? "";
+    if (msg.Contains("502", StringComparison.Ordinal))
+        return "server rejected credentials (502 — wrong username/password or IP-blocked account)";
+    return Truncate(msg, 80);
+}
+
+static string Truncate(string s, int max) =>
+    s.Length <= max ? s : s[..max] + "…";
 
 static int NntpUpload(string[] args)
 {

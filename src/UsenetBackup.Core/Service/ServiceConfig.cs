@@ -96,6 +96,15 @@ public sealed class BackupJobConfig
     [JsonPropertyName("backupPrivilege")]
     public bool BackupPrivilege { get; set; }
 
+    /// <summary>
+    /// Take a Volume Shadow Copy snapshot of the source volume and back up
+    /// from the shadow copy (Windows only, admin required). Provides a
+    /// point-in-time frozen view so open files back up consistently.
+    /// Mutually exclusive with <see cref="BackupPrivilege"/>.
+    /// </summary>
+    [JsonPropertyName("vss")]
+    public bool Vss { get; set; }
+
     /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
     [JsonPropertyName("autoUpload")]
     public bool AutoUpload { get; set; }
