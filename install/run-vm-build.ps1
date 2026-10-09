@@ -215,8 +215,8 @@ Write-Host ("  build-winpe.ps1:  {0:N0} bytes" -f (Get-Item C:\ub\src\winpe\buil
 Write-Host "=== 2/6 Re-publishing apps as single-file ==="
 # Single source root used consistently: the script cds here AND passes it to
 # WiX as SrcRoot. (Previously these were two different hardcoded paths,
-# forcing a manual copy to both locations.)
-$srcRoot = "C:\ub\src"
+# Source root: use src-new if it exists (current VM layout), else src.
+$srcRoot = if (Test-Path "C:\ub\src-new") { "C:\ub\src-new" } else { "C:\ub\src" }
 cd $srcRoot
 # Stamp file versions so Windows Installer replaces binaries on upgrade/reinstall.
 # (Without this, every build carries the default FileVersion 1.0.0.0 and a
