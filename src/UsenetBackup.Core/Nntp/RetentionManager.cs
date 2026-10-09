@@ -246,6 +246,24 @@ public sealed class RetentionManager
         _log($"Backup {record.BackupId}: {republished}/{toRepublish.Count} articles republished " +
              $"and verified; retention clock reset");
 
+        // Publish the updated message-identity index so a recovering
+        // machine (or WinPE) can find the refreshed articles. Without
+        // this, cross-machine recovery would use stale message IDs.
+        try
+        {
+            string indexJson = repo.MessageIndex.ToJson();
+            int version = remote.PostMessageIndex(indexJson);
+            _log($"  published message-identity index v{version}");
+        }
+        catch (Exception ex)
+        {
+            // Index publication failure is logged but does not fail the
+            // retention refresh — the local index is still correct, and
+            // the next successful run will publish it.
+            _log($"  WARNING: failed to publish message-identity index: {ex.Message}");
+            report.Errors.Add($"Index publish: {ex.Message}");
+        }
+
         return isMissing ? BackupOutcome.RefreshedMissing : BackupOutcome.RefreshedExpiring;
     }
 

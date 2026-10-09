@@ -308,6 +308,15 @@ public sealed class BackupScheduler
             using var remote = new Nntp.NntpBlobStore(
                 client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
                 messageIndex: repo.MessageIndex, providerKey: providerKey);
+            // Fetch the latest published message-identity index before
+            // downloading (retention may have refreshed article IDs).
+            try
+            {
+                string? remoteIndex = remote.GetLatestMessageIndex();
+                if (remoteIndex is not null)
+                    repo.MessageIndex.LoadFromJson(remoteIndex);
+            }
+            catch { /* best-effort */ }
             repo.DownloadChunks(nzb, remote, (done, total) => { });
         }
         finally

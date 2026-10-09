@@ -309,6 +309,73 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         return body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
+    /// <summary>
+    /// Posts a versioned chunk-message-identity index. Each version
+    /// supersedes the previous (Usenet articles are immutable). The index
+    /// maps provider keys to chunk-ID -&gt; message-ID mappings, so a
+    /// recovering machine can find refreshed articles. Returns the version
+    /// number posted.
+    /// </summary>
+    public int PostMessageIndex(string indexJson)
+    {
+        // Find the latest version by probing: STAT v1, v2, ... until 430.
+        int version = 1;
+        int latestVersion = 0;
+        while (version <= 1000)
+        {
+            string probeId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
+            if (!UseClient(c => c.Stat(probeId)))
+                break;
+            latestVersion = version;
+            version++;
+        }
+        // If the latest version already has identical content, don't re-post.
+        if (latestVersion > 0)
+        {
+            var existing = GetLatestMessageIndex();
+            if (existing is not null && existing == indexJson)
+                return latestVersion;
+        }
+        string messageId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
+        var sb = new System.Text.StringBuilder();
+        sb.Append("From: ").Append(_from).Append("\r\n");
+        sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
+        sb.Append("Subject: [usenet-backup] message-index v").Append(version).Append("\r\n");
+        sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
+        sb.Append("Content-Type: application/json; charset=utf-8\r\n");
+        sb.Append("\r\n");
+        sb.Append(indexJson);
+        UseClient(c => c.Post(sb.ToString()));
+        WaitForArticle(messageId);
+        return version;
+    }
+
+    /// <summary>
+    /// Fetches the latest versioned chunk-message-identity index by probing
+    /// versions until STAT returns 430. Returns null if no index exists.
+    /// </summary>
+    public string? GetLatestMessageIndex()
+    {
+        int latestVersion = 0;
+        int version = 1;
+        while (version <= 1000)
+        {
+            string messageId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
+            if (!UseClient(c => c.Stat(messageId)))
+                break;
+            latestVersion = version;
+            version++;
+        }
+        if (latestVersion == 0)
+            return null;
+        string latestId = ArticleCodec.MakeMessageIndexMessageId(_repoId, latestVersion);
+        string? article = UseClient(c => c.GetArticle(latestId));
+        if (article is null)
+            return null;
+        var (_, body) = ParseIndexArticle(article);
+        return body;
+    }
+
     private string BuildIndexArticle(string yearMonth, int version, string body)
     {
         string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);

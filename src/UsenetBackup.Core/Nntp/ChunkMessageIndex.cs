@@ -79,6 +79,29 @@ public sealed class ChunkMessageIndex
         _map.TryGetValue(providerKey, out var byChunk) &&
         byChunk.ContainsKey(chunkIdHex);
 
+    /// <summary>
+    /// Serializes the index to JSON for remote publication. The format
+    /// matches the local file format (providerKey -&gt; chunkId -&gt;
+    /// messageId), so a recovering machine can deserialize it directly.
+    /// </summary>
+    public string ToJson() =>
+        JsonSerializer.Serialize(_map);
+
+    /// <summary>
+    /// Replaces the in-memory map with the deserialized remote index and
+    /// persists it locally. Used by recovery on a machine that does not
+    /// have the local index file.
+    /// </summary>
+    public void LoadFromJson(string json)
+    {
+        var map = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json);
+        if (map is not null)
+        {
+            _map = map;
+            Save();
+        }
+    }
+
     private Dictionary<string, Dictionary<string, string>> Load()
     {
         if (!File.Exists(_path))

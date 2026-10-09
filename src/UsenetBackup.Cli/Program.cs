@@ -640,6 +640,16 @@ static int Download(string[] args)
     {
         using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+        // Fetch the latest published message-identity index before
+        // downloading. A retention refresh may have republished articles
+        // under new IDs; without this, stale IDs would be requested.
+        try
+        {
+            string? remoteIndex = remote.GetLatestMessageIndex();
+            if (remoteIndex is not null)
+                repo.MessageIndex.LoadFromJson(remoteIndex);
+        }
+        catch { /* best-effort: fall back to local index */ }
         DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
         {
             if (done % 25 == 0 || done == total)

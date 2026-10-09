@@ -142,6 +142,22 @@ public sealed class WizardState : IDisposable
                 client.Authenticate(NntpUser, NntpPassword);
             using var remote = new NntpBlobStore(client, Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
                 providerKey: ChunkMessageIndex.MakeProviderKey(NntpHost, Newsgroup));
+            // Fetch the latest published message-identity index BEFORE
+            // downloading chunks. A retention refresh on the original
+            // machine republishes articles under new message IDs; without
+            // the remote index this machine would request stale (possibly
+            // expired) IDs. The local index is updated as a side effect.
+            try
+            {
+                string? remoteIndex = remote.GetLatestMessageIndex();
+                if (remoteIndex is not null)
+                    repo.MessageIndex.LoadFromJson(remoteIndex);
+            }
+            catch
+            {
+                // Index fetch is best-effort: fall back to the local index
+                // (or deterministic IDs) if the remote index is unavailable.
+            }
             return repo.DownloadChunks(Nzb, remote, progress);
         }
         finally

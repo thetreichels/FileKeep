@@ -72,6 +72,15 @@ public static class ArticleCodec
         $"<{yearMonth}.{repoId}.index.{version}@{MessageIdDomain}>";
 
     /// <summary>
+    /// Message-ID for a versioned chunk-message-identity index. Each
+    /// retention refresh (or upload) that changes message identities posts
+    /// a new version; recovery probes versions to find the latest.
+    /// Format: &lt;msgindex.&lt;repoId&gt;.&lt;version&gt;@usenet-backup&gt;.
+    /// </summary>
+    public static string MakeMessageIndexMessageId(string repoId, int version) =>
+        $"<msgindex.{repoId}.{version}@{MessageIdDomain}>";
+
+    /// <summary>
     /// Parses a manifest index message-ID, returning (yearMonth, version)
     /// if it belongs to this repo; otherwise null.
     /// </summary>
