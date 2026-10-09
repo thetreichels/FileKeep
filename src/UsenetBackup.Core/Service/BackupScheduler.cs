@@ -297,8 +297,9 @@ public sealed class BackupScheduler
             nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
 
         using var pool = new Nntp.NntpConnectionPool(
-            nntp.Host, nntp.Port, nntp.Ssl, nntp.Connections);
-        // TODO: auth with username/password if configured
+            nntp.Host, nntp.Port, nntp.Ssl,
+            username: nntp.Username, password: nntpPassword,
+            size: nntp.Connections);
 
         using var store = new Nntp.NntpBlobStore(
             pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
