@@ -77,6 +77,8 @@
       <Component Id="DocsComponent" Guid="43631F00-26CB-46A7-BD8F-38DB44EC4A54">
         <File Source="$(var.SrcRoot)\src\UsenetBackup.Service\service.example.json" Name="service.example.json" />
         <File Source="$(var.SrcRoot)\docs\RECOVERY.md" Name="RECOVERY.md" />
+        <File Source="$(var.SrcRoot)\LICENSE" Name="LICENSE.txt" />
+        <File Source="$(var.SrcRoot)\docs\THIRD-PARTY-NOTICES.md" Name="THIRD-PARTY-NOTICES.md" />
         <RemoveFolder Id="RemoveDocsDir" Directory="DOCSDIR" On="uninstall" />
         <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>

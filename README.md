@@ -4,7 +4,7 @@
 
 **Encrypted backups that live on Usenet.** FileKeep is an open-source Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
 [![Tests](https://img.shields.io/badge/tests-194%2F194-brightgreen.svg)]()
 
@@ -148,4 +148,8 @@ On the roadmap: merge/selective restore (deferred to v2), scheduled deep verific
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright © 2026 J. Treichel.
+GPL-3.0-only — see [LICENSE](LICENSE). Copyright © 2026 J. Treichel.
+
+FileKeep is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, **version 3 of the License only** (no "or later" option). Anyone distributing FileKeep or modified versions must make the corresponding source available under the same terms.
+
+Note: versions of FileKeep released under the MIT license (up to and including 0.8.1) remain available under those MIT terms; the GPL-3.0-only license applies from this version forward.
