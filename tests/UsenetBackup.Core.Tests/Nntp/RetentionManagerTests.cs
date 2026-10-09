@@ -103,8 +103,9 @@ public sealed class RetentionManagerTests : IDisposable
         fx.UploadAll();
         int postsBefore = _server.PostCount;
 
-        // Uploaded 10 days ago; 1085 days left > 30-day threshold -> healthy
-        var uploaded = DateTime.UtcNow.AddDays(-10);
+        // Uploaded 1030 days ago: 65 days left <= 90-day check window (so it
+        // IS checked), but > 30-day threshold (so no action) -> healthy.
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
         fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
 
         var log = new List<string>();
@@ -133,7 +134,8 @@ public sealed class RetentionManagerTests : IDisposable
         string oldMessageId = ArticleCodec.MakeMessageId(lostChunk, RepoId);
         Assert.True(_server.Articles.TryRemove(oldMessageId, out _));
 
-        var uploaded = DateTime.UtcNow.AddDays(-10);
+        // In the check window (65 days left) so the missing article is found.
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
         fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
         int postsBefore = _server.PostCount;
 
