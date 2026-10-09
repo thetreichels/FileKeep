@@ -57,7 +57,7 @@ FileKeep.exe verify C:\backups\repo2 <backup-id>
 FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `expiration-check`, `list`.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `recovery-usb` (write the WinPE ISO to a USB drive), `expiration-check`, `list`.
 
 Backing up locked files (databases, Outlook PSTs, etc.):
 
@@ -80,6 +80,20 @@ FileKeep.exe backup C:\backups\repo C:\data --vss
 | **Recovery wizard** (`FileKeepRecovery.exe`) | Windows 95 Setup-style step-through: unlock repo → pick backup → download → verify → restore |
 | **VSS helper** (`FileKeepVss.exe`) | Minimal native helper implementing the full VSS backup lifecycle (`GatherWriterMetadata` → `PrepareForBackup` → `DoSnapshotSet` → `BackupComplete`/`AbortBackup`), so writers like SQL Server are never left in a dangling backup state |
 | **WinPE ISO** | Bootable recovery environment containing the CLI, recovery wizard, and runbook |
+
+### Recovery USB
+
+Build the WinPE ISO once with `winpe\build-winpe.ps1` (requires the Windows ADK + WinPE add-on, run as admin), then flash it to USB:
+
+```powershell
+# List USB drives
+FileKeep.exe recovery-usb --list
+
+# Write the ISO (destructive — requires typing the drive number to confirm)
+FileKeep.exe recovery-usb --iso C:\winpe\filekeep-winpe.iso --drive 2
+```
+
+Only USB-attached drives are eligible targets; the command refuses fixed drives, checks the ISO fits, and declines when stdin isn't interactive (unless `--yes`).
 
 ## How it works
 
