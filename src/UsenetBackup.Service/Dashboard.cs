@@ -1584,7 +1584,16 @@ public static class DashboardHtml
           </main>
         </div>
         <script>
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
         async function api(path, opts) {
+          opts = opts || {};
+          const method = (opts.method || 'GET').toUpperCase();
+          if (method !== 'GET' && method !== 'HEAD') {
+            opts.headers = Object.assign({}, opts.headers, {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': csrfToken
+            });
+          }
           const r = await fetch(path, opts);
           if (!r.ok) {
             const t = await r.text();
