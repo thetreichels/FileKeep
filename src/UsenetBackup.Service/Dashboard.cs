@@ -306,6 +306,7 @@ public static class DashboardApi
             existing.AutoUpload = job.AutoUpload;
             existing.AutoVerify = job.AutoVerify;
             existing.RedundancyMode = job.RedundancyMode;
+            existing.VerificationMode = job.VerificationMode;
         }
         try
         {
@@ -681,6 +682,13 @@ public static class DashboardHtml
                       <option value="par2">PAR2 (recovers up to 3 missing)</option>
                     </select>
                   </label>
+                  <label>Incremental verification:
+                    <select id="jf-verification">
+                      <option value="fast">Fast (size + mtime only)</option>
+                      <option value="verify">Verify (hash files that look unchanged)</option>
+                      <option value="paranoid">Paranoid (hash every file)</option>
+                    </select>
+                  </label>
                 </div>
                 <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
@@ -915,6 +923,7 @@ public static class DashboardHtml
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
           document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
           document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
+          document.getElementById('jf-verification').value = job && job.verificationMode ? job.verificationMode : 'fast';
           // Parse schedule
           const sched = job ? job.schedule : 'daily 02:00';
           if (sched.startsWith('daily ')) {
@@ -958,6 +967,7 @@ public static class DashboardHtml
             autoUpload: document.getElementById('jf-autoupload').checked,
             autoVerify: document.getElementById('jf-autoverify').checked,
             redundancyMode: document.getElementById('jf-redundancy').value,
+            verificationMode: document.getElementById('jf-verification').value,
           };
           const csrf = document.querySelector('meta[name=csrf-token]').content;
           try {

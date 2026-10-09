@@ -12,7 +12,8 @@
       "repo": "C:\\Backup\\repo",
       "schedule": "daily 02:00",
       "source": "C:\\Users\\YOU\\Documents",
-      "backup-privilege": true
+      "backup-privilege": true,
+      "verificationMode": "fast"
     },
     {
       "mode": "incremental",
