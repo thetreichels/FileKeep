@@ -1,4 +1,5 @@
 using System.Text;
+using UsenetBackup.Cli;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 
