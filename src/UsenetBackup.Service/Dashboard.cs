@@ -88,7 +88,7 @@ public static class Dashboard
             string repo = body.GetProperty("repo").GetString() ?? "";
             string backupId = body.GetProperty("backupId").GetString() ?? "";
             var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
@@ -99,7 +99,7 @@ public static class Dashboard
             string repo = body.GetProperty("repo").GetString() ?? "";
             string backupId = body.GetProperty("backupId").GetString() ?? "";
             var (status, payload) = DashboardApi.StartVerify(config, repo, backupId);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/retention-check", async (HttpRequest request) =>
@@ -110,7 +110,7 @@ public static class Dashboard
             string repo = body.GetProperty("repo").GetString() ?? "";
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
             var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, repo, dryRun);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/diagnose", async (HttpRequest request) =>
@@ -138,7 +138,7 @@ public static class Dashboard
             string backupId = body.GetProperty("backupId").GetString() ?? "";
             string destDir = body.GetProperty("destDir").GetString() ?? "";
             var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/backup-now", async (HttpRequest request) =>
@@ -149,7 +149,7 @@ public static class Dashboard
             string repo = body.GetProperty("repo").GetString() ?? "";
             string sourceDir = body.GetProperty("sourceDir").GetString() ?? "";
             var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapGet("/api/operations/nzb", (string repo, string backupId) =>
@@ -171,7 +171,7 @@ public static class Dashboard
             string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
             await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
             var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, repo, tmp);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/disk-backup", async (HttpRequest request) =>
@@ -183,7 +183,7 @@ public static class Dashboard
             string device = body.GetProperty("device").GetString() ?? "";
             string imageName = body.TryGetProperty("imageName", out var n) ? n.GetString() ?? "disk.img" : "disk.img";
             var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/disk-restore", async (HttpRequest request) =>
@@ -196,7 +196,7 @@ public static class Dashboard
             string device = body.GetProperty("device").GetString() ?? "";
             string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirm);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/init-repo", async (HttpRequest request) =>
@@ -218,7 +218,7 @@ public static class Dashboard
             int driveNumber = body.TryGetProperty("driveNumber", out var d) ? d.GetInt32() : -1;
             string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.StartUsbWrite(isoPath, driveNumber, confirm);
-            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
         app.MapGet("/api/operations/lan-server", () =>
