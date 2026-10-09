@@ -675,12 +675,10 @@ static int Serve(string[] args)
     }
 
     using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
-
-    var listener = new System.Net.HttpListener();
-    listener.Prefixes.Add($"http://{bind}:{port}/");
+    using var server = new UsenetBackup.Core.Service.LanServer(repoPath, port, bind);
     try
     {
-        listener.Start();
+        server.Start();
     }
     catch (Exception ex)
     {
@@ -693,145 +691,11 @@ static int Serve(string[] args)
 
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-
-    try
-    {
-        while (!cts.Token.IsCancellationRequested)
-        {
-            var ctx = listener.GetContextAsync().GetAwaiter().GetResult();
-            _ = System.Threading.Tasks.Task.Run(() => HandleServeRequest(ctx, repoPath));
-        }
-    }
-    catch (OperationCanceledException) { }
-    finally
-    {
-        listener.Stop();
-    }
+    cts.Token.WaitHandle.WaitOne();
     Console.WriteLine("Server stopped.");
     return 0;
 }
 
-static void HandleServeRequest(System.Net.HttpListenerContext ctx, string repoRoot)
-{
-    string chunksDir = Path.Combine(repoRoot, "chunks");
-    string manifestsDir = Path.Combine(repoRoot, "manifests");
-    try
-    {
-        string path = ctx.Request.Url?.AbsolutePath ?? "/";
-        string method = ctx.Request.HttpMethod;
-
-        if (path == "/count" && method == "GET")
-        {
-            long count = Directory.Exists(chunksDir)
-                ? Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories).Length
-                : 0;
-            byte[] buf = System.Text.Encoding.UTF8.GetBytes(count.ToString());
-            ctx.Response.ContentType = "text/plain";
-            ctx.Response.OutputStream.Write(buf, 0, buf.Length);
-            ctx.Response.StatusCode = 200;
-        }
-        else if (path == "/manifests" && method == "GET")
-        {
-            // List available backup IDs (filenames without .json)
-            var ids = Directory.Exists(manifestsDir)
-                ? Directory.GetFiles(manifestsDir, "*.json")
-                    .Select(f => Path.GetFileNameWithoutExtension(f))
-                    .OrderBy(id => id)
-                    .ToArray()
-                : Array.Empty<string>();
-            string json = System.Text.Json.JsonSerializer.Serialize(ids);
-            byte[] buf = System.Text.Encoding.UTF8.GetBytes(json);
-            ctx.Response.ContentType = "application/json";
-            ctx.Response.OutputStream.Write(buf, 0, buf.Length);
-            ctx.Response.StatusCode = 200;
-        }
-        else if (path.StartsWith("/manifests/", StringComparison.Ordinal) && method == "GET")
-        {
-            string backupId = path["/manifests/".Length..];
-            // Validate: 32 hex chars (backup IDs are hex)
-            if (backupId.Length != 32 || !backupId.All(Uri.IsHexDigit))
-            {
-                ctx.Response.StatusCode = 400;
-            }
-            else
-            {
-                string manifestPath = Path.Combine(manifestsDir, backupId + ".json");
-                if (!File.Exists(manifestPath))
-                {
-                    ctx.Response.StatusCode = 404;
-                }
-                else
-                {
-                    byte[] data = File.ReadAllBytes(manifestPath);
-                    ctx.Response.ContentType = "application/json";
-                    ctx.Response.ContentLength64 = data.Length;
-                    ctx.Response.OutputStream.Write(data, 0, data.Length);
-                    ctx.Response.StatusCode = 200;
-                }
-            }
-        }
-        else if (path.StartsWith("/chunks/", StringComparison.Ordinal))
-        {
-            string chunkId = path["/chunks/".Length..];
-            if (chunkId.Length != 64 || !chunkId.All(Uri.IsHexDigit))
-            {
-                ctx.Response.StatusCode = 400;
-            }
-            else
-            {
-                // Chunks are stored sharded: chunks/ab/cdef... (first 2 chars as dir)
-                string chunkPath = Path.Combine(chunksDir, chunkId[..2], chunkId[2..]);
-                if (method == "HEAD")
-                {
-                    ctx.Response.StatusCode = File.Exists(chunkPath) ? 200 : 404;
-                }
-                else if (method == "GET")
-                {
-                    if (!File.Exists(chunkPath))
-                    {
-                        ctx.Response.StatusCode = 404;
-                    }
-                    else
-                    {
-                        byte[] data = File.ReadAllBytes(chunkPath);
-                        ctx.Response.ContentType = "application/octet-stream";
-                        ctx.Response.ContentLength64 = data.Length;
-                        ctx.Response.OutputStream.Write(data, 0, data.Length);
-                        ctx.Response.StatusCode = 200;
-                    }
-                }
-                else if (method == "POST")
-                {
-                    // LAN backup target: store incoming chunk
-                    using var ms = new MemoryStream();
-                    ctx.Request.InputStream.CopyTo(ms);
-                    byte[] data = ms.ToArray();
-                    string dir = Path.Combine(chunksDir, chunkId[..2]);
-                    Directory.CreateDirectory(dir);
-                    File.WriteAllBytes(Path.Combine(dir, chunkId[2..]), data);
-                    ctx.Response.StatusCode = 200;
-                }
-                else
-                {
-                    ctx.Response.StatusCode = 405;
-                }
-            }
-        }
-        else
-        {
-            ctx.Response.StatusCode = 404;
-        }
-    }
-    catch (Exception ex)
-    {
-        try { ctx.Response.StatusCode = 500; } catch { }
-        Console.Error.WriteLine($"serve error: {ex.Message}");
-    }
-    finally
-    {
-        try { ctx.Response.OutputStream.Close(); } catch { }
-    }
-}
 
 /// <summary>
 /// Checks Usenet upload expiration status.

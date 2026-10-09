@@ -220,6 +220,28 @@ public static class Dashboard
             return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/operations/lan-server", () =>
+            Results.Json(DashboardApi.GetLanServerStatus()));
+
+        app.MapPost("/api/operations/lan-server/start", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            int port = body.TryGetProperty("port", out var p) ? p.GetInt32() : 8477;
+            var (status, payload) = DashboardApi.StartLanServer(config, repo, port);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/lan-server/stop", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            DashboardApi.StopLanServer();
+            return Results.Json(new { stopped = true });
+        });
+
         // Settings UI: read and update the backup job configuration.
         // All writes require the CSRF token and are validated before saving.
         app.MapGet("/api/config", () =>
@@ -866,6 +888,42 @@ public static class DashboardApi
         return (202, new { accepted = true });
     }
 
+    private static LanServer? _lanServer;
+
+    /// <summary>Current LAN server state for the dashboard.</summary>
+    public static object GetLanServerStatus() =>
+        new { running = _lanServer?.IsRunning == true, port = _lanServer?.Port ?? 0 };
+
+    /// <summary>Starts the LAN chunk server for a repo.</summary>
+    public static (int Status, object Payload) StartLanServer(ServiceConfig config, string repo, int port)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (_lanServer?.IsRunning == true)
+            return (400, new { error = "LAN server is already running." });
+        if (port is < 1 or > 65535)
+            return (400, new { error = "Invalid port." });
+        try
+        {
+            _lanServer?.Dispose();
+            _lanServer = new LanServer(repo, port, "0.0.0.0");
+            _lanServer.Start();
+            OperationLog.Append(repo, "lan-server", $"started on port {port}");
+            return (200, new { running = true, port });
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Stops the LAN chunk server.</summary>
+    public static void StopLanServer()
+    {
+        try { _lanServer?.Dispose(); } catch { }
+        _lanServer = null;
+    }
+
     /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
@@ -1428,6 +1486,16 @@ public static class DashboardHtml
                   <button onclick="initRepo()">Initialize</button>
                 </div>
               </div>
+              <div class="card">
+                <div class="name">LAN server</div>
+                <div class="meta">Serve this repo's chunks over HTTP for LAN restores (e.g. from WinPE recovery).</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="lan-port" placeholder="8477" style="width:100px">
+                  <button onclick="startLanServer()">Start server</button>
+                  <button onclick="stopLanServer()">Stop</button>
+                  <span id="lan-status" style="color:var(--text-2)"></span>
+                </div>
+              </div>
             </div>
             <div class="view" id="view-log">
               <h1>Operations log</h1>
@@ -1752,6 +1820,24 @@ public static class DashboardHtml
           if (!confirm('This will DESTROY all data on drive ' + driveNumber + '. Continue?')) return;
           await api('/api/operations/recovery-usb-write', { method: 'POST', body: JSON.stringify({ isoPath, driveNumber, confirm }) });
           alert('USB write started in the background. Watch the Operations log.');
+        }
+        async function refreshLanStatus() {
+          try {
+            const s = await api('/api/operations/lan-server');
+            document.getElementById('lan-status').textContent =
+              s.running ? `Running on port ${s.port}` : 'Stopped';
+          } catch (e) { /* ignore */ }
+        }
+        async function startLanServer() {
+          const repo = document.getElementById('op-repo').value;
+          const port = parseInt(document.getElementById('lan-port').value, 10) || 8477;
+          if (!confirm(`Start the LAN server on port ${port}? Anyone on your network can read this repo's (encrypted) chunks.`)) return;
+          await api('/api/operations/lan-server/start', { method: 'POST', body: JSON.stringify({ repo, port }) });
+          refreshLanStatus();
+        }
+        async function stopLanServer() {
+          await api('/api/operations/lan-server/stop', { method: 'POST' });
+          refreshLanStatus();
         }
         async function discoverRemote() {
           const repo = document.getElementById('repo').value;
