@@ -355,14 +355,12 @@ static int NntpCheck(string[] args)
     return 0;
 }
 
-/// <summary>
 /// Free no-signup NNTP server used ONLY as a differential-diagnosis
 /// fallback: if the user's provider is unreachable on every port but this
 /// server answers, the problem is provider/account-specific; if neither
 /// answers, the local network or ISP is likely blocking NNTP.
 /// The probe is connect + greeting only — never authenticates, never posts.
-/// </summary>
-private const string DiagnoseFallbackHost = "freenews.netfront.net";
+const string DiagnoseFallbackHost = "freenews.netfront.net";
 
 /// <summary>
 /// Multi-port connectivity diagnostic. Probes the configured provider on
