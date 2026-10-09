@@ -252,6 +252,36 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// Manual retention check for a single repo (dashboard operation).
+    /// </summary>
+    public void RunRetentionCheck(string repoPath, bool dryRun)
+    {
+        var providers = _nntpProviders;
+        if (providers.Count == 0)
+            throw new InvalidOperationException("No NNTP providers configured.");
+        RunRetentionForRepo(repoPath, providers, dryRun);
+    }
+
+    /// <summary>
+    /// Manual NNTP upload of a backup (dashboard operation).
+    /// </summary>
+    public void UploadBackup(string repoPath, string backupId)
+    {
+        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+        if (string.IsNullOrEmpty(passphrase))
+            throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
+        // Reuse the per-job upload path with a synthetic job config.
+        var job = new BackupJobConfig
+        {
+            Name = "manual-upload",
+            Repo = repoPath,
+            Source = "",
+            AutoUpload = true,
+        };
+        AutoUploadToUsenet(job, backupId, passphrase);
+    }
+
+    /// <summary>
     /// Runs RetentionManager.CheckAndRepost for each job's repository.
     /// </summary>
     private void RunRetentionChecks()
@@ -278,7 +308,7 @@ public sealed class BackupScheduler
         }
     }
 
-    private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers)
+    private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers, bool dryRun = false)
     {
         string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
         if (string.IsNullOrEmpty(passphrase))
@@ -314,7 +344,8 @@ public sealed class BackupScheduler
         var report = manager.CheckAndRepost(
             repo, store,
             warnDays: _config.RetentionWarnDays,
-            repostThresholdDays: _config.RetentionRepostThresholdDays);
+            repostThresholdDays: _config.RetentionRepostThresholdDays,
+            dryRun: dryRun);
 
         Log($"retention check complete for '{repoPath}': {report.BackupsHealthy} healthy, " +
             $"{report.BackupsRefreshed} refreshed, {report.Errors.Count} errors");

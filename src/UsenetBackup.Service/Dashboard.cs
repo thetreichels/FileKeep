@@ -53,9 +53,78 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/backups/remote", (string repo) =>
+        {
+            var (status, payload) = DashboardApi.GetRemoteBackups(config, repo);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/backups/remote/import", async (string repo, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string[] ids = body.TryGetProperty("backupIds", out var el) && el.ValueKind == JsonValueKind.Array
+                ? el.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray()
+                : Array.Empty<string>();
+            var (status, payload) = DashboardApi.ImportRemoteBackups(config, repo, ids);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapGet("/api/log", (string repo, int lines = 100) =>
         {
             var (status, payload) = DashboardApi.GetLog(config, repo, lines);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        // Operations: manual actions for every CLI capability, run in the
+        // background like job runs. The UI polls /api/log and /api/status.
+        app.MapPost("/api/operations/upload", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/verify", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/retention-check", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
+            var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, repo, dryRun);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/diagnose", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string host = body.GetProperty("host").GetString() ?? "";
+            var (status, payload) = DashboardApi.RunDiagnose(host);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapGet("/api/operations/usb-drives", () =>
+        {
+            var (status, payload) = DashboardApi.ListUsbDrives();
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -246,6 +315,271 @@ public static class DashboardApi
         {
             using var r = BackupRepository.Open(repo, passphrase);
             return (200, r.ListBackups().OrderByDescending(b => b.CreatedUtc).ToArray());
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Discovers backup manifests posted to Usenet (the encrypted manifest
+    /// index). Returns manifests not present locally — "all backups FileKeep
+    /// is aware of" beyond the local repo. Uses the first configured provider.
+    /// </summary>
+    public static (int Status, object Payload) GetRemoteBackups(ServiceConfig config, string repo)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
+        if (provider is null)
+            return (400, new { error = "No Usenet provider configured." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+        try
+        {
+            string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
+            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
+                nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
+
+            using var client = new UsenetBackup.Core.Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
+            client.Connect();
+            if (!string.IsNullOrEmpty(provider.Username))
+                client.Authenticate(provider.Username, nntpPassword ?? "");
+
+            using var r = BackupRepository.Open(repo, passphrase);
+            string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
+            using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
+                client, provider.Newsgroup, r.RepoId, r.CatalogPath,
+                messageIndex: r.MessageIndex, providerKey: providerKey);
+            var remote = r.DiscoverRemoteManifests(store);
+            var localIds = new HashSet<string>(r.ListBackups().Select(b => b.BackupId));
+            var fresh = remote
+                .Where(m => !localIds.Contains(m.Manifest.BackupId))
+                .Select(m => new
+                {
+                    backupId = m.Manifest.BackupId,
+                    createdUtc = m.Manifest.CreatedUtc,
+                    type = m.Manifest.Type,
+                    source = m.Manifest.Source,
+                    fileCount = m.Manifest.Files.Count,
+                    snapshot = m.Manifest.Snapshot,
+                })
+                .OrderByDescending(m => m.createdUtc)
+                .ToArray();
+            return (200, fresh);
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Imports remote-discovered manifests into the local repo so they can
+    /// be downloaded/restored like local backups.
+    /// </summary>
+    public static (int Status, object Payload) ImportRemoteBackups(ServiceConfig config, string repo, string[] backupIds)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
+        if (provider is null)
+            return (400, new { error = "No Usenet provider configured." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+        try
+        {
+            string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
+            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
+                nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
+
+            using var client = new UsenetBackup.Core.Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
+            client.Connect();
+            if (!string.IsNullOrEmpty(provider.Username))
+                client.Authenticate(provider.Username, nntpPassword ?? "");
+
+            using var r = BackupRepository.Open(repo, passphrase);
+            string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
+            using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
+                client, provider.Newsgroup, r.RepoId, r.CatalogPath,
+                messageIndex: r.MessageIndex, providerKey: providerKey);
+            var remote = r.DiscoverRemoteManifests(store);
+            var wanted = new HashSet<string>(backupIds ?? Array.Empty<string>());
+            int imported = 0;
+            foreach (var m in remote)
+            {
+                if (wanted.Contains(m.Manifest.BackupId))
+                {
+                    r.ImportManifest(m.Manifest);
+                    imported++;
+                }
+            }
+            OperationLog.Append(repo, "import-remote",
+                $"imported={imported} host={provider.Host}");
+            return (200, new { imported });
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Starts a manual NNTP upload of a backup in the background.
+    /// Returns (202, accepted) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) StartUpload(
+        ServiceConfig config, BackupScheduler scheduler, string repo, string backupId)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new { error = "backupId is required." });
+        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
+        if (provider is null)
+            return (400, new { error = "No Usenet provider configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                scheduler.UploadBackup(repo, backupId);
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-upload",
+                    $"backupId={backupId} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-upload", $"backupId={backupId} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Starts a manual backup verification in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartVerify(
+        ServiceConfig config, string repo, string backupId)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new { error = "backupId is required." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                using var r = BackupRepository.Open(repo, passphrase);
+                var issues = r.Verify(backupId);
+                OperationLog.Append(repo, "manual-verify",
+                    issues.Count == 0 ? $"backupId={backupId} OK" : $"backupId={backupId} ISSUES: {string.Join("; ", issues.Take(5))}");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-verify",
+                    $"backupId={backupId} FAILED: {ex.Message}");
+            }
+        });
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Starts a manual retention check in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartRetentionCheck(
+        ServiceConfig config, BackupScheduler scheduler, string repo, bool dryRun)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        Task.Run(() =>
+        {
+            try
+            {
+                scheduler.RunRetentionCheck(repo, dryRun);
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-retention",
+                    $"dryRun={dryRun} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-retention", $"dryRun={dryRun} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
+    /// </summary>
+    public static (int Status, object Payload) RunDiagnose(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+            return (400, new { error = "host is required." });
+        var results = new List<object>();
+        foreach (var (port, ssl, label) in new (int, bool, string)[]
+                 { (119, false, "119/plain"), (563, true, "563/TLS"), (443, false, "443/plain") })
+        {
+            results.Add(new { port = label, result = ProbeNntp(host, port, ssl) });
+        }
+        bool anyOk = results.Any(r => ((string)r.GetType().GetProperty("result")!.GetValue(r)!)
+            .StartsWith("OK", StringComparison.Ordinal));
+        object? fallback = null;
+        string diagnosis;
+        if (anyOk)
+        {
+            diagnosis = $"{host} is reachable. Use port 563 (TLS) if your ISP interferes with plaintext NNTP.";
+        }
+        else
+        {
+            string fb = ProbeNntp("freenews.netfront.net", 119, false);
+            fallback = new { host = "freenews.netfront.net:119", result = fb };
+            diagnosis = fb.StartsWith("OK", StringComparison.Ordinal)
+                ? $"Your network CAN reach NNTP (fallback answered), so the problem is specific to {host}."
+                : "No NNTP server is reachable. Your ISP or firewall is likely blocking NNTP.";
+        }
+        return (200, new { host, probes = results, fallback, diagnosis });
+    }
+
+    private static string ProbeNntp(string host, int port, bool ssl)
+    {
+        try
+        {
+            using var client = new UsenetBackup.Core.Nntp.NntpClient(host, port, ssl);
+            client.Connect();
+            string g = client.Greeting ?? "";
+            try { client.Quit(); } catch { }
+            return $"OK ({(g.Length <= 60 ? g : g[..60] + "…")})";
+        }
+        catch (Exception ex)
+        {
+            string msg = ex.Message ?? "";
+            if (ex is TimeoutException || msg.Contains("Timed out", StringComparison.OrdinalIgnoreCase))
+                return "BLOCKED/TIMEOUT (ISP or firewall may be filtering this port)";
+            if (msg.Contains("refused", StringComparison.OrdinalIgnoreCase))
+                return "CONNECTION REFUSED (port closed)";
+            if (msg.Contains("No such host", StringComparison.OrdinalIgnoreCase))
+                return "DNS FAILED";
+            return $"FAILED ({(msg.Length <= 80 ? msg : msg[..80] + "…")})";
+        }
+    }
+
+    /// <summary>
+    /// Lists USB-attached physical drives (Windows only).
+    /// </summary>
+    public static (int Status, object Payload) ListUsbDrives()
+    {
+        if (!OperatingSystem.IsWindows())
+            return (400, new { error = "USB drive listing requires Windows." });
+        try
+        {
+            var drives = UsenetBackup.Core.Recovery.UsbDrives.List()
+                .Select(d => new { number = d.Number, devicePath = d.DevicePath, model = d.Model, sizeBytes = d.SizeBytes })
+                .ToArray();
+            return (200, drives);
         }
         catch (Exception ex)
         {
@@ -596,6 +930,7 @@ public static class DashboardHtml
             </div>
             <a class="nav-item active" data-view="overview">Overview</a>
             <a class="nav-item" data-view="backups">Backups</a>
+            <a class="nav-item" data-view="operations">Operations</a>
             <a class="nav-item" data-view="log">Operations log</a>
             <a class="nav-item" data-view="settings">Settings</a>
           </nav>
@@ -642,7 +977,46 @@ public static class DashboardHtml
                 </div>
               </div>
               <div class="card" style="padding:8px 20px">
-                <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th></tr></thead><tbody></tbody></table>
+                <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
+              </div>
+              <div class="card">
+                <div class="row">
+                  <div class="grow">
+                    <div class="name">Discover from Usenet</div>
+                    <div class="meta">Find backup manifests posted to Usenet that aren't in this repo yet.</div>
+                  </div>
+                  <button onclick="discoverRemote()">Discover</button>
+                </div>
+                <div id="remoteBackups" style="margin-top:8px"></div>
+              </div>
+            </div>
+            <div class="view" id="view-operations">
+              <h1>Operations</h1>
+              <div class="card">
+                <div class="name">Retention check</div>
+                <div class="meta">STAT-sample articles against provider retention; repost aging ones with fresh IDs.</div>
+                <div class="row" style="margin-top:8px">
+                  <select id="op-repo"></select>
+                  <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run</label>
+                  <button onclick="runRetentionCheck()">Run retention check</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">NNTP connectivity diagnostic</div>
+                <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="op-host" placeholder="news.example.com" style="flex:1">
+                  <button onclick="runDiagnose()">Diagnose</button>
+                </div>
+                <div id="diagnoseResult" style="margin-top:8px"></div>
+              </div>
+              <div class="card">
+                <div class="name">Recovery USB</div>
+                <div class="meta">Write a WinPE ISO to a USB drive. Use FileKeep.exe recovery-usb from an admin prompt for the actual write.</div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="listUsbDrives()">List USB drives</button>
+                </div>
+                <div id="usbDrives" style="margin-top:8px"></div>
               </div>
             </div>
             <div class="view" id="view-log">
@@ -793,6 +1167,9 @@ public static class DashboardHtml
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
+          const opSel = document.getElementById('op-repo');
+          if (!opSel.options.length)
+            s.jobs.forEach(j => opSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
           loadLog();
         }
@@ -869,9 +1246,78 @@ public static class DashboardHtml
           try {
             const bs = await api('/api/backups' + q);
             document.querySelector('#backups tbody').innerHTML = bs.map(b =>
-              `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td></tr>`).join('')
-              || '<tr><td colspan="3" style="color:var(--text-2)">No backups yet.</td></tr>';
-          } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="3">${esc(e.message)}</td></tr>`; }
+              `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td>` +
+              `<td><button onclick="uploadBackup('${esc(b.backupId)}')">Upload</button> ` +
+              `<button onclick="verifyBackup('${esc(b.backupId)}')">Verify</button></td></tr>`).join('')
+              || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
+          } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
+          document.getElementById('remoteBackups').innerHTML = '';
+        }
+        async function uploadBackup(backupId) {
+          const repo = document.getElementById('repo').value;
+          if (!confirm(`Upload backup ${backupId} to Usenet?`)) return;
+          await api('/api/operations/upload', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
+          alert('Upload started in the background. Watch the Operations log.');
+        }
+        async function verifyBackup(backupId) {
+          const repo = document.getElementById('repo').value;
+          await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
+          alert('Verification started in the background. Watch the Operations log.');
+        }
+        async function discoverRemote() {
+          const repo = document.getElementById('repo').value;
+          const box = document.getElementById('remoteBackups');
+          box.innerHTML = '<p style="color:var(--text-2)">Discovering…</p>';
+          try {
+            const rs = await api('/api/backups/remote?repo=' + encodeURIComponent(repo));
+            if (!rs.length) { box.innerHTML = '<p style="color:var(--text-2)">No remote-only backups found.</p>'; return; }
+            box.innerHTML = '<table><thead><tr><th></th><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Files</th></tr></thead><tbody>' +
+              rs.map(r => `<tr><td><input type="checkbox" class="remote-check" value="${esc(r.backupId)}"></td>` +
+                `<td><code>${esc(r.backupId)}</code></td><td>${esc(r.type)}</td><td>${esc(r.createdUtc)}</td><td>${r.fileCount}</td></tr>`).join('') +
+              '</tbody></table><button onclick="importRemote()">Import selected</button>';
+          } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+        }
+        async function importRemote() {
+          const repo = document.getElementById('repo').value;
+          const ids = [...document.querySelectorAll('.remote-check:checked')].map(c => c.value);
+          if (!ids.length) { alert('Select at least one backup.'); return; }
+          await api('/api/backups/remote/import?repo=' + encodeURIComponent(repo),
+            { method: 'POST', body: JSON.stringify({ backupIds: ids }) });
+          alert('Imported. Refreshing…');
+          loadRepo();
+        }
+        // ---- Operations ----
+        async function runRetentionCheck() {
+          const repo = document.getElementById('op-repo').value;
+          const dryRun = document.getElementById('op-dryrun').checked;
+          if (!repo) { alert('Select a repository.'); return; }
+          if (!dryRun && !confirm('Run a live retention check (may repost articles)?')) return;
+          await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ repo, dryRun }) });
+          alert('Retention check started in the background. Watch the Operations log.');
+        }
+        async function runDiagnose() {
+          const host = document.getElementById('op-host').value.trim();
+          if (!host) { alert('Enter a hostname.'); return; }
+          const box = document.getElementById('diagnoseResult');
+          box.innerHTML = '<p style="color:var(--text-2)">Probing…</p>';
+          try {
+            const r = await api('/api/operations/diagnose', { method: 'POST', body: JSON.stringify({ host }) });
+            box.innerHTML = '<table><tbody>' +
+              r.probes.map(p => `<tr><td><code>${esc(p.port)}</code></td><td>${esc(p.result)}</td></tr>`).join('') +
+              (r.fallback ? `<tr><td><code>${esc(r.fallback.host)}</code></td><td>${esc(r.fallback.result)}</td></tr>` : '') +
+              '</tbody></table><p>' + esc(r.diagnosis) + '</p>';
+          } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+        }
+        async function listUsbDrives() {
+          const box = document.getElementById('usbDrives');
+          box.innerHTML = '<p style="color:var(--text-2)">Listing…</p>';
+          try {
+            const ds = await api('/api/operations/usb-drives');
+            box.innerHTML = ds.length
+              ? '<ul>' + ds.map(d => `<li>[${d.number}] ${esc(d.model)} (${Math.round(d.sizeBytes/1048576)} MB)</li>`).join('') + '</ul>' +
+                '<p style="color:var(--text-2)">Write the ISO from an admin prompt: <code>FileKeep.exe recovery-usb --iso &lt;winpe.iso&gt; --drive N</code></p>'
+              : '<p style="color:var(--text-2)">No USB drives found.</p>';
+          } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
         }
         async function loadLog() {
           const repo = document.getElementById('repo').value;
