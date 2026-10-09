@@ -1586,7 +1586,12 @@ public static class DashboardHtml
         <script>
         async function api(path, opts) {
           const r = await fetch(path, opts);
-          if (!r.ok) throw new Error(await r.text());
+          if (!r.ok) {
+            const t = await r.text();
+            let msg = t;
+            try { const j = JSON.parse(t); msg = j.error || j.message || t; } catch { /* not JSON, use raw text */ }
+            throw new Error(msg);
+          }
           return r.status === 202 ? null : r.json();
         }
         function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
