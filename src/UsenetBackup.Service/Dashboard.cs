@@ -201,6 +201,7 @@ public static class DashboardApi
             schedule = j.Schedule.ToString(),
             mode = j.Config.Mode,
             backupPrivilege = j.Config.BackupPrivilege,
+            vss = j.Config.Vss,
             nextRunLocal = j.NextRunLocal,
             consecutiveFailures = j.ConsecutiveFailures,
             lastResult = j.LastResult is null ? null : new
@@ -303,6 +304,7 @@ public static class DashboardApi
             existing.Schedule = job.Schedule;
             existing.Mode = job.Mode;
             existing.BackupPrivilege = job.BackupPrivilege;
+            existing.Vss = job.Vss;
             existing.AutoUpload = job.AutoUpload;
             existing.AutoVerify = job.AutoVerify;
             existing.RedundancyMode = job.RedundancyMode;
@@ -673,6 +675,7 @@ public static class DashboardHtml
                     <option value="full">Full</option>
                   </select></label>
                   <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
+                  <label class="check"><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
                   <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload to Usenet after backup</label>
                   <label class="check"><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
                   <label>Usenet redundancy:
@@ -777,7 +780,7 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}<br>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}<br>
                 ${esc(j.source)} → ${esc(j.repo)}<br>
                 Next run: ${esc(j.nextRunLocal)} (local)${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}</div>
               </div>
@@ -892,7 +895,7 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.autoUpload ? ' · auto-upload' : ''}<br>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${j.autoUpload ? ' · auto-upload' : ''}<br>
                 ${esc(j.source)} → ${esc(j.repo)}</div>
               </div>
               <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
@@ -920,6 +923,7 @@ public static class DashboardHtml
           document.getElementById('jf-repo').value = job ? job.repo : '';
           document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
+          document.getElementById('jf-vss').checked = job ? !!job.vss : false;
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
           document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
           document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
@@ -964,6 +968,7 @@ public static class DashboardHtml
             schedule,
             mode: document.getElementById('jf-mode').value,
             backupPrivilege: document.getElementById('jf-priv').checked,
+            vss: document.getElementById('jf-vss').checked,
             autoUpload: document.getElementById('jf-autoupload').checked,
             autoVerify: document.getElementById('jf-autoverify').checked,
             redundancyMode: document.getElementById('jf-redundancy').value,

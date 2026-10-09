@@ -375,22 +375,33 @@ public sealed class BackupScheduler
                     "environment variable for the service account.");
 
             using var repo = BackupRepository.Open(job.Repo, passphrase);
-            using ISnapshotProvider? snap = job.BackupPrivilege ? new BackupPrivilegeSnapshotProvider(job.Source) : null;
+            using ISnapshotProvider? snap = CreateSnapshotProvider(job);
 
             BackupManifest manifest;
-            if (job.Mode == "full")
+            try
             {
-                manifest = repo.BackupDirectory(job.Source, snap);
+                if (job.Mode == "full")
+                {
+                    manifest = repo.BackupDirectory(job.Source, snap);
+                }
+                else
+                {
+                    string? parent = repo.ListBackups()
+                        .OrderByDescending(b => b.CreatedUtc)
+                        .FirstOrDefault()?.BackupId;
+                    manifest = parent is null
+                        ? repo.BackupDirectory(job.Source, snap)
+                        : repo.BackupIncremental(job.Source, parent, snap,
+                            VerificationModeParser.Parse(job.VerificationMode));
+                }
+                // VSS: writer session finalized only after data is safely stored.
+                if (snap is Recovery.VssSnapshot vss)
+                    vss.Complete();
             }
-            else
+            catch
             {
-                string? parent = repo.ListBackups()
-                    .OrderByDescending(b => b.CreatedUtc)
-                    .FirstOrDefault()?.BackupId;
-                manifest = parent is null
-                    ? repo.BackupDirectory(job.Source, snap)
-                    : repo.BackupIncremental(job.Source, parent, snap,
-                        VerificationModeParser.Parse(job.VerificationMode));
+                // VssSnapshot.Dispose aborts the writer session fail-safe.
+                throw;
             }
 
             OperationLog.Append(job.Repo, "scheduled-backup",
@@ -480,6 +491,58 @@ public sealed class BackupScheduler
         {
             // Best effort.
         }
+    }
+
+    /// <summary>
+    /// Creates the snapshot provider for a job: VSS shadow copy, backup
+    /// privilege, or null for a live read. VSS and backup-privilege are
+    /// mutually exclusive (validated at config load).
+    /// </summary>
+    private static ISnapshotProvider? CreateSnapshotProvider(BackupJobConfig job)
+    {
+        if (job.Vss && job.BackupPrivilege)
+            throw new InvalidOperationException(
+                $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");
+        if (job.BackupPrivilege)
+            return new BackupPrivilegeSnapshotProvider(job.Source);
+        if (job.Vss)
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException(
+                    $"Job '{job.Name}': VSS snapshots require Windows.");
+            string helper = LocateVssHelper();
+            string volume = Path.GetPathRoot(Path.GetFullPath(job.Source))
+                ?? throw new InvalidOperationException(
+                    $"Job '{job.Name}': cannot determine volume for '{job.Source}'.");
+            var vss = new Recovery.VssSnapshot(helper);
+            vss.Create(volume, job.Source);
+            return vss;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Locates FileKeepVss.exe. The service runs from service/ while the
+    /// helper ships in cli/, so check both the service directory and the
+    /// sibling cli directory.
+    /// </summary>
+    private static string LocateVssHelper()
+    {
+        string baseDir = AppContext.BaseDirectory;
+        string[] candidates =
+        {
+            Path.Combine(baseDir, "FileKeepVss.exe"),
+            Path.Combine(baseDir, "..", "cli", "FileKeepVss.exe"),
+        };
+        foreach (string c in candidates)
+        {
+            string full = Path.GetFullPath(c);
+            if (File.Exists(full))
+                return full;
+        }
+        throw new FileNotFoundException(
+            "VSS helper not found. Expected FileKeepVss.exe next to the service " +
+            "or in the sibling cli/ directory.");
     }
 
     /// <summary>

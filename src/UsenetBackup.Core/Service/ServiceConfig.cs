@@ -265,6 +265,12 @@ public sealed class ServiceConfig
             if (job.Mode is not ("incremental" or "full"))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown mode '{job.Mode}' (expected \"incremental\" or \"full\").");
+            if (job.Vss && job.BackupPrivilege)
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");
+            if (job.Vss && !OperatingSystem.IsWindows())
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}': 'vss' requires Windows.");
             if (job.AutoUpload && (Nntp is null || string.IsNullOrWhiteSpace(Nntp.Host)))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
