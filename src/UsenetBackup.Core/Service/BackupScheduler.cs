@@ -282,6 +282,41 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// Downloads chunks referenced by an NZB file from the first configured provider.
+    /// </summary>
+    public void DownloadFromNzb(string repoPath, string nzbPath, string passphrase)
+    {
+        var providers = _nntpProviders;
+        if (providers.Count == 0)
+            throw new InvalidOperationException("No NNTP providers configured.");
+        var nzb = Nntp.NzbParser.ParseFile(nzbPath);
+        if (nzb.Files.Count == 0)
+            throw new InvalidOperationException("NZB contains no files.");
+        var nntp = providers[0];
+        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+
+        using var repo = BackupRepository.Open(repoPath, passphrase);
+        using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
+        client.Connect();
+        if (!string.IsNullOrEmpty(nntp.Username))
+            client.Authenticate(nntp.Username, nntpPassword ?? "");
+        try
+        {
+            string providerKey = Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup);
+            using var remote = new Nntp.NntpBlobStore(
+                client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
+                messageIndex: repo.MessageIndex, providerKey: providerKey);
+            repo.DownloadChunks(nzb, remote, (done, total) => { });
+        }
+        finally
+        {
+            try { client.Quit(); } catch { }
+        }
+    }
+
+    /// <summary>
     /// Runs RetentionManager.CheckAndRepost for each job's repository.
     /// </summary>
     private void RunRetentionChecks()

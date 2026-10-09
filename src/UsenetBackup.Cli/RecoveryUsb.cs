@@ -35,33 +35,10 @@ internal static class RecoveryUsb
         UsenetBackup.Core.Recovery.UsbDrives.List();
 
     /// <summary>
-    /// Raw-writes the ISO to the physical drive. The drive is opened
-    /// exclusively; the volume must not be mounted (Windows will prompt to
-    /// format afterwards — that's expected).
+    /// Raw-writes the ISO to the physical drive. Delegates to the shared Core
+    /// writer. The drive is opened exclusively; the volume must not be mounted
+    /// (Windows will prompt to format afterwards — that's expected).
     /// </summary>
-    public static void WriteIso(string devicePath, string isoPath, Action<long, long> progress)
-    {
-        long isoSize = new FileInfo(isoPath).Length;
-        using var iso = new FileStream(isoPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 1024 * 1024);
-
-        IntPtr h = CreateFileW(devicePath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-            IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
-        if (h == INVALID_HANDLE)
-            throw new IOException(
-                $"Cannot open {devicePath} for writing (error {Marshal.GetLastWin32Error()}). " +
-                "Run as Administrator and ensure the drive is not in use.");
-        using var drive = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(h, ownsHandle: true),
-            FileAccess.Write, bufferSize: 1024 * 1024);
-        byte[] buf = new byte[1024 * 1024];
-        long written = 0;
-        int read;
-        while ((read = iso.Read(buf, 0, buf.Length)) > 0)
-        {
-            drive.Write(buf, 0, read);
-            written += read;
-            progress(written, isoSize);
-        }
-        drive.Flush(flushToDisk: true);
-    }
+    public static void WriteIso(string devicePath, string isoPath, Action<long, long> progress) =>
+        UsenetBackup.Core.Recovery.RawDiskWriter.WriteIso(devicePath, isoPath, progress);
 }

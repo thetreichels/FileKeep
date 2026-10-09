@@ -128,6 +128,98 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapPost("/api/operations/restore", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            string destDir = body.GetProperty("destDir").GetString() ?? "";
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/backup-now", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string sourceDir = body.GetProperty("sourceDir").GetString() ?? "";
+            var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapGet("/api/operations/nzb", (string repo, string backupId) =>
+        {
+            var (status, payload, fileName) = DashboardApi.GenerateNzb(config, repo, backupId);
+            if (status != 200) return Results.BadRequest(payload);
+            return Results.File((byte[])payload, "application/x-nzb", fileName);
+        });
+
+        app.MapPost("/api/operations/download-nzb", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!request.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form." });
+            var form = await request.ReadFormAsync();
+            string repo = form["repo"].ToString();
+            var file = form.Files["nzb"];
+            if (file is null || file.Length == 0) return Results.BadRequest(new { error = "No NZB file uploaded." });
+            string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
+            await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
+            var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, repo, tmp);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/disk-backup", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string device = body.GetProperty("device").GetString() ?? "";
+            string imageName = body.TryGetProperty("imageName", out var n) ? n.GetString() ?? "disk.img" : "disk.img";
+            var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/disk-restore", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            string device = body.GetProperty("device").GetString() ?? "";
+            string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirm);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/init-repo", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string path = body.GetProperty("path").GetString() ?? "";
+            var (status, payload) = DashboardApi.InitRepo(path);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/recovery-usb-write", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string isoPath = body.GetProperty("isoPath").GetString() ?? "";
+            int driveNumber = body.TryGetProperty("driveNumber", out var d) ? d.GetInt32() : -1;
+            string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.StartUsbWrite(isoPath, driveNumber, confirm);
+            return status == 202 ? Results.Accepted(payload) : Results.BadRequest(payload);
+        });
+
         // Settings UI: read and update the backup job configuration.
         // All writes require the CSRF token and are validated before saving.
         app.MapGet("/api/config", () =>
@@ -513,6 +605,268 @@ public static class DashboardApi
     }
 
     /// <summary>
+    /// Starts a restore of a backup to a destination directory in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartRestore(
+        ServiceConfig config, string repo, string backupId, string destDir)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new { error = "backupId is required." });
+        if (string.IsNullOrWhiteSpace(destDir))
+            return (400, new { error = "destDir is required." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                using var r = BackupRepository.Open(repo, passphrase);
+                r.Restore(backupId, destDir);
+                OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} OK");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-restore",
+                    $"backupId={backupId} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Starts an ad-hoc backup of a source directory in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartAdhocBackup(
+        ServiceConfig config, string repo, string sourceDir)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
+            return (400, new { error = "sourceDir must be an existing directory." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                using var r = BackupRepository.Open(repo, passphrase);
+                var manifest = r.BackupDirectory(sourceDir, snapshotProvider: null);
+                OperationLog.Append(repo, "manual-backup",
+                    $"id={manifest.BackupId} source={sourceDir} OK");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-backup",
+                    $"source={sourceDir} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-backup", $"source={sourceDir} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Generates an NZB for a backup and returns the XML bytes.
+    /// </summary>
+    public static (int Status, object Payload, string FileName) GenerateNzb(
+        ServiceConfig config, string repo, string backupId)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." }, "");
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new { error = "backupId is required." }, "");
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." }, "");
+        try
+        {
+            var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
+            string newsgroup = provider?.Newsgroup ?? "alt.binaries.test";
+            using var r = BackupRepository.Open(repo, passphrase);
+            var manifest = r.LoadManifest(backupId);
+            using var catalog = new Catalog(r.CatalogPath);
+            string xml = NzbGenerator.Generate(
+                manifest,
+                chunkId => r.GetChunkBlob(chunkId),
+                chunkId => catalog.GetUploadTimeUtc(chunkId),
+                new NzbGenerator.Options(newsgroup, "filekeep", r.RepoId));
+            byte[] bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(xml);
+            return (200, bytes, $"filekeep-{backupId}.nzb");
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message }, "");
+        }
+    }
+
+    /// <summary>
+    /// Starts a download from an uploaded NZB file in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartNzbDownload(
+        ServiceConfig config, BackupScheduler scheduler, string repo, string nzbPath)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
+        if (provider is null)
+            return (400, new { error = "No Usenet provider configured." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                scheduler.DownloadFromNzb(repo, nzbPath, passphrase);
+                OperationLog.Append(repo, "manual-nzb-download", $"nzb={Path.GetFileName(nzbPath)} OK");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-nzb-download",
+                    $"nzb={Path.GetFileName(nzbPath)} FAILED: {ex.Message}");
+            }
+            finally
+            {
+                try { File.Delete(nzbPath); } catch { }
+            }
+        });
+        OperationLog.Append(repo, "manual-nzb-download", $"nzb={Path.GetFileName(nzbPath)} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Starts a disk-image backup in the background.
+    /// </summary>
+    public static (int Status, object Payload) StartDiskBackup(
+        ServiceConfig config, string repo, string device, string imageName)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(device))
+            return (400, new { error = "device is required." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                using var r = BackupRepository.Open(repo, passphrase);
+                var manifest = r.BackupDiskImage(device, imageName);
+                OperationLog.Append(repo, "manual-disk-backup",
+                    $"id={manifest.BackupId} device={device} OK");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-disk-backup",
+                    $"device={device} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-disk-backup", $"device={device} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Starts a disk-image restore in the background. Destructive: requires
+    /// the caller to type the device path as confirmation.
+    /// </summary>
+    public static (int Status, object Payload) StartDiskRestore(
+        ServiceConfig config, string repo, string backupId, string device, string confirm)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new { error = "backupId is required." });
+        if (string.IsNullOrWhiteSpace(device))
+            return (400, new { error = "device is required." });
+        if (!string.Equals(confirm?.Trim(), device, StringComparison.Ordinal))
+            return (400, new { error = "Confirmation did not match the device path. Restore aborted." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        Task.Run(() =>
+        {
+            try
+            {
+                using var r = BackupRepository.Open(repo, passphrase);
+                r.RestoreDiskImage(backupId, device);
+                OperationLog.Append(repo, "manual-disk-restore",
+                    $"backupId={backupId} device={device} OK");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "manual-disk-restore",
+                    $"backupId={backupId} device={device} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "manual-disk-restore", $"backupId={backupId} device={device} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
+    /// Initializes a new repository at the given path.
+    /// </summary>
+    public static (int Status, object Payload) InitRepo(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return (400, new { error = "path is required." });
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (500, new { error = "Service passphrase is not configured." });
+        try
+        {
+            using var repo = BackupRepository.Init(path, passphrase, BackupRepository.DefaultChunkSize);
+            return (200, new { path = Path.GetFullPath(path) });
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Writes a WinPE ISO to a USB drive in the background. Destructive:
+    /// requires the caller to type the drive number as confirmation.
+    /// Windows only; the service must run elevated.
+    /// </summary>
+    public static (int Status, object Payload) StartUsbWrite(
+        string isoPath, int driveNumber, string confirm)
+    {
+        if (!OperatingSystem.IsWindows())
+            return (400, new { error = "Recovery USB writing requires Windows." });
+        if (string.IsNullOrWhiteSpace(isoPath) || !File.Exists(isoPath))
+            return (400, new { error = "isoPath must be an existing WinPE ISO file." });
+        if (driveNumber < 0)
+            return (400, new { error = "driveNumber is required." });
+        if (confirm?.Trim() != driveNumber.ToString())
+            return (400, new { error = "Confirmation did not match the drive number. Write aborted." });
+        var drives = UsenetBackup.Core.Recovery.UsbDrives.List();
+        var target = drives.FirstOrDefault(d => d.Number == driveNumber);
+        if (target is null)
+            return (400, new { error = $"Drive {driveNumber} is not a USB drive (or not present)." });
+        long isoSize = new FileInfo(isoPath).Length;
+        if (isoSize > target.SizeBytes)
+            return (400, new { error = "ISO does not fit on the target drive." });
+        Task.Run(() =>
+        {
+            try
+            {
+                RawDiskWriter.WriteIso(target.DevicePath, isoPath);
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append("", "manual-usb-write",
+                    $"drive={driveNumber} FAILED: {ex.Message}");
+            }
+        });
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
     public static (int Status, object Payload) RunDiagnose(string host)
@@ -867,6 +1221,8 @@ public static class DashboardHtml
           button:hover { background: #f0f0f0; }
           button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
           button.accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+          button.danger { background: #c42b1c; border-color: #c42b1c; color: #fff; }
+          button.danger:hover { background: #a92418; border-color: #a92418; }
           button:disabled { opacity: .5; cursor: default; }
           select {
             font-family: inherit; font-size: 14px; padding: 6px 10px;
@@ -1012,11 +1368,65 @@ public static class DashboardHtml
               </div>
               <div class="card">
                 <div class="name">Recovery USB</div>
-                <div class="meta">Write a WinPE ISO to a USB drive. Use FileKeep.exe recovery-usb from an admin prompt for the actual write.</div>
+                <div class="meta">Write a WinPE ISO to a USB drive. Destructive — all data on the drive is destroyed.</div>
                 <div class="row" style="margin-top:8px">
                   <button onclick="listUsbDrives()">List USB drives</button>
                 </div>
                 <div id="usbDrives" style="margin-top:8px"></div>
+                <div class="row" style="margin-top:8px">
+                  <input id="usb-iso" placeholder="C:\winpe\filekeep-winpe.iso" style="flex:1">
+                  <input id="usb-drive" placeholder="Drive #" style="width:80px">
+                  <input id="usb-confirm" placeholder="Type drive # to confirm" style="width:180px">
+                  <button class="danger" onclick="writeUsb()">Write ISO to USB</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Restore a backup</div>
+                <div class="meta">Restore a backup's files to a destination folder.</div>
+                <div class="row" style="margin-top:8px">
+                  <select id="restore-backup"><option value="">Select backup…</option></select>
+                  <input id="restore-dest" placeholder="C:\Restore" style="flex:1">
+                  <button onclick="startRestore()">Restore</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Back up a folder now</div>
+                <div class="meta">Ad-hoc backup of any folder into the selected repository (outside the schedule).</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="adhoc-source" placeholder="C:\Users\You\Documents" style="flex:1">
+                  <button onclick="startAdhocBackup()">Back up now</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Download from NZB</div>
+                <div class="meta">Fetch chunks referenced by an NZB file from Usenet into the repository.</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="nzb-file" type="file" accept=".nzb">
+                  <button onclick="uploadNzb()">Download chunks</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Disk imaging</div>
+                <div class="meta">Back up a whole disk to an image, or restore an image back to a disk (destructive).</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="disk-device" placeholder="\\.\PhysicalDrive2 or /dev/sdb" style="flex:1">
+                  <input id="disk-imagename" placeholder="disk.img" style="width:120px">
+                  <button onclick="startDiskBackup()">Back up disk</button>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <select id="disk-backup"><option value="">Select disk-image backup…</option></select>
+                  <input id="disk-target" placeholder="Target device" style="flex:1">
+                  <input id="disk-confirm" placeholder="Type device to confirm" style="width:200px">
+                  <button class="danger" onclick="startDiskRestore()">Restore image to disk</button>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">New repository</div>
+                <div class="meta">Initialize a fresh encrypted backup repository at a path.</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="init-path" placeholder="D:\Backups\NewRepo" style="flex:1">
+                  <button onclick="initRepo()">Initialize</button>
+                </div>
               </div>
             </div>
             <div class="view" id="view-log">
@@ -1243,15 +1653,24 @@ public static class DashboardHtml
           const repo = document.getElementById('repo').value;
           if (!repo) return;
           const q = '?repo=' + encodeURIComponent(repo);
+          let bs = [];
           try {
-            const bs = await api('/api/backups' + q);
+            bs = await api('/api/backups' + q);
             document.querySelector('#backups tbody').innerHTML = bs.map(b =>
               `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td>` +
               `<td><button onclick="uploadBackup('${esc(b.backupId)}')">Upload</button> ` +
-              `<button onclick="verifyBackup('${esc(b.backupId)}')">Verify</button></td></tr>`).join('')
+              `<button onclick="verifyBackup('${esc(b.backupId)}')">Verify</button> ` +
+              `<button onclick="downloadNzb('${esc(b.backupId)}')">NZB</button></td></tr>`).join('')
               || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
           } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
           document.getElementById('remoteBackups').innerHTML = '';
+          // Populate the Operations-view backup selectors.
+          const rb = document.getElementById('restore-backup');
+          rb.innerHTML = '<option value="">Select backup…</option>' +
+            bs.map(b => `<option value="${esc(b.backupId)}">${esc(b.backupId)} (${esc(b.type)}, ${esc(b.createdUtc)})</option>`).join('');
+          const db = document.getElementById('disk-backup');
+          db.innerHTML = '<option value="">Select disk-image backup…</option>' +
+            bs.filter(b => b.type === 'disk-image').map(b => `<option value="${esc(b.backupId)}">${esc(b.backupId)} (${esc(b.createdUtc)})</option>`).join('');
         }
         async function uploadBackup(backupId) {
           const repo = document.getElementById('repo').value;
@@ -1263,6 +1682,76 @@ public static class DashboardHtml
           const repo = document.getElementById('repo').value;
           await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
           alert('Verification started in the background. Watch the Operations log.');
+        }
+        function downloadNzb(backupId) {
+          const repo = document.getElementById('repo').value;
+          window.location = '/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId);
+        }
+        async function startRestore() {
+          const repo = document.getElementById('op-repo').value;
+          const backupId = document.getElementById('restore-backup').value;
+          const destDir = document.getElementById('restore-dest').value.trim();
+          if (!backupId) { alert('Select a backup.'); return; }
+          if (!destDir) { alert('Enter a destination folder.'); return; }
+          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir }) });
+          alert('Restore started in the background. Watch the Operations log.');
+        }
+        async function startAdhocBackup() {
+          const repo = document.getElementById('op-repo').value;
+          const sourceDir = document.getElementById('adhoc-source').value.trim();
+          if (!sourceDir) { alert('Enter a source folder.'); return; }
+          await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
+          alert('Backup started in the background. Watch the Operations log.');
+        }
+        async function uploadNzb() {
+          const repo = document.getElementById('op-repo').value;
+          const input = document.getElementById('nzb-file');
+          if (!input.files.length) { alert('Choose an NZB file.'); return; }
+          const form = new FormData();
+          form.append('repo', repo);
+          form.append('nzb', input.files[0]);
+          const res = await fetch('/api/operations/download-nzb', {
+            method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: form
+          });
+          if (!res.ok) { alert('Failed: ' + (await res.text())); return; }
+          alert('NZB download started in the background. Watch the Operations log.');
+        }
+        async function startDiskBackup() {
+          const repo = document.getElementById('op-repo').value;
+          const device = document.getElementById('disk-device').value.trim();
+          const imageName = document.getElementById('disk-imagename').value.trim() || 'disk.img';
+          if (!device) { alert('Enter a device path.'); return; }
+          await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
+          alert('Disk backup started in the background. Watch the Operations log.');
+        }
+        async function startDiskRestore() {
+          const repo = document.getElementById('op-repo').value;
+          const backupId = document.getElementById('disk-backup').value;
+          const device = document.getElementById('disk-target').value.trim();
+          const confirm = document.getElementById('disk-confirm').value;
+          if (!backupId) { alert('Select a disk-image backup.'); return; }
+          if (!device) { alert('Enter the target device.'); return; }
+          if (confirm.trim() !== device) { alert('Confirmation does not match the device. Aborted.'); return; }
+          if (!confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
+          await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId, device, confirm }) });
+          alert('Disk restore started in the background. Watch the Operations log.');
+        }
+        async function initRepo() {
+          const path = document.getElementById('init-path').value.trim();
+          if (!path) { alert('Enter a path.'); return; }
+          const r = await api('/api/operations/init-repo', { method: 'POST', body: JSON.stringify({ path }) });
+          alert('Repository initialized at ' + r.path + '. Add it as a job in Settings to schedule backups.');
+        }
+        async function writeUsb() {
+          const isoPath = document.getElementById('usb-iso').value.trim();
+          const driveNumber = parseInt(document.getElementById('usb-drive').value, 10);
+          const confirm = document.getElementById('usb-confirm').value;
+          if (!isoPath) { alert('Enter the WinPE ISO path.'); return; }
+          if (isNaN(driveNumber)) { alert('Enter a drive number.'); return; }
+          if (confirm.trim() !== String(driveNumber)) { alert('Confirmation does not match the drive number. Aborted.'); return; }
+          if (!confirm('This will DESTROY all data on drive ' + driveNumber + '. Continue?')) return;
+          await api('/api/operations/recovery-usb-write', { method: 'POST', body: JSON.stringify({ isoPath, driveNumber, confirm }) });
+          alert('USB write started in the background. Watch the Operations log.');
         }
         async function discoverRemote() {
           const repo = document.getElementById('repo').value;
