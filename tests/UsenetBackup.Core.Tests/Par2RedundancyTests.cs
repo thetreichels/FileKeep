@@ -9,10 +9,6 @@ namespace UsenetBackup.Core.Tests;
 /// </summary>
 public sealed class Par2RedundancyTests
 {
-    private static string ChunkId(int i) =>
-        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes($"chunk-{i}"))).ToLowerInvariant();
-
     private static Dictionary<string, byte[]> MakeChunks(int count, int size, int seed = 42)
     {
         var random = new Random(seed);
@@ -21,10 +17,19 @@ public sealed class Par2RedundancyTests
         {
             byte[] bytes = new byte[size];
             random.NextBytes(bytes);
-            chunks[ChunkId(i)] = bytes;
+            // Chunk IDs are content hashes (as in production); the
+            // reconstruction path validates recovered bytes against them.
+            string id = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+            chunks[id] = bytes;
         }
         return chunks;
     }
+
+    // Legacy helper for tests that need deterministic non-content IDs.
+    private static string ChunkId(int i) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"chunk-{i}"))).ToLowerInvariant();
 
     [Fact]
     public void GenerateParity_CreatesThreePerGroup()
@@ -125,7 +130,9 @@ public sealed class Par2RedundancyTests
         {
             byte[] bytes = new byte[sizes[i]];
             random.NextBytes(bytes);
-            chunks[ChunkId(i)] = bytes;
+            string id = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+            chunks[id] = bytes;
         }
         var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
         var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
