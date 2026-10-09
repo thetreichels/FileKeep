@@ -31,6 +31,7 @@
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
         <File Id="CliExeFile" Source="$(var.CliBin)\FileKeep.exe" KeyPath="yes" />
+        <File Id="VssHelperExe" Source="$(var.VssBin)\FileKeepVss.exe" />
         <RemoveFile Id="RemoveCliPdb" Directory="CLIDIR" Name="*.pdb" On="uninstall" />
         <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
       </Component>
