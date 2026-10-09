@@ -132,7 +132,11 @@ public sealed class RetentionManagerTests : IDisposable
         // Simulate article loss: remove one chunk's article from the server
         string lostChunk = fx.ChunkIds[0];
         string oldMessageId = ArticleCodec.MakeMessageId(lostChunk, RepoId);
-        Assert.True(_server.Articles.TryRemove(oldMessageId, out _));
+        Assert.True(_server.Articles.TryRemove(oldMessageId, out _),
+            $"Article not found. Server has {_server.Articles.Count} articles. " +
+            $"Looking for '{oldMessageId}'. " +
+            $"First key: '{_server.Articles.Keys.FirstOrDefault()}'. " +
+            $"ChunkIds count: {fx.ChunkIds.Count}.");
 
         // In the check window (65 days left) so the missing article is found.
         var uploaded = DateTime.UtcNow.AddDays(-1030);
