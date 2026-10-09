@@ -586,6 +586,16 @@ public sealed class BackupRepository : IDisposable
     /// <summary>Path to catalog.db, which also holds the NNTP upload journal.</summary>
     public string CatalogPath => Path.Combine(_root, "catalog.db");
 
+    private ChunkMessageIndex? _messageIndex;
+
+    /// <summary>
+    /// Maps chunk IDs to their live NNTP message IDs, tracking republications
+    /// performed by retention refresh. Every NntpBlobStore for this repo must
+    /// receive this index — otherwise refreshed identities are posted but
+    /// forgotten, and later reads resolve to the expired original IDs.
+    /// </summary>
+    public ChunkMessageIndex MessageIndex => _messageIndex ??= new ChunkMessageIndex(_root);
+
     /// <summary>
     /// Milestone 5: download every chunk referenced by an NZB index from an
     /// NNTP server into this repository's local chunk store.

@@ -4,7 +4,7 @@ namespace UsenetBackup.Core.Recovery;
 
 /// <summary>
 /// Manages a VSS shadow copy via the native FileKeepVss.exe helper.
-/// Implements ISnapshotProvider for the "vss" provider.
+/// Implements <see cref="UsenetBackup.Core.ISnapshotProvider"/> for the "vss" provider.
 ///
 /// The helper is a separate process so the managed backup engine never
 /// touches COM. If the helper exits non-zero, the snapshot is considered
@@ -17,14 +17,23 @@ namespace UsenetBackup.Core.Recovery;
 /// disposal, <see cref="Dispose"/> sends abort (fail-safe): an
 /// un-finalized writer session leaves writers (SQL Server, etc.) dangling
 /// with un-truncated logs.
+///
+/// Usage:
+/// <code>
+/// using var vss = new VssSnapshot(helperPath);
+/// vss.Create("C:", sourceDir);   // throws on failure — never falls back to live
+/// var manifest = repo.BackupDirectory(sourceDir, vss);  // reads via SnapshotRoot
+/// vss.Complete();                // BackupComplete + delete snapshot
+/// </code>
 /// </summary>
-public sealed class VssSnapshot : ISnapshotProvider, IDisposable
+public sealed class VssSnapshot : UsenetBackup.Core.ISnapshotProvider
 {
     private readonly string _helperPath;
     private readonly int _timeoutSecs;
     private Process? _process;
     private bool _finalized;
     private bool _disposed;
+    private string? _sourceDir;
 
     /// <param name="helperPath">Full path to FileKeepVss.exe.</param>
     /// <param name="timeoutSecs">Seconds to hold the snapshot.</param>
@@ -49,10 +58,15 @@ public sealed class VssSnapshot : ISnapshotProvider, IDisposable
     /// live path as a fallback.
     /// </summary>
     /// <param name="volume">Volume to snapshot (e.g., "C:").</param>
-    public void Create(string volume)
+    /// <param name="sourceDir">
+    /// Source directory being backed up. Stored so <see cref="SnapshotRoot"/>
+    /// can return the snapshot-equivalent path for the backup engine.
+    /// </param>
+    public void Create(string volume, string sourceDir)
     {
         if (_process is not null)
             throw new InvalidOperationException("Snapshot already created.");
+        ArgumentException.ThrowIfNullOrEmpty(sourceDir);
 
         if (!File.Exists(_helperPath))
             throw new FileNotFoundException(
@@ -94,7 +108,32 @@ public sealed class VssSnapshot : ISnapshotProvider, IDisposable
         }
 
         SnapshotPath = path.Trim();
+        _sourceDir = Path.GetFullPath(sourceDir);
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// The readable root for the backup engine: the source directory as
+    /// seen through the shadow copy. Valid only after <see cref="Create"/>
+    /// succeeds.
+    /// </remarks>
+    public string SnapshotRoot =>
+        SnapshotPath is null || _sourceDir is null
+            ? throw new InvalidOperationException("Snapshot not created.")
+            : TranslatePath(_sourceDir);
+
+    /// <inheritdoc/>
+    public bool IsSnapshot => true;
+
+    /// <inheritdoc/>
+    public string Name => "vss";
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Files inside a shadow copy are ordinary readable files; no special
+    /// access is needed beyond what the snapshot itself provides.
+    /// </remarks>
+    public FileStream OpenRead(string fullPath) => File.OpenRead(fullPath);
 
     /// <summary>
     /// Signals successful backup completion. The helper calls VSS
@@ -211,17 +250,4 @@ public sealed class VssSnapshot : ISnapshotProvider, IDisposable
         }
         _disposed = true;
     }
-}
-
-/// <summary>
-/// Snapshot provider abstraction. Implementations: none (live files),
-/// backup-privilege (live files with privilege), vss (shadow copy).
-/// </summary>
-public interface ISnapshotProvider : IDisposable
-{
-    /// <summary>Provider identifier: "none", "backup-privilege", or "vss".</summary>
-    string ProviderId { get; }
-
-    /// <summary>Translates a volume path to the snapshot-accessible path.</summary>
-    string TranslatePath(string volumePath);
 }

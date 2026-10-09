@@ -43,7 +43,7 @@ static void PrintUsage()
 
         Usage:
           usenet-backup init <repo> [--chunk-size BYTES]
-          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege]
+          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
           usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
@@ -81,6 +81,11 @@ static void PrintUsage()
         files with backup semantics (Windows only, requires administrator
         rights), so files locked by other processes can be read. This reads
         the live files, not a point-in-time copy.
+
+        --vss takes a Volume Shadow Copy snapshot of the source volume and
+        backs up from the shadow copy (Windows only, requires administrator
+        rights). This gives a point-in-time frozen view, so open files back
+        up consistently. Mutually exclusive with --backup-privilege.
 
         backup-disk images a raw block device (e.g. \\.\C: on Windows,
         /dev/sda on Linux) through the normal chunk/encrypt pipeline as a
@@ -169,19 +174,59 @@ static int Init(string[] args)
 static int Backup(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--verify <fast|verify|paranoid>]"); return 2; }
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss] [--verify <fast|verify|paranoid>]"); return 2; }
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     string? parent = GetOption(args, "--parent");
     var verifyMode = VerificationModeParser.Parse(GetOption(args, "--verify"));
-    using ISnapshotProvider? snap = HasFlag(args, "--backup-privilege") ? new BackupPrivilegeSnapshotProvider(pos[1]) : null;
-    var manifest = parent is null
-        ? repo.BackupDirectory(pos[1], snap)
-        : repo.BackupIncremental(pos[1], parent, snap, verifyMode);
+    using ISnapshotProvider? snap = CreateSnapshotProvider(args, pos[1]);
+    BackupManifest manifest;
+    try
+    {
+        manifest = parent is null
+            ? repo.BackupDirectory(pos[1], snap)
+            : repo.BackupIncremental(pos[1], parent, snap, verifyMode);
+        // VSS: writer session finalized only after data is safely stored.
+        if (snap is UsenetBackup.Core.Recovery.VssSnapshot vss)
+            vss.Complete();
+    }
+    catch
+    {
+        // VssSnapshot.Dispose aborts the writer session fail-safe;
+        // explicit abort here is unnecessary.
+        throw;
+    }
     Console.WriteLine($"{manifest.Type} backup {manifest.BackupId}" +
         (manifest.ParentId is null ? "" : $" (parent {manifest.ParentId})") +
         (manifest.Snapshot is null ? "" : $" [snapshot: {manifest.Snapshot}]") +
         $": {manifest.Files.Count} files, {manifest.Files.Sum(f => f.Chunks.Count)} chunk refs, {repo.StoredChunkCount()} unique chunks stored.");
     return 0;
+}
+
+/// <summary>
+/// Creates the snapshot provider requested by CLI flags, or null for a
+/// live read. --vss and --backup-privilege are mutually exclusive.
+/// </summary>
+static ISnapshotProvider? CreateSnapshotProvider(string[] args, string sourceDir)
+{
+    bool wantVss = HasFlag(args, "--vss");
+    bool wantPriv = HasFlag(args, "--backup-privilege");
+    if (wantVss && wantPriv)
+        throw new InvalidOperationException("--vss and --backup-privilege are mutually exclusive.");
+    if (wantPriv)
+        return new BackupPrivilegeSnapshotProvider(sourceDir);
+    if (wantVss)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("VSS snapshots require Windows.");
+        string helper = Path.Combine(AppContext.BaseDirectory, "FileKeepVss.exe");
+        string volume = Path.GetPathRoot(Path.GetFullPath(sourceDir))
+            ?? throw new InvalidOperationException($"Cannot determine volume for '{sourceDir}'.");
+        var vss = new UsenetBackup.Core.Recovery.VssSnapshot(helper);
+        vss.Create(volume, sourceDir);
+        Console.WriteLine($"VSS snapshot created for {volume} (reading via shadow copy).");
+        return vss;
+    }
+    return null;
 }
 
 static int BackupDisk(string[] args)
@@ -321,7 +366,7 @@ static int NntpUpload(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
         int uploaded = 0, skipped = 0;
         for (int i = 0; i < chunkIds.Length; i++)
         {
@@ -366,7 +411,7 @@ static int ManifestDiscover(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
         // Use the monthly index (STAT probes) instead of LISTGROUP, which is
         // infeasible on large groups (e.g., alt.binaries.test has billions).
         var found = repo.DiscoverRemoteManifestsViaIndex(store);
@@ -454,7 +499,7 @@ static int Download(string[] args)
     using var client = ConnectNntp(args);
     try
     {
-        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath);
+        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex);
         DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
         {
             if (done % 25 == 0 || done == total)

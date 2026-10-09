@@ -81,7 +81,7 @@ public sealed class VssSnapshotTests : IDisposable
 
         using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
         {
-            snapshot.Create("C:");
+            snapshot.Create("C:", "C:\\test");
             Assert.NotNull(snapshot.SnapshotPath);
             // No Complete() — Dispose must fail-safe to abort.
         }
@@ -99,7 +99,7 @@ public sealed class VssSnapshotTests : IDisposable
 
         using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
         {
-            snapshot.Create("C:");
+            snapshot.Create("C:", "C:\\test");
             snapshot.Complete(); // Must not throw on exit 0.
         }
 
@@ -119,7 +119,7 @@ public sealed class VssSnapshotTests : IDisposable
 
         using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
         {
-            snapshot.Create("C:");
+            snapshot.Create("C:", "C:\\test");
             var ex = Assert.Throws<InvalidOperationException>(() => snapshot.Complete());
             Assert.Contains("4", ex.Message);
         }
@@ -137,7 +137,7 @@ public sealed class VssSnapshotTests : IDisposable
 
         using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
         {
-            snapshot.Create("C:");
+            snapshot.Create("C:", "C:\\test");
             snapshot.Abort(); // Explicit abort; Dispose afterwards is a no-op.
         }
 
@@ -154,7 +154,7 @@ public sealed class VssSnapshotTests : IDisposable
 
         using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
         {
-            snapshot.Create("C:");
+            snapshot.Create("C:", "C:\\test");
             snapshot.Complete();
         }
 
