@@ -396,4 +396,57 @@ public sealed class Par2RedundancyTests
                 yield return c;
         }
     }
+
+    [Fact]
+    public void GenerateParity_UsesRS2Magic()
+    {
+        var chunks = MakeChunks(10, 1024);
+        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+
+        foreach (var kvp in parity)
+        {
+            Assert.True(kvp.Value.Length >= 4);
+            Assert.Equal((byte)'R', kvp.Value[0]);
+            Assert.Equal((byte)'S', kvp.Value[1]);
+            Assert.Equal((byte)'2', kvp.Value[2]);
+            Assert.Equal((byte)' ', kvp.Value[3]);
+        }
+    }
+
+    [Fact]
+    public void Reconstruct_RejectsRS1Magic()
+    {
+        // RS1 = handmade Vandermonde implementation (pre-57184b4).
+        // Different generator matrix, so RS1 parity is NOT decodable by
+        // the RS2 (ReedSolomonFast) implementation. It must be rejected,
+        // not silently mis-decoded.
+        var chunks = MakeChunks(10, 1024);
+        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+
+        // Corrupt the magic to RS1
+        var rs1Parity = parity.ToDictionary(
+            kvp => kvp.Key,
+            kvp =>
+            {
+                byte[] copy = (byte[])kvp.Value.Clone();
+                copy[2] = (byte)'1';
+                return copy;
+            });
+
+        // Remove one chunk to force reconstruction attempt
+        var remaining = new Dictionary<string, byte[]>(chunks);
+        remaining.Remove(ids[0]);
+
+        var result = Par2Redundancy.Reconstruct(
+            ids,
+            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
+            rs1Parity.Values.ToList());
+
+        // Must fail cleanly (null), not produce garbage
+        Assert.Null(result);
+    }
 }

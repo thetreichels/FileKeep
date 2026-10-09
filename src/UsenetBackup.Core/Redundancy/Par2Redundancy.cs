@@ -12,10 +12,17 @@ namespace UsenetBackup.Core.Redundancy;
 /// original lengths before hash verification.
 ///
 /// Parity data format (each of the 3 parity blocks):
-///   [magic:4] = "RS1 "
+///   [magic:4] = "RS2 "
 ///   [numChunks:4] (little-endian int32)
 ///   [len0:4][len1:4]...[lenN:4] (little-endian int32 each)
 ///   [parity bytes...] (maxLen bytes)
+///
+/// Magic history:
+///   "RS1 " = handmade Vandermonde implementation (2026-10-05 to 2026-10-08).
+///            NOT decodable by this implementation — different generator
+///            matrix. The old code is in git history (pre-57184b4) if needed.
+///   "RS2 " = ReedSolomonFast (Cauchy matrix, Backblaze-compatible).
+///            Current. This is what GenerateParity produces.
 /// </remarks>
 public static class Par2Redundancy
 {
@@ -24,7 +31,7 @@ public static class Par2Redundancy
     /// <summary>Number of parity chunks per group.</summary>
     public const int ParityShards = 3;
 
-    private static readonly byte[] Magic = "RS1 "u8.ToArray();
+    private static readonly byte[] Magic = "RS2 "u8.ToArray();
     private const int HeaderFixedSize = 8; // magic(4) + numChunks(4)
 
     /// <summary>
