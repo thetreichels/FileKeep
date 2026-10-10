@@ -1118,6 +1118,11 @@ public static class DashboardApi
     private static string? _winReBuildError;
     private static string? _winReBuildDrive;
 
+    /// <summary>Per-step progress for the running WinRE USB build.</summary>
+    private static readonly List<Dictionary<string, object>> _winReBuildSteps = new();
+    private static readonly object _winReBuildStepsLock = new();
+    private static DateTime _winReBuildStartedAt;
+
     /// <summary>
     /// Checks prerequisites for WinRE USB creation: Windows, admin rights,
     /// reagentc, DISM, bcdboot, and WinRE enabled with a locatable WIM.
@@ -1235,9 +1240,43 @@ public static class DashboardApi
         return "";
     }
 
-    /// <summary>Current WinRE USB build status for the dashboard.</summary>
-    public static object GetWinReBuildStatus() =>
-        new { status = _winReBuildStatus ?? "idle", error = _winReBuildError ?? "", drive = _winReBuildDrive ?? "" };
+    /// <summary>Current WinRE USB build status for the dashboard, with per-step progress.</summary>
+    public static object GetWinReBuildStatus()
+    {
+        List<Dictionary<string, object>> steps;
+        lock (_winReBuildStepsLock)
+            steps = _winReBuildSteps.Select(s => new Dictionary<string, object>(s)).ToList();
+
+        int percent = 0;
+        int etaSec = 0;
+        string currentStepName = "";
+        foreach (var s in steps)
+        {
+            if (s.TryGetValue("percent", out var pv) && pv is int pi) percent = Math.Max(percent, pi);
+            if (s.TryGetValue("state", out var st) && st as string == "started")
+            {
+                currentStepName = s.TryGetValue("name", out var n) ? n as string ?? "" : "";
+                if (s.TryGetValue("estimatedRemainingSec", out var ev) && ev is int ei) etaSec = ei;
+            }
+        }
+        if ((_winReBuildStatus == "complete")) percent = 100;
+
+        double elapsedSec = _winReBuildStatus == "running"
+            ? (DateTime.UtcNow - _winReBuildStartedAt).TotalSeconds
+            : 0;
+
+        return new
+        {
+            status = _winReBuildStatus ?? "idle",
+            error = _winReBuildError ?? "",
+            drive = _winReBuildDrive ?? "",
+            percent,
+            currentStep = currentStepName,
+            estimatedRemainingSec = etaSec,
+            elapsedSec = (int)elapsedSec,
+            steps,
+        };
+    }
 
     /// <summary>
     /// Starts a WinRE USB build in the background. Returns 202 if accepted.
@@ -1263,6 +1302,11 @@ public static class DashboardApi
         _winReBuildStatus = "running";
         _winReBuildError = null;
         _winReBuildDrive = driveLetter.ToUpperInvariant();
+        lock (_winReBuildStepsLock)
+        {
+            _winReBuildSteps.Clear();
+            _winReBuildStartedAt = DateTime.UtcNow;
+        }
 
         Task.Run(() =>
         {
@@ -1296,11 +1340,20 @@ public static class DashboardApi
                     CreateNoWindow = true,
                 };
                 using var proc = System.Diagnostics.Process.Start(psi)!;
-                string output = proc.StandardOutput.ReadToEnd();
+                // Read stdout line-by-line so FKPROGRESS markers update the
+                // dashboard in real time instead of only at the end.
+                var outputLines = new System.Text.StringBuilder();
+                string? line;
+                while ((line = proc.StandardOutput.ReadLine()) is not null)
+                {
+                    outputLines.AppendLine(line);
+                    if (line.StartsWith("FKPROGRESS:", StringComparison.Ordinal))
+                        ParseWinReProgress(line.Substring("FKPROGRESS:".Length).Trim());
+                }
                 string err = proc.StandardError.ReadToEnd();
                 proc.WaitForExit();
                 if (proc.ExitCode != 0)
-                    throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{output}");
+                    throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{outputLines}");
                 _winReBuildStatus = "complete";
                 OperationLog.Append("", "winre-build", $"drive={driveLetter}: complete");
             }
@@ -1312,6 +1365,47 @@ public static class DashboardApi
             }
         });
         return (202, new { accepted = true });
+    }
+
+    /// <summary>Parses one FKPROGRESS JSON line from build-winre-usb.ps1.</summary>
+    private static void ParseWinReProgress(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            int step = root.GetProperty("step").GetInt32();
+            int totalSteps = root.GetProperty("totalSteps").GetInt32();
+            string name = root.GetProperty("name").GetString() ?? $"Step {step}";
+            string state = root.GetProperty("state").GetString() ?? "";
+            int percent = root.TryGetProperty("percent", out var p) ? p.GetInt32() : 0;
+            int etaSec = root.TryGetProperty("estimatedRemainingSec", out var e) ? e.GetInt32() : 0;
+
+            lock (_winReBuildStepsLock)
+            {
+                // Ensure the list covers all steps seen so far.
+                while (_winReBuildSteps.Count < totalSteps)
+                    _winReBuildSteps.Add(new Dictionary<string, object>
+                    {
+                        ["step"] = _winReBuildSteps.Count + 1,
+                        ["name"] = "",
+                        ["state"] = "pending",
+                    });
+                var entry = _winReBuildSteps[step - 1];
+                entry["name"] = name;
+                entry["state"] = state;
+                entry["percent"] = percent;
+                entry["estimatedRemainingSec"] = etaSec;
+                if (state == "started" && !entry.ContainsKey("startedAt"))
+                    entry["startedAt"] = DateTime.UtcNow.ToString("o");
+                if (state == "completed")
+                    entry["completedAt"] = DateTime.UtcNow.ToString("o");
+            }
+        }
+        catch
+        {
+            // A malformed progress line must not break the build.
+        }
     }
 
     /// <summary>Current LAN server state for the dashboard.</summary>
@@ -2409,9 +2503,16 @@ public static class DashboardHtml
           if (!window.confirm(confirmText)) return;
           try {
             await api('/api/operations/winre-build', { method: 'POST', body: JSON.stringify({ driveLetter, sourceDir: sourceDir || null }) });
-            alert('WinRE USB build started in the background.');
+            checkWinReStatus();
           } catch (e) { alert('Failed: ' + e.message); }
         }
+        function fmtDuration(sec) {
+          sec = Math.max(0, Math.round(sec));
+          if (sec < 60) return sec + 's';
+          const m = Math.floor(sec / 60), s = sec % 60;
+          return m + 'm ' + s + 's';
+        }
+        let winrePollTimer = null;
         async function checkWinReStatus() {
           const el = document.getElementById('winre-status');
           try {
@@ -2419,6 +2520,32 @@ public static class DashboardHtml
             let html = 'Status: <b>' + esc(s.status) + '</b>';
             if (s.drive) html += ' — drive ' + esc(s.drive) + ':';
             if (s.error) html += ' <span style="color:red">' + esc(s.error) + '</span>';
+            if (s.status === 'running') {
+              const pct = s.percent || 0;
+              html += '<div style="margin-top:8px;max-width:420px">'
+                + '<div style="background:var(--bg-2,#e0e0e0);border-radius:4px;height:14px;overflow:hidden">'
+                + '<div style="background:var(--accent,#0078d4);height:100%;width:' + pct + '%;transition:width .5s"></div>'
+                + '</div>'
+                + '<div style="margin-top:4px;color:var(--text-2)">'
+                + pct + '% — ' + esc(s.currentStep || 'working…');
+              if (s.elapsedSec) html += ' (elapsed ' + fmtDuration(s.elapsedSec);
+              if (s.estimatedRemainingSec) html += ', ~' + fmtDuration(s.estimatedRemainingSec) + ' left';
+              if (s.elapsedSec) html += ')';
+              html += '</div></div>';
+              if (s.steps && s.steps.length) {
+                html += '<ol style="margin-top:8px;padding-left:20px">';
+                for (const st of s.steps) {
+                  const icon = st.state === 'completed' ? '✅' : st.state === 'started' ? '⏳' : '⬜';
+                  html += '<li>' + icon + ' ' + esc(st.name || ('Step ' + st.step)) + '</li>';
+                }
+                html += '</ol>';
+              }
+              // Keep polling while running.
+              if (!winrePollTimer) winrePollTimer = setInterval(checkWinReStatus, 3000);
+            } else {
+              if (winrePollTimer) { clearInterval(winrePollTimer); winrePollTimer = null; }
+              if (s.status === 'complete') html += ' <b style="color:green">Done.</b>';
+            }
             el.innerHTML = html;
           } catch (e) { el.textContent = e.message; }
         }

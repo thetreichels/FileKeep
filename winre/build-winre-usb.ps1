@@ -26,6 +26,11 @@
 #   <BinaryDir>\docs\RECOVERY.md
 #
 # WARNING: Destructive — the target USB drive is formatted.
+#
+# Progress reporting: the script emits FKPROGRESS JSON lines to stdout as
+# each step starts and completes, e.g.:
+#   FKPROGRESS: {"step":3,"totalSteps":10,"name":"Mounting winre.wim","state":"started","percent":30}
+# The dashboard parses these to render a progress bar and step list.
 
 param(
     [Parameter(Mandatory=$true)]
@@ -40,13 +45,57 @@ $ErrorActionPreference = "Stop"
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 
+# --- Progress reporting ---
+# Steps with rough time estimates (seconds) for ETA calculation.
+$script:Steps = @(
+    @{ Name = "Checking prerequisites";       EstimateSec = 5   },
+    @{ Name = "Locating WinRE image";          EstimateSec = 10  },
+    @{ Name = "Staging FileKeep binaries";     EstimateSec = 60  },
+    @{ Name = "Disabling WinRE temporarily";   EstimateSec = 15  },
+    @{ Name = "Mounting winre.wim";            EstimateSec = 60  },
+    @{ Name = "Injecting FileKeep tools";      EstimateSec = 30  },
+    @{ Name = "Committing and unmounting";     EstimateSec = 90  },
+    @{ Name = "Formatting USB drive";          EstimateSec = 60  },
+    @{ Name = "Copying boot files and image";  EstimateSec = 120 },
+    @{ Name = "Re-enabling WinRE";             EstimateSec = 15  }
+)
+$script:TotalEstimateSec = ($script:Steps | Measure-Object -Property EstimateSec -Sum).Sum
+$script:CurrentStep = 0
+
+function Write-ProgressStep([int]$step, [string]$state) {
+    $script:CurrentStep = $step
+    $elapsed = 0
+    for ($i = 0; $i -lt $step - 1; $i++) { $elapsed += $script:Steps[$i].EstimateSec }
+    $percent = if ($state -eq "completed") {
+        $e = $elapsed + $script:Steps[$step - 1].EstimateSec
+        [math]::Round($e / $script:TotalEstimateSec * 100)
+    } else {
+        [math]::Round($elapsed / $script:TotalEstimateSec * 100)
+    }
+    $remaining = $script:TotalEstimateSec - $elapsed
+    $obj = @{
+        step = $step
+        totalSteps = $script:Steps.Count
+        name = $script:Steps[$step - 1].Name
+        state = $state
+        percent = $percent
+        estimatedRemainingSec = $remaining
+    } | ConvertTo-Json -Compress
+    # FKPROGRESS marker goes to stdout for the dashboard to parse.
+    Write-Output "FKPROGRESS: $obj"
+}
+function Step-Start([int]$n) { Write-ProgressStep $n "started"; Write-Host "[$n/$($script:Steps.Count)] $($script:Steps[$n-1].Name)..." }
+function Step-Done([int]$n) { Write-ProgressStep $n "completed" }
+
 # --- Preconditions ---
+Step-Start 1
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Fail "Run as Administrator."
 }
 if (-not (Get-Command reagentc.exe -ErrorAction SilentlyContinue)) { Fail "reagentc.exe not found." }
 if (-not (Get-Command dism.exe -ErrorAction SilentlyContinue)) { Fail "dism.exe not found." }
 if (-not (Get-Command bcdboot.exe -ErrorAction SilentlyContinue)) { Fail "bcdboot.exe not found." }
+Step-Done 1
 
 # Normalize drive letter (accept "E", "E:", "E:\")
 $DriveLetter = $DriveLetter.TrimEnd(':', '\')
@@ -66,6 +115,7 @@ Write-Host "=== FileKeep WinRE USB builder ==="
 Write-Host "Target USB: $usbRoot"
 
 # --- Locate WinRE ---
+Step-Start 2
 Write-Host "Locating WinRE..."
 $reInfo = reagentc /info 2>&1 | Out-String
 $wimPath = $null
@@ -97,8 +147,10 @@ if (-not $wimPath -or -not (Test-Path $wimPath)) {
     Fail "Could not locate winre.wim. Ensure WinRE is enabled (reagentc /info)."
 }
 Write-Host "WinRE image: $wimPath"
+Step-Done 2
 
 # --- Stage FileKeep binaries ---
+Step-Start 3
 $stageDir = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre-stage"
 $cliOut = Join-Path $stageDir "cli"
 $wizOut = Join-Path $stageDir "recovery"
@@ -130,8 +182,10 @@ if ($BinaryDir -ne "") {
     if (Test-Path $srcDocs) { Copy-Item $srcDocs $docsOut -Force }
 }
 Write-Host "Staged FileKeep binaries."
+Step-Done 3
 
 # --- Disable WinRE (releases the WIM lock) ---
+Step-Start 4
 $wasEnabled = $reInfo -match 'Enabled'
 if ($wasEnabled) {
     Write-Host "Disabling WinRE temporarily..."
@@ -140,10 +194,12 @@ if ($wasEnabled) {
 } else {
     Write-Host "WinRE already disabled; proceeding."
 }
+Step-Done 4
 
 $winreReenabled = $false
 try {
     # --- Mount the WIM ---
+    Step-Start 5
     Write-Host "Mounting winre.wim..."
     if (Test-Path $MountDir) { Remove-Item $MountDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $MountDir | Out-Null
@@ -152,9 +208,11 @@ try {
     Copy-Item $wimPath $wimCopy -Force
     dism /Mount-Wim /WimFile:$wimCopy /Index:1 /MountDir:$MountDir
     if ($LASTEXITCODE -ne 0) { Fail "DISM mount failed." }
+    Step-Done 5
 
     try {
         # --- Inject FileKeep tools ---
+        Step-Start 6
         Write-Host "Injecting FileKeep recovery tools..."
         $fkDir = Join-Path $MountDir "FileKeep"
         New-Item -ItemType Directory -Force -Path $fkDir | Out-Null
@@ -174,8 +232,10 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
         } else {
             Write-Host "winpeshl.ini already exists; leaving it alone."
         }
+        Step-Done 6
     } finally {
         # --- Commit and unmount ---
+        Step-Start 7
         Write-Host "Committing and unmounting..."
         dism /Unmount-Wim /MountDir:$MountDir /Commit
         if ($LASTEXITCODE -ne 0) {
@@ -183,14 +243,18 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
             dism /Unmount-Wim /MountDir:$MountDir /Discard | Out-Null
             Fail "DISM unmount /commit failed."
         }
+        Step-Done 7
     }
 
     # --- Prepare the USB drive ---
+    Step-Start 8
     Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
     # Use diskpart-free approach: format via Format-Volume, then bcdboot.
     Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
     if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+    Step-Done 8
 
+    Step-Start 9
     Write-Host "Copying boot files..."
     bcdboot C:\Windows /s "$DriveLetter`:" /f UEFI
     if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
@@ -207,8 +271,10 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
     Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
 
     Write-Host "USB build complete."
+    Step-Done 9
 } finally {
     # --- Re-enable WinRE on the host ---
+    Step-Start 10
     if (-not $SkipReenable -and $wasEnabled) {
         Write-Host "Re-enabling WinRE..."
         reagentc /enable | Out-Null
@@ -218,6 +284,8 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
         } else {
             Write-Warning "reagentc /enable failed. Run 'reagentc /enable' manually."
         }
+    }
+    Step-Done 10
     }
     # Cleanup temp files
     Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
