@@ -358,7 +358,6 @@ detach vdisk
         }
     }
     Step-Done 10
-    }
     # Cleanup temp files
     Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     $wimCopy = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre.wim"
