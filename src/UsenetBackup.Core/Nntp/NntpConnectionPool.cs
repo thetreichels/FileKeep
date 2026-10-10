@@ -135,15 +135,55 @@ public sealed class NntpConnectionPool : IDisposable
     public T Use<T>(Func<NntpClient, T> action)
     {
         var client = Acquire();
-        try { return action(client); }
-        finally { Release(client); }
+        bool evicted = false;
+        try
+        {
+            return action(client);
+        }
+        catch (NntpException) when (!evicted)
+        {
+            // The connection died mid-use (server-side kill, idle timeout).
+            // Evict it so the pool doesn't hand out the corpse again, then
+            // retry once with a fresh connection. The semaphore slot stays
+            // held across the swap (Evict does not release).
+            evicted = true;
+            try { client.Dispose(); } catch { }
+            lock (_allClientsLock)
+                _allClients.Remove(client);
+            client = CreateConnectedClient();
+            lock (_allClientsLock)
+                _allClients.Add(client);
+            return action(client);
+        }
+        finally
+        {
+            Release(client);
+        }
     }
 
     public void Use(Action<NntpClient> action)
     {
         var client = Acquire();
-        try { action(client); }
-        finally { Release(client); }
+        bool evicted = false;
+        try
+        {
+            action(client);
+        }
+        catch (NntpException) when (!evicted)
+        {
+            evicted = true;
+            try { client.Dispose(); } catch { }
+            lock (_allClientsLock)
+                _allClients.Remove(client);
+            client = CreateConnectedClient();
+            lock (_allClientsLock)
+                _allClients.Add(client);
+            action(client);
+        }
+        finally
+        {
+            Release(client);
+        }
     }
 
     public void Dispose()

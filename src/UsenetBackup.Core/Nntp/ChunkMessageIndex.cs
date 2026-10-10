@@ -25,6 +25,7 @@ namespace UsenetBackup.Core.Nntp;
 public sealed class ChunkMessageIndex
 {
     private readonly string _path;
+    private readonly object _mapLock = new();
     // providerKey -> (chunkIdHex -> messageId)
     private Dictionary<string, Dictionary<string, string>> _map;
 
@@ -60,9 +61,13 @@ public sealed class ChunkMessageIndex
     public bool TryGetMessageId(string providerKey, string idHex, [NotNullWhen(true)] out string? messageId)
     {
         messageId = null;
-        return providerKey is not null &&
-            _map.TryGetValue(providerKey, out var byId) &&
-            byId.TryGetValue(idHex, out messageId);
+        if (providerKey is null)
+            return false;
+        lock (_mapLock)
+        {
+            return _map.TryGetValue(providerKey, out var byId) &&
+                byId.TryGetValue(idHex, out messageId);
+        }
     }
 
     /// <summary>
@@ -73,12 +78,17 @@ public sealed class ChunkMessageIndex
     public void RecordNewIdentity(string providerKey, string chunkIdHex, string newMessageId)
     {
         ArgumentException.ThrowIfNullOrEmpty(providerKey);
-        if (!_map.TryGetValue(providerKey, out var byChunk))
+        if (!IsValidMessageId(newMessageId))
+            throw new ArgumentException($"Invalid message ID: {newMessageId}", nameof(newMessageId));
+        lock (_mapLock)
         {
-            byChunk = new Dictionary<string, string>();
-            _map[providerKey] = byChunk;
+            if (!_map.TryGetValue(providerKey, out var byChunk))
+            {
+                byChunk = new Dictionary<string, string>();
+                _map[providerKey] = byChunk;
+            }
+            byChunk[chunkIdHex] = newMessageId;
         }
-        byChunk[chunkIdHex] = newMessageId;
         Save();
     }
 
@@ -86,33 +96,69 @@ public sealed class ChunkMessageIndex
     /// True if the chunk has a republished (non-deterministic) identity on
     /// the given provider.
     /// </summary>
-    public bool HasNewIdentity(string providerKey, string chunkIdHex) =>
-        providerKey is not null &&
-        _map.TryGetValue(providerKey, out var byChunk) &&
-        byChunk.ContainsKey(chunkIdHex);
+    public bool HasNewIdentity(string providerKey, string chunkIdHex)
+    {
+        if (providerKey is null)
+            return false;
+        lock (_mapLock)
+        {
+            return _map.TryGetValue(providerKey, out var byChunk) &&
+                byChunk.ContainsKey(chunkIdHex);
+        }
+    }
 
     /// <summary>
     /// Serializes the index to JSON for remote publication. The format
     /// matches the local file format (providerKey -&gt; chunkId -&gt;
     /// messageId), so a recovering machine can deserialize it directly.
     /// </summary>
-    public string ToJson() =>
-        JsonSerializer.Serialize(_map);
+    public string ToJson()
+    {
+        lock (_mapLock)
+        {
+            return JsonSerializer.Serialize(_map);
+        }
+    }
 
     /// <summary>
     /// Replaces the in-memory map with the deserialized remote index and
     /// persists it locally. Used by recovery on a machine that does not
-    /// have the local index file.
+    /// have the local index file. Message IDs are validated: a malicious
+    /// server must not inject CRLF into IDs that get interpolated into
+    /// NNTP commands (STAT {id}).
     /// </summary>
     public void LoadFromJson(string json)
     {
         var map = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json);
-        if (map is not null)
+        if (map is null)
+            return;
+        foreach (var byChunk in map.Values)
+        {
+            foreach (string messageId in byChunk.Values)
+            {
+                if (!IsValidMessageId(messageId))
+                    throw new InvalidDataException(
+                        $"Remote message index contains an invalid message ID: {messageId}");
+            }
+        }
+        lock (_mapLock)
         {
             _map = map;
-            Save();
         }
+        Save();
     }
+
+    /// <summary>
+    /// Message IDs we generate look like &lt;...@usenet-backup&gt;. At minimum,
+    /// an ID interpolated into an NNTP command must not contain CR, LF, or
+    /// whitespace that would split protocol lines.
+    /// </summary>
+    internal static bool IsValidMessageId(string messageId) =>
+        !string.IsNullOrEmpty(messageId) &&
+        messageId.Length <= 256 &&
+        messageId[0] == '<' &&
+        messageId[^1] == '>' &&
+        !messageId.Any(c => c == '\r' || c == '\n' || char.IsWhiteSpace(c));
 
     private Dictionary<string, Dictionary<string, string>> Load()
     {
@@ -148,9 +194,20 @@ public sealed class ChunkMessageIndex
 
     private void Save()
     {
-        string tmp = _path + ".tmp";
-        string json = JsonSerializer.Serialize(_map, new JsonSerializerOptions { WriteIndented = true });
+        // Unique temp name: concurrent saves must not share a temp file.
+        // Snapshot under the lock so serialization sees a consistent map.
+        string json;
+        lock (_mapLock)
+        {
+            json = JsonSerializer.Serialize(_map, new JsonSerializerOptions { WriteIndented = true });
+        }
+        string tmp = _path + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmp, json);
-        File.Move(tmp, _path, overwrite: true);
+        try { File.Move(tmp, _path, overwrite: true); }
+        catch
+        {
+            try { File.Delete(tmp); } catch { }
+            throw;
+        }
     }
 }

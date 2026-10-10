@@ -63,7 +63,12 @@ public sealed class NntpClient : IDisposable
         {
             _tcp = new TcpClient();
             if (!_tcp.ConnectAsync(_host!, _port).Wait(_timeout))
+            {
+                // Don't leak the socket: the pending connect holds it open.
+                _tcp.Dispose();
+                _tcp = null;
                 throw new NntpException($"Timed out connecting to {_host}:{_port}.");
+            }
             _tcp.SendTimeout = (int)_timeout.TotalMilliseconds;
             _tcp.ReceiveTimeout = (int)_timeout.TotalMilliseconds;
 
@@ -177,7 +182,9 @@ public sealed class NntpClient : IDisposable
             throw new NntpException($"LISTGROUP {newsgroup} failed: {code}");
         const int maxArticles = 100_000;
         var result = new List<string>();
-        foreach (string line in ReadMultiline().Split('\n'))
+        // Cap the raw response: 100k lines × ~90 bytes ≈ 9 MB; 16 MB gives
+        // headroom without letting a malicious server OOM us.
+        foreach (string line in ReadMultiline(maxChars: 16 * 1024 * 1024).Split('\n'))
         {
             string t = line.Trim();
             if (t.Length == 0 || t == ".")
@@ -212,6 +219,10 @@ public sealed class NntpClient : IDisposable
 
     private (int Code, string Text) SendCommand(string command)
     {
+        // Defense in depth: never let a CR or LF smuggled into an argument
+        // (e.g. a server-supplied message ID) split into extra protocol lines.
+        if (command.Contains('\r') || command.Contains('\n'))
+            throw new ArgumentException("NNTP command must not contain CR or LF.", nameof(command));
         _writer!.WriteLine(command);
         return ReadResponse();
     }
