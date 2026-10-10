@@ -56,7 +56,7 @@ if (-not $script:ImageMode -and $DriveLetter -eq "") { Fail "Specify -DriveLette
 
 # --- Progress reporting ---
 # Steps with rough time estimates (seconds) for ETA calculation.
-$usbTargetName = if ($script:ImageMode) { "disk image" } else { "USB drive" }
+$step8Name = if ($script:ImageMode) { "Creating disk image" } else { "Formatting USB drive" }
 $script:Steps = @(
     @{ Name = "Checking prerequisites";       EstimateSec = 5   },
     @{ Name = "Locating WinRE image";          EstimateSec = 10  },
@@ -65,7 +65,7 @@ $script:Steps = @(
     @{ Name = "Mounting winre.wim";            EstimateSec = 60  },
     @{ Name = "Injecting FileKeep tools";      EstimateSec = 30  },
     @{ Name = "Committing and unmounting";     EstimateSec = 90  },
-    @{ Name = $(if ($script:ImageMode) { "Creating disk image" } else { "Formatting USB drive" }); EstimateSec = 60  },
+    @{ Name = $step8Name;                       EstimateSec = 60  },
     @{ Name = "Copying boot files and image";  EstimateSec = 120 },
     @{ Name = "Re-enabling WinRE";             EstimateSec = 15  }
 )
