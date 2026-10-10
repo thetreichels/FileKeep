@@ -1480,34 +1480,26 @@ public static class DashboardApi
         try { test.Validate(); }
         catch (Exception ex) { return (400, new { error = ex.Message }); }
 
-        // Apply to the live config.
-        var existing = config.Jobs.FirstOrDefault(j =>
-            j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
-        // Encrypt a supplied SMB password via DPAPI; blank keeps the stored blob.
-        // Note: per-job SMB fields (SmbShare/SmbUser/SmbPasswordProtected) are
-        // legacy — migrated to BackupLocations on config load. New jobs use
-        // location names in Targets; credentials live on the location.
-        string smbPwBlob = existing?.SmbPasswordProtected ?? "";
-        if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
-            smbPwBlob = UsenetBackup.Core.Dpapi.Protect(job.SmbPasswordPlaintext) ?? "";
-        job.SmbPasswordProtected = smbPwBlob;
-        job.SmbPasswordPlaintext = null;
-        if (existing is null)
-            config.Jobs.Add(job);
-        else
+        // Apply to the live config under the Jobs lock. Replace the object
+        // rather than mutating in place: the scheduler may be running a job
+        // with the old config object, and it must see a consistent snapshot.
+        lock (config.JobsLock)
         {
-            existing.Repo = job.Repo;
-            existing.Source = job.Source;
-            existing.Targets = job.Targets;
-            existing.Schedule = job.Schedule;
-            existing.Mode = job.Mode;
-            existing.BackupPrivilege = job.BackupPrivilege;
-            existing.Vss = job.Vss;
-            existing.AutoUpload = job.AutoUpload;
-            existing.AutoVerify = job.AutoVerify;
-            existing.RedundancyMode = job.RedundancyMode;
-            existing.VerificationMode = job.VerificationMode;
-            existing.SmbPasswordProtected = job.SmbPasswordProtected;
+            var existing = config.Jobs.FirstOrDefault(j =>
+                j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
+            // Encrypt a supplied SMB password via DPAPI; blank keeps the stored blob.
+            // Note: per-job SMB fields (SmbShare/SmbUser/SmbPasswordProtected) are
+            // legacy — migrated to BackupLocations on config load. New jobs use
+            // location names in Targets; credentials live on the location.
+            string smbPwBlob = existing?.SmbPasswordProtected ?? "";
+            if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
+                smbPwBlob = UsenetBackup.Core.Dpapi.Protect(job.SmbPasswordPlaintext) ?? "";
+            job.SmbPasswordProtected = smbPwBlob;
+            job.SmbPasswordPlaintext = null;
+            if (existing is null)
+                config.Jobs.Add(job);
+            else
+                config.Jobs[config.Jobs.IndexOf(existing)] = job;
         }
         try
         {
@@ -1530,13 +1522,16 @@ public static class DashboardApi
         BackupScheduler scheduler, string configPath, string name,
         Action<string>? log = null)
     {
-        var existing = config.Jobs.FirstOrDefault(j =>
-            j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (existing is null)
-            return (400, new { error = $"Unknown job '{name}'." });
-        if (config.Jobs.Count == 1)
-            return (400, new { error = "Cannot delete the last backup job. The service requires at least one job." });
-        config.Jobs.Remove(existing);
+        lock (config.JobsLock)
+        {
+            var existing = config.Jobs.FirstOrDefault(j =>
+                j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+                return (400, new { error = $"Unknown job '{name}'." });
+            if (config.Jobs.Count == 1)
+                return (400, new { error = "Cannot delete the last backup job. The service requires at least one job." });
+            config.Jobs.Remove(existing);
+        }
         try
         {
             string json = System.Text.Json.JsonSerializer.Serialize(config,

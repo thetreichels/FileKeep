@@ -288,6 +288,14 @@ public sealed class ServiceConfig
     public List<BackupJobConfig> Jobs { get; set; } = new();
 
     /// <summary>
+    /// Guards concurrent access to <see cref="Jobs"/>. Dashboard HTTP handlers
+    /// and the scheduler run on different threads; all reads and writes of the
+    /// Jobs list must hold this lock.
+    /// </summary>
+    [JsonIgnore]
+    public readonly object JobsLock = new();
+
+    /// <summary>
     /// Named backup destinations (Usenet providers and SMB shares). Jobs
     /// reference these by name in their <c>targets</c>. This replaces the
     /// legacy per-job connection details and the top-level <see cref="Nntp"/>

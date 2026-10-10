@@ -135,7 +135,23 @@ public sealed class BackupScheduler
     private readonly IClock _clock;
     private readonly TimeSpan _pollInterval;
     private readonly Action<string>? _log;
-    private readonly object _runGate = new(); // runs never overlap
+    /// <summary>
+    /// Guards short-lived scheduler state: _jobs, _config, _nntpProviders,
+    /// _lastRetentionCheck, _activeOperationCts, ActiveUpload. Never held
+    /// across a backup, upload, verify, or retention operation (D1).
+    /// </summary>
+    private readonly object _stateLock = new();
+    /// <summary>
+    /// Serializes long-running operations (backup/upload/verify/retention)
+    /// so they never overlap. Does NOT block short state reads: dashboard
+    /// status, ReloadJobs, and the Jobs list stay responsive during a run.
+    /// </summary>
+    private readonly object _operationLock = new();
+    /// <summary>
+    /// CTS for the currently running operation, or null if idle.
+    /// Guarded by _stateLock. Cancelled on service stop (D8).
+    /// </summary>
+    private CancellationTokenSource? _activeOperationCts;
     private IReadOnlyList<NntpConfig> _nntpProviders = Array.Empty<NntpConfig>();
     private ServiceConfig _config;
     private DateTime _lastRetentionCheck = DateTime.MinValue;
@@ -150,7 +166,7 @@ public sealed class BackupScheduler
     {
         get
         {
-            lock (_runGate)
+            lock (_stateLock)
                 return _jobs.ToList();
         }
     }
@@ -179,7 +195,7 @@ public sealed class BackupScheduler
     /// </summary>
     public void ReloadJobs(ServiceConfig config)
     {
-        lock (_runGate)
+        lock (_stateLock)
         {
             var now = _clock.Now;
             _nntpProviders = config.EffectiveProviders;
@@ -187,7 +203,12 @@ public sealed class BackupScheduler
             var oldByName = _jobs.ToDictionary(j => j.Config.Name,
                 StringComparer.OrdinalIgnoreCase);
             _jobs.Clear();
-            foreach (var jc in config.Jobs)
+            // Snapshot the job configs under the Jobs lock: UpsertJob/DeleteJob
+            // may replace the list concurrently (D5).
+            List<BackupJobConfig> jobConfigs;
+            lock (config.JobsLock)
+                jobConfigs = config.Jobs.ToList();
+            foreach (var jc in jobConfigs)
             {
                 var schedule = ScheduleParser.Parse(jc.Schedule);
                 var state = new JobState(jc, schedule, schedule.NextAfter(now));
@@ -208,14 +229,56 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// Begins a long-running operation: creates a CancellationTokenSource for
+    /// it and returns its token. Must be called holding _operationLock.
+    /// </summary>
+    private CancellationToken BeginOperation()
+    {
+        lock (_stateLock)
+        {
+            _activeOperationCts?.Dispose();
+            _activeOperationCts = new CancellationTokenSource();
+            return _activeOperationCts.Token;
+        }
+    }
+
+    /// <summary>
+    /// Ends the current operation, disposing its CTS. Must be called holding
+    /// _operationLock.
+    /// </summary>
+    private void EndOperation()
+    {
+        lock (_stateLock)
+        {
+            _activeOperationCts?.Dispose();
+            _activeOperationCts = null;
+        }
+    }
+
+    /// <summary>
+    /// Cancels the currently running operation, if any. Called on service
+    /// stop so a running job aborts at the next phase boundary (D8).
+    /// </summary>
+    public void CancelActiveOperation()
+    {
+        lock (_stateLock)
+        {
+            _activeOperationCts?.Cancel();
+        }
+    }
+
+    /// <summary>
     /// Main loop: runs until <paramref name="stopping"/> is cancelled.
+    /// When stopping fires, any active operation is cancelled at its next
+    /// phase boundary (D8).
     /// </summary>
     public async Task RunAsync(CancellationToken stopping)
     {
         Log("scheduler started");
+        using var reg = stopping.Register(CancelActiveOperation);
         while (!stopping.IsCancellationRequested)
         {
-            RunDueJobs(_clock.Now);
+            RunDueJobs(_clock.Now, stopping);
             RunRetentionIfDue(_clock.Now);
             try { await Task.Delay(_pollInterval, stopping); }
             catch (OperationCanceledException) { break; }
@@ -235,7 +298,7 @@ public sealed class BackupScheduler
             return;
 
         TimeSpan interval = TimeSpan.FromHours(_config.RetentionCheckIntervalHours);
-        lock (_runGate)
+        lock (_stateLock)
         {
             if (now - _lastRetentionCheck < interval)
                 return;
@@ -254,30 +317,42 @@ public sealed class BackupScheduler
 
     /// <summary>
     /// Manual retention check for a single repo (dashboard operation).
-    /// Serialized against scheduled runs via _runGate.
+    /// Serialized against other long operations via _operationLock; does not
+    /// block short state reads (D1).
     /// </summary>
     public void RunRetentionCheck(string repoPath, bool dryRun)
     {
-        lock (_runGate)
+        CancellationToken token;
+        IReadOnlyList<NntpConfig> providers;
+        lock (_stateLock)
         {
-            var providers = _nntpProviders;
+            providers = _nntpProviders;
             if (providers.Count == 0)
                 throw new InvalidOperationException("No NNTP providers configured.");
-            RunRetentionForRepo(repoPath, providers, dryRun);
+        }
+        lock (_operationLock)
+        {
+            token = BeginOperation();
+            try { RunRetentionForRepo(repoPath, providers, dryRun, token); }
+            finally { EndOperation(); }
         }
     }
 
     /// <summary>
     /// Manual NNTP upload of a backup (dashboard operation).
-    /// Serialized against scheduled runs via _runGate.
+    /// Serialized against other long operations via _operationLock; does not
+    /// block short state reads (D1).
     /// </summary>
     public void UploadBackup(string repoPath, string backupId)
     {
-        lock (_runGate)
+        lock (_operationLock)
         {
-            string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
-            if (string.IsNullOrEmpty(passphrase))
-                throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
+            CancellationToken token = BeginOperation();
+            try
+            {
+                string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+                if (string.IsNullOrEmpty(passphrase))
+                    throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
             // Reuse the per-job upload path with a synthetic job config.
             var job = new BackupJobConfig
             {
@@ -286,7 +361,9 @@ public sealed class BackupScheduler
                 Source = "",
                 AutoUpload = true,
             };
-            UploadToTargets(job, backupId, passphrase);
+            UploadToTargets(job, backupId, passphrase, token);
+            }
+            finally { EndOperation(); }
         }
     }
 
@@ -295,7 +372,9 @@ public sealed class BackupScheduler
     /// </summary>
     public void DownloadFromNzb(string repoPath, string nzbPath, string passphrase)
     {
-        var providers = _nntpProviders;
+        IReadOnlyList<NntpConfig> providers;
+        lock (_stateLock)
+            providers = _nntpProviders;
         if (providers.Count == 0)
             throw new InvalidOperationException("No NNTP providers configured.");
         var nzb = Nntp.NzbParser.ParseFile(nzbPath);
@@ -337,7 +416,9 @@ public sealed class BackupScheduler
     /// </summary>
     private void RunRetentionChecks()
     {
-        var providers = _nntpProviders;
+        IReadOnlyList<NntpConfig> providers;
+        lock (_stateLock)
+            providers = _nntpProviders;
         if (providers.Count == 0)
         {
             Log("retention check skipped: no NNTP providers configured");
@@ -347,7 +428,7 @@ public sealed class BackupScheduler
         // Group jobs by repo to avoid checking the same repo twice.
         // Snapshot under the lock: ReloadJobs mutates _jobs concurrently.
         List<string> repos;
-        lock (_runGate)
+        lock (_stateLock)
         {
             repos = _jobs.Select(j => j.Config.Repo).Distinct().ToList();
         }
@@ -364,7 +445,7 @@ public sealed class BackupScheduler
         }
     }
 
-    private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers, bool dryRun = false)
+    private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers, bool dryRun = false, CancellationToken token = default)
     {
         string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
         if (string.IsNullOrEmpty(passphrase))
@@ -454,51 +535,81 @@ public sealed class BackupScheduler
     /// <summary>
     /// Runs every job whose next-run time has passed. Exposed for tests.
     /// </summary>
-    public void RunDueJobs(DateTime now)
+    public void RunDueJobs(DateTime now, CancellationToken stopping = default)
     {
         List<JobState> due;
-        lock (_runGate)
+        lock (_stateLock)
             due = _jobs.Where(j => j.NextRunLocal <= now).OrderBy(j => j.NextRunLocal).ToList();
         foreach (var job in due)
-            RunOne(job, now);
+        {
+            stopping.ThrowIfCancellationRequested();
+            RunOne(job, now, stopping);
+        }
     }
 
     /// <summary>
     /// Runs a single job immediately, outside its schedule (dashboard "run now").
+    /// The long operation runs under _operationLock; state updates are applied
+    /// afterwards under _stateLock only if the job is still present (D1).
     /// </summary>
     public JobRunResult RunJobNow(string name)
     {
-        JobState job;
-        lock (_runGate)
+        BackupJobConfig config;
+        lock (_stateLock)
         {
-            job = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Unknown job '{name}'.");
-            // Hold the lock for the entire run so a concurrent ReloadJobs
-            // can't swap the job list out from under us.
-            var result = Execute(job.Config, _clock.Now);
-            job.LastResult = result;
-            job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
-            // Re-anchor the schedule so "run now" doesn't cause an immediate re-run.
-            job.NextRunLocal = job.Schedule.NextAfter(_clock.Now);
-            return result;
+            config = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                ?.Config ?? throw new InvalidOperationException($"Unknown job '{name}'.");
         }
+        JobRunResult result;
+        lock (_operationLock)
+        {
+            CancellationToken token = BeginOperation();
+            try { result = Execute(config, _clock.Now, token); }
+            finally { EndOperation(); }
+        }
+        lock (_stateLock)
+        {
+            var job = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (job is not null)
+            {
+                job.LastResult = result;
+                job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
+                // Re-anchor the schedule so "run now" doesn't cause an immediate re-run.
+                job.NextRunLocal = job.Schedule.NextAfter(_clock.Now);
+            }
+        }
+        return result;
     }
 
-    private void RunOne(JobState job, DateTime now)
+    private void RunOne(JobState job, DateTime now, CancellationToken stopping)
     {
         JobRunResult result;
-        lock (_runGate)
-            result = Execute(job.Config, now);
-        job.LastResult = result;
-        job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
-        job.NextRunLocal = job.Schedule.NextAfter(now);
+        lock (_operationLock)
+        {
+            CancellationToken token = BeginOperation();
+            try { result = Execute(job.Config, now, token); }
+            finally { EndOperation(); }
+        }
+        lock (_stateLock)
+        {
+            // The job may have been removed by a concurrent ReloadJobs; only
+            // update state if it's still in the list.
+            if (_jobs.Contains(job))
+            {
+                job.LastResult = result;
+                job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
+                job.NextRunLocal = job.Schedule.NextAfter(now);
+            }
+        }
+        stopping.ThrowIfCancellationRequested();
     }
 
-    private JobRunResult Execute(BackupJobConfig job, DateTime now)
+    private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token)
     {
         Log($"job '{job.Name}': starting");
         try
         {
+            token.ThrowIfCancellationRequested();
             string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
             if (string.IsNullOrEmpty(passphrase))
                 throw new InvalidOperationException(
@@ -511,6 +622,7 @@ public sealed class BackupScheduler
             BackupManifest manifest;
             try
             {
+                token.ThrowIfCancellationRequested();
                 if (job.Mode == "full")
                 {
                     manifest = repo.BackupDirectory(job.Source, snap);
@@ -544,7 +656,9 @@ public sealed class BackupScheduler
             string? autoUploadError = null;
             if (job.EffectiveTargets.Count > 0)
             {
-                try { UploadToTargets(job, manifest.BackupId, passphrase); }
+                token.ThrowIfCancellationRequested();
+                try { UploadToTargets(job, manifest.BackupId, passphrase, token); }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     // Upload failure doesn't fail the backup itself, but it's tracked
@@ -562,6 +676,7 @@ public sealed class BackupScheduler
             string? verifyError = null;
             if (job.AutoVerify)
             {
+                token.ThrowIfCancellationRequested();
                 try
                 {
                     Log($"job '{job.Name}': auto-verifying {manifest.BackupId}...");
@@ -592,6 +707,13 @@ public sealed class BackupScheduler
                 VerifyFailed = verifyFailed,
                 VerifyError = verifyError,
             };
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is not a failure: propagate so the caller can
+            // distinguish "stopped by user/service" from "backup failed".
+            Log($"job '{job.Name}': cancelled");
+            throw;
         }
         catch (Exception ex)
         {
@@ -687,8 +809,9 @@ public sealed class BackupScheduler
     /// doesn't stop the other, but all failures are collected and thrown
     /// together so the caller sees the full picture.
     /// </summary>
-    private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase)
+    private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase, CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         var targets = job.EffectiveTargets;
         var errors = new List<string>();
         foreach (string targetName in targets)
