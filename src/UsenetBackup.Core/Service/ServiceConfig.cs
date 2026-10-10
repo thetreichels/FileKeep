@@ -182,6 +182,14 @@ public sealed class BackupJobConfig
     [JsonPropertyName("vss")]
     public bool Vss { get; set; }
 
+    /// <summary>
+    /// Seconds to hold the VSS snapshot. Backups exceeding this abort when
+    /// the helper times out. Default 7200 (2 hours); raise for very large
+    /// sources. 0 means the helper default.
+    /// </summary>
+    [JsonPropertyName("vssTimeoutSecs")]
+    public int VssTimeoutSecs { get; set; }
+
     /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
     [JsonPropertyName("autoUpload")]
     public bool AutoUpload { get; set; }

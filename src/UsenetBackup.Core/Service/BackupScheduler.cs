@@ -792,7 +792,10 @@ public sealed class BackupScheduler
             string volume = Path.GetPathRoot(Path.GetFullPath(job.Source))
                 ?? throw new InvalidOperationException(
                     $"Job '{job.Name}': cannot determine volume for '{job.Source}'.");
-            var vss = new Recovery.VssSnapshot(helper);
+            // Scale the snapshot hold time: the helper aborts (deleting the
+            // snapshot mid-backup) on timeout. Default 2h; configurable per job.
+            int timeoutSecs = job.VssTimeoutSecs > 0 ? job.VssTimeoutSecs : 7200;
+            var vss = new Recovery.VssSnapshot(helper, timeoutSecs);
             vss.Create(volume, job.Source);
             return vss;
         }

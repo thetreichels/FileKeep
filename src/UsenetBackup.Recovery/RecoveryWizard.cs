@@ -591,6 +591,10 @@ public sealed class RecoveryWizard : Form
                 var result = new List<(string BackupId, BackupManifest Manifest)>();
                 foreach (string id in ids)
                 {
+                    // Validate server-supplied IDs: must be 32-hex. A malicious
+                    // server must not abort discovery (or worse) with one bad ID.
+                    if (id.Length != 32 || !id.All(c => Uri.IsHexDigit(c)))
+                        continue;
                     string? json = store.GetManifestJson(id);
                     if (json is null) continue;
                     // Check if already local

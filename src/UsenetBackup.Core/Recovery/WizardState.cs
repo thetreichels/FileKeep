@@ -287,13 +287,19 @@ public sealed class WizardState : IDisposable
     /// <summary>
     /// Validates a drive selection for disk restore. The drive must come from
     /// <see cref="ListPhysicalDrives"/> (not free-typed). The UI confirms via
-    /// a native TaskDialog before calling this.
+    /// a native TaskDialog before calling this. System drives require explicit
+    /// opt-in via <paramref name="allowSystemDrive"/>.
     /// </summary>
-    public void RestoreDiskToDrive(PhysicalDriveInfo drive, Action<int, int>? progress = null)
+    public void RestoreDiskToDrive(PhysicalDriveInfo drive, Action<int, int>? progress = null,
+        bool allowSystemDrive = false)
     {
         if (SelectedBackupId is null)
             throw new InvalidOperationException("Select a backup first.");
         ArgumentNullException.ThrowIfNull(drive);
+        if (drive.IsSystemDrive && !allowSystemDrive)
+            throw new InvalidOperationException(
+                $"Refusing to restore to {drive.DevicePath}: it hosts the running Windows installation. " +
+                "If you are sure, confirm explicitly.");
         EnsureSmbChunks(progress);
         OpenRepo().RestoreDiskImage(SelectedBackupId, drive.DevicePath);
     }
@@ -322,14 +328,14 @@ public sealed class WizardState : IDisposable
     {
         if (SelectedBackupId is null)
             return false;
-        var manifest = OpenRepo().ListBackups()
-            .FirstOrDefault(b => b.BackupId == SelectedBackupId);
-        // BackupSummary doesn't carry kind; load the manifest for certainty.
-        // For the wizard's purposes, check via the manifest file directly.
-        string manifestPath = Path.Combine(RepoPath, "manifests", SelectedBackupId + ".json");
-        if (!File.Exists(manifestPath))
+        try
+        {
+            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
+            return manifest.IsDiskImage;
+        }
+        catch
+        {
             return false;
-        string json = File.ReadAllText(manifestPath);
-        return json.Contains("\"kind\":\"disk-image\"") || json.Contains("\"kind\": \"disk-image\"");
+        }
     }
 }

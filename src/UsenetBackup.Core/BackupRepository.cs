@@ -1342,6 +1342,9 @@ public sealed class BackupRepository : IDisposable
     public void Restore(string backupId, string destDir)
     {
         var manifest = LoadManifest(backupId);
+        if (manifest.IsDiskImage)
+            throw new InvalidOperationException(
+                $"Backup {backupId} is a disk image; use RestoreDiskImage to write it to a device, not file restore.");
         var errors = new List<string>();
         RestoreOrVerify(manifest, destDir, verifyOnly: false, errors);
         OperationLog.Append(_root, "restore",

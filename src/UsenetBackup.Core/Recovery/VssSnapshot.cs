@@ -76,18 +76,18 @@ public sealed class VssSnapshot : UsenetBackup.Core.ISnapshotProvider
         var psi = new ProcessStartInfo
         {
             FileName = _helperPath,
-            // NOTE: volume is intentionally NOT quoted. Path.GetPathRoot
-            // returns e.g. "C:\" — quoting it as "C:\" would place a
-            // backslash before the closing quote, which CommandLineToArgvW
-            // interprets as an escaped literal quote, mangling the argument.
-            // A volume root never contains spaces, so no quoting is needed.
-            Arguments = $"--volume {volume} --timeout {_timeoutSecs}",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardInput = true,
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
+        // ArgumentList avoids quoting pitfalls (a "C:\" volume root would
+        // mangle CommandLineToArgvW if quoted in an Arguments string).
+        psi.ArgumentList.Add("--volume");
+        psi.ArgumentList.Add(volume);
+        psi.ArgumentList.Add("--timeout");
+        psi.ArgumentList.Add(_timeoutSecs.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
         _process = Process.Start(psi)
             ?? throw new InvalidOperationException("Failed to start VSS helper.");
