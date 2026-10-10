@@ -54,7 +54,7 @@ public sealed class ServiceTests : IDisposable
           "jobs": [
             { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
               "source": "{{_srcDir.Replace("\\", "\\\\")}}",
-              "schedule": "{{schedule}}", "mode": "{{mode}}", "backup-privilege": false }
+              "schedule": "{{schedule}}", "mode": "{{mode}}", "backupPrivilege": false }
           ]
         }
         """;
