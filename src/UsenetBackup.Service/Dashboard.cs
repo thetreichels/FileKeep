@@ -241,6 +241,23 @@ public static class Dashboard
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/operations/winre-prerequisites", () =>
+            Results.Json(DashboardApi.CheckWinRePrerequisites()));
+
+        app.MapGet("/api/operations/winre-build-status", () =>
+            Results.Json(DashboardApi.GetWinReBuildStatus()));
+
+        app.MapPost("/api/operations/winre-build", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string driveLetter = body.GetProperty("driveLetter").GetString() ?? "";
+            string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, sourceDir);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/operations/lan-server/start", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -1096,6 +1113,207 @@ public static class DashboardApi
         return (202, new { accepted = true });
     }
 
+    /// <summary>WinRE USB build state.</summary>
+    private static string? _winReBuildStatus;
+    private static string? _winReBuildError;
+    private static string? _winReBuildDrive;
+
+    /// <summary>
+    /// Checks prerequisites for WinRE USB creation: Windows, admin rights,
+    /// reagentc, DISM, bcdboot, and WinRE enabled with a locatable WIM.
+    /// ADK is NOT required.
+    /// </summary>
+    public static object CheckWinRePrerequisites()
+    {
+        var result = new Dictionary<string, object>();
+        result["isWindows"] = OperatingSystem.IsWindows();
+        if (!OperatingSystem.IsWindows())
+        {
+            result["ready"] = false;
+            result["error"] = "WinRE USB creation requires Windows.";
+            return result;
+        }
+        bool isAdmin = false;
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            isAdmin = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch { }
+        result["isAdmin"] = isAdmin;
+
+        bool hasReagentc = FindSystemTool("reagentc.exe") is not null;
+        bool hasDism = FindSystemTool("dism.exe") is not null;
+        bool hasBcdboot = FindSystemTool("bcdboot.exe") is not null;
+        result["reagentc"] = hasReagentc;
+        result["dism"] = hasDism;
+        result["bcdboot"] = hasBcdboot;
+
+        // Check WinRE status via reagentc /info
+        bool winReEnabled = false;
+        string winReLocation = "";
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "reagentc.exe",
+                Arguments = "/info",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            };
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(10000);
+            winReEnabled = output.Contains("Enabled", StringComparison.OrdinalIgnoreCase) &&
+                           !output.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
+            foreach (var line in output.Split('\n'))
+            {
+                if (line.Contains("Windows RE location:", StringComparison.OrdinalIgnoreCase))
+                {
+                    winReLocation = line.Split(':', 2)[1].Trim();
+                    break;
+                }
+            }
+        }
+        catch { }
+        result["winReEnabled"] = winReEnabled;
+        result["winReLocation"] = winReLocation;
+
+        // Check for the build script (installed layout or source tree)
+        string scriptPath = FindWinReScript();
+        result["scriptFound"] = !string.IsNullOrEmpty(scriptPath);
+
+        var missing = new List<string>();
+        if (!isAdmin) missing.Add("Administrator rights");
+        if (!hasReagentc) missing.Add("reagentc.exe");
+        if (!hasDism) missing.Add("dism.exe");
+        if (!hasBcdboot) missing.Add("bcdboot.exe");
+        if (!winReEnabled) missing.Add("WinRE enabled (reagentc /info)");
+        if (string.IsNullOrEmpty(scriptPath)) missing.Add("build-winre-usb.ps1");
+
+        result["ready"] = missing.Count == 0;
+        result["missing"] = missing;
+        return result;
+    }
+
+    private static string? FindSystemTool(string name)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "where.exe",
+                Arguments = name,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            };
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+            var first = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+            return string.IsNullOrEmpty(first) ? null : first;
+        }
+        catch { return null; }
+    }
+
+    private static string FindWinReScript()
+    {
+        // Installed layout: <base>/winre/build-winre-usb.ps1
+        string installed = Path.Combine(AppContext.BaseDirectory, "winre", "build-winre-usb.ps1");
+        if (File.Exists(installed)) return installed;
+        // Source tree: walk up from base directory
+        string? dir = Path.GetDirectoryName(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            string candidate = Path.Combine(dir, "winre", "build-winre-usb.ps1");
+            if (File.Exists(candidate)) return candidate;
+            dir = Path.GetDirectoryName(dir);
+        }
+        return "";
+    }
+
+    /// <summary>Current WinRE USB build status for the dashboard.</summary>
+    public static object GetWinReBuildStatus() =>
+        new { status = _winReBuildStatus ?? "idle", error = _winReBuildError ?? "", drive = _winReBuildDrive ?? "" };
+
+    /// <summary>
+    /// Starts a WinRE USB build in the background. Returns 202 if accepted.
+    /// Destructive: the target USB drive is formatted.
+    /// </summary>
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string? sourceDir)
+    {
+        if (!OperatingSystem.IsWindows())
+            return (400, new { error = "WinRE USB creation requires Windows." });
+        if (_winReBuildStatus == "running")
+            return (400, new { error = "A WinRE build is already running." });
+        driveLetter = driveLetter.Trim().TrimEnd(':', '\\');
+        if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
+            return (400, new { error = "driveLetter must be a single drive letter (e.g. E)." });
+
+        var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
+        if (prereq is null || !(prereq.TryGetValue("ready", out var readyObj) && readyObj is bool ready && ready))
+        {
+            var missing = prereq?.TryGetValue("missing", out var m) == true ? m : "prerequisites not met";
+            return (400, new { error = $"Prerequisites not met: {missing}" });
+        }
+
+        _winReBuildStatus = "running";
+        _winReBuildError = null;
+        _winReBuildDrive = driveLetter.ToUpperInvariant();
+
+        Task.Run(() =>
+        {
+            try
+            {
+                string scriptPath = FindWinReScript();
+                if (string.IsNullOrEmpty(scriptPath))
+                    throw new FileNotFoundException("build-winre-usb.ps1 not found.");
+
+                // In the installed layout, use binary mode.
+                bool isInstalledLayout = scriptPath.StartsWith(
+                    Path.Combine(AppContext.BaseDirectory, "winre"),
+                    StringComparison.OrdinalIgnoreCase);
+                string binaryDirArg = "";
+                if (isInstalledLayout)
+                {
+                    string? installRoot = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
+                    if (installRoot is not null)
+                        binaryDirArg = $" -BinaryDir \"{installRoot}\"";
+                }
+
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -DriveLetter \"{driveLetter}\"" +
+                        binaryDirArg +
+                        (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using var proc = System.Diagnostics.Process.Start(psi)!;
+                string output = proc.StandardOutput.ReadToEnd();
+                string err = proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+                if (proc.ExitCode != 0)
+                    throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{output}");
+                _winReBuildStatus = "complete";
+                OperationLog.Append("", "winre-build", $"drive={driveLetter}: complete");
+            }
+            catch (Exception ex)
+            {
+                _winReBuildStatus = "failed";
+                _winReBuildError = ex.Message;
+                OperationLog.Append("", "winre-build", $"drive={driveLetter}: FAILED: {ex.Message}");
+            }
+        });
+        return (202, new { accepted = true });
+    }
+
     /// <summary>Current LAN server state for the dashboard.</summary>
     public static object GetLanServerStatus() =>
         new { running = _lanServer?.IsRunning == true, port = _lanServer?.Port ?? 0 };
@@ -1648,6 +1866,23 @@ public static class DashboardHtml
                 </div>
               </div>
               <div class="card">
+                <div class="name">Build WinRE USB (ADK-free)</div>
+                <div class="meta">Create a bootable FileKeep recovery USB directly from the host's WinRE image. No ADK required. Requires Administrator rights. Destructive — the USB drive is formatted.</div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinRePrereqs()">Check prerequisites</button>
+                  <span id="winre-prereq" style="margin-left:8px"></span>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <input id="winre-drive" placeholder="Drive letter (e.g. E)" style="width:160px">
+                  <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
+                  <button class="danger" onclick="startWinReBuild()">Build USB</button>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinReStatus()">Check build status</button>
+                  <span id="winre-status" style="margin-left:8px"></span>
+                </div>
+              </div>
+              <div class="card">
                 <div class="name">Recovery USB</div>
                 <div class="meta">Write a WinPE ISO to a USB drive. Destructive — all data on the drive is destroyed.</div>
                 <div class="row" style="margin-top:8px">
@@ -2149,6 +2384,40 @@ public static class DashboardHtml
             const s = await api('/api/operations/winpe-build-status');
             let html = 'Status: <b>' + esc(s.status) + '</b>';
             if (s.isoPath) html += ' — ' + esc(s.isoPath);
+            if (s.error) html += ' <span style="color:red">' + esc(s.error) + '</span>';
+            el.innerHTML = html;
+          } catch (e) { el.textContent = e.message; }
+        }
+        async function checkWinRePrereqs() {
+          const el = document.getElementById('winre-prereq');
+          el.textContent = 'Checking…';
+          try {
+            const p = await api('/api/operations/winre-prerequisites');
+            if (p.ready) {
+              el.innerHTML = '<b style="color:green">Ready</b> — WinRE enabled, no ADK needed.';
+            } else {
+              const missing = (p.missing || []).map(esc).join(', ');
+              el.innerHTML = '<b style="color:red">Not ready:</b> ' + missing;
+            }
+          } catch (e) { el.textContent = e.message; }
+        }
+        async function startWinReBuild() {
+          const driveLetter = document.getElementById('winre-drive').value.trim();
+          const sourceDir = document.getElementById('winre-src').value.trim();
+          if (!driveLetter) { alert('Enter a drive letter (e.g. E).'); return; }
+          const confirmText = 'Build WinRE USB on drive ' + driveLetter + ':? This FORMATS the drive — all data is destroyed.';
+          if (!window.confirm(confirmText)) return;
+          try {
+            await api('/api/operations/winre-build', { method: 'POST', body: JSON.stringify({ driveLetter, sourceDir: sourceDir || null }) });
+            alert('WinRE USB build started in the background.');
+          } catch (e) { alert('Failed: ' + e.message); }
+        }
+        async function checkWinReStatus() {
+          const el = document.getElementById('winre-status');
+          try {
+            const s = await api('/api/operations/winre-build-status');
+            let html = 'Status: <b>' + esc(s.status) + '</b>';
+            if (s.drive) html += ' — drive ' + esc(s.drive) + ':';
             if (s.error) html += ' <span style="color:red">' + esc(s.error) + '</span>';
             el.innerHTML = html;
           } catch (e) { el.textContent = e.message; }

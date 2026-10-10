@@ -25,6 +25,7 @@
         <Directory Id="WIZARDDIR" Name="wizard" />
         <Directory Id="DOCSDIR" Name="docs" />
         <Directory Id="WINPEDIR" Name="winpe" />
+        <Directory Id="WINREDIR" Name="winre" />
       </Directory>
     </StandardDirectory>
 
@@ -93,12 +94,21 @@
       </Component>
     </ComponentGroup>
 
+    <!-- WinRE USB build script (used by the dashboard's WinRE USB GUI; ADK-free) -->
+    <ComponentGroup Id="WinREFiles" Directory="WINREDIR">
+      <Component Id="WinREBuildScript" Guid="*">
+        <File Source="$(var.SrcRoot)\winre\build-winre-usb.ps1" Name="build-winre-usb.ps1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveWinREDir" Directory="WINREDIR" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
     <Feature Id="ProductFeature" Title="FileKeep" Level="1">
       <ComponentGroupRef Id="CliFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />
       <ComponentGroupRef Id="WinPEFiles" />
+      <ComponentGroupRef Id="WinREFiles" />
     </Feature>
 
     <!-- Add/Remove Programs icon -->
