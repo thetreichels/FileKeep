@@ -6,13 +6,16 @@
 
 [![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
-[![Tests](https://img.shields.io/badge/tests-194%2F194-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-286-blue.svg)]()
 
 ## What it does
 
 - **Full and incremental backups** of directories and whole disks, with content-defined chunking and cross-backup deduplication
 - **Client-side authenticated encryption** (AES-256-GCM) — the passphrase never leaves your machine and is never stored with the backup data
 - **Usenet as storage** — chunks are posted as yEnc articles to any NNTP provider; NZB indexes track them
+- **Volume packing** — encrypted chunks are packed into deterministic 32 MiB volumes at upload time, so one NNTP article carries many chunks (`init --volume-size` tunes it, `nntp-upload --no-volumes` restores one-article-per-chunk)
+- **Upload preflight** — `nntp-check --probe-post-size auto` binary-searches a provider's article-size ceiling, and every upload proves the provider will accept the largest planned volume *before* posting anything
+- **SMB targets** — mirror a repository to an SMB share (your NAS) with `smb-sync`; the recovery wizard restores straight from the share, no Usenet round-trip
 - **Volume Shadow Copy (VSS)** snapshots for point-in-time backups of open and locked files — available via `backup --vss` and per scheduled job (`"vss": true` in service config)
 - **Reed–Solomon parity** for recovery from damaged or missing articles
 - **Retention management** — monitors article age against provider retention and reposts with fresh identities before articles expire
@@ -57,7 +60,7 @@ FileKeep.exe verify C:\backups\repo2 <backup-id>
 FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `smb-sync`, `expiration-check`, `list`.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues; `--probe-post-size auto` finds the provider's article-size ceiling before you upload), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `smb-sync`, `expiration-check`, `list`.
 
 Backing up locked files (databases, Outlook PSTs, etc.):
 
@@ -85,6 +88,8 @@ FileKeep.exe backup C:\backups\repo C:\data --vss
 
 Build bootable recovery media from the dashboard (**Recovery** → **Build WinRE recovery media**) or with `winre\build-winre-usb.ps1` (run as admin, no ADK required). The script formats the target USB drive and installs the customized WinRE image with FileKeep tools.
 
+Boot mode defaults to `Both` — an MBR-partitioned FAT32 volume that boots legacy BIOS and UEFI machines (override with `-BootMode UEFI` or `-BootMode BIOS`). With `-ImagePath C:\path\filekeep-recovery.vhdx` the builder writes a bootable disk image file instead of touching a USB drive — handy for Hyper-V or for writing the image later with another tool. The dashboard exposes the same choice with live progress, percent, ETA, and a step checklist.
+
 Only USB-attached drives are eligible targets; the command refuses fixed drives, checks the ISO fits, and declines when stdin isn't interactive (unless `--yes`).
 
 ## How it works
@@ -92,7 +97,7 @@ Only USB-attached drives are eligible targets; the command refuses fixed drives,
 1. **Chunk** — files are split into content-defined chunks (~4 MB default), hashed with SHA-256; identical chunks across backups are stored once
 2. **Encrypt** — each chunk is encrypted with AES-256-GCM under a key derived from your passphrase (PBKDF2-HMAC-SHA-512, 600k iterations)
 3. **Parity** — Reed–Solomon parity shards are generated per chunk group for damage recovery
-4. **Post** — chunks go up as yEnc NNTP articles with deterministic message-IDs; uploads resume after interruption via a local journal plus server STAT checks
+4. **Post** — encrypted chunks are packed into deterministic 32 MiB volumes and posted as yEnc NNTP articles (one article per volume) with deterministic message-IDs; uploads resume after interruption via a local journal plus server STAT checks, and preflight proves the provider accepts the largest volume before anything is posted
 5. **Index** — an NZB 1.1 file maps chunks to articles; the encrypted manifest is also posted so the recovery wizard can discover backups newer than your USB stick
 6. **Retain** — a retention manager periodically STATs a sample of articles (default 10 per backup — a lightweight health check, not a proof that every article survives) against provider retention. If any sampled article is missing or the backup nears expiry, *all* chunks are republished under fresh message-IDs before the retention clock resets; a partial failure leaves the old timestamp in place so the next run retries
 7. **Restore** — download via NZB, per-chunk authentication and hash verification, decrypt, reassemble; `verify` proves integrity independently of the backup that created it
@@ -102,7 +107,7 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 ## Security model
 
 - **Passphrase handling.** The key is derived at runtime and zeroed on dispose; it is never written to the repository. Prefer the `USENETBACKUP_PASSPHRASE` environment variable or the interactive prompt — `--passphrase` on the command line is visible in the process list (the CLI warns about this).
-- **What's public.** Chunk message-IDs embed the SHA-256 of the plaintext chunk (required for content addressing and dedup). Ciphertext is safe, but anyone with an NZB can confirm guesses about plaintext. Filenames are plaintext in manifests (a v1 tradeoff for independent verifiability). There is no forward secrecy: a compromised passphrase decrypts all past Usenet posts.
+- **What's public.** Chunk message-IDs embed the SHA-256 of the plaintext chunk (required for content addressing and dedup). Volume articles embed the SHA-256 of the packed volume bytes instead — still deterministic, so the guess-confirmation caveat applies to volume-packed uploads too. Ciphertext is safe, but anyone with an NZB can confirm guesses about plaintext. Filenames are plaintext in manifests (a v1 tradeoff for independent verifiability). There is no forward secrecy: a compromised passphrase decrypts all past Usenet posts.
 - **Dashboard.** Binds to loopback only. NNTP passwords are stored via Windows DPAPI and never exposed to the UI.
 - **Destructive commands.** `restore-disk` overwrites a block device; it requires typing the device path to confirm (or `--yes` for scripts).
 - **Dependencies.** `dotnet list package --vulnerable` is clean (SQLitePCLRaw CVE-2025-6965 patched via upgrade to 2.1.12).
@@ -113,13 +118,14 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 
 - [`docs/RECOVERY.md`](docs/RECOVERY.md) — bare-metal recovery runbook
 - [`docs/VSS-DESIGN.md`](docs/VSS-DESIGN.md) — VSS snapshot lifecycle design
+- [`docs/VOLUME-PACKER-DESIGN.md`](docs/VOLUME-PACKER-DESIGN.md) — volume packing format and upload policy
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — where the project is headed
 
 ## Development
 
 ```sh
 dotnet build FileKeep.slnx
-dotnet test FileKeep.slnx   # 194/194 on Windows
+dotnet test FileKeep.slnx   # 286 tests; suite validated green on Windows
 ```
 
 The core engine builds and tests cross-platform; Windows-only paths (backup privilege, VSS helper, service hosting, WiX installer) need a Windows 10/11 machine. The service also runs in `--console` mode on any OS for development.
@@ -134,7 +140,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), and the WinRE recovery environment are implemented and tested.
+FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, and the WinRE recovery environment are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 

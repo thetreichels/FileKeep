@@ -1,7 +1,6 @@
 # Volume Packer — Design
 
-Status: approved for implementation (user: "Yes, build the volume packer", 2026-10-09).
-Branch: `volume-packer`.
+Status: implemented; merged to main 2026-10-09 (commits `110a77c`, `29812d5`, `6006247`).
 
 ## Goal
 

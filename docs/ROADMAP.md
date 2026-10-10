@@ -9,7 +9,7 @@ production-ready.
 
 ## 1. System-Image Consistency Strategy
 
-**Status:** Open engineering problem
+**Status:** Mechanism implemented (2026-10-09/10); acceptance criteria still open
 **Blocks:** Bare-metal image restore being called production-ready
 
 ### Problem
@@ -33,8 +33,14 @@ The product must clearly distinguish three different guarantees:
    writers) before the snapshot. Databases, mail stores, etc. are in a
    clean state.
 
-Today FileKeep does not achieve any of these for a live system disk. It must
-not claim to until the mechanism exists.
+Today FileKeep has a genuine snapshot mechanism: the native `FileKeepVss.exe`
+helper implements the full VSS lifecycle (`GatherWriterMetadata` →
+`PrepareForBackup` → `DoSnapshotSet` → `BackupComplete`/`AbortBackup`, so
+writers like SQL Server are never left in a dangling backup state) and is
+wired into `backup --vss`, scheduled jobs (`"vss": true`, mutually exclusive
+with `backupPrivilege`), and a dashboard checkbox. What remains is proving
+the acceptance criteria below on real hardware — and the product must still
+not claim a consistency level it has not demonstrated end to end.
 
 ### Possible approaches
 
@@ -118,7 +124,7 @@ The fast path stays for performance. What is missing:
 
 ## 3. Usenet Retention Management
 
-**Status:** Open engineering problem — needs to become a first-class subsystem
+**Status:** Implemented (2026-10-09/10); dashboard retention-health view still open
 **Blocks:** The original product vision
 
 ### Problem
@@ -134,9 +140,15 @@ FileKeep has excellent building blocks:
 - Upload dates, expiration information
 - NZB generation, remote discovery
 
-But the **retention/republication engine** — the subsystem that keeps
-backups alive — does not yet exist as a designed component. Without it,
-backups silently expire.
+The **retention/republication engine** — the subsystem that keeps backups
+alive — now exists as a designed component. A retention manager STAT-samples
+articles per backup against provider retention and republishes missing or
+aging articles under fresh message-IDs (timestamp + nonce, since servers
+reject duplicate IDs), updating the manifest index; when local chunks are
+gone it falls back to server-downloaded bytes, and a partial failure leaves
+the old timestamp in place so the next run retries. What remains is
+surfacing retention health in the dashboard (the last open acceptance
+criterion below).
 
 ### Intended lifecycle
 
@@ -187,13 +199,14 @@ Determine remaining retention
 
 ### Acceptance criteria
 
-- [ ] Retention monitor subsystem designed and implemented
-- [ ] Article availability verified against the provider, not just computed
+- [x] Retention monitor subsystem designed and implemented
+- [x] Article availability verified against the provider, not just computed
   from dates
-- [ ] Reposting updates manifest indexes atomically
+- [x] Reposting updates manifest indexes atomically
 - [ ] Dashboard shows retention health per backup (days remaining, articles
   reposted)
-- [ ] Test: simulated expiry triggers repost and index update
+- [x] Test: simulated expiry triggers repost and index update
+  (`RetentionManagerTests`)
 
 ---
 
