@@ -61,6 +61,17 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
+    public void SmbDiscovery_GetScanTargets_DoesNotThrow()
+    {
+        // Depends on real NICs; just verify it enumerates without throwing
+        // and only yields IPv4 addresses.
+        foreach (var ip in SmbDiscovery.GetScanTargets().Take(10))
+        {
+            Assert.Equal(System.Net.Sockets.AddressFamily.InterNetwork, ip.AddressFamily);
+        }
+    }
+
+    [Fact]
     public void SmbSync_CopiesChunksManifestsAndRepoJson()
     {
         // Build a fake repo.

@@ -59,6 +59,8 @@ public sealed class RecoveryWizard : Form
     private readonly TextBox _smbShare = new();
     private readonly TextBox _smbUser = new();
     private readonly TextBox _smbPassword = new();
+    private readonly Button _scanSmb = new();
+    private readonly ListBox _smbResults = new();
 
     // Page 4: download
     private readonly TextBox _nzbPath = new();
@@ -479,6 +481,21 @@ public sealed class RecoveryWizard : Form
         _checkSmb.Click += CheckSmb_Click;
         p.Controls.Add(_checkSmb);
 
+        // Network scan: find SMB hosts/shares on the local subnet
+        _scanSmb.Text = "Scan network for shares…";
+        _scanSmb.Location = new Point(16, 456);
+        _scanSmb.Size = new Size(180, 28);
+        _scanSmb.Click += ScanSmb_Click;
+        p.Controls.Add(_scanSmb);
+        _smbResults.Location = new Point(204, 456);
+        _smbResults.Size = new Size(372, 60);
+        _smbResults.SelectedIndexChanged += (_, _) =>
+        {
+            if (_smbResults.SelectedItem is SmbShareView v)
+                _smbShare.Text = v.Unc;
+        };
+        p.Controls.Add(_smbResults);
+
         _backupList.SelectedIndexChanged += (_, _) =>
         {
             if (_backupList.SelectedItem is BackupSummaryView b)
@@ -492,6 +509,11 @@ public sealed class RecoveryWizard : Form
     private sealed record BackupSummaryView(string BackupId, string Type, string Source, DateTime CreatedUtc)
     {
         public override string ToString() => $"{CreatedUtc:u}  [{Type}]  {BackupId[..8]}… ({Source})";
+    }
+
+    private sealed record SmbShareView(string Unc, string Display)
+    {
+        public override string ToString() => Display;
     }
 
     private async void CheckRemote_Click(object? sender, EventArgs e)
@@ -689,6 +711,58 @@ public sealed class RecoveryWizard : Form
         {
             _checkSmb.Enabled = true;
             _smbPassword.Text = ""; // never retain the password in the UI
+        }
+    }
+
+    private async void ScanSmb_Click(object? sender, EventArgs e)
+    {
+        _scanSmb.Enabled = false;
+        _smbResults.Items.Clear();
+        _smbResults.Items.Add("Scanning local network for SMB shares…");
+        try
+        {
+            var discovery = new UsenetBackup.Core.SmbDiscovery();
+            var hosts = await Task.Run(() => discovery.DiscoverAsync(
+                (done, total) => BeginInvoke(() =>
+                {
+                    if (_smbResults.Items.Count > 0)
+                        _smbResults.Items[0] = $"Scanning… {done}/{total} addresses";
+                })));
+            _smbResults.Items.Clear();
+            int shareCount = 0;
+            foreach (var host in hosts)
+            {
+                string label = host.HostName is not null
+                    ? $"{host.HostName} ({host.HostAddress})"
+                    : host.HostAddress;
+                if (!host.SharesListed)
+                {
+                    _smbResults.Items.Add($"{label} — reachable, share list needs credentials");
+                    continue;
+                }
+                foreach (var share in host.Shares)
+                {
+                    string unc = $@"\\{host.HostAddress}\{share.ShareName}";
+                    string display = string.IsNullOrEmpty(share.Remark) ? unc : $"{unc} — {share.Remark}";
+                    _smbResults.Items.Add(new SmbShareView(unc, display));
+                    shareCount++;
+                }
+            }
+            if (hosts.Count == 0)
+                _smbResults.Items.Add("No SMB hosts found on the local network.");
+            else if (shareCount == 0)
+                SetStatus($"Found {hosts.Count} SMB host(s), but no visible shares. Enter the share path manually.");
+            else
+                SetStatus($"Found {shareCount} share(s). Select one to fill the share field.");
+        }
+        catch (Exception ex)
+        {
+            _smbResults.Items.Clear();
+            _smbResults.Items.Add("Scan failed: " + ex.Message);
+        }
+        finally
+        {
+            _scanSmb.Enabled = true;
         }
     }
 
