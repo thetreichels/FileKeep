@@ -42,7 +42,14 @@ public static class Dashboard
             if (!DashboardApi.IsKnownJob(scheduler, name))
                 return Results.NotFound(new { error = $"Unknown job '{name}'." });
             // Run in the background; the scheduler serializes runs.
-            Task.Run(() => scheduler.RunJobNow(name));
+            Task.Run(() =>
+            {
+                try { scheduler.RunJobNow(name); }
+                catch (Exception ex)
+                {
+                    log($"dashboard: manual run of job '{name}' FAILED: {ex.Message}");
+                }
+            });
             return Results.Accepted();
         });
 

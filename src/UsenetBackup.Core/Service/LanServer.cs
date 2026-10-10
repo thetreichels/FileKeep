@@ -153,6 +153,11 @@ public sealed class LanServer : IDisposable
                         {
                             File.Delete(tmpPath);
                         }
+                        catch
+                        {
+                            try { File.Delete(tmpPath); } catch { }
+                            throw;
+                        }
                         ctx.Response.StatusCode = 200;
                     }
                     else

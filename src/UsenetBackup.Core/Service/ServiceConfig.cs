@@ -488,14 +488,27 @@ public sealed class ServiceConfig
     public void Save(string path)
     {
         Validate();
-        string json = JsonSerializer.Serialize(this, new JsonSerializerOptions
+        // Serialize under the Jobs lock: dashboard handlers mutate Jobs on
+        // other threads, and serializing a concurrently-modified list throws
+        // or writes torn JSON.
+        string json;
+        lock (JobsLock)
         {
-            WriteIndented = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        });
-        string tmp = path + ".tmp";
+            json = JsonSerializer.Serialize(this, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            });
+        }
+        // Unique temp name: concurrent saves must not share a temp file.
+        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmp, json);
-        File.Move(tmp, path, overwrite: true);
+        try { File.Move(tmp, path, overwrite: true); }
+        catch
+        {
+            try { File.Delete(tmp); } catch { }
+            throw;
+        }
     }
 
     public void Validate()

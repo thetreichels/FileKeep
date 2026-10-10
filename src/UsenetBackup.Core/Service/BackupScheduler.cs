@@ -278,8 +278,17 @@ public sealed class BackupScheduler
         using var reg = stopping.Register(CancelActiveOperation);
         while (!stopping.IsCancellationRequested)
         {
-            RunDueJobs(_clock.Now, stopping);
-            RunRetentionIfDue(_clock.Now);
+            try
+            {
+                RunDueJobs(_clock.Now, stopping);
+            }
+            catch (OperationCanceledException)
+            {
+                // Service stop cancelled the active operation mid-run.
+                // Break out gracefully instead of crashing.
+                break;
+            }
+            RunRetentionIfDue(_clock.Now, stopping);
             try { await Task.Delay(_pollInterval, stopping); }
             catch (OperationCanceledException) { break; }
         }
@@ -290,7 +299,7 @@ public sealed class BackupScheduler
     /// Runs retention checks if enabled and the interval has elapsed.
     /// Exposed for tests.
     /// </summary>
-    public void RunRetentionIfDue(DateTime now)
+    public void RunRetentionIfDue(DateTime now, CancellationToken stopping = default)
     {
         if (!_config.RetentionEnabled)
             return;
@@ -307,8 +316,9 @@ public sealed class BackupScheduler
 
         try
         {
-            RunRetentionChecks();
+            RunRetentionChecks(stopping);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             Log($"retention check failed: {ex.Message}");
@@ -414,7 +424,7 @@ public sealed class BackupScheduler
     /// <summary>
     /// Runs RetentionManager.CheckAndRepost for each job's repository.
     /// </summary>
-    private void RunRetentionChecks()
+    private void RunRetentionChecks(CancellationToken stopping = default)
     {
         IReadOnlyList<NntpConfig> providers;
         lock (_stateLock)
@@ -432,21 +442,35 @@ public sealed class BackupScheduler
         {
             repos = _jobs.Select(j => j.Config.Repo).Distinct().ToList();
         }
-        foreach (string repoPath in repos)
+        // Serialize against other long operations. The token from
+        // BeginOperation is cancelled by CancelActiveOperation on service
+        // stop (registered in RunAsync).
+        lock (_operationLock)
         {
+            CancellationToken token = BeginOperation();
             try
             {
-                RunRetentionForRepo(repoPath, providers);
+                foreach (string repoPath in repos)
+                {
+                    token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        RunRetentionForRepo(repoPath, providers, token: token);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        Log($"retention check failed for repo '{repoPath}': {ex.Message}");
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                Log($"retention check failed for repo '{repoPath}': {ex.Message}");
-            }
+            finally { EndOperation(); }
         }
     }
 
     private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers, bool dryRun = false, CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
         if (string.IsNullOrEmpty(passphrase))
         {
@@ -455,6 +479,7 @@ public sealed class BackupScheduler
         }
 
         using var repo = BackupRepository.Open(repoPath, passphrase);
+        token.ThrowIfCancellationRequested();
         // Share the repo's index instance with every per-provider store:
         // republication records new identities into this instance, and
         // CheckBackup publishes repo.MessageIndex — they must be the same

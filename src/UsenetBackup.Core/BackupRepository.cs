@@ -107,6 +107,12 @@ public sealed class BackupRepository : IDisposable
             try { File.Delete(tmpPath); } catch { }
             throw new InvalidOperationException($"A repository already exists at {repoPath}.");
         }
+        catch
+        {
+            // Any other move failure: don't leak the temp file.
+            try { File.Delete(tmpPath); } catch { }
+            throw;
+        }
         Directory.CreateDirectory(Path.Combine(repoPath, "manifests"));
         Directory.CreateDirectory(Path.Combine(repoPath, "chunks"));
         Directory.CreateDirectory(Path.Combine(repoPath, "parity"));
@@ -309,7 +315,12 @@ public sealed class BackupRepository : IDisposable
         // truncated manifest that the catalog already references.
         string tmpPath = manifestPath + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmpPath, manifest.ToJson());
-        File.Move(tmpPath, manifestPath, overwrite: true);
+        try { File.Move(tmpPath, manifestPath, overwrite: true); }
+        catch
+        {
+            try { File.Delete(tmpPath); } catch { }
+            throw;
+        }
     }
 
     /// <summary>

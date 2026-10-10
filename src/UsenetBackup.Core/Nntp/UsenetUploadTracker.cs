@@ -106,6 +106,11 @@ public sealed class UsenetUploadTracker
         // torn file still loses data).
         string tmpPath = _path + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmpPath, json);
-        File.Move(tmpPath, _path, overwrite: true);
+        try { File.Move(tmpPath, _path, overwrite: true); }
+        catch
+        {
+            try { File.Delete(tmpPath); } catch { }
+            throw;
+        }
     }
 }
