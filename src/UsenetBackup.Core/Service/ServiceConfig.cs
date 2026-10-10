@@ -442,9 +442,16 @@ public sealed class ServiceConfig
             }
             else if (job.AutoUpload)
             {
+                // Legacy AutoUpload (no explicit Targets): target the NNTP
+                // location, plus the SMB location migrated above (if any).
+                var targets = new List<string>();
                 var nntpLoc = Locations.FirstOrDefault(l => l.Type == "nntp");
                 if (nntpLoc is not null)
-                    job.Targets = new List<string> { nntpLoc.Name };
+                    targets.Add(nntpLoc.Name);
+                if (existing is not null)
+                    targets.Add(existing.Name);
+                if (targets.Count > 0)
+                    job.Targets = targets;
             }
             // Clear the legacy per-job fields (now on the location).
             job.SmbShare = "";
