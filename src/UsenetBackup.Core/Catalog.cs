@@ -46,23 +46,29 @@ public sealed class Catalog : IDisposable
 
     public void RecordChunk(string id, long sizeBytes)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR IGNORE INTO chunks(id, size_bytes, created_utc) VALUES($id, $size, $ts)";
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$size", sizeBytes);
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
-        cmd.ExecuteNonQuery();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "INSERT OR IGNORE INTO chunks(id, size_bytes, created_utc) VALUES($id, $size, $ts)";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.Parameters.AddWithValue("$size", sizeBytes);
+            cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     public void RecordBackup(string id, string type, string source, DateTime createdUtc)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO backups(id, type, source, created_utc) VALUES($id, $type, $src, $ts)";
-        cmd.Parameters.AddWithValue("$id", id);
-        cmd.Parameters.AddWithValue("$type", type);
-        cmd.Parameters.AddWithValue("$src", source);
-        cmd.Parameters.AddWithValue("$ts", createdUtc.ToString("O"));
-        cmd.ExecuteNonQuery();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "INSERT OR REPLACE INTO backups(id, type, source, created_utc) VALUES($id, $type, $src, $ts)";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.Parameters.AddWithValue("$type", type);
+            cmd.Parameters.AddWithValue("$src", source);
+            cmd.Parameters.AddWithValue("$ts", createdUtc.ToString("O"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     /// <summary>
@@ -111,14 +117,17 @@ public sealed class Catalog : IDisposable
     /// </summary>
     public DateTime? GetUploadTimeUtc(string chunkId)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT uploaded_utc FROM uploads WHERE chunk_id = $cid LIMIT 1";
-        cmd.Parameters.AddWithValue("$cid", chunkId);
-        object? value = cmd.ExecuteScalar();
-        if (value is null or DBNull)
-            return null;
-        return DateTime.Parse((string)value, null,
-            System.Globalization.DateTimeStyles.RoundtripKind);
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT uploaded_utc FROM uploads WHERE chunk_id = $cid LIMIT 1";
+            cmd.Parameters.AddWithValue("$cid", chunkId);
+            object? value = cmd.ExecuteScalar();
+            if (value is null or DBNull)
+                return null;
+            return DateTime.Parse((string)value, null,
+                System.Globalization.DateTimeStyles.RoundtripKind);
+        }
     }
 
     /// <summary>
@@ -128,43 +137,55 @@ public sealed class Catalog : IDisposable
     /// </summary>
     public void RecordDownload(string messageId, string chunkId)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR IGNORE INTO downloads(message_id, chunk_id, downloaded_utc) VALUES($mid, $cid, $ts)";
-        cmd.Parameters.AddWithValue("$mid", messageId);
-        cmd.Parameters.AddWithValue("$cid", chunkId);
-        cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
-        cmd.ExecuteNonQuery();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "INSERT OR IGNORE INTO downloads(message_id, chunk_id, downloaded_utc) VALUES($mid, $cid, $ts)";
+            cmd.Parameters.AddWithValue("$mid", messageId);
+            cmd.Parameters.AddWithValue("$cid", chunkId);
+            cmd.Parameters.AddWithValue("$ts", DateTime.UtcNow.ToString("O"));
+            cmd.ExecuteNonQuery();
+        }
     }
 
     public bool IsDownloaded(string messageId)
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT 1 FROM downloads WHERE message_id = $mid";
-        cmd.Parameters.AddWithValue("$mid", messageId);
-        using var r = cmd.ExecuteReader();
-        return r.Read();
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM downloads WHERE message_id = $mid";
+            cmd.Parameters.AddWithValue("$mid", messageId);
+            using var r = cmd.ExecuteReader();
+            return r.Read();
+        }
     }
 
     public long DownloadedCount()
     {
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM downloads";
-        return (long)cmd.ExecuteScalar()!;
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM downloads";
+            return (long)cmd.ExecuteScalar()!;
+        }
     }
 
     public IReadOnlyList<BackupSummary> ListBackups()
     {
-        var list = new List<BackupSummary>();
-        using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT id, type, source, created_utc FROM backups ORDER BY created_utc";
-        using var r = cmd.ExecuteReader();
-        while (r.Read())
+        lock (_lock)
         {
-            list.Add(new BackupSummary(
-                r.GetString(0), r.GetString(1), r.GetString(2),
-                DateTime.Parse(r.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+            var list = new List<BackupSummary>();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT id, type, source, created_utc FROM backups ORDER BY created_utc";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new BackupSummary(
+                    r.GetString(0), r.GetString(1), r.GetString(2),
+                    DateTime.Parse(r.GetString(3), null, System.Globalization.DateTimeStyles.RoundtripKind)));
+            }
+            return list;
         }
-        return list;
     }
 
     public void Dispose()

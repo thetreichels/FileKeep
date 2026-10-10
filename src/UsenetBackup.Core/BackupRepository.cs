@@ -1418,8 +1418,26 @@ public sealed class BackupRepository : IDisposable
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
         {
+            // Two-pass restore: regular files first, symlinks last. A symlink
+            // created early could redirect a later file write outside destDir
+            // (lexical path validation doesn't resolve symlinks).
             foreach (var entry in manifest.Files)
             {
+                if (entry.SymlinkTarget is not null)
+                    continue;
+                try
+                {
+                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer);
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{entry.Path}: {ex.Message}");
+                }
+            }
+            foreach (var entry in manifest.Files)
+            {
+                if (entry.SymlinkTarget is null)
+                    continue;
                 try
                 {
                     RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer);

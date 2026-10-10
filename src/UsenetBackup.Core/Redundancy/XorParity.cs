@@ -141,9 +141,10 @@ public static class XorParity
         int headerSize = HeaderFixedSize + originalLengths.Count * 4;
         byte[] data = new byte[headerSize + parity.Length];
         Magic.CopyTo(data, 0);
-        BitConverter.GetBytes(originalLengths.Count).CopyTo(data, 4);
+        // Explicit little-endian: the wire format must not depend on platform.
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(4), originalLengths.Count);
         for (int i = 0; i < originalLengths.Count; i++)
-            BitConverter.GetBytes(originalLengths[i]).CopyTo(data, 8 + i * 4);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(8 + i * 4), originalLengths[i]);
         parity.CopyTo(data, headerSize);
         return data;
     }
@@ -160,7 +161,7 @@ public static class XorParity
         if (data[0] != Magic[0] || data[1] != Magic[1] || data[2] != Magic[2] || data[3] != Magic[3])
             return false;
 
-        int numChunks = BitConverter.ToInt32(data, 4);
+        int numChunks = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(4));
         if (numChunks <= 0 || numChunks > 100)
             return false;
 
@@ -170,7 +171,7 @@ public static class XorParity
 
         lengths = new int[numChunks];
         for (int i = 0; i < numChunks; i++)
-            lengths[i] = BitConverter.ToInt32(data, 8 + i * 4);
+            lengths[i] = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(8 + i * 4));
 
         parity = new byte[data.Length - headerSize];
         Array.Copy(data, headerSize, parity, 0, parity.Length);

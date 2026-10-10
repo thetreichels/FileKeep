@@ -147,4 +147,41 @@ public sealed class RestorePathSecurityTests : IDisposable
                 File.ReadAllText(Path.Combine(dest, rel)));
         }
     }
+
+    [Fact]
+    public void Restore_BlocksSymlinkRedirectAttack()
+    {
+        // A symlink created early must not redirect a later file write
+        // outside destDir. Two-pass restore (files first, symlinks last)
+        // defeats this.
+        string backupId = BackupSingleFile();
+        string dest = Path.Combine(_workDir, "restored");
+        string outside = Path.Combine(_workDir, "outside");
+        Directory.CreateDirectory(outside);
+        string canary = Path.Combine(outside, "pwned.txt");
+
+        PoisonManifest(backupId, m =>
+        {
+            // Entry 0: symlink "evil" -> outside dir. Save its chunks first,
+            // then add a file "evil/pwned.txt" reusing them — lexically inside
+            // destDir, but would resolve through the symlink to outside/.
+            var chunks = m.Files[0].Chunks.ToList();
+            string sha = m.Files[0].Sha256;
+            m.Files[0].Path = "evil";
+            m.Files[0].SymlinkTarget = outside;
+            m.Files[0].Chunks.Clear();
+            m.Files.Add(new FileEntry
+            {
+                Path = "evil/pwned.txt",
+                Size = 5,
+                Sha256 = sha,
+                Chunks = chunks,
+            });
+        });
+
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        repo.Restore(backupId, dest);
+        Assert.False(File.Exists(canary),
+            "Symlink redirect attack wrote outside the restore directory!");
+    }
 }
