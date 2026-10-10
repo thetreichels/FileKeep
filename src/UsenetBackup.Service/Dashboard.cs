@@ -255,7 +255,8 @@ public static class Dashboard
             string driveLetter = body.TryGetProperty("driveLetter", out var dl) ? dl.GetString() ?? "" : "";
             string imagePath = body.TryGetProperty("imagePath", out var ip) ? ip.GetString() ?? "" : "";
             string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, imagePath, sourceDir);
+            string bootMode = body.TryGetProperty("bootMode", out var bm) ? bm.GetString() ?? "Both" : "Both";
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, imagePath, sourceDir, bootMode);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -1284,10 +1285,13 @@ public static class DashboardApi
     /// USB mode (driveLetter): destructive, the target USB drive is formatted.
     /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
-    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string imagePath, string? sourceDir)
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string imagePath, string? sourceDir, string bootMode)
     {
         if (!OperatingSystem.IsWindows())
             return (400, new { error = "WinRE recovery media creation requires Windows." });
+        bootMode = (bootMode ?? "Both").Trim();
+        if (bootMode != "UEFI" && bootMode != "BIOS" && bootMode != "Both")
+            return (400, new { error = "bootMode must be UEFI, BIOS, or Both." });
         if (_winReBuildStatus == "running")
             return (400, new { error = "A WinRE build is already running." });
 
@@ -1348,6 +1352,7 @@ public static class DashboardApi
                     FileName = "powershell.exe",
                     Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"" +
                         (imageMode ? $" -ImagePath \"{imagePath}\"" : $" -DriveLetter \"{driveLetter}\"") +
+                        $" -BootMode \"{bootMode}\"" +
                         binaryDirArg +
                         (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
                     UseShellExecute = false,
@@ -2000,6 +2005,15 @@ public static class DashboardHtml
                   <input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1">
                   <button onclick="startWinReBuild()">Build image</button>
                 </div>
+                <div class="row" style="margin-top:8px">
+                  <label>Boot mode:
+                    <select id="winre-bootmode">
+                      <option value="Both" selected>Both (UEFI + legacy BIOS)</option>
+                      <option value="UEFI">UEFI only</option>
+                      <option value="BIOS">Legacy BIOS only</option>
+                    </select>
+                  </label>
+                </div>
                 <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
                 <div class="row" style="margin-top:8px">
                   <button onclick="checkWinReStatus()">Check build status</button>
@@ -2536,17 +2550,18 @@ public static class DashboardHtml
         async function startWinReBuild() {
           const mode = document.querySelector('input[name="winre-mode"]:checked').value;
           const sourceDir = (document.getElementById(mode === 'usb' ? 'winre-src' : 'winre-src-img').value || '').trim();
+          const bootMode = document.getElementById('winre-bootmode').value;
           let body, confirmText;
           if (mode === 'usb') {
             const driveLetter = document.getElementById('winre-drive').value.trim();
             if (!driveLetter) { alert('Enter a drive letter (e.g. E).'); return; }
             confirmText = 'Build WinRE USB on drive ' + driveLetter + ':? This FORMATS the drive — all data is destroyed.';
-            body = { driveLetter, sourceDir: sourceDir || null };
+            body = { driveLetter, sourceDir: sourceDir || null, bootMode };
           } else {
             const imagePath = document.getElementById('winre-image').value.trim();
             if (!imagePath) { alert('Enter an image path (e.g. C:\\winre\\filekeep-recovery.vhdx).'); return; }
             confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
-            body = { imagePath, sourceDir: sourceDir || null };
+            body = { imagePath, sourceDir: sourceDir || null, bootMode };
           }
           if (!window.confirm(confirmText)) return;
           try {

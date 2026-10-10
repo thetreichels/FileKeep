@@ -36,6 +36,8 @@ param(
     [string]$DriveLetter = "",
     [string]$ImagePath = "",
     [int]$ImageSizeMB = 4096,
+    [ValidateSet("UEFI", "BIOS", "Both")]
+    [string]$BootMode = "Both",
     [string]$SourceDir = "C:\ub\src",
     [string]$BinaryDir = "",
     [string]$MountDir = "C:\winre-mount",
@@ -53,6 +55,12 @@ function Fail($msg) { Write-Error $msg; exit 1 }
 $script:ImageMode = $ImagePath -ne ""
 if ($script:ImageMode -and $DriveLetter -ne "") { Fail "Specify either -DriveLetter or -ImagePath, not both." }
 if (-not $script:ImageMode -and $DriveLetter -eq "") { Fail "Specify -DriveLetter (USB) or -ImagePath (disk image)." }
+
+# bcdboot firmware flag: ALL copies both UEFI and BIOS boot files.
+$script:BcdBootFlag = @{ UEFI = "UEFI"; BIOS = "BIOS"; Both = "ALL" }[$BootMode]
+# MBR partition layout boots on both legacy BIOS and UEFI (via FAT32).
+# GPT is only needed for UEFI-only; MBR is the compatible choice.
+$script:UseMbr = $BootMode -ne "UEFI"
 
 # --- Progress reporting ---
 # Steps with rough time estimates (seconds) for ETA calculation.
@@ -303,21 +311,32 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
     if ($script:ImageMode) {
         # --- Image mode: create and attach a VHDX, then treat it like the USB ---
         Step-Start 8
-        Write-Host "Creating disk image $ImagePath..."
+        Write-Host "Creating disk image $ImagePath (BootMode: $BootMode)..."
+        $mbrPart = if ($script:UseMbr) {
+            @"
+convert mbr
+create partition primary
+select partition 1
+active
+"@
+        } else { "create partition primary" }
         $dpCreate = @"
 create vdisk file="$ImagePath" maximum=$ImageSizeMB type=expandable
 select vdisk file="$ImagePath"
 attach vdisk
-create partition primary
+$mbrPart
 format fs=fat32 quick label="FILEKEEP"
 assign
 "@
         $dpCreate | diskpart | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail "diskpart create/attach failed." }
-        # Find the newly assigned drive letter.
-        Start-Sleep 2
-        $vhdVol = Get-Volume | Where-Object { $_.FileSystemLabel -eq "FILEKEEP" -and $_.DriveLetter } |
-                  Sort-Object -Property DriveLetter -Descending | Select-Object -First 1
+        # Find the newly assigned drive letter (retry: volume may take a moment).
+        $vhdVol = $null
+        for ($i = 0; $i -lt 15 -and -not $vhdVol; $i++) {
+            Start-Sleep 2
+            $vhdVol = Get-Volume | Where-Object { $_.FileSystemLabel -eq "FILEKEEP" -and $_.DriveLetter } |
+                      Sort-Object -Property DriveLetter -Descending | Select-Object -First 1
+        }
         if (-not $vhdVol) { Fail "Could not find the attached VHDX volume." }
         $targetRoot = "$($vhdVol.DriveLetter):\"
         Write-Host "VHDX attached as $($vhdVol.DriveLetter):"
@@ -326,7 +345,7 @@ assign
         try {
             Step-Start 9
             Write-Host "Copying boot files..."
-            bcdboot C:\Windows /s $targetRoot /f UEFI
+            bcdboot C:\Windows /s $targetRoot /f $script:BcdBootFlag
             if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
 
             Write-Host "Copying customized WinRE image..."
@@ -350,14 +369,31 @@ detach vdisk
     } else {
         # --- USB mode: prepare the physical drive ---
         Step-Start 8
-        Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
-        Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
-        if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+        if ($script:UseMbr) {
+            Write-Host "Preparing USB drive $usbRoot (MBR, active FAT32 for BIOS+UEFI)..."
+            $diskNumber = (Get-Partition -DriveLetter $DriveLetter | Get-Disk).Number
+            $dpUsb = @"
+select disk $diskNumber
+clean
+convert mbr
+create partition primary
+select partition 1
+active
+format fs=fat32 quick label="FILEKEEP"
+assign letter=$DriveLetter
+"@
+            $dpUsb | diskpart | Out-Null
+            if ($LASTEXITCODE -ne 0) { Fail "diskpart USB preparation failed." }
+        } else {
+            Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
+            Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
+            if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+        }
         Step-Done 8
 
         Step-Start 9
         Write-Host "Copying boot files..."
-        bcdboot C:\Windows /s "$DriveLetter`:" /f UEFI
+        bcdboot C:\Windows /s "$DriveLetter`:" /f $script:BcdBootFlag
         if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
 
         Write-Host "Copying customized WinRE image to USB..."
