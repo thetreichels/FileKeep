@@ -166,4 +166,32 @@ public sealed class ChunkCryptoTests
             Directory.Delete(repoDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void LocalBlobStore_ConcurrentPut_SameChunk_DoesNotThrow()
+    {
+        string repoDir = Path.Combine(Path.GetTempPath(), "ub-raceput-test-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new LocalBlobStore(repoDir);
+            byte[] plaintext = RandomNumberGenerator.GetBytes(1000);
+            byte[] blob = ChunkCrypto.Encrypt(plaintext, Key, ChunkId32);
+            string chunkId = Hashing.Sha256Hex(plaintext);
+
+            // Hammer the same chunk from many threads: the TOCTOU between
+            // File.Exists and File.Move must not surface as an exception.
+            // Content-addressed, so every winner writes identical bytes.
+            Parallel.For(0, 64, _ =>
+            {
+                store.Put(chunkId, blob);
+                store.Put(chunkId, blob.AsSpan());
+            });
+
+            Assert.Equal(blob, store.Get(chunkId));
+        }
+        finally
+        {
+            Directory.Delete(repoDir, recursive: true);
+        }
+    }
 }

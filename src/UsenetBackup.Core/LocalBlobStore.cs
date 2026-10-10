@@ -35,7 +35,15 @@ public sealed class LocalBlobStore : IBlobStore
         try
         {
             File.WriteAllBytes(tmp, blob);
-            File.Move(tmp, path);
+            try
+            {
+                File.Move(tmp, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                // Another thread committed this exact chunk concurrently
+                // (content-addressed: identical bytes). Treat as dedup hit.
+            }
         }
         finally
         {
@@ -63,7 +71,15 @@ public sealed class LocalBlobStore : IBlobStore
             {
                 fs.Write(blob);
             }
-            File.Move(tmp, path);
+            try
+            {
+                File.Move(tmp, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                // Another thread committed this exact chunk concurrently
+                // (content-addressed: identical bytes). Treat as dedup hit.
+            }
         }
         finally
         {
