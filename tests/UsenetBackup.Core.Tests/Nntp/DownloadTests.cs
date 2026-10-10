@@ -301,4 +301,50 @@ public sealed class DownloadTests : IDisposable
                    Path.Combine(_repoDir, "catalog.db"));
         Assert.Throws<InvalidDataException>(() => fx.Repo.DownloadChunks(doc, remote));
     }
+
+    /// <summary>
+    /// A remote that serves one malicious oversized blob.
+    /// </summary>
+    private sealed class OversizedBlobStore : IBlobStore
+    {
+        private readonly byte[] _blob;
+        public OversizedBlobStore(byte[] blob) => _blob = blob;
+        public bool Exists(string chunkIdHex) => false;
+        public void Put(string chunkIdHex, byte[] blob) => throw new NotSupportedException();
+        public byte[] Get(string chunkIdHex) => _blob;
+        public long StoredCount => 0;
+    }
+
+    [Fact]
+    public void Download_RejectsOversizedBlob_BeforeDecrypt()
+    {
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        // Synthetic chunk ID: the size check fires before any crypto, so the
+        // ID never needs to correspond to a real chunk.
+        string chunkId = new string('a', 64);
+        var doc = new NzbDocument(
+            null, null, "test",
+            new[]
+            {
+                new NzbFile(
+                    "subject", "poster", DateTimeOffset.UtcNow,
+                    new[] { new NzbSegment(ArticleCodec.MakeMessageId(chunkId, repo.RepoId), 0, 1) })
+            });
+
+        // Just over the bound: must be rejected without attempting decryption.
+        byte[] oversized = new byte[(int)repo.MaxChunkBlobBytes + 1];
+        var ex = Assert.Throws<InvalidDataException>(() =>
+            repo.DownloadChunks(doc, new OversizedBlobStore(oversized)));
+        Assert.Contains("maximum chunk blob size", ex.Message);
+    }
+
+    [Fact]
+    public void MaxChunkBlobBytes_ScalesWithChunkSize()
+    {
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        // A legitimate blob (chunk + AES-GCM nonce/tag overhead) is far below
+        // the bound; the bound itself is a small multiple of the chunk size.
+        Assert.Equal((long)ChunkSize * 4, repo.MaxChunkBlobBytes);
+        Assert.Equal(repo.MaxChunkBlobBytes * 2, repo.MaxDownloadBytes);
+    }
 }

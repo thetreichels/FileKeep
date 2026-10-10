@@ -78,8 +78,46 @@ public sealed class RetentionManager
         int warnDays = 90,
         int repostThresholdDays = 30,
         int sampleSize = 10,
+        bool dryRun = false) =>
+        CheckAndRepost(repo, _ => remote, warnDays, repostThresholdDays, sampleSize, dryRun);
+
+    /// <summary>
+    /// Checks retention health for all tracked uploads and refreshes
+    /// articles that are missing or approaching expiry, resolving the
+    /// NNTP store per tracker record.
+    /// </summary>
+    /// <param name="repo">Local repository (source of chunks for republication).</param>
+    /// <param name="storeFactory">
+    /// Resolves the NNTP store for a tracker record. Called once per
+    /// expiring record and MUST return a store connected to that record's
+    /// own provider: upload records are tracked per provider
+    /// (backupId@host), so checking provider B's records through provider
+    /// A's connection would refresh the wrong server while advancing B's
+    /// timestamp. A record's timestamp advances only after its own
+    /// provider's refresh succeeds. The manager takes no ownership of
+    /// returned stores — the factory may return cached instances and the
+    /// caller disposes them.
+    /// </param>
+    /// <param name="warnDays">Backups expiring within this many days are checked. Default 90.</param>
+    /// <param name="repostThresholdDays">
+    /// Backups with at most this many days of retention remaining are
+    /// refreshed proactively. Default 30. Set to 0 to refresh only when
+    /// articles are actually missing.
+    /// </param>
+    /// <param name="sampleSize">Articles to STAT-check per backup. Default 10.</param>
+    /// <param name="dryRun">
+    /// When true, reports what WOULD be done without posting anything,
+    /// updating any index, or advancing any timestamp.
+    /// </param>
+    public RetentionReport CheckAndRepost(
+        BackupRepository repo,
+        Func<UsenetUploadTracker.UploadRecord, NntpBlobStore> storeFactory,
+        int warnDays = 90,
+        int repostThresholdDays = 30,
+        int sampleSize = 10,
         bool dryRun = false)
     {
+        ArgumentNullException.ThrowIfNull(storeFactory);
         var report = new RetentionReport { DryRun = dryRun };
         var tracker = new UsenetUploadTracker(repo.RepoRoot);
 
@@ -92,6 +130,9 @@ public sealed class RetentionManager
             report.BackupsChecked++;
             try
             {
+                // One store per provider record — never check provider B's
+                // articles through provider A's connection.
+                NntpBlobStore remote = storeFactory(record);
                 var outcome = CheckBackup(repo, remote, tracker, record, daysLeft,
                     repostThresholdDays, sampleSize, report, dryRun);
                 switch (outcome)

@@ -12,6 +12,20 @@ public sealed class HttpBlobStore : IBlobStore, IDisposable
     private readonly string _baseUrl;
     private bool _disposed;
 
+    /// <summary>
+    /// Default read-time cap for a single chunk download (64 MiB). Set
+    /// <see cref="MaxDownloadBytes"/> tighter from the repo's
+    /// chunk-size-derived bound when known.
+    /// </summary>
+    public const long DefaultMaxDownloadBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// Read-time cap (bytes) for a single chunk response. The download aborts
+    /// mid-read when exceeded, so a malicious oversized response cannot
+    /// exhaust memory.
+    /// </summary>
+    public long MaxDownloadBytes { get; set; } = DefaultMaxDownloadBytes;
+
     public HttpBlobStore(string baseUrl)
     {
         _baseUrl = baseUrl.TrimEnd('/');
@@ -39,11 +53,31 @@ public sealed class HttpBlobStore : IBlobStore, IDisposable
     public byte[] Get(string chunkIdHex)
     {
         ValidateChunkId(chunkIdHex);
-        using var resp = _http.GetAsync($"{_baseUrl}/chunks/{chunkIdHex}").GetAwaiter().GetResult();
+        // ResponseHeadersRead + manual bounded copy: ReadAsByteArrayAsync would
+        // buffer an unbounded malicious response before we could reject it.
+        using var resp = _http.GetAsync($"{_baseUrl}/chunks/{chunkIdHex}", HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
         if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
             throw new InvalidDataException($"Chunk {chunkIdHex} not found on LAN store {_baseUrl}.");
         resp.EnsureSuccessStatusCode();
-        return resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+        if (resp.Content.Headers.ContentLength > MaxDownloadBytes)
+            throw new InvalidDataException(
+                $"Chunk {chunkIdHex} declares {resp.Content.Headers.ContentLength:N0} bytes, exceeding " +
+                $"the maximum download size of {MaxDownloadBytes:N0} bytes; rejecting as malicious or corrupt.");
+        using var stream = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
+        using var ms = new MemoryStream();
+        var buffer = new byte[81920];
+        long total = 0;
+        int read;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            total += read;
+            if (total > MaxDownloadBytes)
+                throw new InvalidDataException(
+                    $"Chunk {chunkIdHex} exceeds the maximum download size of {MaxDownloadBytes:N0} bytes; " +
+                    "aborting (possible malicious oversized response).");
+            ms.Write(buffer, 0, read);
+        }
+        return ms.ToArray();
     }
 
     public long StoredCount

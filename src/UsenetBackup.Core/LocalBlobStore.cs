@@ -44,6 +44,34 @@ public sealed class LocalBlobStore : IBlobStore
         }
     }
 
+    /// <summary>
+    /// Span overload: writes the blob without an intermediate array copy,
+    /// for backup loops that encrypt into a pooled buffer. Same atomic
+    /// tmp-file + move semantics as <see cref="Put(string, byte[])"/>.
+    /// </summary>
+    public void Put(string chunkIdHex, ReadOnlySpan<byte> blob)
+    {
+        string path = PathFor(chunkIdHex);
+        if (File.Exists(path))
+            return;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                fs.Write(blob);
+            }
+            File.Move(tmp, path);
+        }
+        finally
+        {
+            if (File.Exists(tmp))
+                File.Delete(tmp);
+        }
+    }
+
     public byte[] Get(string chunkIdHex)
     {
         string path = PathFor(chunkIdHex);

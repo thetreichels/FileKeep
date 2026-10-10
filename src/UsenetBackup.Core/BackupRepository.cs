@@ -16,6 +16,24 @@ public sealed class BackupRepository : IDisposable
     public const int DefaultChunkSize = 4 * 1024 * 1024;
     public const int DefaultKdfIterations = 600_000;
 
+    /// <summary>
+    /// Hard upper bound on a single downloaded chunk blob (encrypted bytes),
+    /// as a multiple of the repo's configured chunk size. Blobs larger than
+    /// this are rejected before decryption. Guards the download/decrypt
+    /// boundary against malicious oversized articles (memory-exhaustion DoS).
+    /// The 4x headroom covers AES-GCM overhead (28 bytes) plus future format
+    /// growth; legitimate blobs are always ~chunkSize + 28 bytes.
+    /// </summary>
+    public long MaxChunkBlobBytes => (long)_config.ChunkSize * 4;
+
+    /// <summary>
+    /// Read-time cap for a single chunk download (NNTP article or HTTP
+    /// response), in bytes. yEnc inflates binary data (worst case ~2x when
+    /// every byte needs escaping), plus article headers, so this is 2x the
+    /// blob cap.
+    /// </summary>
+    public long MaxDownloadBytes => MaxChunkBlobBytes * 2;
+
     private readonly string _root;
     private readonly RepositoryConfig _config;
     private readonly byte[] _key;
@@ -419,27 +437,39 @@ public sealed class BackupRepository : IDisposable
         catch (IOException) { size = -1; }
 
         using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        long total = 0;
-        int read;
-        while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
+        // One pooled buffer reused for every chunk's encrypted blob
+        // (nonce + chunk + tag): zero per-chunk allocation on the hot path.
+        byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
+            _config.ChunkSize + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+        try
         {
-            var span = buffer.AsSpan(0, read);
-            string chunkId = Hashing.Sha256Hex(span);
-            if (!_blobs.Exists(chunkId))
+            long total = 0;
+            int read;
+            while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
             {
-                byte[] blob = ChunkCrypto.Encrypt(span, _key, Hashing.HexToBytes(chunkId));
-                _blobs.Put(chunkId, blob);
+                var span = buffer.AsSpan(0, read);
+                string chunkId = Hashing.Sha256Hex(span);
+                if (!_blobs.Exists(chunkId))
+                {
+                    var blobSpan = blobBuf.AsSpan(0, read + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+                    ChunkCrypto.EncryptInto(span, _key, Hashing.HexToBytes(chunkId), blobSpan);
+                    _blobs.Put(chunkId, blobSpan);
+                }
+                _catalog.RecordChunk(chunkId, read);
+                entry.Chunks.Add(chunkId);
+                fileHash.AppendData(span);
+                total += read;
             }
-            _catalog.RecordChunk(chunkId, read);
-            entry.Chunks.Add(chunkId);
-            fileHash.AppendData(span);
-            total += read;
+            entry.Size = size >= 0 ? size : total;
+            if (size >= 0 && size != total)
+                throw new IOException(
+                    $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
+            entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
         }
-        entry.Size = size >= 0 ? size : total;
-        if (size >= 0 && size != total)
-            throw new IOException(
-                $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
-        entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(blobBuf);
+        }
         return entry;
     }
 
@@ -510,24 +540,32 @@ public sealed class BackupRepository : IDisposable
         catch (IOException) { /* length unknown; write and let it fail naturally */ }
 
         using var imageHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        byte[] chunkBuf = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        // One pooled buffer reused for every decrypted chunk: zero per-chunk
+        // allocation on the plaintext side. (The encrypted blob still comes
+        // from _blobs.Get; a pooled read path would be a separate change.)
+        byte[] plainBuf = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
         {
             foreach (string chunkId in entry.Chunks)
             {
                 byte[] blob = _blobs.Get(chunkId); // throws if missing
-                byte[] plain = ChunkCrypto.Decrypt(blob, _key, Hashing.HexToBytes(chunkId)); // AES-GCM authenticates
-                if (!string.Equals(Hashing.Sha256Hex(plain), chunkId, StringComparison.OrdinalIgnoreCase))
+                int ctLen = blob.Length - ChunkCrypto.NonceSizeBytes - ChunkCrypto.TagSizeBytes;
+                if (ctLen < 0 || ctLen > plainBuf.Length)
+                    throw new InvalidDataException(
+                        $"Chunk {chunkId} has an invalid blob size ({blob.Length} bytes); restore aborted.");
+                var plainSpan = plainBuf.AsSpan(0, ctLen);
+                ChunkCrypto.DecryptInto(blob, _key, Hashing.HexToBytes(chunkId), plainSpan); // AES-GCM authenticates
+                if (!string.Equals(Hashing.Sha256Hex(plainSpan), chunkId, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException($"Chunk {chunkId} failed hash verification; restore aborted.");
-                device.Write(plain, 0, plain.Length);
-                imageHash.AppendData(plain);
-                CryptographicOperations.ZeroMemory(plain);
+                device.Write(plainBuf, 0, ctLen);
+                imageHash.AppendData(plainSpan);
+                CryptographicOperations.ZeroMemory(plainSpan);
             }
             device.Flush(flushToDisk: true);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(chunkBuf);
+            ArrayPool<byte>.Shared.Return(plainBuf);
         }
 
         string actual = Convert.ToHexString(imageHash.GetHashAndReset());
@@ -921,6 +959,13 @@ public sealed class BackupRepository : IDisposable
     /// </summary>
     private void VerifyDownloadedBlob(string chunkIdHex, byte[] blob)
     {
+        // Fail closed on size before decryption allocates: a malicious
+        // oversized blob must never reach ChunkCrypto.Decrypt's allocation.
+        if (blob.Length > MaxChunkBlobBytes)
+            throw new InvalidDataException(
+                $"Downloaded chunk {chunkIdHex} is {blob.Length:N0} bytes, exceeding the " +
+                $"maximum chunk blob size of {MaxChunkBlobBytes:N0} bytes; " +
+                "rejecting as malicious or corrupt.");
         byte[] plaintext;
         try
         {
@@ -976,6 +1021,33 @@ public sealed class BackupRepository : IDisposable
         return errors;
     }
 
+    /// <summary>
+    /// Resolves a manifest-relative path against the restore destination and
+    /// anchors it inside <paramref name="destDir"/>. Manifests may arrive from
+    /// untrusted sources (imported from Usenet, tampered repos), so a bare
+    /// <c>Path.Combine</c> is unsafe: traversal sequences ("../../x"),
+    /// absolute paths, drive-relative paths ("C:foo") and UNC paths would all
+    /// write outside the destination. The combined path is normalized with
+    /// <see cref="Path.GetFullPath"/> and rejected with
+    /// <see cref="InvalidDataException"/> unless it stays under the
+    /// normalized destination root.
+    /// </summary>
+    private static string ResolveRestorePath(string destDir, string manifestPath)
+    {
+        string root = Path.GetFullPath(destDir);
+        string combined = Path.Combine(
+            destDir, manifestPath.Replace('/', Path.DirectorySeparatorChar));
+        string resolved = Path.GetFullPath(combined);
+        string rootPrefix = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase)
+            && !resolved.Equals(root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                $"Manifest path '{manifestPath}' escapes the restore directory '{destDir}'.");
+        return resolved;
+    }
+
     private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly, List<string> errors)
     {
         if (!verifyOnly && destDir is not null && manifest.Directories is not null)
@@ -984,8 +1056,7 @@ public sealed class BackupRepository : IDisposable
             {
                 try
                 {
-                    Directory.CreateDirectory(
-                        Path.Combine(destDir, dir.Replace('/', Path.DirectorySeparatorChar)));
+                    Directory.CreateDirectory(ResolveRestorePath(destDir, dir));
                 }
                 catch (Exception ex)
                 {
@@ -1021,7 +1092,7 @@ public sealed class BackupRepository : IDisposable
         {
             if (!verifyOnly && destDir is not null)
             {
-                string linkPath = Path.Combine(destDir, entry.Path.Replace('/', Path.DirectorySeparatorChar));
+                string linkPath = ResolveRestorePath(destDir, entry.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
                 if (File.Exists(linkPath) || Directory.Exists(linkPath))
                     File.Delete(linkPath);
@@ -1038,7 +1109,7 @@ public sealed class BackupRepository : IDisposable
         {
             if (!verifyOnly && destDir is not null)
             {
-                outPath = Path.Combine(destDir, entry.Path.Replace('/', Path.DirectorySeparatorChar));
+                outPath = ResolveRestorePath(destDir, entry.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
                 // Write to temp file first; rename to final path only after
                 // hash verification succeeds. This is atomic on the same

@@ -19,6 +19,14 @@ public interface IBlobStore
     void Put(string chunkIdHex, byte[] blob);
 
     /// <summary>
+    /// Stores a blob from a span, for hot loops that encrypt into a pooled
+    /// buffer. The default implementation copies into an array; stores that
+    /// can write a span directly (e.g. <see cref="LocalBlobStore"/>) override
+    /// this to avoid the copy.
+    /// </summary>
+    void Put(string chunkIdHex, ReadOnlySpan<byte> blob) => Put(chunkIdHex, blob.ToArray());
+
+    /// <summary>
     /// Returns the stored blob. Throws <see cref="InvalidDataException"/>
     /// when the blob is missing.
     /// </summary>

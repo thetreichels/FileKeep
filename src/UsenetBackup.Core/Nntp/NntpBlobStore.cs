@@ -78,6 +78,21 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// <summary>True if this store uses a connection pool (parallel-capable).</summary>
     public bool IsPooled => _pool is not null;
 
+    /// <summary>
+    /// Default read-time cap for a single article download (64 MiB). Covers
+    /// chunk sizes up to ~30 MiB at default settings; call sites that know the
+    /// repo's chunk size should set <see cref="MaxArticleBytes"/> tighter from
+    /// the repo's chunk-size-derived bound.
+    /// </summary>
+    public const long DefaultMaxArticleBytes = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// Read-time cap (characters) for a single ARTICLE response. The download
+    /// aborts mid-read when exceeded, so a malicious oversized article cannot
+    /// exhaust memory. Set from the repo's chunk-size-derived bound when known.
+    /// </summary>
+    public long MaxArticleBytes { get; set; } = DefaultMaxArticleBytes;
+
     /// <summary>Number of connections in the pool, or 1 for single-client mode.</summary>
     public int ConnectionCount => _pool?.Size ?? 1;
 
@@ -202,7 +217,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         ValidateChunkId(chunkIdHex);
         string messageId = ResolveMessageId(chunkIdHex);
-        string? article = UseClient(c => c.GetArticle(messageId));
+        string? article = UseClient(c => c.GetArticle(messageId, MaxArticleBytes));
         if (article is null)
             throw new InvalidDataException(
                 $"Chunk {chunkIdHex} not found on the NNTP server (message-ID {messageId}).");
@@ -239,7 +254,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public byte[]? GetManifest(string backupId)
     {
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
-        string? article = UseClient(c => c.GetArticle(messageId));
+        string? article = UseClient(c => c.GetArticle(messageId, MaxArticleBytes));
         if (article is null)
             return null;
         var (id, blob) = ArticleCodec.ParseManifestArticle(article);
@@ -256,14 +271,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// </summary>
     public int PostManifestIndex(string yearMonth, IReadOnlyList<string> backupIds)
     {
-        // Find the latest version by probing: STAT v1, v2, ... until 430.
-        int version = 1;
-        int latestVersion = 0;
-        while (UseClient(c => c.Stat(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version))))
-        {
-            latestVersion = version;
-            version++;
-        }
+        // Find the latest version by probing (tolerates expired versions).
+        int latestVersion = ProbeLatestVersion(
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
+        int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         // This makes re-upload idempotent.
         if (latestVersion > 0)
@@ -286,22 +297,12 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// </summary>
     public IReadOnlyList<string>? GetLatestManifestIndex(string yearMonth)
     {
-        int latestVersion = 0;
-        int version = 1;
-        // Probe versions until we hit a 430 (not found).
-        // Cap at 1000 to avoid infinite loop on misbehaving servers.
-        while (version <= 1000)
-        {
-            string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
-            if (!UseClient(c => c.Stat(messageId)))
-                break;
-            latestVersion = version;
-            version++;
-        }
+        int latestVersion = ProbeLatestVersion(
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, latestVersion);
-        string? article = UseClient(c => c.GetArticle(latestId));
+        string? article = UseClient(c => c.GetArticle(latestId, MaxArticleBytes));
         if (article is null)
             return null;
         // Parse the body: one backup ID per line.
@@ -318,17 +319,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// </summary>
     public int PostMessageIndex(string indexJson)
     {
-        // Find the latest version by probing: STAT v1, v2, ... until 430.
-        int version = 1;
-        int latestVersion = 0;
-        while (version <= 1000)
-        {
-            string probeId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
-            if (!UseClient(c => c.Stat(probeId)))
-                break;
-            latestVersion = version;
-            version++;
-        }
+        // Find the latest version by probing (tolerates expired versions).
+        int latestVersion = ProbeLatestVersion(
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
+        int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         if (latestVersion > 0)
         {
@@ -351,29 +345,125 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     }
 
     /// <summary>
-    /// Fetches the latest versioned chunk-message-identity index by probing
-    /// versions until STAT returns 430. Returns null if no index exists.
+    /// Fetches the latest versioned chunk-message-identity index.
+    /// Version discovery tolerates gaps: an expired older version does not
+    /// hide a newer surviving one.
+    ///
+    /// Returns null when no index version exists on the server — either no
+    /// index has ever been published, or every published version has
+    /// expired. Throws <see cref="MessageIndexFetchException"/> when a
+    /// version IS listed on the server but cannot be retrieved or parsed:
+    /// the index is then expected-but-broken, and the caller must surface
+    /// an explicit recovery error rather than silently falling back to
+    /// stale message IDs.
     /// </summary>
     public string? GetLatestMessageIndex()
     {
-        int latestVersion = 0;
-        int version = 1;
-        while (version <= 1000)
-        {
-            string messageId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
-            if (!UseClient(c => c.Stat(messageId)))
-                break;
-            latestVersion = version;
-            version++;
-        }
+        int latestVersion = ProbeLatestVersion(
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeMessageIndexMessageId(_repoId, latestVersion);
-        string? article = UseClient(c => c.GetArticle(latestId));
+        string? article;
+        try
+        {
+            article = UseClient(c => c.GetArticle(latestId, MaxArticleBytes));
+        }
+        catch (Exception ex)
+        {
+            throw new MessageIndexFetchException(
+                $"Message-identity index v{latestVersion} ({latestId}) is listed on the " +
+                $"server but could not be retrieved: {ex.Message}", ex);
+        }
         if (article is null)
-            return null;
-        var (_, body) = ParseIndexArticle(article);
+            throw new MessageIndexFetchException(
+                $"Message-identity index v{latestVersion} ({latestId}) is listed on the " +
+                "server but the article body could not be fetched.");
+        string body;
+        try
+        {
+            (_, body) = ParseIndexArticle(article);
+        }
+        catch (Exception ex)
+        {
+            throw new MessageIndexFetchException(
+                $"Message-identity index v{latestVersion} ({latestId}) could not be parsed: " +
+                ex.Message, ex);
+        }
         return body.Trim();
+    }
+
+    /// <summary>
+    /// Fetches the latest published message-identity index and loads it
+    /// into <paramref name="index"/>. A retention refresh republishes
+    /// articles under new message IDs; without this sync a recovering
+    /// machine would request stale (possibly expired) IDs.
+    ///
+    /// No-op when no index was ever published: the local index or
+    /// deterministic IDs are then authoritative. Throws
+    /// <see cref="MessageIndexFetchException"/> with an explicit recovery
+    /// error when an index exists on the server but cannot be retrieved
+    /// or parsed — continuing with stale IDs in that case would turn an
+    /// index problem into later chunk-download failures.
+    /// </summary>
+    public void SyncMessageIndex(ChunkMessageIndex index)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+        string? remoteJson;
+        try
+        {
+            remoteJson = GetLatestMessageIndex();
+        }
+        catch (MessageIndexFetchException ex)
+        {
+            throw new MessageIndexFetchException(
+                "A message-identity index is published for this repository but it could not be " +
+                "retrieved from the Usenet server. A retention refresh may have republished " +
+                "articles under new message IDs; continuing with the local index or " +
+                "deterministic IDs could request stale (possibly expired) articles and turn " +
+                "this into chunk-download failures. Resolve the server issue and retry. " +
+                $"Detail: {ex.Message}", ex);
+        }
+        if (remoteJson is null)
+            return; // never published: local index / deterministic IDs are authoritative
+        try
+        {
+            index.LoadFromJson(remoteJson);
+        }
+        catch (Exception ex)
+        {
+            throw new MessageIndexFetchException(
+                "The published message-identity index could not be parsed. Continuing with " +
+                "the local index or deterministic IDs could request stale (possibly expired) " +
+                $"articles. Detail: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Finds the highest published index version, tolerating gaps: a
+    /// version whose article has expired (or never propagated) does not
+    /// hide newer surviving versions. Stops after a run of consecutive
+    /// misses so a long-dead series still terminates quickly.
+    /// </summary>
+    private int ProbeLatestVersion(Func<int, string> makeMessageId)
+    {
+        const int maxConsecutiveMisses = 5;
+        const int hardCap = 1000;
+        int latest = 0;
+        int misses = 0;
+        for (int version = 1; version <= hardCap; version++)
+        {
+            if (UseClient(c => c.Stat(makeMessageId(version))))
+            {
+                latest = version;
+                misses = 0;
+            }
+            else if (++misses >= maxConsecutiveMisses)
+            {
+                break;
+            }
+        }
+        return latest;
     }
 
     private string BuildIndexArticle(string yearMonth, int version, string body)

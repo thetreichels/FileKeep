@@ -282,9 +282,14 @@ static int Restore(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--store URL]"); return 2; }
     string? storeUrl = GetOption(args, "--store");
-    using var repo = storeUrl is not null
-        ? BackupRepository.OpenWithStore(pos[0], GetPassphrase(args), new UsenetBackup.Core.Lan.HttpBlobStore(storeUrl))
+    // The LAN store's read cap is tightened to this repo's chunk-size-derived
+    // bound once the repo (and its config) is open.
+    var lanStore = storeUrl is not null ? new UsenetBackup.Core.Lan.HttpBlobStore(storeUrl) : null;
+    using var repo = lanStore is not null
+        ? BackupRepository.OpenWithStore(pos[0], GetPassphrase(args), lanStore)
         : BackupRepository.Open(pos[0], GetPassphrase(args));
+    if (lanStore is not null)
+        lanStore.MaxDownloadBytes = repo.MaxDownloadBytes;
     repo.Restore(pos[1], pos[2]);
     Console.WriteLine($"Restored backup {pos[1]} to {Path.GetFullPath(pos[2])}.");
     return 0;
@@ -505,6 +510,7 @@ static int NntpUpload(string[] args)
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+        store.MaxArticleBytes = repo.MaxDownloadBytes;
         int uploaded = 0, skipped = 0;
         for (int i = 0; i < chunkIds.Length; i++)
         {
@@ -551,6 +557,7 @@ static int ManifestDiscover(string[] args)
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+        store.MaxArticleBytes = repo.MaxDownloadBytes;
         // Use the monthly index (STAT probes) instead of LISTGROUP, which is
         // infeasible on large groups (e.g., alt.binaries.test has billions).
         var found = repo.DiscoverRemoteManifestsViaIndex(store);
@@ -640,16 +647,13 @@ static int Download(string[] args)
     {
         using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+        remote.MaxArticleBytes = repo.MaxDownloadBytes;
         // Fetch the latest published message-identity index before
         // downloading. A retention refresh may have republished articles
         // under new IDs; without this, stale IDs would be requested.
-        try
-        {
-            string? remoteIndex = remote.GetLatestMessageIndex();
-            if (remoteIndex is not null)
-                repo.MessageIndex.LoadFromJson(remoteIndex);
-        }
-        catch { /* best-effort: fall back to local index */ }
+        // Throws an explicit recovery error if an index was published but
+        // cannot be retrieved or parsed — never silently falls back.
+        remote.SyncMessageIndex(repo.MessageIndex);
         DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
         {
             if (done % 25 == 0 || done == total)
@@ -802,14 +806,27 @@ static int RetentionCheck(string[] args)
     try
     {
         using var remote = new UsenetBackup.Core.Nntp.NntpBlobStore(
-            client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath);
+            client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
+            messageIndex: repo.MessageIndex,
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
 
         if (dryRun)
         {
             Console.WriteLine("DRY RUN — no articles will be reposted, no indexes updated, no timestamps advanced");
         }
 
-        var report = manager.CheckAndRepost(repo, remote, warnDays, repostThreshold, dryRun: dryRun);
+        // Single-provider command: only records for the configured host are
+        // processed through this connection. Records from other providers
+        // fail visibly instead of being checked through the wrong server.
+        var report = manager.CheckAndRepost(repo,
+            record => string.Equals(record.ProviderHost, nntp.Host, StringComparison.OrdinalIgnoreCase)
+                ? remote
+                : throw new InvalidOperationException(
+                    $"Backup {record.BackupId} was uploaded via '{record.ProviderHost}', " +
+                    $"but this retention-check targets '{nntp.Host}'. Run retention-check " +
+                    "against the original provider, or use the service scheduler which " +
+                    "checks each provider through its own connection."),
+            warnDays, repostThreshold, dryRun: dryRun);
 
         Console.WriteLine($"\nRetention check complete:");
         Console.WriteLine($"  Backups checked: {report.BackupsChecked}");

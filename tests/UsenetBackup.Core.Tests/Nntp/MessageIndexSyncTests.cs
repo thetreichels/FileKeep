@@ -113,6 +113,119 @@ public sealed class MessageIndexSyncTests : IDisposable
     }
 
     [Fact]
+    public void GetLatestMessageIndex_ReturnsNullWhenNeverPublished()
+    {
+        using var store = CreateStore();
+        Assert.Null(store.GetLatestMessageIndex());
+    }
+
+    [Fact]
+    public void GetLatestMessageIndex_ToleratesExpiredOlderVersions()
+    {
+        using var store = CreateStore();
+        int v1 = store.PostMessageIndex("{\"v\":1}");
+        int v2 = store.PostMessageIndex("{\"v\":2}");
+        int v3 = store.PostMessageIndex("{\"v\":3}");
+        Assert.Equal(3, v3);
+
+        // Simulate expiry of the older versions: their articles are gone
+        // while the newest survives. Discovery must not stop at the gap.
+        Assert.True(_server.Articles.TryRemove(ArticleCodec.MakeMessageIndexMessageId(RepoId, v1), out _));
+        Assert.True(_server.Articles.TryRemove(ArticleCodec.MakeMessageIndexMessageId(RepoId, v2), out _));
+
+        Assert.Equal("{\"v\":3}", store.GetLatestMessageIndex());
+    }
+
+    [Fact]
+    public void PostMessageIndex_AfterGap_ContinuesFromSurvivingVersion()
+    {
+        using var store = CreateStore();
+        int v1 = store.PostMessageIndex("{\"v\":1}");
+        int v2 = store.PostMessageIndex("{\"v\":2}");
+        Assert.True(_server.Articles.TryRemove(ArticleCodec.MakeMessageIndexMessageId(RepoId, v1), out _));
+
+        // Latest surviving version is v2, so the next post must be v3 —
+        // not v2 (which would collide with the surviving article).
+        int v3 = store.PostMessageIndex("{\"v\":3}");
+        Assert.Equal(3, v3);
+        Assert.Equal("{\"v\":3}", store.GetLatestMessageIndex());
+    }
+
+    [Fact]
+    public void GetLatestMessageIndex_ThrowsWhenArticleUnfetchable()
+    {
+        using var store = CreateStore();
+        store.PostMessageIndex("{\"v\":1}");
+        // STAT succeeds but ARTICLE fails: expected-but-broken.
+        _server.FailArticleFetch.Add(ArticleCodec.MakeMessageIndexMessageId(RepoId, 1));
+
+        var ex = Assert.Throws<MessageIndexFetchException>(() => store.GetLatestMessageIndex());
+        Assert.Contains("v1", ex.Message);
+    }
+
+    [Fact]
+    public void GetLatestMessageIndex_ThrowsWhenArticleUnparseable()
+    {
+        using var store = CreateStore();
+        store.PostMessageIndex("{\"v\":1}");
+        // Corrupt the article so it has no header/body separator.
+        _server.Articles[ArticleCodec.MakeMessageIndexMessageId(RepoId, 1)] =
+            "this is not a valid article, no headers at all";
+
+        var ex = Assert.Throws<MessageIndexFetchException>(() => store.GetLatestMessageIndex());
+        Assert.Contains("parsed", ex.Message);
+    }
+
+    [Fact]
+    public void SyncMessageIndex_LoadsRemoteIndex()
+    {
+        using var store = CreateStore();
+        store.PostMessageIndex("{\"h/g\":{\"a\":\"<a@x>\"}}");
+
+        var index = new ChunkMessageIndex(_workDir);
+        store.SyncMessageIndex(index);
+
+        Assert.Equal("<a@x>", index.GetMessageId("h/g", "a", RepoId));
+    }
+
+    [Fact]
+    public void SyncMessageIndex_NoOpWhenNeverPublished()
+    {
+        using var store = CreateStore();
+        var index = new ChunkMessageIndex(_workDir);
+        store.SyncMessageIndex(index); // must not throw
+        Assert.Equal(ArticleCodec.MakeMessageId("a", RepoId),
+            index.GetMessageId("h/g", "a", RepoId)); // deterministic fallback intact
+    }
+
+    [Fact]
+    public void SyncMessageIndex_ThrowsExplicitErrorWhenFetchFails()
+    {
+        using var store = CreateStore();
+        store.PostMessageIndex("{\"v\":1}");
+        _server.FailArticleFetch.Add(ArticleCodec.MakeMessageIndexMessageId(RepoId, 1));
+
+        var index = new ChunkMessageIndex(_workDir);
+        var ex = Assert.Throws<MessageIndexFetchException>(() => store.SyncMessageIndex(index));
+        Assert.Contains("could not be retrieved", ex.Message);
+        Assert.IsType<MessageIndexFetchException>(ex.InnerException);
+    }
+
+    [Fact]
+    public void SyncMessageIndex_ThrowsExplicitErrorWhenUnparseable()
+    {
+        using var store = CreateStore();
+        store.PostMessageIndex("{\"v\":1}");
+        _server.Articles[ArticleCodec.MakeMessageIndexMessageId(RepoId, 1)] = "not json at all";
+
+        var index = new ChunkMessageIndex(_workDir);
+        // "not json at all" has no header/body separator -> fetch-level
+        // parse failure, wrapped as MessageIndexFetchException.
+        var ex = Assert.Throws<MessageIndexFetchException>(() => store.SyncMessageIndex(index));
+        Assert.IsType<MessageIndexFetchException>(ex.InnerException);
+    }
+
+    [Fact]
     public void MakeMessageIndexMessageId_Deterministic()
     {
         string id1 = ArticleCodec.MakeMessageIndexMessageId(RepoId, 1);

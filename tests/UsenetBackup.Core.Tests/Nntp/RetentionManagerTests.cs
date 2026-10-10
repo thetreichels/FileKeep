@@ -41,13 +41,15 @@ public sealed class RetentionManagerTests : IDisposable
         try { Directory.Delete(_workDir, recursive: true); } catch { }
     }
 
-    private NntpClient Connect()
+    private NntpClient Connect() => ConnectTo(_server);
+
+    private static NntpClient ConnectTo(FakeNntpServer server)
     {
         var (clientStream, serverStream) = InMemoryTransport.Create();
         _ = Task.Run(() =>
         {
             using (serverStream)
-                _server.HandleConnection(serverStream, CancellationToken.None);
+                server.HandleConnection(serverStream, CancellationToken.None);
         });
         var client = new NntpClient(clientStream);
         client.Connect();
@@ -313,6 +315,155 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(1, report2.BackupsRefreshed);
         var record2 = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
         Assert.True(record2.UploadedUtc > uploaded);
+    }
+
+    [Fact]
+    public void CheckAndRepost_UsesMatchingStorePerProvider()
+    {
+        using var serverB = new FakeNntpServer();
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, 64 * 1024, 10_000);
+        var manifest = repo.BackupDirectory(_srcDir);
+        var chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
+
+        const string hostB = "news.other.example";
+        // Share the repo's index instance with the stores, exactly like the
+        // scheduler does: republication records into it and CheckBackup
+        // publishes repo.MessageIndex, so they must be the same object.
+        var messageIndex = repo.MessageIndex;
+
+        using var clientA = ConnectTo(_server);
+        using var clientB = ConnectTo(serverB);
+        using var storeA = new NntpBlobStore(clientA, Newsgroup, RepoId,
+            Path.Combine(_workDir, "journal-a.db"),
+            messageIndex: messageIndex,
+            providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
+        using var storeB = new NntpBlobStore(clientB, Newsgroup, RepoId,
+            Path.Combine(_workDir, "journal-b.db"),
+            messageIndex: messageIndex,
+            providerKey: ChunkMessageIndex.MakeProviderKey(hostB, Newsgroup));
+
+        // Original upload to BOTH providers.
+        foreach (string chunkId in chunkIds)
+        {
+            byte[] blob = repo.GetChunkBlob(chunkId);
+            storeA.Put(chunkId, blob);
+            storeB.Put(chunkId, blob);
+        }
+        int postsBeforeA = _server.PostCount;
+        int postsBeforeB = serverB.PostCount;
+
+        // Both records expiring (25 days left) so both get refreshed.
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        var tracker = new UsenetUploadTracker(_repoDir);
+        tracker.RecordUpload(manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+        tracker.RecordUpload(manifest.BackupId, hostB, Newsgroup, uploaded);
+
+        var requestedHosts = new List<string>();
+        NntpBlobStore Resolve(UsenetUploadTracker.UploadRecord record)
+        {
+            requestedHosts.Add(record.ProviderHost);
+            return string.Equals(record.ProviderHost, ProviderHost, StringComparison.OrdinalIgnoreCase)
+                ? storeA
+                : string.Equals(record.ProviderHost, hostB, StringComparison.OrdinalIgnoreCase)
+                    ? storeB
+                    : throw new InvalidOperationException($"unexpected host {record.ProviderHost}");
+        }
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            repo, (Func<UsenetUploadTracker.UploadRecord, NntpBlobStore>)Resolve,
+            warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(2, report.BackupsChecked);
+        Assert.Equal(2, report.BackupsRefreshed);
+        Assert.Empty(report.Errors);
+        Assert.Contains(ProviderHost, requestedHosts);
+        Assert.Contains(hostB, requestedHosts);
+
+        // Each provider refreshed through its OWN connection: all chunks
+        // republished plus one message-index post per provider.
+        Assert.Equal(chunkIds.Count + 1, _server.PostCount - postsBeforeA);
+        Assert.Equal(chunkIds.Count + 1, serverB.PostCount - postsBeforeB);
+
+        // New identities recorded under each provider's own key...
+        string keyA = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        string keyB = ChunkMessageIndex.MakeProviderKey(hostB, Newsgroup);
+        foreach (string chunkId in chunkIds)
+        {
+            Assert.True(messageIndex.HasNewIdentity(keyA, chunkId));
+            Assert.True(messageIndex.HasNewIdentity(keyB, chunkId));
+            // ...and the identities differ per provider.
+            Assert.NotEqual(
+                messageIndex.GetMessageId(keyA, chunkId, RepoId),
+                messageIndex.GetMessageId(keyB, chunkId, RepoId));
+        }
+
+        // Each provider's timestamp advanced only after its own refresh.
+        var fresh = new UsenetUploadTracker(_repoDir);
+        Assert.True(fresh.GetAll().Single(r => r.ProviderHost == ProviderHost).UploadedUtc > uploaded);
+        Assert.True(fresh.GetAll().Single(r => r.ProviderHost == hostB).UploadedUtc > uploaded);
+
+        // The index published during B's refresh must contain BOTH
+        // providers' refreshed identities — guards against a stale
+        // repo.MessageIndex when several providers refresh in one run.
+        string? publishedJson = storeB.GetLatestMessageIndex();
+        Assert.NotNull(publishedJson);
+        string publishedDir = Path.Combine(_workDir, "published-check");
+        Directory.CreateDirectory(publishedDir);
+        var published = new ChunkMessageIndex(publishedDir);
+        published.LoadFromJson(publishedJson);
+        foreach (string chunkId in chunkIds)
+        {
+            Assert.True(published.HasNewIdentity(keyA, chunkId));
+            Assert.True(published.HasNewIdentity(keyB, chunkId));
+        }
+    }
+
+    [Fact]
+    public void CheckAndRepost_UnknownProviderRecord_RecordedAsError()
+    {
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, 64 * 1024, 10_000);
+        var manifest = repo.BackupDirectory(_srcDir);
+        var chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
+
+        var messageIndex = new ChunkMessageIndex(_repoDir);
+        using var client = Connect();
+        using var store = new NntpBlobStore(client, Newsgroup, RepoId,
+            Path.Combine(_workDir, "journal.db"),
+            messageIndex: messageIndex,
+            providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
+        foreach (string chunkId in chunkIds)
+            store.Put(chunkId, repo.GetChunkBlob(chunkId));
+        int postsBefore = _server.PostCount;
+
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        var tracker = new UsenetUploadTracker(_repoDir);
+        tracker.RecordUpload(manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+        tracker.RecordUpload(manifest.BackupId, "gone.example.com", Newsgroup, uploaded);
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            repo,
+            record => string.Equals(record.ProviderHost, ProviderHost, StringComparison.OrdinalIgnoreCase)
+                ? store
+                : throw new InvalidOperationException(
+                    $"No NNTP provider configured for host '{record.ProviderHost}'."),
+            warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(2, report.BackupsChecked);
+        Assert.Equal(1, report.BackupsRefreshed); // known provider still refreshed
+        Assert.Single(report.Errors);
+        Assert.Contains("gone.example.com", report.Errors[0]);
+        Assert.Equal(chunkIds.Count + 1, _server.PostCount - postsBefore);
+
+        // Known provider's timestamp advanced after its own refresh...
+        var fresh = new UsenetUploadTracker(_repoDir);
+        Assert.True(fresh.GetAll().Single(r => r.ProviderHost == ProviderHost).UploadedUtc > uploaded);
+        // ...unknown provider's timestamp untouched (never refreshed through
+        // another provider's connection).
+        Assert.Equal(uploaded,
+            fresh.GetAll().Single(r => r.ProviderHost == "gone.example.com").UploadedUtc,
+            TimeSpan.FromSeconds(5));
     }
 
     [Fact]

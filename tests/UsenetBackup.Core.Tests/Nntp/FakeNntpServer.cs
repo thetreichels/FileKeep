@@ -30,6 +30,13 @@ internal sealed class FakeNntpServer : IDisposable
     /// </summary>
     public bool FailIndexPosts { get; set; }
 
+    /// <summary>
+    /// Message IDs for which ARTICLE returns 430 even though the article
+    /// exists (STAT still succeeds). Simulates a server-side fetch failure
+    /// for tests of expected-but-unretrievable index articles.
+    /// </summary>
+    public readonly HashSet<string> FailArticleFetch = new(StringComparer.Ordinal);
+
     /// <summary>Starts the optional TCP listener (loopback, ephemeral port).</summary>
     public int Listen()
     {
@@ -123,7 +130,7 @@ internal sealed class FakeNntpServer : IDisposable
                         break;
                     case "ARTICLE":
                         Interlocked.Increment(ref _articleCount);
-                        if (Articles.TryGetValue(arg, out string? found))
+                        if (!FailArticleFetch.Contains(arg) && Articles.TryGetValue(arg, out string? found))
                         {
                             writer.WriteLine("220 0 article follows");
                             // Re-stuff dots on the way out, like a real server.

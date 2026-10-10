@@ -124,4 +124,40 @@ public sealed class NntpClientTests : IDisposable
             Assert.Throws<InvalidOperationException>(() => client.Stat("<x>"));
         }
     }
+
+    [Fact]
+    public void GetArticle_MaxBytes_AbortsOversizedArticle()
+    {
+        const string msgId = "<oversized@usenet-backup>";
+        // 100 KiB article with a 1 KiB cap: the read must abort mid-stream,
+        // before the whole article is buffered.
+        _server.Articles[msgId] = "X-Header: test\r\n\r\n" + new string('a', 100 * 1024);
+        using var client = Connect();
+        Assert.Throws<NntpException>(() => client.GetArticle(msgId, maxBytes: 1024));
+    }
+
+    [Fact]
+    public void GetArticle_MaxBytes_AllowsArticleUnderCap()
+    {
+        const string msgId = "<small@usenet-backup>";
+        _server.Articles[msgId] = "X-Header: test\r\n\r\nhello";
+        using var client = Connect();
+        string? article = client.GetArticle(msgId, maxBytes: 1024);
+        Assert.NotNull(article);
+        Assert.Contains("hello", article);
+        client.Quit();
+    }
+
+    [Fact]
+    public void GetArticle_NoCap_BackwardsCompatible()
+    {
+        const string msgId = "<nocap@usenet-backup>";
+        _server.Articles[msgId] = "X-Header: test\r\n\r\n" + new string('b', 64 * 1024);
+        using var client = Connect();
+        // No maxBytes: uncapped, as before.
+        string? article = client.GetArticle(msgId);
+        Assert.NotNull(article);
+        Assert.True(article.Length >= 64 * 1024);
+        client.Quit();
+    }
 }

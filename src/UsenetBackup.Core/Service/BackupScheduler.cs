@@ -310,13 +310,9 @@ public sealed class BackupScheduler
                 messageIndex: repo.MessageIndex, providerKey: providerKey);
             // Fetch the latest published message-identity index before
             // downloading (retention may have refreshed article IDs).
-            try
-            {
-                string? remoteIndex = remote.GetLatestMessageIndex();
-                if (remoteIndex is not null)
-                    repo.MessageIndex.LoadFromJson(remoteIndex);
-            }
-            catch { /* best-effort */ }
+            // Throws an explicit recovery error if an index was published
+            // but cannot be retrieved or parsed — never silently falls back.
+            remote.SyncMessageIndex(repo.MessageIndex);
             repo.DownloadChunks(nzb, remote, (done, total) => { });
         }
         finally
@@ -362,37 +358,81 @@ public sealed class BackupScheduler
         }
 
         using var repo = BackupRepository.Open(repoPath, passphrase);
-        var messageIndex = new Nntp.ChunkMessageIndex(repo.RepoRoot);
+        // Share the repo's index instance with every per-provider store:
+        // republication records new identities into this instance, and
+        // CheckBackup publishes repo.MessageIndex — they must be the same
+        // object, otherwise a second provider's refresh would publish a
+        // stale index missing its new identities.
+        var messageIndex = repo.MessageIndex;
 
-        // Use the first provider (retention is per-provider via tracker)
-        var nntp = providers[0];
-        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+        // Retention records are tracked per provider (backupId@host), so
+        // each record must be checked and refreshed through its OWN
+        // provider's connection: one pool+store per provider host, created
+        // lazily and disposed at the end of the run. A record whose
+        // provider is no longer configured fails visibly (recorded as an
+        // error) instead of being silently checked through another
+        // provider — which would refresh the wrong server while advancing
+        // the missing provider's timestamp.
+        var stores = new Dictionary<string, (Nntp.NntpConnectionPool Pool, Nntp.NntpBlobStore Store)>(
+            StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            Nntp.NntpBlobStore StoreFor(Nntp.UsenetUploadTracker.UploadRecord record)
+            {
+                if (stores.TryGetValue(record.ProviderHost, out var entry))
+                    return entry.Store;
 
-        using var pool = new Nntp.NntpConnectionPool(
-            nntp.Host, nntp.Port, nntp.Ssl,
-            username: nntp.Username, password: nntpPassword,
-            size: nntp.Connections);
+                // Prefer an exact host+newsgroup match; fall back to host-only.
+                NntpConfig? nntp = providers.FirstOrDefault(p =>
+                        string.Equals(p.Host, record.ProviderHost, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(p.Newsgroup, record.Newsgroup, StringComparison.OrdinalIgnoreCase))
+                    ?? providers.FirstOrDefault(p =>
+                        string.Equals(p.Host, record.ProviderHost, StringComparison.OrdinalIgnoreCase));
+                if (nntp is null)
+                    throw new InvalidOperationException(
+                        $"No NNTP provider configured for host '{record.ProviderHost}' " +
+                        $"(backup {record.BackupId}). Retention for that provider cannot be " +
+                        "checked; configure the provider or remove its upload records.");
 
-        using var store = new Nntp.NntpBlobStore(
-            pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
-            messageIndex: messageIndex,
-            providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
+                string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+                if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+                    nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
 
-        var manager = new Nntp.RetentionManager(
-            msg => Log($"retention: {msg}"),
-            host => string.Equals(host, nntp.Host, StringComparison.OrdinalIgnoreCase)
-                ? nntp.RetentionDays : 1095);
+                var pool = new Nntp.NntpConnectionPool(
+                    nntp.Host, nntp.Port, nntp.Ssl,
+                    username: nntp.Username, password: nntpPassword,
+                    size: nntp.Connections);
+                var store = new Nntp.NntpBlobStore(
+                    pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
+                    messageIndex: messageIndex,
+                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
+                stores[record.ProviderHost] = (pool, store);
+                return store;
+            }
 
-        var report = manager.CheckAndRepost(
-            repo, store,
-            warnDays: _config.RetentionWarnDays,
-            repostThresholdDays: _config.RetentionRepostThresholdDays,
-            dryRun: dryRun);
+            var manager = new Nntp.RetentionManager(
+                msg => Log($"retention: {msg}"),
+                host => providers.FirstOrDefault(p =>
+                        string.Equals(p.Host, host, StringComparison.OrdinalIgnoreCase))
+                    ?.RetentionDays ?? 1095);
 
-        Log($"retention check complete for '{repoPath}': {report.BackupsHealthy} healthy, " +
-            $"{report.BackupsRefreshed} refreshed, {report.Errors.Count} errors");
+            var report = manager.CheckAndRepost(
+                repo, StoreFor,
+                warnDays: _config.RetentionWarnDays,
+                repostThresholdDays: _config.RetentionRepostThresholdDays,
+                dryRun: dryRun);
+
+            Log($"retention check complete for '{repoPath}': {report.BackupsHealthy} healthy, " +
+                $"{report.BackupsRefreshed} refreshed, {report.Errors.Count} errors");
+        }
+        finally
+        {
+            foreach (var (pool, store) in stores.Values)
+            {
+                try { store.Dispose(); } catch { /* best effort */ }
+                try { pool.Dispose(); } catch { /* best effort */ }
+            }
+        }
     }
 
     /// <summary>

@@ -485,6 +485,7 @@ public sealed class RecoveryWizard : Form
                     using var store = new NntpBlobStore(
                         client, _state.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
                         providerKey: ChunkMessageIndex.MakeProviderKey(_state.NntpHost, _state.Newsgroup));
+                    store.MaxArticleBytes = repo.MaxDownloadBytes;
                     return _state.DiscoverRemoteManifests(store);
                 }
                 finally

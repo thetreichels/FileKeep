@@ -37,6 +37,8 @@
 #include <vsbackup.h>
 
 #include <cctype>
+#include <cstring>
+#include <new>
 #include <cstdio>
 #include <string>
 #include <chrono>
@@ -98,9 +100,54 @@ enum class SignalResult {
     Error,      // wait/read error (fail-safe abort)
 };
 
+// Shared state between the stdin reader thread and the main thread.
+// Heap-allocated: on timeout the reader thread may still be blocked in
+// ReadFile, so the state is intentionally leaked in that path — the
+// process proceeds to abort and exit, which reclaims it.
+struct StdinSignalState {
+    HANDLE doneEvent = nullptr; // manual-reset; set when the read finishes
+    char line[256] = {};        // bytes read (NUL-terminated)
+    bool gotData = false;       // true if at least one byte was read
+};
+
+// Blocking stdin read. Anonymous pipe handles are NOT waitable objects —
+// WaitForSingleObject must never be called on them (a failed wait would
+// take the abort path and delete the snapshot mid-backup). A blocking
+// ReadFile IS well-defined for pipes: it returns when the engine writes
+// the signal or closes the pipe (EOF).
+static DWORD WINAPI StdinReaderThread(LPVOID param) {
+    auto* state = static_cast<StdinSignalState*>(param);
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hStdin && hStdin != INVALID_HANDLE_VALUE) {
+        // Read until newline, EOF, or buffer full. A single ReadFile on a
+        // byte-stream pipe is not guaranteed to return the whole line.
+        size_t total = 0;
+        while (total < sizeof(state->line) - 1) {
+            DWORD bytesRead = 0;
+            BOOL ok = ReadFile(hStdin, state->line + total,
+                static_cast<DWORD>(sizeof(state->line) - 1 - total),
+                &bytesRead, nullptr);
+            if (!ok || bytesRead == 0)
+                break; // EOF or error: engine went away
+            total += bytesRead;
+            state->line[total] = '\0';
+            if (strchr(state->line, '\n') != nullptr)
+                break;
+        }
+        state->gotData = total > 0;
+    }
+    SetEvent(state->doneEvent);
+    return 0;
+}
+
 // Waits for the engine's completion signal on stdin.
 // Only SignalResult::Complete means the backup succeeded; every other
 // outcome must lead to AbortBackup (fail-safe).
+//
+// Synchronization design: a reader thread blocks in ReadFile on stdin
+// while the main thread waits on a manual-reset event with the timeout.
+// The event — not the pipe handle — is the waitable object, so there is
+// no dependence on pipe-handle wait semantics at all.
 SignalResult WaitForCompletionSignal(DWORD timeoutSecs) {
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
     if (hStdin == nullptr || hStdin == INVALID_HANDLE_VALUE) {
@@ -111,30 +158,58 @@ SignalResult WaitForCompletionSignal(DWORD timeoutSecs) {
     // Guard against DWORD overflow in ms conversion.
     DWORD waitMs = (timeoutSecs > 4000000) ? INFINITE : timeoutSecs * 1000;
 
-    DWORD waitResult = WaitForSingleObject(hStdin, waitMs);
-    if (waitResult == WAIT_TIMEOUT) {
-        fwprintf(stderr, L"Timeout (%lu seconds) waiting for completion signal; "
-            L"aborting backup\n", timeoutSecs);
-        return SignalResult::Timeout;
+    auto* state = new (std::nothrow) StdinSignalState();
+    if (!state) {
+        fwprintf(stderr, L"Out of memory; aborting backup\n");
+        return SignalResult::Error;
     }
-    if (waitResult != WAIT_OBJECT_0) {
-        fwprintf(stderr, L"Wait for completion signal failed: %lu; aborting backup\n",
+    state->doneEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!state->doneEvent) {
+        fwprintf(stderr, L"CreateEvent failed: %lu; aborting backup\n",
             GetLastError());
+        delete state;
         return SignalResult::Error;
     }
 
-    // Signaled: data available or pipe closed (EOF).
-    char buffer[256] = {};
-    DWORD bytesRead = 0;
-    BOOL ok = ReadFile(hStdin, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
-    if (!ok || bytesRead == 0) {
+    HANDLE hThread = CreateThread(nullptr, 0, StdinReaderThread, state, 0, nullptr);
+    if (!hThread) {
+        fwprintf(stderr, L"CreateThread failed: %lu; aborting backup\n",
+            GetLastError());
+        CloseHandle(state->doneEvent);
+        delete state;
+        return SignalResult::Error;
+    }
+    CloseHandle(hThread); // synchronize via doneEvent; the thread needs no join
+
+    DWORD waitResult = WaitForSingleObject(state->doneEvent, waitMs);
+    if (waitResult == WAIT_TIMEOUT) {
+        fwprintf(stderr, L"Timeout (%lu seconds) waiting for completion signal; "
+            L"aborting backup\n", timeoutSecs);
+        // The reader thread is still blocked in ReadFile; its state is
+        // intentionally leaked — the abort path exits the process shortly.
+        CloseHandle(state->doneEvent);
+        return SignalResult::Timeout;
+    }
+    CloseHandle(state->doneEvent);
+    if (waitResult != WAIT_OBJECT_0) {
+        fwprintf(stderr, L"Wait for completion signal failed: %lu; aborting backup\n",
+            GetLastError());
+        delete state;
+        return SignalResult::Error;
+    }
+
+    // The reader thread finished writing before signaling the event, so
+    // the state is safe to read and free here.
+    bool gotData = state->gotData;
+    std::string signal(state->line);
+    delete state;
+
+    if (!gotData) {
         // EOF: the engine went away without signaling. Fail-safe abort.
         fwprintf(stderr, L"Stdin closed without completion signal; aborting backup\n");
         return SignalResult::Eof;
     }
 
-    buffer[bytesRead] = '\0';
-    std::string signal(buffer);
     for (auto& c : signal) c = static_cast<char>(std::tolower(
         static_cast<unsigned char>(c)));
     if (signal.find("complete") != std::string::npos) {

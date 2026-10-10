@@ -143,8 +143,14 @@ public sealed class NntpClient : IDisposable
         };
     }
 
-    /// <summary>Returns the full article text, or null when it doesn't exist.</summary>
-    public string? GetArticle(string messageId)
+    /// <summary>
+    /// Returns the full article text, or null when it doesn't exist.
+    /// When <paramref name="maxBytes"/> is positive, the read aborts with
+    /// <see cref="NntpException"/> as soon as the article exceeds that many
+    /// characters — a fail-fast guard so a malicious oversized article cannot
+    /// exhaust memory before the caller ever sees it.
+    /// </summary>
+    public string? GetArticle(string messageId, long maxBytes = 0)
     {
         EnsureConnected();
         var (code, text) = SendCommand($"ARTICLE {messageId}");
@@ -152,7 +158,7 @@ public sealed class NntpClient : IDisposable
             return null;
         if (code != 220)
             throw new NntpException($"ARTICLE {messageId} failed: {code} {text}");
-        return ReadMultiline();
+        return ReadMultiline(maxBytes);
     }
 
     /// <summary>
@@ -220,7 +226,7 @@ public sealed class NntpClient : IDisposable
         return (code, line.Length > 4 ? line[4..] : "");
     }
 
-    private string ReadMultiline()
+    private string ReadMultiline(long maxChars = 0)
     {
         var sb = new StringBuilder();
         while (true)
@@ -234,6 +240,10 @@ public sealed class NntpClient : IDisposable
             // leading control/format chars (e.g. U+0099) as ignorable and would strip a
             // legitimate first byte from lines like "\u0099..".
             sb.Append(line.StartsWith("..", StringComparison.Ordinal) ? line[1..] : line).Append("\r\n");
+            if (maxChars > 0 && sb.Length > maxChars)
+                throw new NntpException(
+                    $"Article exceeds the maximum allowed size of {maxChars:N0} characters; " +
+                    "aborting download (possible malicious oversized article).");
         }
         return sb.ToString();
     }
