@@ -273,8 +273,22 @@ public sealed class RetentionManager
                 string newMessageId;
                 if (volumeMode)
                 {
-                    byte[] volumeBytes = VolumePacker.BuildVolume(
-                        volumeChunks![articleId], repo.GetChunkBlob).Bytes;
+                    byte[] volumeBytes;
+                    try
+                    {
+                        // Prefer a local rebuild (validates chunk integrity,
+                        // works offline). Volume bytes are deterministic, so a
+                        // server download is byte-identical when local chunks
+                        // are gone (e.g. wiped after upload to save space).
+                        volumeBytes = VolumePacker.BuildVolume(
+                            volumeChunks![articleId], repo.GetChunkBlob).Bytes;
+                    }
+                    catch (InvalidDataException)
+                    {
+                        _log($"  local chunks for volume {articleId[..12]}… missing, " +
+                             "downloading volume from server for republish");
+                        volumeBytes = remote.GetVolume(articleId);
+                    }
                     newMessageId = remote.RepublishVolumeWithNewIdentity(articleId, volumeBytes);
                 }
                 else
