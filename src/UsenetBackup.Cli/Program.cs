@@ -86,7 +86,8 @@ static void PrintUsage()
 
         nntp-check --probe-post-size MB posts a single probe article of that
         size to discover the provider's article-size ceiling (the upper
-        bound for --volume-size). The probe article permanently lands in
+        bound for --volume-size). Use --probe-post-size auto to binary-search
+        the ceiling automatically. Probe articles permanently land in
         the newsgroup.
 
         nzb-generate writes an NZB 1.1 index of the backup's articles —
@@ -392,14 +393,17 @@ static int NntpCheck(string[] args)
 /// provider's maximum accepted article size — the upper bound for
 /// volume_size_bytes. Opt-in: the probe article permanently lands in the
 /// newsgroup.
+/// Use "auto" to binary-search the ceiling automatically (1 MB .. 256 MB).
 /// </summary>
 static int NntpProbePostSize(string[] args, string sizeArg)
 {
+    if (sizeArg.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        return NntpProbePostSizeAuto(args);
     if (!double.TryParse(sizeArg, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out double mb) ||
         mb <= 0 || mb > 1024)
     {
-        Console.Error.WriteLine("error: --probe-post-size needs a size in MB (0 < MB <= 1024)");
+        Console.Error.WriteLine("error: --probe-post-size needs a size in MB (0 < MB <= 1024) or 'auto'");
         return 2;
     }
     string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
@@ -439,6 +443,151 @@ static int NntpProbePostSize(string[] args, string sizeArg)
             "use a smaller volume_size_bytes in repo.json.");
         return 1;
     }
+}
+
+/// <summary>
+/// Binary-searches the provider's maximum accepted article size: probes
+/// 1 MB .. 256 MB, keeping the largest accepted size. Each probe posts a
+/// real article (they permanently land in the newsgroup), so this sends
+/// ~8 probe articles total. Prints the ceiling and a suggested
+/// volume_size_bytes (ceiling with a 10% safety margin).
+/// </summary>
+static int NntpProbePostSizeAuto(string[] args)
+{
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    Console.WriteLine($"Binary-searching max article size on {newsgroup} " +
+        "(~8 probe articles will permanently land in the group)...");
+
+    long loBytes = 1L * 1024 * 1024;      // known good floor
+    long hiBytes = 256L * 1024 * 1024;    // search ceiling
+
+    // First verify the floor is accepted at all.
+    if (!TryPostProbe(args, newsgroup, loBytes, quiet: true))
+    {
+        Console.WriteLine("Even 1 MB probes are rejected — the provider or " +
+            "credentials may be wrong. Fix connectivity first (nntp-check --diagnose).");
+        return 1;
+    }
+
+    // If the ceiling itself is accepted, that IS the answer (or higher).
+    if (TryPostProbe(args, newsgroup, hiBytes, quiet: true))
+    {
+        Console.WriteLine($"Provider accepts at least {hiBytes / (1024 * 1024)} MB articles.");
+        Console.WriteLine("Suggested volume_size_bytes: 268435456 (256 MiB).");
+        return 0;
+    }
+
+    // Binary search: lo accepted, hi rejected.
+    while (hiBytes - loBytes > 1L * 1024 * 1024)
+    {
+        long mid = (loBytes + hiBytes) / 2;
+        // Round to whole MB for clean reporting.
+        mid = (mid / (1024 * 1024)) * (1024 * 1024);
+        if (mid <= loBytes) break;
+        Console.WriteLine($"  trying {mid / (1024 * 1024)} MB...");
+        if (TryPostProbe(args, newsgroup, mid, quiet: true))
+            loBytes = mid;
+        else
+            hiBytes = mid;
+    }
+
+    long maxMb = loBytes / (1024 * 1024);
+    long suggested = (long)(loBytes * 0.9); // 10% safety margin
+    Console.WriteLine($"\nProvider max article size: ~{maxMb} MB.");
+    Console.WriteLine($"Suggested volume_size_bytes: {suggested} " +
+        $"({suggested / (1024.0 * 1024):F1} MiB, 10% safety margin).");
+    return 0;
+}
+
+/// <summary>
+/// Posts one probe article of exactly <paramref name="bytes"/> and returns
+/// true if the server accepted it. Quiet mode suppresses per-probe output.
+/// </summary>
+static bool TryPostProbe(string[] args, string newsgroup, long bytes, bool quiet)
+{
+    byte[] payload = new byte[bytes];
+    Random.Shared.NextBytes(payload);
+    string nonce = Guid.NewGuid().ToString("N")[..8];
+    var sb = new StringBuilder();
+    sb.Append("From: usenet-backup\r\n");
+    sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
+    sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
+    sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
+    sb.Append("X-UsenetBackup-Probe: 1\r\n");
+    sb.Append("\r\n");
+    sb.Append(UsenetBackup.Core.Nntp.YEnc.Encode(payload, $"probe-{nonce}.bin"));
+
+    try
+    {
+        using var client = ConnectNntp(args);
+        client.Post(sb.ToString());
+        client.Quit();
+        return true;
+    }
+    catch (Exception ex)
+    {
+        if (!quiet)
+            Console.WriteLine($"Probe of {bytes} bytes failed: {ex.Message}");
+        return false;
+    }
+}
+
+/// <summary>
+/// Upload preflight: builds the largest planned volume, measures the exact
+/// posted article size, and proves the provider accepts it before any real
+/// data is posted. Uses the cached per-provider limit when known; otherwise
+/// posts a single probe article at the planned size. Throws (aborting the
+/// upload) with a clear message if the provider rejects the size.
+/// </summary>
+static void PreflightVolumeSize(
+    UsenetBackup.Core.BackupRepository repo,
+    System.Collections.Generic.IReadOnlyList<System.Collections.Generic.IReadOnlyList<string>> groups,
+    string[] args,
+    string newsgroup)
+{
+    if (groups.Count == 0)
+        return;
+    string? host = GetOption(args, "--host");
+    if (string.IsNullOrEmpty(host))
+        return; // --host is validated later by ConnectNntp
+    bool ssl = args.Contains("--ssl");
+    int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : (ssl ? 563 : 119);
+
+    // Find the largest group by total blob bytes, then build exactly that
+    // volume and measure the real posted article size (yEnc + headers).
+    long maxBlobBytes = 0;
+    System.Collections.Generic.IReadOnlyList<string>? largest = null;
+    foreach (var group in groups)
+    {
+        long total = 0;
+        foreach (string id in group)
+            total += repo.GetChunkBlobSize(id);
+        if (total > maxBlobBytes)
+        {
+            maxBlobBytes = total;
+            largest = group;
+        }
+    }
+    if (largest is null)
+        return;
+    var volume = UsenetBackup.Core.Nntp.VolumePacker.BuildVolume(largest, repo.GetChunkBlob);
+    string article = UsenetBackup.Core.Nntp.ArticleCodec.BuildVolumeArticle(
+        volume.Id, repo.RepoId, volume.Bytes, newsgroup, "usenet-backup");
+    long articleBytes = article.Length; // yEnc body is ASCII: chars == bytes
+
+    var limits = new UsenetBackup.Core.Nntp.ProviderLimits(repo.RepoRoot);
+    long? cached = limits.GetMaxArticleBytes(host, port);
+    if (cached.HasValue && cached.Value >= articleBytes)
+    {
+        Console.WriteLine($"Preflight: largest article {articleBytes} bytes within " +
+            $"known {host}:{port} limit ({cached.Value} bytes).");
+        return;
+    }
+    Console.WriteLine($"Preflight: probing {host}:{port} with a {articleBytes}-byte " +
+        "article to verify the upload will succeed...");
+    limits.EnsureCapacity(host, port, articleBytes,
+        size => TryPostProbe(args, newsgroup, size, quiet: false));
+    Console.WriteLine("Preflight OK — provider accepts the volume size.");
 }
 
 /// <summary>
@@ -601,6 +750,11 @@ static int NntpUpload(string[] args)
             // Pack chunks into volumes (one Usenet article each), streaming
             // one volume at a time so memory stays flat for large backups.
             var groups = repo.PlanVolumes(manifest);
+            // Preflight: prove the provider accepts our largest article
+            // BEFORE posting anything. Uses the cached per-provider limit
+            // when known; otherwise posts one probe article at the planned
+            // size. Aborts the upload if the probe is rejected.
+            PreflightVolumeSize(repo, groups, args, newsgroup);
             var volumeEntries = new List<VolumeEntry>(groups.Count);
             for (int i = 0; i < groups.Count; i++)
             {

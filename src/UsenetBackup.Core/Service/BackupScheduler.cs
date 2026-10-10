@@ -708,6 +708,12 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': auto-uploading {backupId} to {nntp.Host}");
             try
             {
+                // Preflight: prove the provider accepts our largest article
+                // BEFORE posting anything. Uses the cached per-provider limit
+                // when known; otherwise posts one probe article at the planned
+                // size. Aborts this provider's upload if the probe is rejected.
+                if (useVolumes)
+                    PreflightProviderCapacity(repo, volumeGroups, nntp, nntpPassword);
                 // Use a connection pool for parallel uploads.
                 // Connections setting controls the pool size (1-100, default 10).
                 using var pool = new Nntp.NntpConnectionPool(
@@ -903,6 +909,83 @@ public sealed class BackupScheduler
         }
         if (errors.Count == providers.Count)
             throw new InvalidOperationException($"Auto-upload failed on all {providers.Count} provider(s): {string.Join("; ", errors)}");
+    }
+
+    /// <summary>
+    /// Upload preflight: builds the largest planned volume, measures the exact
+    /// posted article size, and proves the provider accepts it before any real
+    /// data is posted. Uses the cached per-provider limit when known; otherwise
+    /// posts a single probe article at the planned size. Throws (aborting this
+    /// provider's upload) with a clear message if the provider rejects the size.
+    /// </summary>
+    private void PreflightProviderCapacity(
+        BackupRepository repo,
+        List<IReadOnlyList<string>> volumeGroups,
+        NntpConfig nntp,
+        string? nntpPassword)
+    {
+        if (volumeGroups.Count == 0)
+            return;
+        // Largest group by total blob bytes -> build it -> measure the article.
+        long maxBlobBytes = 0;
+        IReadOnlyList<string>? largest = null;
+        foreach (var group in volumeGroups)
+        {
+            long total = 0;
+            foreach (string id in group)
+                total += repo.GetChunkBlobSize(id);
+            if (total > maxBlobBytes)
+            {
+                maxBlobBytes = total;
+                largest = group;
+            }
+        }
+        if (largest is null)
+            return;
+        var volume = Nntp.VolumePacker.BuildVolume(largest, repo.GetChunkBlob);
+        string article = Nntp.ArticleCodec.BuildVolumeArticle(
+            volume.Id, repo.RepoId, volume.Bytes, nntp.Newsgroup, "usenet-backup");
+        long articleBytes = article.Length; // yEnc body is ASCII: chars == bytes
+
+        var limits = new Nntp.ProviderLimits(repo.RepoRoot);
+        long? cached = limits.GetMaxArticleBytes(nntp.Host, nntp.Port);
+        if (cached.HasValue && cached.Value >= articleBytes)
+        {
+            Log($"job preflight: largest article {articleBytes} bytes within " +
+                $"known {nntp.Host}:{nntp.Port} limit ({cached.Value} bytes).");
+            return;
+        }
+        Log($"job preflight: probing {nntp.Host}:{nntp.Port} with a {articleBytes}-byte " +
+            "article to verify the upload will succeed...");
+        limits.EnsureCapacity(nntp.Host, nntp.Port, articleBytes, size =>
+        {
+            byte[] payload = new byte[size];
+            System.Random.Shared.NextBytes(payload);
+            string nonce = Guid.NewGuid().ToString("N")[..8];
+            var sb = new System.Text.StringBuilder();
+            sb.Append("From: usenet-backup\r\n");
+            sb.Append("Newsgroups: ").Append(nntp.Newsgroup).Append("\r\n");
+            sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
+            sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
+            sb.Append("X-UsenetBackup-Probe: 1\r\n");
+            sb.Append("\r\n");
+            sb.Append(Nntp.YEnc.Encode(payload, $"probe-{nonce}.bin"));
+            try
+            {
+                using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
+                client.Connect();
+                if (!string.IsNullOrEmpty(nntp.Username))
+                    client.Authenticate(nntp.Username, nntpPassword ?? "");
+                client.Post(sb.ToString());
+                client.Quit();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        });
+        Log("job preflight OK — provider accepts the volume size.");
     }
 
     private void Log(string message) => _log?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
