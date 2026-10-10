@@ -179,6 +179,82 @@ public static class ArticleCodec
         byte[] blob = YEnc.Decode(body);
         return (backupId, blob);
     }
+    /// <summary>
+    /// Message-ID for a packed volume article:
+    /// &lt;volumeid.repoid@usenet-backup&gt; — deliberately the same shape as
+    /// chunk message-IDs, so the NZB parser, message index, and catalog
+    /// journal work for volumes unchanged.
+    /// </summary>
+    public static string MakeVolumeMessageId(string volumeIdHex, string repoId) =>
+        $"<{volumeIdHex}.{repoId}@{MessageIdDomain}>";
+
+    /// <summary>
+    /// Message-ID for a retention-refresh republication of a volume.
+    /// Servers reject duplicate message IDs, so refreshing retention requires
+    /// a NEW identity.
+    /// Format: &lt;volumeId.repoId.refresh.&lt;unixTime&gt;.&lt;nonce&gt;@usenet-backup&gt;.
+    /// </summary>
+    public static string MakeRefreshVolumeMessageId(string volumeIdHex, string repoId)
+    {
+        long unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string nonce = Guid.NewGuid().ToString("N")[..8];
+        return $"<{volumeIdHex}.{repoId}.refresh.{unixTime}.{nonce}@{MessageIdDomain}>";
+    }
+
+    public static string BuildVolumeArticle(
+        string volumeIdHex, string repoId, byte[] volumeBytes, string newsgroup, string from)
+    {
+        return BuildVolumeArticleWithMessageId(
+            volumeIdHex, MakeVolumeMessageId(volumeIdHex, repoId), volumeBytes, newsgroup, from);
+    }
+
+    /// <summary>
+    /// Builds a volume article with an explicit message ID (for retention-refresh
+    /// republications, which must use a NEW identity).
+    /// </summary>
+    public static string BuildVolumeArticleWithMessageId(
+        string volumeIdHex, string messageId, byte[] volumeBytes, string newsgroup, string from)
+    {
+        if (volumeIdHex.Length != 64)
+            throw new ArgumentException("Volume ID must be 64 hex chars.", nameof(volumeIdHex));
+
+        var sb = new StringBuilder();
+        sb.Append("From: ").Append(from).Append("\r\n");
+        sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
+        sb.Append("Subject: [usenet-backup] volume ").Append(volumeIdHex).Append("\r\n");
+        sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
+        sb.Append("X-UsenetBackup-Volume: ").Append(volumeIdHex).Append("\r\n");
+        sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
+        sb.Append("\r\n");
+        sb.Append(YEnc.Encode(volumeBytes, $"volume-{volumeIdHex[..16]}.bin"));
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Parses a volume article back into (volume ID, volume bytes).
+    /// Verifies yEnc framing; unpacking and per-chunk verification are the
+    /// caller's job (fails closed).
+    /// </summary>
+    public static (string VolumeId, byte[] VolumeBytes) ParseVolumeArticle(string articleText)
+    {
+        int split = articleText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        if (split < 0)
+        {
+            split = articleText.IndexOf("\n\n", StringComparison.Ordinal);
+            if (split < 0)
+                throw new InvalidDataException("Article has no header/body separator.");
+        }
+
+        var headers = ParseHeaders(articleText[..split]);
+        if (!headers.TryGetValue("X-UsenetBackup-Volume", out string? volumeId) ||
+            volumeId.Length != 64 || !volumeId.All(Uri.IsHexDigit))
+            throw new InvalidDataException("Article is missing a valid X-UsenetBackup-Volume header.");
+
+        string body = articleText[(split + (articleText[split..].StartsWith("\r\n\r\n") ? 4 : 2))..];
+        byte[] blob = YEnc.Decode(body);
+        return (volumeId.ToLowerInvariant(), blob);
+    }
+
     public static (string ChunkId, byte[] Blob) ParseArticle(string articleText)
     {
         int split = articleText.IndexOf("\r\n\r\n", StringComparison.Ordinal);

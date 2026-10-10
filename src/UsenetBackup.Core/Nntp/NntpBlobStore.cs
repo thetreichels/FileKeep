@@ -191,6 +191,89 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         _journal.RecordUpload(messageId, chunkIdHex);
     }
 
+    private string ResolveVolumeMessageId(string volumeIdHex)
+    {
+        if (_messageIndex is not null &&
+            _messageIndex.TryGetMessageId(_providerKey!, volumeIdHex, out string? recorded) &&
+            recorded is not null)
+            return recorded;
+        return ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
+    }
+
+    /// <summary>
+    /// Posts a packed volume as a single article. Idempotent via the journal
+    /// fast path and STAT fallback, like <see cref="Put"/>. Refuses up front
+    /// when the framed article would exceed <see cref="MaxArticleBytes"/>
+    /// instead of failing mid-POST with a bare server 441.
+    /// </summary>
+    public void PutVolume(string volumeIdHex, byte[] volumeBytes)
+    {
+        ValidateChunkId(volumeIdHex);
+        ArgumentNullException.ThrowIfNull(volumeBytes);
+        string messageId = ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
+        if (_journal.IsUploaded(messageId))
+            return; // resume fast path: already posted
+        if (UseClient(c => c.Stat(messageId)))
+        {
+            _journal.RecordUpload(messageId, volumeIdHex); // server already has it
+            return;
+        }
+        string article = ArticleCodec.BuildVolumeArticle(
+            volumeIdHex, _repoId, volumeBytes, _newsgroup, _from);
+        if (article.Length > MaxArticleBytes)
+            throw new InvalidDataException(
+                $"Volume article ({article.Length} bytes) exceeds the {MaxArticleBytes}-byte article limit. " +
+                "Lower volume_size_bytes in repo.json and re-run the upload.");
+        UseClient(c => c.Post(article));
+        WaitForArticle(messageId);
+        _journal.RecordUpload(messageId, volumeIdHex);
+    }
+
+    /// <summary>
+    /// Fetches a volume article, resolving refreshed identities through the
+    /// message index. Validates the X-UsenetBackup-Volume header matches.
+    /// Unpacking and per-chunk verification are the caller's job.
+    /// </summary>
+    public byte[] GetVolume(string volumeIdHex)
+    {
+        ValidateChunkId(volumeIdHex);
+        string messageId = ResolveVolumeMessageId(volumeIdHex);
+        string? article = UseClient(c => c.GetArticle(messageId, MaxArticleBytes));
+        if (article is null)
+            throw new InvalidDataException(
+                $"Volume {volumeIdHex} not found on the NNTP server (message-ID {messageId}).");
+        var (id, blob) = ArticleCodec.ParseVolumeArticle(article);
+        if (!id.Equals(volumeIdHex, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                $"NNTP server returned the wrong article for volume {volumeIdHex} (got {id}).");
+        return blob;
+    }
+
+    /// <summary>
+    /// Republication for retention refresh. Posts the volume under a NEW
+    /// message ID (servers reject duplicate IDs), waits until retrievable,
+    /// records the new identity in the message index, and returns the new
+    /// message ID. Never early-returns — the point is a fresh article with a
+    /// fresh retention clock.
+    /// </summary>
+    public string RepublishVolumeWithNewIdentity(string volumeIdHex, byte[] volumeBytes)
+    {
+        ValidateChunkId(volumeIdHex);
+        ArgumentNullException.ThrowIfNull(volumeBytes);
+        string newMessageId = ArticleCodec.MakeRefreshVolumeMessageId(volumeIdHex, _repoId);
+        string article = ArticleCodec.BuildVolumeArticleWithMessageId(
+            volumeIdHex, newMessageId, volumeBytes, _newsgroup, _from);
+        if (article.Length > MaxArticleBytes)
+            throw new InvalidDataException(
+                $"Volume article ({article.Length} bytes) exceeds the {MaxArticleBytes}-byte article limit. " +
+                "Lower volume_size_bytes in repo.json and re-run.");
+        UseClient(c => c.Post(article));
+        WaitForArticle(newMessageId);
+        _journal.RecordUpload(newMessageId, volumeIdHex);
+        _messageIndex?.RecordNewIdentity(_providerKey!, volumeIdHex, newMessageId);
+        return newMessageId;
+    }
+
     /// <summary>
     /// Waits for a newly-posted article to become retrievable via STAT,
     /// with exponential backoff. Throws if the article never appears.

@@ -51,7 +51,7 @@ static void PrintUsage()
         usenet-backup — local repository engine (milestones 1-2) + NNTP backend (milestone 3)
 
         Usage:
-          usenet-backup init <repo> [--chunk-size BYTES]
+          usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES]
           usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
@@ -59,8 +59,9 @@ static void PrintUsage()
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
           usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER] [--diagnose]
+              [--probe-post-size MB]
           usenet-backup nntp-upload <repo> <backup-id> --host HOST [--port PORT]
-              [--ssl] [--user USER] [--newsgroup GROUP]
+              [--ssl] [--user USER] [--newsgroup GROUP] [--no-volumes]
           usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
               [--newsgroup GROUP] [--poster POSTER]
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
@@ -79,11 +80,22 @@ static void PrintUsage()
         each. It is resumable: already-posted articles are skipped via the
         local upload journal plus a server STAT check.
 
-        nzb-generate writes an NZB 1.1 index of the backup's chunk articles
-        (one file per chunk, deterministic message-IDs). Chunks with no
-        upload journal record are flagged — run nntp-upload first.
+        By default nntp-upload packs chunks into volumes (see --volume-size,
+        default 32 MiB): one article per volume instead of one per chunk.
+        --no-volumes forces the original one-article-per-chunk behavior.
 
-        download fetches every chunk referenced by an NZB index into the
+        nntp-check --probe-post-size MB posts a single probe article of that
+        size to discover the provider's article-size ceiling (the upper
+        bound for --volume-size). The probe article permanently lands in
+        the newsgroup.
+
+        nzb-generate writes an NZB 1.1 index of the backup's articles —
+        one file per chunk, or one file per packed volume when the backup
+        was uploaded with volume packing (deterministic message-IDs either
+        way). Articles with no upload journal record are flagged — run
+        nntp-upload first.
+
+        download fetches every article referenced by an NZB index into the
         repo's local chunk store. It is resumable: chunks already present
         are skipped. Each fetched chunk is authenticated and hash-verified
         before being stored. Run verify/restore afterwards as usual.
@@ -177,8 +189,9 @@ static int Init(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 1) { Console.Error.WriteLine("error: init <repo>"); return 2; }
     int chunkSize = int.TryParse(GetOption(args, "--chunk-size"), out int cs) ? cs : BackupRepository.DefaultChunkSize;
-    using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize);
-    Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}).");
+    long volumeSize = long.TryParse(GetOption(args, "--volume-size"), out long vs) ? vs : BackupRepository.DefaultVolumeSizeBytes;
+    using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize, volumeSizeBytes: volumeSize);
+    Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}, volume size {volumeSize}).");
     return 0;
 }
 
@@ -363,12 +376,69 @@ static int NntpCheck(string[] args)
 {
     if (HasFlag(args, "--diagnose"))
         return NntpDiagnose(args);
+    string? probeSize = GetOption(args, "--probe-post-size");
+    if (probeSize is not null)
+        return NntpProbePostSize(args, probeSize);
 
     using var client = ConnectNntp(args);
     Console.WriteLine($"Connected: {client.Greeting}");
     client.Quit();
     Console.WriteLine("NNTP check OK.");
     return 0;
+}
+
+/// <summary>
+/// Posts a single probe article of the given size (in MB) to find the
+/// provider's maximum accepted article size — the upper bound for
+/// volume_size_bytes. Opt-in: the probe article permanently lands in the
+/// newsgroup.
+/// </summary>
+static int NntpProbePostSize(string[] args, string sizeArg)
+{
+    if (!double.TryParse(sizeArg, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double mb) ||
+        mb <= 0 || mb > 1024)
+    {
+        Console.Error.WriteLine("error: --probe-post-size needs a size in MB (0 < MB <= 1024)");
+        return 2;
+    }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    long bytes = (long)(mb * 1024 * 1024);
+    Console.WriteLine($"Posting a {mb} MB probe article to {newsgroup} " +
+        "(it will permanently land in the group)...");
+
+    byte[] payload = new byte[bytes];
+    Random.Shared.NextBytes(payload);
+    string nonce = Guid.NewGuid().ToString("N")[..8];
+    var sb = new StringBuilder();
+    sb.Append("From: usenet-backup\r\n");
+    sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
+    sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
+    sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
+    sb.Append("X-UsenetBackup-Probe: 1\r\n");
+    sb.Append("\r\n");
+    sb.Append(YEnc.Encode(payload, $"probe-{nonce}.bin"));
+
+    using var client = ConnectNntp(args);
+    try
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        client.Post(sb.ToString());
+        sw.Stop();
+        bool retrievable = client.Stat($"<probe-{nonce}@usenet-backup>");
+        client.Quit();
+        Console.WriteLine($"POST accepted in {sw.Elapsed.TotalSeconds:F1}s; " +
+            $"article {(retrievable ? "is retrievable" : "not yet visible via STAT")}.");
+        Console.WriteLine($"The provider accepts articles of at least {mb} MB.");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"POST failed: {ex.Message}");
+        Console.WriteLine($"The provider does NOT accept {mb} MB articles — " +
+            "use a smaller volume_size_bytes in repo.json.");
+        return 1;
+    }
 }
 
 /// <summary>
@@ -499,11 +569,25 @@ static int NntpUpload(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 2) { Console.Error.WriteLine("error: nntp-upload <repo> <backup-id> --host HOST [...]"); return 2; }
     string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    bool noVolumes = HasFlag(args, "--no-volumes");
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var manifest = repo.LoadManifest(pos[1]);
     // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
     string[] chunkIds = UsenetBackup.Core.ChunkOrdering.GetOrderedChunkIds(manifest);
+
+    // Packing mode and volume size are sticky per backup (see
+    // BackupRepository.ResolveVolumeMode): flips are refused loudly rather
+    // than silently breaking the upload/download contract.
+    bool useVolumes = repo.ResolveVolumeMode(manifest, chunkIds, forceChunkMode: noVolumes, out string? refusal);
+    if (refusal is not null)
+    {
+        Console.Error.WriteLine($"error: {refusal}");
+        return 2;
+    }
+    if (manifest.Volumes is { Count: > 0 } && (noVolumes || !repo.UseVolumes))
+        Console.WriteLine("note: backup was uploaded with volume packing; volume mode forced " +
+            "(--no-volumes / use_volumes=false ignored for this backup).");
 
     using var client = ConnectNntp(args);
     try
@@ -512,23 +596,66 @@ static int NntpUpload(string[] args)
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
         store.MaxArticleBytes = repo.MaxDownloadBytes;
         int uploaded = 0, skipped = 0;
-        for (int i = 0; i < chunkIds.Length; i++)
+        if (useVolumes)
         {
-            if (store.Exists(chunkIds[i]))
+            // Pack chunks into volumes (one Usenet article each), streaming
+            // one volume at a time so memory stays flat for large backups.
+            var groups = repo.PlanVolumes(manifest);
+            var volumeEntries = new List<VolumeEntry>(groups.Count);
+            for (int i = 0; i < groups.Count; i++)
             {
-                skipped++;
+                var volume = VolumePacker.BuildVolume(groups[i], repo.GetChunkBlob);
+                if (store.Exists(volume.Id))
+                {
+                    skipped++;
+                }
+                else
+                {
+                    store.PutVolume(volume.Id, volume.Bytes);
+                    uploaded++;
+                }
+                volumeEntries.Add(new VolumeEntry
+                {
+                    Id = volume.Id,
+                    ChunkIds = volume.ChunkIds.ToList(),
+                    SizeBytes = volume.Bytes.Length,
+                });
+                if ((i + 1) % 10 == 0 || i + 1 == groups.Count)
+                    Console.WriteLine($"  {i + 1}/{groups.Count} volumes processed ({uploaded} uploaded, {skipped} already present)");
             }
-            else
+            // Record the packing in the manifest BEFORE the manifest itself is
+            // uploaded — the NZB and download paths both read it from there.
+            // (Mode is sticky per backup, so this only ever writes once.)
+            if (manifest.Volumes is null)
             {
-                store.Put(chunkIds[i], repo.GetChunkBlob(chunkIds[i]));
-                uploaded++;
+                manifest.Volumes = volumeEntries;
+                manifest.VolumeSize = repo.VolumeSizeBytes;
+                repo.SaveManifest(manifest);
             }
-            if ((i + 1) % 25 == 0 || i + 1 == chunkIds.Length)
-                Console.WriteLine($"  {i + 1}/{chunkIds.Length} chunks processed ({uploaded} uploaded, {skipped} already present)");
+            OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
+                $"id={manifest.BackupId} chunks={chunkIds.Length} volumes={groups.Count} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+            Console.WriteLine($"Upload complete: {uploaded} volumes posted, {skipped} already present.");
         }
-        OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
-            $"id={manifest.BackupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
-        Console.WriteLine($"Upload complete: {uploaded} posted, {skipped} already present.");
+        else
+        {
+            for (int i = 0; i < chunkIds.Length; i++)
+            {
+                if (store.Exists(chunkIds[i]))
+                {
+                    skipped++;
+                }
+                else
+                {
+                    store.Put(chunkIds[i], repo.GetChunkBlob(chunkIds[i]));
+                    uploaded++;
+                }
+                if ((i + 1) % 25 == 0 || i + 1 == chunkIds.Length)
+                    Console.WriteLine($"  {i + 1}/{chunkIds.Length} chunks processed ({uploaded} uploaded, {skipped} already present)");
+            }
+            OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
+                $"id={manifest.BackupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+            Console.WriteLine($"Upload complete: {uploaded} posted, {skipped} already present.");
+        }
         // Upload the encrypted manifest so the USB recovery wizard can
         // discover backups newer than the stick.
         repo.UploadManifest(manifest.BackupId, store);
@@ -593,27 +720,40 @@ static int NzbGenerate(string[] args)
     var manifest = repo.LoadManifest(pos[1]);
     using var catalog = new Catalog(repo.CatalogPath);
 
+    // Volume mode: rebuild packed volume bytes deterministically from local
+    // chunk blobs (same packing => same bytes => same volume IDs).
+    Dictionary<string, IReadOnlyList<string>>? volumeGroups = null;
+    if (manifest.Volumes is { Count: > 0 })
+        volumeGroups = manifest.Volumes.ToDictionary(
+            v => v.Id, v => (IReadOnlyList<string>)v.ChunkIds);
+
     int notUploaded = 0;
     string xml = NzbGenerator.Generate(
         manifest,
         chunkId => repo.GetChunkBlob(chunkId),
-        chunkId =>
+        id =>
         {
-            var t = catalog.GetUploadTimeUtc(chunkId);
+            var t = catalog.GetUploadTimeUtc(id);
             if (t is null)
                 notUploaded++;
             return t;
         },
-        new NzbGenerator.Options(newsgroup, poster, repo.RepoId));
+        new NzbGenerator.Options(newsgroup, poster, repo.RepoId),
+        getVolumeBlob: volumeGroups is null
+            ? null
+            : volId => VolumePacker.BuildVolume(volumeGroups[volId], repo.GetChunkBlob).Bytes);
 
     File.WriteAllText(pos[2], xml, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
     int chunkCount = manifest.Files.SelectMany(f => f.Chunks).Distinct().Count();
+    int volumeCount = manifest.Volumes?.Count ?? 0;
     OperationLog.Append(Path.GetFullPath(pos[0]), "nzb-generate",
-        $"id={manifest.BackupId} chunks={chunkCount} output={pos[2]} newsgroup={newsgroup}");
+        $"id={manifest.BackupId} chunks={chunkCount} volumes={volumeCount} output={pos[2]} newsgroup={newsgroup}");
+    string unit = volumeCount > 0 ? "volumes" : "chunks";
+    int unitCount = volumeCount > 0 ? volumeCount : chunkCount;
     if (notUploaded > 0)
-        Console.WriteLine($"warning: {notUploaded}/{chunkCount} chunks have no upload journal record — run nntp-upload first.");
-    Console.WriteLine($"NZB written to {pos[2]} ({chunkCount} chunks).");
+        Console.WriteLine($"warning: {notUploaded}/{unitCount} {unit} have no upload journal record — run nntp-upload first.");
+    Console.WriteLine($"NZB written to {pos[2]} ({unitCount} {unit}).");
     return 0;
 }
 
@@ -638,7 +778,7 @@ static int Download(string[] args)
         Console.Error.WriteLine($"error: NZB '{pos[1]}' contains no files.");
         return 2;
     }
-    Console.WriteLine($"NZB references {nzb.Files.Count} chunk(s)" +
+    Console.WriteLine($"NZB references {nzb.Files.Count} {(nzb.IsVolumeNzb ? "volume(s)" : "chunk(s)")}" +
         (nzb.BackupId is null ? "" : $" (backup {nzb.BackupId})") + ".");
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
@@ -647,17 +787,19 @@ static int Download(string[] args)
     {
         using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
-        remote.MaxArticleBytes = repo.MaxDownloadBytes;
+        // Volume articles are volume-sized, not chunk-sized.
+        remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
         // Fetch the latest published message-identity index before
         // downloading. A retention refresh may have republished articles
         // under new IDs; without this, stale IDs would be requested.
         // Throws an explicit recovery error if an index was published but
         // cannot be retrieved or parsed — never silently falls back.
         remote.SyncMessageIndex(repo.MessageIndex);
-        DownloadResult result = repo.DownloadChunks(nzb, remote, (done, total) =>
+        string unit = nzb.IsVolumeNzb ? "volume" : "chunk";
+        DownloadResult result = repo.DownloadNzb(nzb, remote, (done, total) =>
         {
             if (done % 25 == 0 || done == total)
-                Console.WriteLine($"  {done}/{total} chunks processed");
+                Console.WriteLine($"  {done}/{total} {unit}s processed");
         });
         OperationLog.Append(Path.GetFullPath(pos[0]), "download",
             $"nzb={pos[1]} chunks={result.Total} downloaded={result.Downloaded} already_present={result.AlreadyPresent} host={GetOption(args, "--host")} newsgroup={newsgroup}");

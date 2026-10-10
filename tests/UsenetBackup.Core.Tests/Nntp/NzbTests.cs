@@ -277,3 +277,120 @@ public sealed class NzbRoundTripTests : IDisposable
         }
     }
 }
+
+/// <summary>
+/// Volume packer: NZB generation/parsing in volume mode.
+/// </summary>
+public sealed class NzbVolumeTests
+{
+    private const string RepoId = "0123456789abcdef";
+    private const string Newsgroup = "alt.binaries.test";
+    private const string Poster = "usenet-backup";
+
+    private static byte[] RandomBytes(int n)
+    {
+        var b = new byte[n];
+        Random.Shared.NextBytes(b);
+        return b;
+    }
+
+    private static (BackupManifest Manifest, Dictionary<string, byte[]> VolumeBlobs) MakeVolumeManifest(
+        int chunkCount, int chunkSize, long targetVolumeBytes)
+    {
+        var blobs = new Dictionary<string, byte[]>();
+        var ids = new List<string>();
+        for (int i = 0; i < chunkCount; i++)
+        {
+            byte[] blob = RandomBytes(chunkSize);
+            string id = Hashing.Sha256Hex(blob);
+            ids.Add(id);
+            blobs[id] = blob;
+        }
+        ids.Sort(StringComparer.Ordinal);
+
+        var manifest = new BackupManifest
+        {
+            BackupId = "20261010-voltest",
+            CreatedUtc = new DateTime(2026, 10, 10, 0, 0, 0, DateTimeKind.Utc),
+            RootSha256 = new string('b', 64),
+            VolumeSize = targetVolumeBytes,
+            Volumes = new List<VolumeEntry>(),
+        };
+        manifest.Files.Add(new FileEntry { Path = "a.bin", Chunks = ids });
+
+        var volumes = VolumePacker.Pack(ids, id => blobs[id], targetVolumeBytes);
+        var volumeBlobs = new Dictionary<string, byte[]>();
+        foreach (var v in volumes)
+        {
+            manifest.Volumes.Add(new VolumeEntry
+            {
+                Id = v.Id,
+                ChunkIds = v.ChunkIds.ToList(),
+                SizeBytes = v.Bytes.Length,
+            });
+            volumeBlobs[v.Id] = v.Bytes;
+        }
+        return (manifest, volumeBlobs);
+    }
+
+    [Fact]
+    public void Generate_VolumeMode_OneFilePerVolume()
+    {
+        var (manifest, volumeBlobs) = MakeVolumeManifest(chunkCount: 6, chunkSize: 5000, targetVolumeBytes: 12000);
+        Assert.True(manifest.Volumes!.Count > 1); // sanity: actually split
+
+        string xml = NzbGenerator.Generate(
+            manifest,
+            getBlob: _ => throw new InvalidOperationException("chunk blobs must not be needed in volume mode"),
+            getUploadTimeUtc: _ => null,
+            new NzbGenerator.Options(Newsgroup, Poster, RepoId),
+            getVolumeBlob: id => volumeBlobs[id]);
+
+        NzbDocument doc = NzbParser.Parse(xml);
+        Assert.True(doc.IsVolumeNzb);
+        Assert.Equal(manifest.Volumes.Count, doc.Files.Count);
+        var parsedIds = doc.Files.Select(f => f.VolumeId).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var expectedIds = manifest.Volumes.Select(v => v.Id).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        Assert.Equal(expectedIds, parsedIds);
+        foreach (var file in doc.Files)
+        {
+            Assert.StartsWith("[usenet-backup] volume ", file.Subject, StringComparison.Ordinal);
+            Assert.Equal(ArticleCodec.MakeVolumeMessageId(file.VolumeId!, RepoId),
+                file.Segments[0].MessageId);
+        }
+    }
+
+    [Fact]
+    public void Generate_ChunkMode_ParsesAsNotVolume()
+    {
+        var manifest = new BackupManifest
+        {
+            BackupId = "20261010-chunktest",
+            CreatedUtc = new DateTime(2026, 10, 10, 0, 0, 0, DateTimeKind.Utc),
+            RootSha256 = new string('c', 64),
+        };
+        manifest.Files.Add(new FileEntry { Path = "a.bin", Chunks = new List<string> { new('a', 64) } });
+
+        string xml = NzbGenerator.Generate(
+            manifest,
+            id => new byte[10],
+            _ => null,
+            new NzbGenerator.Options(Newsgroup, Poster, RepoId));
+
+        NzbDocument doc = NzbParser.Parse(xml);
+        Assert.False(doc.IsVolumeNzb);
+        Assert.Single(doc.Files);
+        Assert.Equal(new string('a', 64), doc.Files[0].ChunkId);
+    }
+
+    [Fact]
+    public void Generate_VolumeMode_RequiresVolumeBlobProvider()
+    {
+        var (manifest, _) = MakeVolumeManifest(chunkCount: 2, chunkSize: 100, targetVolumeBytes: 10000);
+        Assert.Throws<ArgumentException>(() => NzbGenerator.Generate(
+            manifest,
+            _ => new byte[10],
+            _ => null,
+            new NzbGenerator.Options(Newsgroup, Poster, RepoId)));
+    }
+}

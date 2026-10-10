@@ -308,12 +308,14 @@ public sealed class BackupScheduler
             using var remote = new Nntp.NntpBlobStore(
                 client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
                 messageIndex: repo.MessageIndex, providerKey: providerKey);
+            // Volume articles are volume-sized, not chunk-sized.
+            remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
             // Fetch the latest published message-identity index before
             // downloading (retention may have refreshed article IDs).
             // Throws an explicit recovery error if an index was published
             // but cannot be retrieved or parsed — never silently falls back.
             remote.SyncMessageIndex(repo.MessageIndex);
-            repo.DownloadChunks(nzb, remote, (done, total) => { });
+            repo.DownloadNzb(nzb, remote, (done, total) => { });
         }
         finally
         {
@@ -675,6 +677,18 @@ public sealed class BackupScheduler
         var manifest = repo.LoadManifest(backupId);
         // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
         string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
+        // Packing mode and volume size are sticky per backup (see
+        // BackupRepository.ResolveVolumeMode): flips are refused loudly
+        // rather than silently breaking the upload/download contract.
+        bool useVolumes = repo.ResolveVolumeMode(
+            manifest, chunkIds, forceChunkMode: false, out string? refusal);
+        if (refusal is not null)
+            throw new InvalidOperationException(refusal);
+        if (manifest.Volumes is { Count: > 0 } && !repo.UseVolumes)
+            Log($"job '{job.Name}': backup was uploaded with volume packing; volume mode forced.");
+        List<IReadOnlyList<string>> volumeGroups = useVolumes
+            ? repo.PlanVolumes(manifest).ToList()
+            : new();
 
         List<string> errors = new();
         foreach (var nntp in providers)
@@ -712,66 +726,150 @@ public sealed class BackupScheduler
                 {
                     MaxDegreeOfParallelism = nntp.Connections
                 };
-                // Generate parity blocks upfront so the progress tracker knows
-                // the full scope: chunks + parity + manifest (+ index).
-                IReadOnlyDictionary<string, byte[]> parityBlocks =
-                    new Dictionary<string, byte[]>();
-                if (redundancy == "xor")
-                    parityBlocks = Redundancy.XorParity.GenerateParity(
-                        chunkIds, id => repo.GetChunkBlob(id));
-                else if (redundancy == "par2")
-                    parityBlocks = Redundancy.Par2Redundancy.GenerateParity(
-                        chunkIds, id => repo.GetChunkBlob(id));
+                // Parity blocks are generated per group at upload time (never
+                // all held in memory: a parity shard is volume-sized). Count
+                // them upfront so the progress tracker knows the full scope:
+                // positional groups of 10, trailing groups of < 2 skipped.
+                int dataUnits = useVolumes ? volumeGroups.Count : chunkIds.Length;
+                int parityGroups = dataUnits / 10 + (dataUnits % 10 >= 2 ? 1 : 0);
+                int parityUnits = redundancy == "xor" ? parityGroups
+                    : redundancy == "par2" ? parityGroups * 3 : 0;
 
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
                 // real estimates that refine as more data arrives.
                 // Exposed via ActiveUpload for dashboard progress bar.
-                // Total covers chunks + parity + manifest + index so the bar
-                // doesn't hit 100% and vanish while work remains.
-                int totalUnits = chunkIds.Length + parityBlocks.Count + 2;
+                // Total covers data units (chunks or volumes) + parity + manifest
+                // + index so the bar doesn't hit 100% and vanish while work remains.
+                int totalUnits = dataUnits + parityUnits + 2;
                 using var progress = new UploadProgressTracker(
                     Log, job.Name, nntp.Host, totalUnits);
                 ActiveUpload = progress;
                 try
                 {
-                    progress.SetPhase("chunks");
-                    Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
+                    // volId -> chunk group, filled by the data phase; feeds parity.
+                    var volumeEntries = new List<VolumeEntry>();
+                    if (useVolumes)
                     {
-                        if (store.Exists(chunkId))
+                        progress.SetPhase("volumes");
+                        Parallel.ForEach(volumeGroups, parallelOptions, group =>
                         {
-                            Interlocked.Increment(ref skipped);
-                            progress.RecordSkipped(1);
-                        }
-                        else
-                        {
-                            byte[] blob = repo.GetChunkBlob(chunkId);
-                            store.Put(chunkId, blob);
-                            Interlocked.Increment(ref uploaded);
-                            progress.RecordUploaded(1, blob.Length);
-                        }
-                    });
-
-                    // Upload parity blocks (tracked; previously invisible)
-                    int parityUploaded = 0, paritySkipped = 0;
-                    if (parityBlocks.Count > 0)
-                    {
-                        progress.SetPhase("parity");
-                        string parityLabel = redundancy == "xor" ? "XOR" : "PAR2";
-                        Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
-                        {
-                            if (!store.Exists(kvp.Key))
+                            var volume = Nntp.VolumePacker.BuildVolume(group, repo.GetChunkBlob);
+                            lock (volumeEntries)
+                                volumeEntries.Add(new VolumeEntry
+                                {
+                                    Id = volume.Id,
+                                    ChunkIds = volume.ChunkIds.ToList(),
+                                    SizeBytes = volume.Bytes.Length,
+                                });
+                            if (store.Exists(volume.Id))
                             {
-                                store.Put(kvp.Key, kvp.Value);
-                                Interlocked.Increment(ref parityUploaded);
-                                progress.RecordUploaded(1, kvp.Value.Length);
+                                Interlocked.Increment(ref skipped);
+                                progress.RecordSkipped(1);
                             }
                             else
                             {
-                                Interlocked.Increment(ref paritySkipped);
-                                progress.RecordSkipped(1);
+                                store.PutVolume(volume.Id, volume.Bytes);
+                                Interlocked.Increment(ref uploaded);
+                                progress.RecordUploaded(1, volume.Bytes.Length);
                             }
                         });
+                        // Record the packing in the manifest BEFORE the manifest
+                        // itself is uploaded (first provider to finish wins;
+                        // the packing is deterministic so all agree).
+                        if (manifest.Volumes is null)
+                        {
+                            manifest.Volumes = volumeEntries
+                                .OrderBy(e => e.Id, StringComparer.Ordinal).ToList();
+                            manifest.VolumeSize = repo.VolumeSizeBytes;
+                            repo.SaveManifest(manifest);
+                        }
+                    }
+                    else
+                    {
+                        progress.SetPhase("chunks");
+                        Parallel.ForEach(chunkIds, parallelOptions, chunkId =>
+                        {
+                            if (store.Exists(chunkId))
+                            {
+                                Interlocked.Increment(ref skipped);
+                                progress.RecordSkipped(1);
+                            }
+                            else
+                            {
+                                byte[] blob = repo.GetChunkBlob(chunkId);
+                                store.Put(chunkId, blob);
+                                Interlocked.Increment(ref uploaded);
+                                progress.RecordUploaded(1, blob.Length);
+                            }
+                        });
+                    }
+
+                    // Upload parity blocks (tracked; previously invisible).
+                    // In volume mode parity is generated per group and posted
+                    // immediately, so a volume-sized shard never multiplies
+                    // into gigabytes held in memory.
+                    int parityUploaded = 0, paritySkipped = 0;
+                    if (parityUnits > 0)
+                    {
+                        progress.SetPhase("parity");
+                        string parityLabel = redundancy == "xor" ? "XOR" : "PAR2";
+                        if (useVolumes)
+                        {
+                            var chunkMap = volumeEntries.ToDictionary(
+                                e => e.Id, e => (IReadOnlyList<string>)e.ChunkIds);
+                            string[] sortedVolIds = chunkMap.Keys
+                                .OrderBy(id => id, StringComparer.Ordinal).ToArray();
+                            byte[] GetVolumeBytes(string volId) =>
+                                Nntp.VolumePacker.BuildVolume(chunkMap[volId], repo.GetChunkBlob).Bytes;
+                            for (int g = 0; g < sortedVolIds.Length; g += 10)
+                            {
+                                string[] group = sortedVolIds.Skip(g).Take(10).ToArray();
+                                if (group.Length < 2)
+                                    continue;
+                                IReadOnlyDictionary<string, byte[]> blocks =
+                                    redundancy == "xor"
+                                        ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes)
+                                        : Redundancy.Par2Redundancy.GenerateParity(group, GetVolumeBytes);
+                                Parallel.ForEach(blocks, parallelOptions, kvp =>
+                                {
+                                    if (!store.Exists(kvp.Key))
+                                    {
+                                        store.PutVolume(kvp.Key, kvp.Value);
+                                        Interlocked.Increment(ref parityUploaded);
+                                        progress.RecordUploaded(1, kvp.Value.Length);
+                                    }
+                                    else
+                                    {
+                                        Interlocked.Increment(ref paritySkipped);
+                                        progress.RecordSkipped(1);
+                                    }
+                                });
+                            }
+                        }
+                        else
+                        {
+                            IReadOnlyDictionary<string, byte[]> parityBlocks =
+                                redundancy == "xor"
+                                    ? Redundancy.XorParity.GenerateParity(
+                                        chunkIds, id => repo.GetChunkBlob(id))
+                                    : Redundancy.Par2Redundancy.GenerateParity(
+                                        chunkIds, id => repo.GetChunkBlob(id));
+                            Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
+                            {
+                                if (!store.Exists(kvp.Key))
+                                {
+                                    store.Put(kvp.Key, kvp.Value);
+                                    Interlocked.Increment(ref parityUploaded);
+                                    progress.RecordUploaded(1, kvp.Value.Length);
+                                }
+                                else
+                                {
+                                    Interlocked.Increment(ref paritySkipped);
+                                    progress.RecordSkipped(1);
+                                }
+                            });
+                        }
                         Log($"job '{job.Name}': uploaded {parityUploaded} {parityLabel} parity blocks to {nntp.Host}" +
                             (paritySkipped > 0 ? $" ({paritySkipped} already present)" : ""));
                     }
@@ -789,7 +887,7 @@ public sealed class BackupScheduler
                     var tracker = new Nntp.UsenetUploadTracker(job.Repo);
                     tracker.RecordUpload(backupId, nntp.Host, nntp.Newsgroup);
                     OperationLog.Append(job.Repo, "auto-upload",
-                        $"job={job.Name} id={backupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
+                        $"job={job.Name} id={backupId} chunks={chunkIds.Length} volumes={(useVolumes ? volumeGroups.Count : 0)} uploaded={uploaded} skipped={skipped} host={nntp.Host}");
                     Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");
                 }
                 finally

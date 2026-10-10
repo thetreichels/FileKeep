@@ -77,6 +77,20 @@ public sealed class XorParityTests
     }
 
     [Fact]
+    public void MakeParityId_Is64Hex_NntpSafe()
+    {
+        // Regression: parity IDs must pass NntpBlobStore's 64-hex validation
+        // (the old "parity-xor-<hex>" prefix broke xor mode end-to-end).
+        var group = new[] { new string('a', 64), new string('b', 64) };
+        string id = XorParity.MakeParityId(group);
+        Assert.Equal(64, id.Length);
+        Assert.True(id.All(Uri.IsHexDigit));
+        Assert.Equal(id.ToLowerInvariant(), id);
+        // Domain-separated from PAR2 IDs for the same group.
+        Assert.NotEqual(id, Par2Redundancy.MakeParityId(group, 0));
+    }
+
+    [Fact]
     public void GetGroupFor_UsesSortedOrder_Regression_b1921c8()
     {
         // Regression test for b1921c8: upload paths (scheduler + CLI) must use

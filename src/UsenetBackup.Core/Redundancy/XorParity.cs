@@ -190,20 +190,19 @@ public static class XorParity
     }
 
     /// <summary>
-    /// Deterministic parity chunk ID from group chunk IDs (order-insensitive).
+    /// Deterministic parity ID from group chunk IDs (order-insensitive):
+    /// SHA-256 hex of "xor:" + the ordinal-sorted IDs. The "xor:" domain
+    /// separator keeps these from colliding with PAR2 parity IDs for the
+    /// same group. 64 hex chars so the ID is NNTP-safe (usable as an
+    /// article identity like any chunk ID).
     /// </summary>
     public static string MakeParityId(IReadOnlyList<string> groupChunkIds)
     {
-        var sorted = groupChunkIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
-        using var sha = System.Security.Cryptography.SHA256.Create();
-        foreach (string id in sorted)
-        {
-            byte[] bytes = Convert.FromHexString(id);
-            sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
-        }
-        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-        byte[] hash = sha.Hash!;
-        return "parity-xor-" + Convert.ToHexString(hash).ToLowerInvariant();
+        string input = "xor:" + string.Join(",",
+            groupChunkIds.OrderBy(id => id, StringComparer.Ordinal));
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private static int IndexOf(IReadOnlyList<string> list, string value)

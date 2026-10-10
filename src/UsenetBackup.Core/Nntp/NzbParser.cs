@@ -24,6 +24,16 @@ public sealed record NzbFile(
     public string? ChunkId => Segments.Count == 0
         ? null
         : NzbParser.ChunkIdFromMessageId(Segments[0].MessageId);
+
+    /// <summary>
+    /// Volume ID parsed from the first segment's usenet-backup message-ID,
+    /// or null when the file doesn't reference our article format.
+    /// Only meaningful for volume NZBs (<see cref="NzbDocument.IsVolumeNzb"/>);
+    /// the message-ID shape is identical to chunk articles.
+    /// </summary>
+    public string? VolumeId => Segments.Count == 0
+        ? null
+        : NzbParser.ChunkIdFromMessageId(Segments[0].MessageId);
 }
 
 /// <summary>
@@ -33,7 +43,8 @@ public sealed record NzbDocument(
     string? BackupId,
     string? RootSha256,
     string? Generator,
-    IReadOnlyList<NzbFile> Files);
+    IReadOnlyList<NzbFile> Files,
+    bool IsVolumeNzb = false);
 
 /// <summary>
 /// Parses NZB 1.1 indexes back into chunk/segment references (the inverse
@@ -54,6 +65,7 @@ public static class NzbParser
         ArgumentException.ThrowIfNullOrEmpty(xml);
 
         string? backupId = null, rootSha256 = null, generator = null;
+        int volumeCount = 0;
         var files = new List<NzbFile>();
 
         var settings = new XmlReaderSettings
@@ -80,6 +92,8 @@ public static class NzbParser
                         if (type == "x-usenetbackup-backup-id") backupId = value;
                         else if (type == "x-usenetbackup-root-sha256") rootSha256 = value;
                         else if (type == "x-usenetbackup-generator") generator = value;
+                        else if (type == "x-usenetbackup-volume-count" &&
+                            int.TryParse(value, out int vc)) volumeCount = vc;
                         break;
 
                     case "file":
@@ -129,7 +143,7 @@ public static class NzbParser
             }
         }
 
-        return new NzbDocument(backupId, rootSha256, generator, files);
+        return new NzbDocument(backupId, rootSha256, generator, files, IsVolumeNzb: volumeCount > 0);
     }
 
     private static DateTimeOffset ParseUnixDate(string? value) =>

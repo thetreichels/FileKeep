@@ -26,6 +26,23 @@ public sealed class FileEntry
     public string? SymlinkTarget { get; set; }
 }
 
+/// <summary>
+/// One packed volume in a backup manifest: the set of chunks posted as a
+/// single Usenet article. Additive: manifests uploaded per-chunk (v1) have
+/// no volumes list.
+/// </summary>
+public sealed class VolumeEntry
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("chunk_ids")]
+    public List<string> ChunkIds { get; set; } = new();
+
+    [JsonPropertyName("size_bytes")]
+    public long SizeBytes { get; set; }
+}
+
 public sealed class BackupManifest
 {
     [JsonPropertyName("format_version")]
@@ -81,6 +98,23 @@ public sealed class BackupManifest
     [JsonPropertyName("directories")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? Directories { get; set; }
+
+    /// <summary>
+    /// Volume packing used for the Usenet upload of this backup (null when
+    /// the backup was uploaded one article per chunk). Additive; old
+    /// manifests verify unchanged.
+    /// </summary>
+    [JsonPropertyName("volumes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<VolumeEntry>? Volumes { get; set; }
+
+    /// <summary>
+    /// Target volume size in bytes used when packing <see cref="Volumes"/>
+    /// (informational). Null when volumes were not used.
+    /// </summary>
+    [JsonPropertyName("volume_size")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? VolumeSize { get; set; }
 
     [JsonPropertyName("root_sha256")]
     public string RootSha256 { get; set; } = "";

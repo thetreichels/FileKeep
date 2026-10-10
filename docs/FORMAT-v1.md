@@ -225,6 +225,61 @@ Generate after `nntp-upload` (or treat a missing journal record as
 "not known to be posted"). The manifest itself is not posted — see
 recovery below.
 
+## Volume packing (v1 addition)
+
+Uploads may pack multiple encrypted chunk blobs into **volumes**: one
+volume is posted as one NNTP article, so a backup of N chunks posts ~N/k
+articles for k chunks per volume. Chunking (dedup granularity) and chunk
+crypto are unchanged — packing happens at the upload layer only, and the
+packing is deterministic (greedy fill of canonically ordered chunks into
+`volume_size_bytes`), so re-uploads are idempotent.
+
+**Volume format (binary).**
+
+```
+magic:   4 bytes "VOL1"
+count:   int32 LE, number of chunk entries (>= 1)
+per chunk:
+    id:     32 bytes raw (chunk ID decoded from 64 hex chars)
+    offset: int64 LE, offset into the payload
+    length: int32 LE, encrypted blob length
+payload: concatenated encrypted chunk blobs
+```
+
+**Volume ID.** SHA-256 hex of the complete volume bytes. The article
+message-ID is `<volumeid.repoid@usenet-backup>` — deliberately the same
+shape as chunk message-IDs, so NZB parsing, the message-identity index,
+and the catalog journal work unchanged. Retention refresh uses
+`<volumeid.repoid.refresh.<unixTime>.<nonce>@usenet-backup>`.
+
+**Article headers** (body is yEnc as in the chunk format):
+
+```
+Subject: [usenet-backup] volume <volumeid>
+X-UsenetBackup-Volume: <volumeid>
+X-UsenetBackup-Format: v1
+```
+
+**Manifest.** A volume-packed backup records `volumes: [{id, chunk_ids,
+size_bytes}]` and `volume_size` (both additive, null-ignored — old
+manifests verify unchanged).
+
+**NZB.** One `<file>` per volume, one `<segment>` carrying the volume
+message-ID; head meta adds `x-usenetbackup-volume-count`. A parser
+detects volume mode from that meta field; NZBs without it are chunk
+indexes as before.
+
+**Download.** Fetch the volume article, unpack (fail closed on bad
+framing), then run every chunk through the normal authenticate +
+hash-verify gate. Parity (XOR/PAR2) operates over volume IDs with the
+same grouping math; a reconstructed volume's chunks are re-verified
+before acceptance.
+
+**repo.json.** `volume_size_bytes` (default 32 MiB) and `use_volumes`
+(default true). `nntp-upload --no-volumes` forces per-chunk posting.
+`nntp-check --probe-post-size <MB>` posts a single probe article to
+discover the provider's article-size ceiling.
+
 ## Download/recovery (v1, milestone 5)
 
 A backup is recovered from Usenet by parsing its NZB and fetching every

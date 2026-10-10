@@ -9,13 +9,16 @@ namespace UsenetBackup.Core.Nntp;
 ///   1. Present and healthy — all sampled articles STAT-verified on the
 ///      server and retention remaining above threshold: no action.
 ///   2. Missing — one or more sampled articles absent: republish the missing
-///      chunks under NEW message IDs, STAT-verify each new article, update
+///      articles under NEW message IDs, STAT-verify each new article, update
 ///      the message index, and only then advance the retention timestamp.
 ///   3. Approaching expiration — articles present but retention remaining at
-///      or below threshold: republish ALL chunks under new message IDs
+///      or below threshold: republish ALL articles under new message IDs
 ///      (servers reject duplicate IDs, so reposting the same ID does NOT
 ///      refresh retention), verify, update the index, then advance the
 ///      timestamp.
+///
+/// The "article" unit is the packed volume for volume-packed backups and
+/// the chunk otherwise (see the manifest's volumes list).
 ///
 /// The retention timestamp is advanced ONLY after every republished article
 /// has been STAT-verified. A partial failure leaves the old timestamp in
@@ -183,28 +186,34 @@ public sealed class RetentionManager
                 $"Cannot load manifest for retention check: {ex.Message}", ex);
         }
 
-        var chunkIds = manifest.Files
-            .SelectMany(f => f.Chunks)
-            .Distinct()
-            .ToList();
+        // The retention article unit: packed volumes when the backup was
+        // uploaded with volume packing, individual chunks otherwise.
+        bool volumeMode = manifest.Volumes is { Count: > 0 };
+        List<string> articleIds = volumeMode
+            ? manifest.Volumes!.Select(v => v.Id).ToList()
+            : manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
+        Dictionary<string, IReadOnlyList<string>>? volumeChunks = volumeMode
+            ? manifest.Volumes!.ToDictionary(
+                v => v.Id, v => (IReadOnlyList<string>)v.ChunkIds)
+            : null;
 
-        if (chunkIds.Count == 0)
+        if (articleIds.Count == 0)
         {
-            _log($"Backup {record.BackupId}: no chunks, skipping");
+            _log($"Backup {record.BackupId}: no articles, skipping");
             return BackupOutcome.Healthy;
         }
 
         // Live STAT checks — never trust the local journal for retention.
-        var sample = SampleChunks(chunkIds, sampleSize);
-        var missingChunks = new List<string>();
+        var sample = SampleChunks(articleIds, sampleSize);
+        var missingArticles = new List<string>();
 
-        foreach (string chunkId in sample)
+        foreach (string articleId in sample)
         {
             report.ArticlesChecked++;
             bool exists;
             try
             {
-                exists = remote.ExistsOnServer(chunkId);
+                exists = remote.ExistsOnServer(articleId);
             }
             catch
             {
@@ -213,20 +222,20 @@ public sealed class RetentionManager
 
             if (!exists)
             {
-                missingChunks.Add(chunkId);
+                missingArticles.Add(articleId);
                 report.ArticlesMissing++;
             }
         }
 
-        _log($"Backup {record.BackupId}: {sample.Count - missingChunks.Count}/{sample.Count} " +
+        _log($"Backup {record.BackupId}: {sample.Count - missingArticles.Count}/{sample.Count} " +
              $"sampled articles present on server, {daysLeft} days retention remaining");
 
         // Outcome 1: present and healthy — nothing to do.
-        if (missingChunks.Count == 0 && daysLeft > repostThresholdDays)
+        if (missingArticles.Count == 0 && daysLeft > repostThresholdDays)
             return BackupOutcome.Healthy;
 
         // Outcome 2 vs 3: missing articles, or merely approaching expiry.
-        bool isMissing = missingChunks.Count > 0;
+        bool isMissing = missingArticles.Count > 0;
         // A missing sampled article proves the backup is degrading, but the
         // sample is only a window (default 10) into potentially hundreds of
         // articles. Republishing just the missing samples and then resetting
@@ -235,13 +244,13 @@ public sealed class RetentionManager
         // would then defer action based on the dishonest timestamp.
         //
         // Correct behavior: any missing article triggers a FULL refresh.
-        // Every chunk gets a fresh message identity and a fresh retention
+        // Every article gets a fresh message identity and a fresh retention
         // clock, so the timestamp reset that follows is honest. Partial
         // refresh is never allowed to move the backup-level clock.
-        List<string> toRepublish = chunkIds;
+        List<string> toRepublish = articleIds;
 
         string reason = isMissing
-            ? $"{missingChunks.Count} sampled articles missing from server"
+            ? $"{missingArticles.Count} sampled articles missing from server"
             : $"only {daysLeft} days retention remaining (threshold: {repostThresholdDays})";
         _log($"{(dryRun ? "Would republish" : "Republishing")} {toRepublish.Count} article(s) " +
              $"for backup {record.BackupId}: {reason}");
@@ -252,23 +261,35 @@ public sealed class RetentionManager
         // Republication must fully succeed before the retention clock moves.
         var failures = new List<string>();
         int republished = 0;
-        foreach (string chunkId in toRepublish)
+        foreach (string articleId in toRepublish)
         {
             try
             {
-                byte[] blob = repo.GetChunkBlob(chunkId);
                 // New message identity: the ONLY way to get a fresh retention
-                // clock. RepublishWithNewIdentity STAT-verifies the new
-                // article and updates the message index before returning.
-                string newMessageId = remote.RepublishWithNewIdentity(chunkId, blob);
+                // clock. The republish methods STAT-verify the new article
+                // and update the message index before returning. Volume bytes
+                // are rebuilt deterministically from local chunks — only the
+                // message ID is new.
+                string newMessageId;
+                if (volumeMode)
+                {
+                    byte[] volumeBytes = VolumePacker.BuildVolume(
+                        volumeChunks![articleId], repo.GetChunkBlob).Bytes;
+                    newMessageId = remote.RepublishVolumeWithNewIdentity(articleId, volumeBytes);
+                }
+                else
+                {
+                    byte[] blob = repo.GetChunkBlob(articleId);
+                    newMessageId = remote.RepublishWithNewIdentity(articleId, blob);
+                }
                 republished++;
                 report.ArticlesRepublished++;
-                _log($"  republished {chunkId[..12]}… as {newMessageId}");
+                _log($"  republished {articleId[..12]}… as {newMessageId}");
             }
             catch (Exception ex)
             {
-                failures.Add($"{chunkId}: {ex.Message}");
-                report.Errors.Add($"Republish {chunkId}: {ex.Message}");
+                failures.Add($"{articleId}: {ex.Message}");
+                report.Errors.Add($"Republish {articleId}: {ex.Message}");
             }
         }
 
@@ -318,19 +339,19 @@ public sealed class RetentionManager
     }
 
     /// <summary>
-    /// Samples chunk IDs evenly across the list for STAT checks.
+    /// Samples article IDs evenly across the list for STAT checks.
     /// </summary>
-    private static List<string> SampleChunks(List<string> chunkIds, int sampleSize)
+    private static List<string> SampleChunks(List<string> articleIds, int sampleSize)
     {
-        if (chunkIds.Count <= sampleSize)
-            return chunkIds;
+        if (articleIds.Count <= sampleSize)
+            return articleIds;
 
         var sample = new List<string>(sampleSize);
-        double step = (double)chunkIds.Count / sampleSize;
+        double step = (double)articleIds.Count / sampleSize;
         for (int i = 0; i < sampleSize; i++)
         {
             int idx = (int)(i * step);
-            sample.Add(chunkIds[idx]);
+            sample.Add(articleIds[idx]);
         }
         return sample;
     }

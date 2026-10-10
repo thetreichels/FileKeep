@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
 namespace UsenetBackup.Core.Nntp;
@@ -46,11 +47,22 @@ public sealed class ChunkMessageIndex
     /// </summary>
     public string GetMessageId(string providerKey, string chunkIdHex, string repoId)
     {
-        if (providerKey is not null &&
-            _map.TryGetValue(providerKey, out var byChunk) &&
-            byChunk.TryGetValue(chunkIdHex, out string? messageId))
+        if (TryGetMessageId(providerKey, chunkIdHex, out string? messageId))
             return messageId;
         return ArticleCodec.MakeMessageId(chunkIdHex, repoId);
+    }
+
+    /// <summary>
+    /// Recorded-only lookup: returns the republished message ID for this
+    /// content ID on the provider, or false if it was never republished.
+    /// The key is ID-agnostic — it works for chunk IDs and volume IDs alike.
+    /// </summary>
+    public bool TryGetMessageId(string providerKey, string idHex, [NotNullWhen(true)] out string? messageId)
+    {
+        messageId = null;
+        return providerKey is not null &&
+            _map.TryGetValue(providerKey, out var byId) &&
+            byId.TryGetValue(idHex, out messageId);
     }
 
     /// <summary>

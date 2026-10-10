@@ -14,6 +14,7 @@ public sealed class BackupRepository : IDisposable
 {
     public const string FormatVersion = "v1";
     public const int DefaultChunkSize = 4 * 1024 * 1024;
+    public const long DefaultVolumeSizeBytes = 32L * 1024 * 1024;
     public const int DefaultKdfIterations = 600_000;
 
     /// <summary>
@@ -72,11 +73,14 @@ public sealed class BackupRepository : IDisposable
         string repoPath,
         string passphrase,
         int chunkSize = DefaultChunkSize,
-        int kdfIterations = DefaultKdfIterations)
+        int kdfIterations = DefaultKdfIterations,
+        long volumeSizeBytes = DefaultVolumeSizeBytes)
     {
         ArgumentException.ThrowIfNullOrEmpty(passphrase);
         if (chunkSize < 4096)
             throw new ArgumentOutOfRangeException(nameof(chunkSize), "Chunk size must be >= 4 KiB.");
+        if (volumeSizeBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(volumeSizeBytes), "Volume size must be positive.");
 
         Directory.CreateDirectory(repoPath);
         if (File.Exists(Path.Combine(repoPath, "repo.json")))
@@ -88,6 +92,7 @@ public sealed class BackupRepository : IDisposable
             KdfIterations = kdfIterations,
             KdfSaltB64 = Convert.ToBase64String(KeyDerivation.NewSalt()),
             ChunkSize = chunkSize,
+            VolumeSizeBytes = volumeSizeBytes,
         };
         File.WriteAllText(
             Path.Combine(repoPath, "repo.json"),
@@ -600,6 +605,101 @@ public sealed class BackupRepository : IDisposable
     public byte[] GetChunkBlob(string chunkIdHex) => _blobs.Get(chunkIdHex);
 
     /// <summary>
+    /// Encrypted blob size without reading the blob (for volume planning).
+    /// </summary>
+    public long GetChunkBlobSize(string chunkIdHex)
+    {
+        if (_blobs is LocalBlobStore local)
+        {
+            try
+            {
+                return new FileInfo(local.PathFor(chunkIdHex)).Length;
+            }
+            catch (IOException ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                throw new InvalidDataException($"Chunk {chunkIdHex} is missing from the repository.", ex);
+            }
+        }
+        return GetChunkBlob(chunkIdHex).Length;
+    }
+
+    /// <summary>Target packed-volume size for Usenet uploads (repo.json).</summary>
+    public long VolumeSizeBytes => _config.VolumeSizeBytes;
+
+    /// <summary>Whether uploads pack chunks into volumes (repo.json).</summary>
+    public bool UseVolumes => _config.UseVolumes;
+
+    /// <summary>
+    /// Decides whether an upload uses volume packing. Packing mode and
+    /// volume size are sticky per backup: the manifest records the packing,
+    /// and the server-side manifest article is immutable, so flipping modes
+    /// or sizes for the same backup would silently break the upload/download
+    /// contract. Flips are refused with a reason instead.
+    /// </summary>
+    /// <param name="manifest">The backup's manifest.</param>
+    /// <param name="chunkIds">Canonical ordered chunk IDs.</param>
+    /// <param name="forceChunkMode">Caller override (--no-volumes / config).</param>
+    /// <param name="refusal">When returning false with a refusal, the reason.</param>
+    public bool ResolveVolumeMode(
+        BackupManifest manifest,
+        string[] chunkIds,
+        bool forceChunkMode,
+        out string? refusal)
+    {
+        refusal = null;
+        bool manifestHasVolumes = manifest.Volumes is { Count: > 0 };
+        bool wantVolumes = UseVolumes && !forceChunkMode && chunkIds.Length > 0;
+        if (manifestHasVolumes)
+        {
+            if (manifest.VolumeSize != VolumeSizeBytes)
+            {
+                refusal = $"backup {manifest.BackupId} was packed with volume size " +
+                    $"{manifest.VolumeSize}, but repo.json now says {VolumeSizeBytes}. " +
+                    "Volume size is sticky per backup; restore repo.json or re-backup.";
+                return false;
+            }
+            return true;
+        }
+        if (wantVolumes && ChunkUploadRecorded(chunkIds))
+        {
+            refusal = $"backup {manifest.BackupId} was already uploaded per-chunk; volume " +
+                "packing cannot be enabled retroactively. Re-backup or keep chunk mode.";
+            return false;
+        }
+        return wantVolumes;
+    }
+
+    private bool ChunkUploadRecorded(string[] chunkIds)
+    {
+        using var catalog = new Catalog(CatalogPath);
+        return chunkIds.Any(id => catalog.GetUploadTimeUtc(id) is not null);
+    }
+
+    /// <summary>
+    /// Greedy volume packing plan for a manifest's chunks: ordered groups of
+    /// chunk IDs sized to the repo's configured volume target. Reads no blob
+    /// bytes — sizes come from the local store.
+    /// </summary>
+    public IReadOnlyList<IReadOnlyList<string>> PlanVolumes(BackupManifest manifest)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
+        return VolumePacker.Plan(chunkIds, GetChunkBlobSize, VolumeSizeBytes);
+    }
+
+    /// <summary>
+    /// Recomputes the root hash and writes the manifest back to manifests/.
+    /// Used after upload-time mutations (volume packing) so the stored
+    /// manifest matches what was posted to Usenet.
+    /// </summary>
+    public void SaveManifest(BackupManifest manifest)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        manifest.RootSha256 = manifest.ComputeRootHash();
+        WriteManifest(manifest);
+    }
+
+    /// <summary>
     /// Decrypts and hash-verifies one stored chunk. Throws
     /// <see cref="CryptographicException"/> on wrong passphrase and
     /// <see cref="InvalidDataException"/> on corruption. Used by the recovery
@@ -655,20 +755,40 @@ public sealed class BackupRepository : IDisposable
         ArgumentNullException.ThrowIfNull(nzb);
         ArgumentNullException.ThrowIfNull(remote);
 
-        int downloaded = 0, alreadyPresent = 0, reconstructed = 0;
         var files = nzb.Files;
         // Collect all chunk IDs for parity group lookup
         var allChunkIds = files.Select(f => f.ChunkId)
             .Where(id => id is not null)
             .Cast<string>()
             .ToList();
-
         for (int i = 0; i < files.Count; i++)
-        {
-            string? chunkId = files[i].ChunkId;
-            if (chunkId is null)
+            if (files[i].ChunkId is null)
                 throw new InvalidDataException(
                     $"NZB file #{i + 1} ('{files[i].Subject}') does not reference a usenet-backup article.");
+
+        return DownloadChunkIds(allChunkIds, remote, progress);
+    }
+
+    /// <summary>
+    /// Downloads an explicit list of chunks (fetch, authenticate, hash-verify,
+    /// store; parity reconstruction on failure). Used by
+    /// <see cref="DownloadChunks"/> and by LAN recovery of volume-packed
+    /// backups (the LAN server hosts chunks, not volume articles).
+    /// </summary>
+    public DownloadResult DownloadChunkIds(
+        IReadOnlyList<string> chunkIds,
+        IBlobStore remote,
+        Action<int, int>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(chunkIds);
+        ArgumentNullException.ThrowIfNull(remote);
+
+        int downloaded = 0, alreadyPresent = 0, reconstructed = 0;
+        var allChunkIds = chunkIds.ToList();
+
+        for (int i = 0; i < allChunkIds.Count; i++)
+        {
+            string chunkId = allChunkIds[i];
             string messageId = ArticleCodec.MakeMessageId(chunkId, RepoId);
 
             if (_blobs.Exists(chunkId))
@@ -698,9 +818,207 @@ public sealed class BackupRepository : IDisposable
                 _catalog.RecordDownload(messageId, chunkId);
                 downloaded++;
             }
-            progress?.Invoke(i + 1, files.Count);
+            progress?.Invoke(i + 1, allChunkIds.Count);
         }
-        return new DownloadResult(downloaded, alreadyPresent, files.Count, reconstructed);
+        return new DownloadResult(downloaded, alreadyPresent, allChunkIds.Count, reconstructed);
+    }
+
+    /// <summary>
+    /// Volume-mode download: every volume referenced by a volume NZB is
+    /// fetched as one article, unpacked, and each chunk is authenticated
+    /// (AES-GCM) and hash-verified before storage — same fail-closed
+    /// guarantees as <see cref="DownloadChunks"/>, at volume granularity.
+    ///
+    /// Interruption-safe: a volume whose chunks are all present locally is
+    /// skipped (adopted into the download journal). The chunk->volume plan
+    /// comes from the local manifest when available; otherwise volumes are
+    /// fetched and unpacked to discover their chunks.
+    /// </summary>
+    /// <param name="nzb">Parsed volume NZB index (<see cref="NzbDocument.IsVolumeNzb"/>).</param>
+    /// <param name="remote">NNTP-backed blob store to fetch from.</param>
+    /// <param name="progress">Called as (done, total) after each volume.</param>
+    public DownloadResult DownloadVolumes(
+        NzbDocument nzb,
+        NntpBlobStore remote,
+        Action<int, int>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(nzb);
+        ArgumentNullException.ThrowIfNull(remote);
+        if (!nzb.IsVolumeNzb)
+            throw new ArgumentException("NZB is not a volume index.", nameof(nzb));
+
+        // Chunk->volume plan for skip planning and parity reconstruction.
+        // Best-effort: a missing manifest only costs extra fetches.
+        Dictionary<string, IReadOnlyList<string>>? plan = null;
+        if (nzb.BackupId is not null)
+        {
+            try
+            {
+                var manifest = LoadManifest(nzb.BackupId);
+                if (manifest.Volumes is { Count: > 0 })
+                    plan = manifest.Volumes.ToDictionary(
+                        v => v.Id, v => (IReadOnlyList<string>)v.ChunkIds);
+            }
+            catch { /* fall back to fetch-and-unpack */ }
+        }
+
+        var volumeIds = new List<string>(nzb.Files.Count);
+        for (int i = 0; i < nzb.Files.Count; i++)
+        {
+            string? volumeId = nzb.Files[i].VolumeId;
+            if (volumeId is null)
+                throw new InvalidDataException(
+                    $"NZB file #{i + 1} ('{nzb.Files[i].Subject}') does not reference a usenet-backup article.");
+            volumeIds.Add(volumeId);
+        }
+        // Canonical (sorted) order for parity group alignment.
+        var allVolumeIds = volumeIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        int downloaded = 0, alreadyPresent = 0, reconstructed = 0;
+        for (int i = 0; i < volumeIds.Count; i++)
+        {
+            string volumeId = volumeIds[i];
+            string messageId = ArticleCodec.MakeVolumeMessageId(volumeId, RepoId);
+            IReadOnlyList<string>? wanted = null;
+            plan?.TryGetValue(volumeId, out wanted);
+
+            if (wanted is not null && wanted.All(c => _blobs.Exists(c)))
+            {
+                _catalog.RecordDownload(messageId, volumeId); // adopt into journal
+                alreadyPresent += wanted.Count;
+            }
+            else
+            {
+                byte[]? volumeBytes = null;
+                try
+                {
+                    volumeBytes = remote.GetVolume(volumeId);
+                    VolumePacker.Unpack(volumeBytes); // fail closed on bad framing
+                }
+                catch (Exception)
+                {
+                    // Volume missing or corrupted — try parity reconstruction
+                    volumeBytes = TryReconstructVolume(volumeId, allVolumeIds, plan, remote);
+                    if (volumeBytes is null)
+                        throw; // Reconstruction failed, rethrow original
+                    reconstructed++;
+                }
+                foreach (var (chunkId, blob) in VolumePacker.Unpack(volumeBytes))
+                {
+                    if (_blobs.Exists(chunkId))
+                    {
+                        alreadyPresent++;
+                        continue;
+                    }
+                    VerifyDownloadedBlob(chunkId, blob);
+                    _blobs.Put(chunkId, blob);
+                    _catalog.RecordChunk(chunkId, blob.Length);
+                    downloaded++;
+                }
+                _catalog.RecordDownload(messageId, volumeId);
+            }
+            progress?.Invoke(i + 1, volumeIds.Count);
+        }
+        return new DownloadResult(downloaded, alreadyPresent, downloaded + alreadyPresent, reconstructed);
+    }
+
+    /// <summary>
+    /// Attempts to reconstruct a missing/corrupt volume using XOR or PAR2
+    /// parity over volumes. Sibling volume bytes come from a local rebuild
+    /// (when all their chunks are present) or a remote fetch. Every chunk
+    /// of a reconstructed volume is re-verified before it is accepted.
+    /// Returns null if reconstruction is not possible.
+    /// </summary>
+    private byte[]? TryReconstructVolume(
+        string volumeId,
+        IReadOnlyList<string> allVolumeIds,
+        Dictionary<string, IReadOnlyList<string>>? plan,
+        NntpBlobStore remote)
+    {
+        byte[]? GetVolumeBytesOrNull(string vid)
+        {
+            try
+            {
+                if (plan is not null && plan.TryGetValue(vid, out var chunks) &&
+                    chunks.All(c => _blobs.Exists(c)))
+                    return VolumePacker.BuildVolume(chunks, _blobs.Get).Bytes;
+                return remote.GetVolume(vid);
+            }
+            catch { return null; }
+        }
+
+        bool VerifyVolume(byte[] volumeBytes)
+        {
+            try
+            {
+                foreach (var (chunkId, blob) in VolumePacker.Unpack(volumeBytes))
+                    VerifyDownloadedBlob(chunkId, blob);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Try XOR parity first (simpler, single parity block)
+        var xorGroup = Redundancy.XorParity.GetGroupFor(volumeId, allVolumeIds);
+        if (xorGroup.Count >= 2)
+        {
+            string parityId = Redundancy.XorParity.MakeParityId(xorGroup);
+            try
+            {
+                byte[] parityBytes = remote.GetVolume(parityId);
+                byte[]? reconstructed = Redundancy.XorParity.Reconstruct(
+                    volumeId, xorGroup, GetVolumeBytesOrNull, parityBytes);
+                if (reconstructed is not null && VerifyVolume(reconstructed))
+                    return reconstructed;
+            }
+            catch { /* parity not available */ }
+        }
+
+        // Try PAR2 (Reed-Solomon, up to 3 missing)
+        var par2Group = Redundancy.Par2Redundancy.GetGroupFor(volumeId, allVolumeIds);
+        if (par2Group.Count >= 2)
+        {
+            try
+            {
+                var parityDatas = new List<byte[]>();
+                for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
+                {
+                    string parityId = Redundancy.Par2Redundancy.MakeParityId(par2Group, p);
+                    try { parityDatas.Add(remote.GetVolume(parityId)); }
+                    catch { /* parity block not available */ }
+                }
+
+                if (parityDatas.Count > 0)
+                {
+                    var reconstructed = Redundancy.Par2Redundancy.Reconstruct(
+                        par2Group, GetVolumeBytesOrNull, parityDatas);
+                    if (reconstructed is not null &&
+                        reconstructed.TryGetValue(volumeId, out byte[]? candidate) &&
+                        VerifyVolume(candidate))
+                        return candidate;
+                }
+            }
+            catch { /* reconstruction failed */ }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Downloads a backup from an NZB index, dispatching on index kind:
+    /// volume NZBs fetch packed volume articles (<see cref="DownloadVolumes"/>),
+    /// chunk NZBs fetch one article per chunk (<see cref="DownloadChunks"/>).
+    /// </summary>
+    public DownloadResult DownloadNzb(
+        NzbDocument nzb,
+        NntpBlobStore remote,
+        Action<int, int>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(nzb);
+        ArgumentNullException.ThrowIfNull(remote);
+        return nzb.IsVolumeNzb
+            ? DownloadVolumes(nzb, remote, progress)
+            : DownloadChunks(nzb, remote, progress);
     }
 
     /// <summary>

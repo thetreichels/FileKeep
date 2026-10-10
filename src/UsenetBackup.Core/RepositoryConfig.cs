@@ -22,4 +22,20 @@ public sealed class RepositoryConfig
 
     [JsonPropertyName("chunk_size")]
     public int ChunkSize { get; set; }
+
+    /// <summary>
+    /// Target packed-volume size in bytes for Usenet uploads (default 32 MiB).
+    /// Chunks are greedily packed into volumes of at most this size; one
+    /// volume is posted as one article. Absent in older repo.json files ->
+    /// default applies.
+    /// </summary>
+    [JsonPropertyName("volume_size_bytes")]
+    public long VolumeSizeBytes { get; set; } = 32L * 1024 * 1024;
+
+    /// <summary>
+    /// When false, uploads post one article per chunk (v1 behavior) instead
+    /// of packing chunks into volumes. Default true.
+    /// </summary>
+    [JsonPropertyName("use_volumes")]
+    public bool UseVolumes { get; set; } = true;
 }

@@ -132,6 +132,20 @@ public sealed class WizardState : IDisposable
         {
             using var remote = new Lan.HttpBlobStore(LanServer);
             remote.MaxDownloadBytes = repo.MaxDownloadBytes;
+            if (Nzb.IsVolumeNzb)
+            {
+                // The LAN server hosts chunks, not volume articles: expand
+                // the manifest's volume plan into plain chunk downloads.
+                if (Nzb.BackupId is null)
+                    throw new InvalidDataException("Volume NZB has no backup ID; cannot expand its chunk plan.");
+                var manifest = repo.LoadManifest(Nzb.BackupId);
+                if (manifest.Volumes is not { Count: > 0 })
+                    throw new InvalidDataException("Volume NZB but the manifest has no volumes list.");
+                var chunkIds = manifest.Volumes
+                    .SelectMany(v => v.ChunkIds).Distinct()
+                    .OrderBy(id => id, StringComparer.Ordinal).ToList();
+                return repo.DownloadChunkIds(chunkIds, remote, progress);
+            }
             return repo.DownloadChunks(Nzb, remote, progress);
         }
 
@@ -143,7 +157,8 @@ public sealed class WizardState : IDisposable
                 client.Authenticate(NntpUser, NntpPassword);
             using var remote = new NntpBlobStore(client, Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
                 providerKey: ChunkMessageIndex.MakeProviderKey(NntpHost, Newsgroup));
-            remote.MaxArticleBytes = repo.MaxDownloadBytes;
+            // Volume articles are volume-sized, not chunk-sized.
+            remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
             // Fetch the latest published message-identity index BEFORE
             // downloading chunks. A retention refresh on the original
             // machine republishes articles under new message IDs; without
@@ -152,7 +167,7 @@ public sealed class WizardState : IDisposable
             // Throws an explicit recovery error if an index was published
             // but cannot be retrieved or parsed — never silently falls back.
             remote.SyncMessageIndex(repo.MessageIndex);
-            return repo.DownloadChunks(Nzb, remote, progress);
+            return repo.DownloadNzb(Nzb, remote, progress);
         }
         finally
         {
