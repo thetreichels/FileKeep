@@ -272,7 +272,25 @@ public static class Dashboard
             {
                 dashboardPort = config.DashboardPort,
                 dashboardBind = config.DashboardBind,
-                jobs = config.Jobs,
+                // Never expose the encrypted password blob to the UI.
+                jobs = config.Jobs.Select(j => new
+                {
+                    name = j.Name,
+                    repo = j.Repo,
+                    source = j.Source,
+                    schedule = j.Schedule,
+                    mode = j.Mode,
+                    backupPrivilege = j.BackupPrivilege,
+                    vss = j.Vss,
+                    autoUpload = j.AutoUpload,
+                    targets = j.Targets,
+                    smbShare = j.SmbShare,
+                    smbUser = j.SmbUser,
+                    hasSmbPassword = !string.IsNullOrEmpty(j.SmbPasswordProtected),
+                    autoVerify = j.AutoVerify,
+                    verificationMode = j.VerificationMode,
+                    redundancyMode = j.RedundancyMode,
+                }).ToList(),
                 // Never expose the encrypted password blob to the UI.
                 nntp = config.Nntp == null ? null : new
                 {
@@ -1002,6 +1020,7 @@ public static class DashboardApi
     private static DateTime _winReBuildStartedAt;
 
     private static LanServer? _lanServer;
+    private static readonly object _lanServerLock = new();
 
     /// <summary>
     /// Checks prerequisites for WinRE USB creation: Windows, admin rights,
@@ -1170,8 +1189,12 @@ public static class DashboardApi
         bootMode = (bootMode ?? "Both").Trim();
         if (bootMode != "UEFI" && bootMode != "BIOS" && bootMode != "Both")
             return (400, new { error = "bootMode must be UEFI, BIOS, or Both." });
-        if (_winReBuildStatus == "running")
-            return (400, new { error = "A WinRE build is already running." });
+        lock (_winReBuildStepsLock)
+        {
+            if (_winReBuildStatus == "running")
+                return (400, new { error = "A WinRE build is already running." });
+            _winReBuildStatus = "running";
+        }
 
         bool imageMode = !string.IsNullOrWhiteSpace(imagePath);
         if (imageMode && !string.IsNullOrWhiteSpace(driveLetter))
@@ -1196,7 +1219,6 @@ public static class DashboardApi
             return (400, new { error = $"Prerequisites not met: {missing}" });
         }
 
-        _winReBuildStatus = "running";
         _winReBuildError = null;
         _winReBuildDrive = imageMode ? imagePath : driveLetter.ToUpperInvariant();
         lock (_winReBuildStepsLock)
@@ -1316,21 +1338,24 @@ public static class DashboardApi
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
-        if (_lanServer?.IsRunning == true)
-            return (400, new { error = "LAN server is already running." });
-        if (port is < 1 or > 65535)
-            return (400, new { error = "Invalid port." });
-        try
+        lock (_lanServerLock)
         {
-            _lanServer?.Dispose();
-            _lanServer = new LanServer(repo, port, "0.0.0.0");
-            _lanServer.Start();
-            OperationLog.Append(repo, "lan-server", $"started on port {port}");
-            return (200, new { running = true, port });
-        }
-        catch (Exception ex)
-        {
-            return (500, new { error = ex.Message });
+            if (_lanServer?.IsRunning == true)
+                return (400, new { error = "LAN server is already running." });
+            if (port is < 1 or > 65535)
+                return (400, new { error = "Invalid port." });
+            try
+            {
+                _lanServer?.Dispose();
+                _lanServer = new LanServer(repo, port, "0.0.0.0");
+                _lanServer.Start();
+                OperationLog.Append(repo, "lan-server", $"started on port {port}");
+                return (200, new { running = true, port });
+            }
+            catch (Exception ex)
+            {
+                return (500, new { error = ex.Message });
+            }
         }
     }
 
@@ -1462,6 +1487,11 @@ public static class DashboardApi
         // Note: per-job SMB fields (SmbShare/SmbUser/SmbPasswordProtected) are
         // legacy — migrated to BackupLocations on config load. New jobs use
         // location names in Targets; credentials live on the location.
+        string smbPwBlob = existing?.SmbPasswordProtected ?? "";
+        if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
+            smbPwBlob = UsenetBackup.Core.Dpapi.Protect(job.SmbPasswordPlaintext) ?? "";
+        job.SmbPasswordProtected = smbPwBlob;
+        job.SmbPasswordPlaintext = null;
         if (existing is null)
             config.Jobs.Add(job);
         else
@@ -1477,6 +1507,7 @@ public static class DashboardApi
             existing.AutoVerify = job.AutoVerify;
             existing.RedundancyMode = job.RedundancyMode;
             existing.VerificationMode = job.VerificationMode;
+            existing.SmbPasswordProtected = job.SmbPasswordProtected;
         }
         try
         {
@@ -1671,6 +1702,22 @@ public static class DashboardApi
             // Validate NNTP fields if a host is set; Validate() also checks that
             // no job has auto-upload without a provider.
             config.Validate();
+            // Sync the migrated "Usenet" location with the new settings so
+            // scheduled uploads (which now use locations) don't go stale.
+            var usenetLoc = config.Locations.FirstOrDefault(l =>
+                l.Type == "nntp" && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
+            if (usenetLoc is not null && config.Nntp is not null)
+            {
+                usenetLoc.Host = config.Nntp.Host;
+                usenetLoc.Port = config.Nntp.Port;
+                usenetLoc.Ssl = config.Nntp.Ssl;
+                usenetLoc.Username = config.Nntp.Username;
+                usenetLoc.Connections = config.Nntp.Connections;
+                usenetLoc.Newsgroup = config.Nntp.Newsgroup;
+                usenetLoc.RetentionDays = config.Nntp.RetentionDays;
+                usenetLoc.PasswordProtected = config.Nntp.PasswordProtected;
+                usenetLoc.RedundancyMode = config.Nntp.RedundancyMode;
+            }
             config.Save(configPath);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
@@ -1707,6 +1754,18 @@ public static class DashboardApi
                 return (400, new { error = $"Port {p.Port} is out of range." });
             if (p.Connections is < 1 or > 100)
                 return (400, new { error = $"Connections must be 1-100 (got {p.Connections})." });
+        }
+        // Encrypt supplied plaintext passwords via DPAPI; blank keeps the stored blob.
+        // Match against existing providers by host+port to preserve blobs.
+        foreach (var p in providers)
+        {
+            var existing = config.NntpProviders.FirstOrDefault(e =>
+                e.Host.Equals(p.Host, StringComparison.OrdinalIgnoreCase) && e.Port == p.Port);
+            string? blobToKeep = existing?.PasswordProtected;
+            if (!string.IsNullOrEmpty(p.PasswordPlaintext))
+                blobToKeep = Dpapi.Protect(p.PasswordPlaintext);
+            p.PasswordProtected = blobToKeep;
+            p.PasswordPlaintext = null;
         }
         config.NntpProviders = providers;
         try

@@ -83,7 +83,8 @@ public sealed class BackupRepository : IDisposable
             throw new ArgumentOutOfRangeException(nameof(volumeSizeBytes), "Volume size must be positive.");
 
         Directory.CreateDirectory(repoPath);
-        if (File.Exists(Path.Combine(repoPath, "repo.json")))
+        string repoJsonPath = Path.Combine(repoPath, "repo.json");
+        if (File.Exists(repoJsonPath))
             throw new InvalidOperationException($"A repository already exists at {repoPath}.");
 
         var config = new RepositoryConfig
@@ -94,9 +95,18 @@ public sealed class BackupRepository : IDisposable
             ChunkSize = chunkSize,
             VolumeSizeBytes = volumeSizeBytes,
         };
-        File.WriteAllText(
-            Path.Combine(repoPath, "repo.json"),
+        // Atomic write: a crash mid-write must not leave a truncated repo.json
+        // (Open would reject it as corrupt while Init refuses to overwrite).
+        string tmpPath = repoJsonPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        File.WriteAllText(tmpPath,
             JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+        try { File.Move(tmpPath, repoJsonPath); }
+        catch (IOException)
+        {
+            // Lost the race with a concurrent Init: clean up and report.
+            try { File.Delete(tmpPath); } catch { }
+            throw new InvalidOperationException($"A repository already exists at {repoPath}.");
+        }
         Directory.CreateDirectory(Path.Combine(repoPath, "manifests"));
         Directory.CreateDirectory(Path.Combine(repoPath, "chunks"));
         Directory.CreateDirectory(Path.Combine(repoPath, "parity"));
@@ -295,7 +305,11 @@ public sealed class BackupRepository : IDisposable
     private void WriteManifest(BackupManifest manifest)
     {
         string manifestPath = Path.Combine(_root, "manifests", manifest.BackupId + ".json");
-        File.WriteAllText(manifestPath, manifest.ToJson());
+        // Atomic write via temp file: a crash mid-write must not leave a
+        // truncated manifest that the catalog already references.
+        string tmpPath = manifestPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        File.WriteAllText(tmpPath, manifest.ToJson());
+        File.Move(tmpPath, manifestPath, overwrite: true);
     }
 
     /// <summary>
@@ -586,6 +600,10 @@ public sealed class BackupRepository : IDisposable
 
     public BackupManifest LoadManifest(string backupId)
     {
+        // Backup IDs are 32-hex GUIDs; reject path traversal early.
+        if (string.IsNullOrEmpty(backupId) || backupId.Length != 32 ||
+            !backupId.All(c => Uri.IsHexDigit(c)))
+            throw new ArgumentException($"Invalid backup ID: {backupId}", nameof(backupId));
         string path = Path.Combine(_root, "manifests", backupId + ".json");
         if (!File.Exists(path))
             throw new FileNotFoundException($"Manifest {backupId} not found in repository.");
@@ -1235,6 +1253,9 @@ public sealed class BackupRepository : IDisposable
             {
                 if (!seen.Add(backupId))
                     continue; // already processed from a newer month
+                // Validate network-supplied IDs: must be 32-hex GUIDs.
+                if (backupId.Length != 32 || !backupId.All(c => Uri.IsHexDigit(c)))
+                    continue; // forged index line; skip
                 string localPath = Path.Combine(_root, "manifests", backupId + ".json");
                 if (File.Exists(localPath))
                     continue; // already on USB

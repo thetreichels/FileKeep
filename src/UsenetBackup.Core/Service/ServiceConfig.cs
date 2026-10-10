@@ -128,6 +128,12 @@ public sealed class BackupLocation
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SmbPasswordPlaintext { get; set; }
 
+    /// <summary>
+    /// Parity/redundancy mode for this location ("none", "xor", "par2").
+    /// If empty, falls back to the job's RedundancyMode.
+    /// </summary>
+    public string RedundancyMode { get; set; } = "";
+
     /// <summary>True if a password is available (stored blob or env var).</summary>
     [JsonIgnore]
     public bool HasPassword =>
@@ -355,7 +361,13 @@ public sealed class ServiceConfig
         try
         {
             config = JsonSerializer.Deserialize<ServiceConfig>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                    // Fail closed on typos: a misspelled key (e.g. "autoVeriy")
+                    // must not silently fall back to a default.
+                    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+                });
         }
         catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
         if (config is null)
@@ -401,6 +413,7 @@ public sealed class ServiceConfig
                 Username = cfg.Username, Connections = cfg.Connections,
                 Newsgroup = cfg.Newsgroup, RetentionDays = cfg.RetentionDays,
                 PasswordProtected = cfg.PasswordProtected,
+                RedundancyMode = cfg.RedundancyMode,
             });
         }
 
@@ -506,7 +519,7 @@ public sealed class ServiceConfig
             if (job.Vss && !OperatingSystem.IsWindows())
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' requires Windows.");
-            if (job.AutoUpload && (Nntp is null || string.IsNullOrWhiteSpace(Nntp.Host)))
+            if (job.AutoUpload && !EffectiveProviders.Any(p => !string.IsNullOrWhiteSpace(p.Host)))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
         }

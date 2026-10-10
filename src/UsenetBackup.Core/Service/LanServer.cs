@@ -142,7 +142,17 @@ public sealed class LanServer : IDisposable
                         byte[] data = ms.ToArray();
                         string dir = Path.Combine(chunksDir, chunkId[..2]);
                         Directory.CreateDirectory(dir);
-                        File.WriteAllBytes(Path.Combine(dir, chunkId[2..]), data);
+                        // Atomic write: temp file + move. If another writer
+                        // won the race, the content-addressed target already
+                        // exists with identical bytes (dedup).
+                        string finalPath = Path.Combine(dir, chunkId[2..]);
+                        string tmpPath = finalPath + ".tmp-" + Guid.NewGuid().ToString("N");
+                        File.WriteAllBytes(tmpPath, data);
+                        try { File.Move(tmpPath, finalPath); }
+                        catch (IOException) when (File.Exists(finalPath))
+                        {
+                            File.Delete(tmpPath);
+                        }
                         ctx.Response.StatusCode = 200;
                     }
                     else

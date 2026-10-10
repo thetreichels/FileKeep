@@ -254,32 +254,40 @@ public sealed class BackupScheduler
 
     /// <summary>
     /// Manual retention check for a single repo (dashboard operation).
+    /// Serialized against scheduled runs via _runGate.
     /// </summary>
     public void RunRetentionCheck(string repoPath, bool dryRun)
     {
-        var providers = _nntpProviders;
-        if (providers.Count == 0)
-            throw new InvalidOperationException("No NNTP providers configured.");
-        RunRetentionForRepo(repoPath, providers, dryRun);
+        lock (_runGate)
+        {
+            var providers = _nntpProviders;
+            if (providers.Count == 0)
+                throw new InvalidOperationException("No NNTP providers configured.");
+            RunRetentionForRepo(repoPath, providers, dryRun);
+        }
     }
 
     /// <summary>
     /// Manual NNTP upload of a backup (dashboard operation).
+    /// Serialized against scheduled runs via _runGate.
     /// </summary>
     public void UploadBackup(string repoPath, string backupId)
     {
-        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
-        if (string.IsNullOrEmpty(passphrase))
-            throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
-        // Reuse the per-job upload path with a synthetic job config.
-        var job = new BackupJobConfig
+        lock (_runGate)
         {
-            Name = "manual-upload",
-            Repo = repoPath,
-            Source = "",
-            AutoUpload = true,
-        };
-        UploadToTargets(job, backupId, passphrase);
+            string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+            if (string.IsNullOrEmpty(passphrase))
+                throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
+            // Reuse the per-job upload path with a synthetic job config.
+            var job = new BackupJobConfig
+            {
+                Name = "manual-upload",
+                Repo = repoPath,
+                Source = "",
+                AutoUpload = true,
+            };
+            UploadToTargets(job, backupId, passphrase);
+        }
     }
 
     /// <summary>
@@ -336,8 +344,13 @@ public sealed class BackupScheduler
             return;
         }
 
-        // Group jobs by repo to avoid checking the same repo twice
-        var repos = _jobs.Select(j => j.Config.Repo).Distinct().ToList();
+        // Group jobs by repo to avoid checking the same repo twice.
+        // Snapshot under the lock: ReloadJobs mutates _jobs concurrently.
+        List<string> repos;
+        lock (_runGate)
+        {
+            repos = _jobs.Select(j => j.Config.Repo).Distinct().ToList();
+        }
         foreach (string repoPath in repos)
         {
             try
@@ -711,10 +724,25 @@ public sealed class BackupScheduler
     private void UploadToNntpLocation(
         BackupJobConfig job, string backupId, string passphrase, BackupLocation? loc)
     {
-        // TODO: use loc's host/port/credentials when the multi-provider
-        // upload path supports per-location providers. For now, the existing
-        // provider-based upload is used.
-        AutoUploadToUsenet(job, backupId, passphrase);
+        if (loc is null)
+        {
+            AutoUploadToUsenet(job, backupId, passphrase);
+            return;
+        }
+        // Use the location's own host/port/credentials, not the legacy fields.
+        var provider = new NntpConfig
+        {
+            Host = loc.Host,
+            Port = loc.Port,
+            Ssl = loc.Ssl,
+            Username = loc.Username,
+            Connections = loc.Connections,
+            Newsgroup = loc.Newsgroup,
+            RetentionDays = loc.RetentionDays,
+            PasswordProtected = loc.PasswordProtected,
+        };
+        AutoUploadToUsenetWithProviders(job, backupId, passphrase,
+            new List<NntpConfig> { provider });
     }
 
     /// <summary>
@@ -746,7 +774,13 @@ public sealed class BackupScheduler
 
     private void AutoUploadToUsenet(BackupJobConfig job, string backupId, string passphrase)
     {
-        var providers = _nntpProviders;
+        AutoUploadToUsenetWithProviders(job, backupId, passphrase, _nntpProviders);
+    }
+
+    private void AutoUploadToUsenetWithProviders(
+        BackupJobConfig job, string backupId, string passphrase,
+        IReadOnlyList<NntpConfig> providers)
+    {
         if (providers.Count == 0)
             throw new InvalidOperationException("Auto-upload enabled but no Usenet provider configured.");
 

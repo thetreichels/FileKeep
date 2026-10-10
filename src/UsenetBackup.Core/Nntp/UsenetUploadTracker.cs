@@ -79,9 +79,21 @@ public sealed class UsenetUploadTracker
             return list?.ToDictionary(r => $"{r.BackupId}@{r.ProviderHost}")
                 ?? new Dictionary<string, UploadRecord>();
         }
-        catch
+        catch (Exception ex)
         {
-            return new Dictionary<string, UploadRecord>();
+            // Do not silently discard all records on corruption — that would
+            // make retention stop tracking everything. Preserve the torn file
+            // for forensics and surface the problem.
+            try
+            {
+                string backupPath = _path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                File.Move(_path, backupPath);
+            }
+            catch { }
+            throw new InvalidDataException(
+                $"Upload tracker file is corrupt: {_path}. " +
+                $"The torn file was preserved with a .corrupt- suffix. " +
+                $"Original error: {ex.Message}", ex);
         }
     }
 
@@ -89,6 +101,11 @@ public sealed class UsenetUploadTracker
     {
         string json = JsonSerializer.Serialize(_records.Values.ToList(),
             new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(_path, json);
+        // Atomic write via temp file: a crash mid-write must not truncate
+        // the tracker (Load no longer silently swallows corruption, but a
+        // torn file still loses data).
+        string tmpPath = _path + ".tmp-" + Guid.NewGuid().ToString("N");
+        File.WriteAllText(tmpPath, json);
+        File.Move(tmpPath, _path, overwrite: true);
     }
 }
