@@ -212,7 +212,8 @@ public sealed class IncrementalTests : IDisposable
         WriteSrc("a.txt", "x"u8.ToArray());
         using var repo = InitRepo();
         repo.BackupDirectory(_srcDir);
+        // Valid 32-hex format, but no such manifest exists.
         Assert.Throws<FileNotFoundException>(() =>
-            repo.BackupIncremental(_srcDir, "deadbeef"));
+            repo.BackupIncremental(_srcDir, new string('0', 32)));
     }
 }
