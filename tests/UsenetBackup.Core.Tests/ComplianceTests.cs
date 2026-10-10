@@ -228,9 +228,8 @@ public sealed class ComplianceTests : IDisposable
     [Fact]
     public void Directives_ServiceConfigCannotCarryAPassphrase()
     {
-        // Defense in depth: even if someone adds a "passphrase" key to
-        // service.json, there is no property to bind it to — it is ignored,
-        // and the scheduler still fails fast without the environment variable.
+        // Defense in depth: a "passphrase" key in service.json is rejected
+        // outright (strict JSON), so it can never be silently bound or ignored.
         string json = """
             { "dashboardBind": "127.0.0.1", "dashboardPort": 15789,
               "passphrase": "hunter2",
@@ -239,22 +238,8 @@ public sealed class ComplianceTests : IDisposable
             """;
         string path = Path.Combine(_workDir, "service.json");
         File.WriteAllText(path, json);
-        var config = ServiceConfig.Load(path); // unknown keys are ignored
-        Assert.Single(config.Jobs);
-
-        string? saved = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
-        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
-        try
-        {
-            var scheduler = new BackupScheduler(config);
-            var result = scheduler.RunJobNow("audit");
-            Assert.False(result.Success); // not silently authenticated by the config file
-            Assert.Contains(BackupScheduler.PassphraseEnvVar, result.Error);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, saved);
-        }
+        // Unknown keys are rejected, not ignored.
+        Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(path));
     }
 
     [Fact]
