@@ -11,7 +11,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <OutputType>WinExe</OutputType>
-    <!-- WinPE has no .NET runtime; publish self-contained for USB use. -->
+    <!-- WinRE has no .NET runtime; publish self-contained for USB use. -->
       <!-- Single-file self-contained publish: the MSI installs the exe + native deps explicitly. -->
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->

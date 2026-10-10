@@ -4,7 +4,7 @@ using Microsoft.Win32;
 namespace UsenetBackup.Recovery;
 
 /// <summary>
-/// Windows 95 Setup aesthetic for the USB/WinPE recovery environment:
+/// Windows 95 Setup aesthetic for the USB/WinRE recovery environment:
 /// teal desktop, navy gradient title bar, classic 3D gray dialog with a
 /// step list on the left, MS Sans Serif. Comfort, not trickery — the
 /// window title and branding stay "FileKeep".
@@ -22,10 +22,10 @@ internal static class Win95Theme
     public static Font TitleFont => new("MS Sans Serif", 8.25f, FontStyle.Bold);
 
     /// <summary>
-    /// True when running inside Windows PE (MiniNT registry key present).
+    /// True when running inside WinRE (MiniNT registry key present).
     /// The recovery wizard auto-selects the Win95 theme there.
     /// </summary>
-    public static bool IsWinPE()
+    public static bool IsWinRE()
     {
         try
         {

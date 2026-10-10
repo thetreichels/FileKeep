@@ -5,7 +5,7 @@ namespace UsenetBackup.Recovery;
 
 /// <summary>
 /// Lists physical drives via WMI (Win32_DiskDrive). Windows-only;
-/// works in WinPE where WMI is available.
+/// works in WinRE where WMI is available.
 /// </summary>
 public sealed class WmiDriveEnumerator : IDriveEnumerator
 {

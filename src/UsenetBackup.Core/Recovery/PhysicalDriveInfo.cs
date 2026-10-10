@@ -8,7 +8,7 @@ public sealed record PhysicalDriveInfo(
     int Index,           // e.g. 0
     string Model,        // e.g. "Samsung SSD 860 EVO 500GB"
     ulong SizeBytes,     // total size
-    string Serial)       // may be empty in WinPE
+    string Serial)       // may be empty in WinRE
 {
     public string Display =>
         $"{Index}: {Model} ({FormatSize(SizeBytes)}) [{DevicePath}]";

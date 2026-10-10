@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 namespace UsenetBackup.Core;
 
 /// <summary>
-/// Discovers SMB shares on the local network. WinPE/WinRE has full TCP/IP
+/// Discovers SMB shares on the local network. WinRE has full TCP/IP
 /// and an SMB client, but none of the browsing/discovery services that power
 /// Explorer's Network view — so this does it the direct way:
 ///

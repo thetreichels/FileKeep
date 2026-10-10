@@ -15,7 +15,7 @@ production-ready.
 ### Problem
 
 FileKeep's stated goal includes system-image backup with bare-metal recovery
-via WinPE. A file-by-file copy of a live Windows system disk is not
+via WinRE. A file-by-file copy of a live Windows system disk is not
 crash-consistent, let alone application-consistent. Without a genuine snapshot
 mechanism, the "image" may contain torn writes, inconsistent registry hives,
 or corrupt database files.

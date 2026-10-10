@@ -258,7 +258,7 @@ and what guarantees it provides.
 ### Phase D: Documentation and validation
 
 - [ ] User docs explain the three levels and when to use each
-- [ ] Bare-metal recovery tested from VSS snapshot via WinPE
+- [ ] Bare-metal recovery tested from VSS snapshot via WinRE
 - [ ] Failure injection: VSS disabled, insufficient privilege, timeout —
       all fail closed with clear errors
 

@@ -317,7 +317,7 @@ public sealed class RetentionManager
         }
 
         // Publish the updated message-identity index BEFORE advancing the
-        // retention clock. A recovering machine (or WinPE) can only find
+        // retention clock. A recovering machine (or WinRE) can only find
         // the refreshed articles through this index — if publication fails
         // while the clock has already advanced, cross-machine recovery
         // would use stale message IDs while the retention timestamp

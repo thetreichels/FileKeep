@@ -1,5 +1,4 @@
 using System.Text;
-using UsenetBackup.Cli;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 
@@ -35,7 +34,6 @@ try
         "expiration-check" => ExpirationCheck(args[1..]),
         "retention-check" => RetentionCheck(args[1..]),
         "serve" => Serve(args[1..]),
-        "recovery-usb" => RecoveryUsbCommand(args[1..]),
         "smb-sync" => SmbSyncCommand(args[1..]),
         _ => Unknown(args[0]),
     };
@@ -68,8 +66,6 @@ static void PrintUsage()
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
           usenet-backup serve <repo> [--port PORT] [--bind ADDR]
-          usenet-backup recovery-usb --list
-          usenet-backup recovery-usb --iso <winpe.iso> --drive <N> [--yes]
           usenet-backup smb-sync <repo> --share \\server\share\path [--user USER]
           usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
           (--user also accepts --username as an alias)
@@ -1155,100 +1151,6 @@ static int RetentionCheck(string[] args)
     }
 }
 
-static int RecoveryUsbCommand(string[] args)
-{
-    if (!OperatingSystem.IsWindows())
-    {
-        Console.Error.WriteLine("error: recovery-usb requires Windows (raw disk access).");
-        return 2;
-    }
-
-    if (HasFlag(args, "--list"))
-    {
-        var drives = RecoveryUsb.ListUsbDrives();
-        if (drives.Count == 0)
-        {
-            Console.WriteLine("No USB drives found.");
-            return 0;
-        }
-        Console.WriteLine("USB drives:");
-        foreach (var d in drives)
-            Console.WriteLine($"  [{d.Number}] {d.DevicePath}  {d.Model}  ({d.SizeBytes / (1024 * 1024):N0} MB)");
-        return 0;
-    }
-
-    string? isoPath = GetOption(args, "--iso");
-    string? driveOpt = GetOption(args, "--drive");
-    if (string.IsNullOrEmpty(isoPath) || string.IsNullOrEmpty(driveOpt))
-    {
-        Console.Error.WriteLine("error: recovery-usb --iso <winpe.iso> --drive <N> [--yes]");
-        Console.Error.WriteLine("       recovery-usb --list   (show USB drives)");
-        return 2;
-    }
-    if (!File.Exists(isoPath))
-    {
-        Console.Error.WriteLine($"error: ISO not found: {isoPath}");
-        Console.Error.WriteLine("Build one first: winpe\\build-winpe.ps1 (requires Windows ADK + WinPE add-on).");
-        return 2;
-    }
-    if (!int.TryParse(driveOpt, out int driveNumber) || driveNumber < 0)
-    {
-        Console.Error.WriteLine($"error: --drive must be a physical drive number (see --list).");
-        return 2;
-    }
-
-    var usb = RecoveryUsb.ListUsbDrives();
-    var target = usb.FirstOrDefault(d => d.Number == driveNumber);
-    if (target is null)
-    {
-        Console.Error.WriteLine($"error: drive {driveNumber} is not a USB drive (or not present).");
-        Console.Error.WriteLine("Refusing to write to a non-USB drive. See --list.");
-        return 2;
-    }
-
-    long isoSize = new FileInfo(isoPath).Length;
-    if (isoSize > target.SizeBytes)
-    {
-        Console.Error.WriteLine($"error: ISO ({isoSize / (1024 * 1024):N0} MB) does not fit on " +
-            $"drive {driveNumber} ({target.SizeBytes / (1024 * 1024):N0} MB).");
-        return 2;
-    }
-
-    Console.WriteLine($"About to write {Path.GetFileName(isoPath)} ({isoSize / (1024 * 1024):N0} MB)");
-    Console.WriteLine($"  to [{target.Number}] {target.DevicePath}  {target.Model}  ({target.SizeBytes / (1024 * 1024):N0} MB)");
-    Console.WriteLine("  THIS WILL DESTROY ALL DATA ON THE DRIVE.");
-
-    if (!HasFlag(args, "--yes"))
-    {
-        if (Console.IsInputRedirected)
-        {
-            Console.Error.WriteLine("error: refusing to write without confirmation when stdin is not interactive (use --yes).");
-            return 2;
-        }
-        Console.Write($"Type the drive number ({target.Number}) to confirm: ");
-        string? confirm = Console.ReadLine();
-        if (confirm?.Trim() != target.Number.ToString())
-        {
-            Console.Error.WriteLine("error: confirmation did not match. Aborted.");
-            return 2;
-        }
-    }
-
-    Console.WriteLine("Writing...");
-    int lastPct = -1;
-    RecoveryUsb.WriteIso(target.DevicePath, isoPath, (written, total) =>
-    {
-        int pct = (int)(written * 100 / total);
-        if (pct != lastPct)
-        {
-            lastPct = pct;
-            Console.Write($"\r  {pct}% ({written / (1024 * 1024):N0} / {total / (1024 * 1024):N0} MB)");
-        }
-    });
-    Console.WriteLine("\nDone. The drive is now a bootable FileKeep recovery USB.");
-    Console.WriteLine("Windows may prompt to format the drive — decline; boot from it via your BIOS/UEFI boot menu.");
-    return 0;
-}
 
 /// <summary>
 /// Syncs a local repository to an SMB network share:

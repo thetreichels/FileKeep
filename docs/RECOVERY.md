@@ -2,7 +2,7 @@
 
 Two recovery tools are on the USB stick: the `usenet-backup` CLI and the
 `usenet-backup-recovery` GUI wizard. Both are self-contained (no .NET
-runtime needed in WinPE). The wizard walks through the same steps as the
+runtime needed in WinRE). The wizard walks through the same steps as the
 CLI commands below: locate repo metadata → enter passphrase and Usenet
 credentials → pick a backup → download → verify → restore. Print this
 file and keep it with your offline metadata copy.
@@ -24,7 +24,7 @@ keep a copy on USB and/or in a password manager:
 - A published copy of the `usenet-backup` CLI (`win-x64`, self-contained)
   and the `usenet-backup-recovery` GUI wizard (same publish options).
 
-Publish the wizard for USB/WinPE use with:
+Publish the wizard for USB/WinRE use with:
 
 ```powershell
 dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj `
@@ -68,17 +68,17 @@ chunk-ID check → AES-GCM → SHA-256) before storing it; bad chunks are
 never journaled. `verify` re-checks the manifest root hash and every
 chunk before you trust the restore.
 
-### B. Whole disk / bare metal (WinPE)
+### B. Whole disk / bare metal (WinRE)
 
 Run `UsenetBackupRecovery.exe` from the USB stick and follow the
 wizard, or use the CLI steps below.
 
-1. Boot WinPE with networking (`wpeinit`, then `ipconfig` to confirm).
+1. Boot the WinRE USB (networking is available automatically).
 2. From your USB stick (or a network share), get:
    `UsenetBackup.exe` (self-contained), `repo.json`, `manifests/`,
    `catalog.db`, and the NZB of the disk-image backup.
 3. Reassemble the repo metadata as in scenario A on a scratch volume
-   (e.g. `X:\repo` — WinPE RAM disk — for small repos, or a USB disk).
+   (e.g. `X:\repo` — WinRE RAM disk — for small repos, or a USB disk).
 4. Download the image chunks from Usenet:
    ```
    usenet-backup download X:\repo disk-backup.nzb --host <provider> --user <user>

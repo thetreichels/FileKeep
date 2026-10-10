@@ -17,7 +17,7 @@
 - **Reed–Solomon parity** for recovery from damaged or missing articles
 - **Retention management** — monitors article age against provider retention and reposts with fresh identities before articles expire
 - **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
-- **Bootable WinPE recovery environment** (Windows 95 Setup-style wizard) for bare-metal restores
+- **Bootable WinRE recovery USB** (Windows 95 Setup-style wizard) for bare-metal restores — built ADK-free from the host's own WinRE image
 - **LAN mode** — serve a repository over HTTP so a recovery stick can pull from your NAS instead of re-downloading from Usenet
 
 ## Installation
@@ -29,7 +29,7 @@ Download `filekeep-0.8.1.msi` and run it. Installs to `C:\Program Files\FileKeep
 | `cli\FileKeep.exe` | Command-line interface |
 | `cli\FileKeepVss.exe` | Native VSS snapshot helper |
 | `service\FileKeepService.exe` | Windows service + web dashboard |
-| `wizard\FileKeepRecovery.exe` | Recovery wizard (also used in WinPE) |
+| `wizard\FileKeepRecovery.exe` | Recovery wizard (also used in WinRE) |
 | `docs\` | Recovery runbook and format docs |
 
 The installer registers the `FileKeep` service (starts on first boot) and otherwise stays out of your way — no Start Menu clutter, no tray icon.
@@ -57,7 +57,7 @@ FileKeep.exe verify C:\backups\repo2 <backup-id>
 FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `recovery-usb` (write the WinPE ISO to a USB drive), `expiration-check`, `list`.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `smb-sync`, `expiration-check`, `list`.
 
 Backing up locked files (databases, Outlook PSTs, etc.):
 
@@ -79,19 +79,11 @@ FileKeep.exe backup C:\backups\repo C:\data --vss
 | **Dashboard** | Web UI in the Windows Settings visual language, with OS dark-mode support: job status, run-now, backup lists, operations log, Usenet provider config (passwords stored via DPAPI, never exposed to the UI) |
 | **Recovery wizard** (`FileKeepRecovery.exe`) | Windows 95 Setup-style step-through: unlock repo → pick backup → download → verify → restore |
 | **VSS helper** (`FileKeepVss.exe`) | Minimal native helper implementing the full VSS backup lifecycle (`GatherWriterMetadata` → `PrepareForBackup` → `DoSnapshotSet` → `BackupComplete`/`AbortBackup`), so writers like SQL Server are never left in a dangling backup state |
-| **WinPE ISO** | Bootable recovery environment containing the CLI, recovery wizard, and runbook |
+| **WinRE USB** | Bootable recovery environment containing the CLI, recovery wizard, and runbook — built ADK-free from the host's WinRE image |
 
 ### Recovery USB
 
-Build the WinPE ISO once with `winpe\build-winpe.ps1` (requires the Windows ADK + WinPE add-on, run as admin), then flash it to USB:
-
-```powershell
-# List USB drives
-FileKeep.exe recovery-usb --list
-
-# Write the ISO (destructive — requires typing the drive number to confirm)
-FileKeep.exe recovery-usb --iso C:\winpe\filekeep-winpe.iso --drive 2
-```
+Build bootable recovery media from the dashboard (**Recovery** → **Build WinRE recovery media**) or with `winre\build-winre-usb.ps1` (run as admin, no ADK required). The script formats the target USB drive and installs the customized WinRE image with FileKeep tools.
 
 Only USB-attached drives are eligible targets; the command refuses fixed drives, checks the ISO fits, and declines when stdin isn't interactive (unless `--yes`).
 
@@ -142,7 +134,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), and the WinPE recovery environment are implemented and tested.
+FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), and the WinRE recovery environment are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 
