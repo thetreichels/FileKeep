@@ -655,7 +655,8 @@ public sealed class RecoveryWizard : Form
                 using var smb = UsenetBackup.Core.SmbShare.Connect(
                     share,
                     string.IsNullOrEmpty(user) ? null : user,
-                    string.IsNullOrEmpty(password) ? null : password);
+                    string.IsNullOrEmpty(password) ? null : password,
+                    createIfMissing: false);
                 string manifestsDir = smb.Combine("manifests");
                 var result = new List<(string BackupId, BackupManifest Manifest)>();
                 if (!Directory.Exists(manifestsDir))

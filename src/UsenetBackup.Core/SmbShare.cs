@@ -30,6 +30,21 @@ public sealed class SmbShare : IDisposable
     /// </summary>
     public static SmbShare Connect(string uncPath, string? username, string? password)
     {
+        return Connect(uncPath, username, password, createIfMissing: true);
+    }
+
+    /// <summary>
+    /// Connects to an SMB share. <paramref name="uncPath"/> is the share root
+    /// (e.g. \\NAS\backups) or a subdirectory (\\NAS\backups\filekeep).
+    /// If <paramref name="username"/> is given, authenticates with
+    /// WNetAddConnection2 (Windows only); otherwise uses the current user's
+    /// credentials. If <paramref name="createIfMissing"/> is true (default),
+    /// the subdirectory is created after connecting; set false for
+    /// read-only access (restore/discovery) so typos fail instead of
+    /// creating empty directories. Throws on failure.
+    /// </summary>
+    public static SmbShare Connect(string uncPath, string? username, string? password, bool createIfMissing)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(uncPath);
         uncPath = uncPath.Trim().Replace('/', Path.DirectorySeparatorChar);
 
@@ -42,7 +57,11 @@ public sealed class SmbShare : IDisposable
                 throw new ArgumentException(
                     "Credentials require a UNC share path (\\\\server\\share).", nameof(uncPath));
             if (!Directory.Exists(uncPath))
-                throw new IOException($"Directory not reachable: {uncPath}.");
+            {
+                if (!createIfMissing)
+                    throw new IOException($"Directory not found: {uncPath}.");
+                Directory.CreateDirectory(uncPath);
+            }
             return new SmbShare(Path.GetFullPath(uncPath), connectedByUs: false);
         }
 
@@ -56,8 +75,18 @@ public sealed class SmbShare : IDisposable
             // No explicit creds (or non-Windows): verify the path is reachable
             // with the current identity.
             if (!Directory.Exists(uncPath))
-                throw new IOException($"SMB share not reachable: {uncPath}. " +
-                    "Check the path and that the current user has access.");
+            {
+                if (!createIfMissing)
+                    throw new IOException($"SMB share not reachable: {uncPath}. " +
+                        "Check the path and that the current user has access.");
+                // Try to create (only works if we have write access to the parent).
+                try { Directory.CreateDirectory(uncPath); }
+                catch (Exception ex)
+                {
+                    throw new IOException($"SMB share not reachable: {uncPath}. " +
+                        $"Check the path and that the current user has access: {ex.Message}", ex);
+                }
+            }
             return new SmbShare(uncPath, connectedByUs: false);
         }
 
@@ -77,24 +106,37 @@ public sealed class SmbShare : IDisposable
             password ?? "",
             username,
             0); // CONNECT_UPDATE_PROFILE=0: don't persist
-        if (result != 0)
+        const int ERROR_ALREADY_ASSIGNED = 85;
+        const int ERROR_DEVICE_ALREADY_REMEMBERED = 1202;
+        if (result != 0 && result != ERROR_ALREADY_ASSIGNED && result != ERROR_DEVICE_ALREADY_REMEMBERED)
         {
             throw new IOException(
                 $"Could not connect to SMB share {shareRoot} as {username} " +
                 $"(WNet error {result}). Check the share path and credentials.");
         }
+        // If already connected (85/1202), the existing connection is reused.
+        bool connectedByUs = result == 0;
         // Ensure the full subdirectory path exists / is reachable.
         if (!Directory.Exists(uncPath))
         {
+            if (!createIfMissing)
+            {
+                if (connectedByUs)
+                    WNetCancelConnection2(shareRoot, 0, force: false);
+                throw new IOException(
+                    $"Connected to {shareRoot} but subdirectory not found: {uncPath}. " +
+                    "Check the path.");
+            }
             try { Directory.CreateDirectory(uncPath); }
             catch (Exception ex)
             {
-                WNetCancelConnection2(shareRoot, 0, force: false);
+                if (connectedByUs)
+                    WNetCancelConnection2(shareRoot, 0, force: false);
                 throw new IOException(
                     $"Connected to {shareRoot} but could not reach {uncPath}: {ex.Message}", ex);
             }
         }
-        return new SmbShare(uncPath, connectedByUs: true);
+        return new SmbShare(uncPath, connectedByUs);
     }
 
     /// <summary>The connected UNC path (share root or subdirectory).</summary>

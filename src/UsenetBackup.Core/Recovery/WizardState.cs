@@ -222,7 +222,8 @@ public sealed class WizardState : IDisposable
         using var smb = UsenetBackup.Core.SmbShare.Connect(
             SmbShare,
             string.IsNullOrEmpty(SmbUser) ? null : SmbUser,
-            string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword);
+            string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword,
+            createIfMissing: false);
         var repo = OpenRepo();
         var manifest = repo.LoadManifest(SelectedBackupId);
         // Collect chunk IDs from the manifest (volumes or per-file chunk lists).

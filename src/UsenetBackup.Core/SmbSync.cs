@@ -3,8 +3,8 @@ namespace UsenetBackup.Core;
 /// <summary>
 /// Syncs a local backup repository to an SMB network share. Copies chunks
 /// (content-addressed, so naturally idempotent — existing files are skipped),
-/// manifests, and repo.json. The catalog database is NOT synced (it's
-/// rebuildable locally, and SQLite over SMB has locking quirks).
+/// manifests, parity files, and repo.json. The catalog database is NOT synced
+/// (it's rebuildable locally, and SQLite over SMB has locking quirks).
 ///
 /// The share ends up with a read-only-usable repo layout: a recovery wizard
 /// can open it directly (chunks + manifests + repo.json are all that's needed
@@ -29,6 +29,8 @@ public sealed class SmbSync
         public int ChunksSkipped { get; set; }
         public int ManifestsCopied { get; set; }
         public int ManifestsSkipped { get; set; }
+        public int ParityCopied { get; set; }
+        public int ParitySkipped { get; set; }
         public long BytesCopied { get; set; }
     }
 
@@ -48,6 +50,7 @@ public sealed class SmbSync
 
         string chunksDir = Path.Combine(repoRoot, "chunks");
         string manifestsDir = Path.Combine(repoRoot, "manifests");
+        string parityDir = Path.Combine(repoRoot, "parity");
         string repoJson = Path.Combine(repoRoot, "repo.json");
 
         // Enumerate everything first for progress reporting.
@@ -57,8 +60,11 @@ public sealed class SmbSync
         var manifestFiles = Directory.Exists(manifestsDir)
             ? Directory.GetFiles(manifestsDir, "*.json")
             : Array.Empty<string>();
+        var parityFiles = Directory.Exists(parityDir)
+            ? Directory.GetFiles(parityDir, "*", SearchOption.AllDirectories)
+            : Array.Empty<string>();
         bool hasRepoJson = File.Exists(repoJson);
-        int total = chunkFiles.Length + manifestFiles.Length + (hasRepoJson ? 1 : 0);
+        int total = chunkFiles.Length + manifestFiles.Length + parityFiles.Length + (hasRepoJson ? 1 : 0);
         int done = 0;
 
         void Report()
@@ -68,8 +74,11 @@ public sealed class SmbSync
 
         string destChunks = share.Combine("chunks");
         string destManifests = share.Combine("manifests");
+        string destParity = share.Combine("parity");
         Directory.CreateDirectory(destChunks);
         Directory.CreateDirectory(destManifests);
+        if (parityFiles.Length > 0)
+            Directory.CreateDirectory(destParity);
 
         foreach (string src in chunkFiles)
         {
@@ -106,6 +115,24 @@ public sealed class SmbSync
             if (done % 25 == 0) Report();
         }
 
+        foreach (string src in parityFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string relative = Path.GetRelativePath(parityDir, src);
+            string dest = Path.Combine(destParity, relative);
+            if (CopyIfNeeded(src, dest, out long bytes))
+            {
+                result.ParityCopied++;
+                result.BytesCopied += bytes;
+            }
+            else
+            {
+                result.ParitySkipped++;
+            }
+            done++;
+            if (done % 25 == 0) Report();
+        }
+
         if (hasRepoJson)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -118,6 +145,7 @@ public sealed class SmbSync
 
         _log?.Invoke($"SMB sync to {share.UncPath}: {result.ChunksCopied} chunks copied " +
             $"({result.ChunksSkipped} already present), {result.ManifestsCopied} manifests, " +
+            $"{result.ParityCopied} parity files, " +
             $"{FormatBytes(result.BytesCopied)} transferred.");
         return result;
     }

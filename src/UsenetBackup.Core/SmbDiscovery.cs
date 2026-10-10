@@ -43,8 +43,8 @@ public sealed class SmbDiscovery
     /// <summary>
     /// Scans local subnets for SMB hosts and enumerates their shares.
     /// <paramref name="progress"/> receives (hostsScanned, hostsTotal).
-    /// Only scans subnets with a prefix length of /16 or longer (scanning
-    /// anything larger would take unreasonable time).
+    /// Only scans subnets with a prefix length of /20 or longer (scanning
+    /// anything larger would take unreasonable time; a /16 has 65k hosts).
     /// </summary>
     public async Task<IReadOnlyList<DiscoveredHost>> DiscoverAsync(
         Action<int, int>? progress = null,
@@ -98,7 +98,7 @@ public sealed class SmbDiscovery
     }
 
     /// <summary>
-    /// All IPv4 host addresses in local subnets (/16 or smaller), excluding
+    /// All IPv4 host addresses in local subnets (/20 or smaller), excluding
     /// the local addresses themselves, network, and broadcast.
     /// </summary>
     internal static IEnumerable<IPAddress> GetScanTargets()
@@ -117,8 +117,8 @@ public sealed class SmbDiscovery
                 if (unicast.IPv4Mask is null)
                     continue;
                 int prefix = MaskToPrefix(unicast.IPv4Mask);
-                if (prefix < 16)
-                    continue; // too big to scan
+                if (prefix < 20)
+                    continue; // too big to scan (/16 = 65k hosts)
                 uint mask = ToUInt32(unicast.IPv4Mask);
                 uint addr = ToUInt32(unicast.Address);
                 uint network = addr & mask;
