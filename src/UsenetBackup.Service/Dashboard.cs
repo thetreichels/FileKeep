@@ -252,9 +252,10 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string driveLetter = body.GetProperty("driveLetter").GetString() ?? "";
+            string driveLetter = body.TryGetProperty("driveLetter", out var dl) ? dl.GetString() ?? "" : "";
+            string imagePath = body.TryGetProperty("imagePath", out var ip) ? ip.GetString() ?? "" : "";
             string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, sourceDir);
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, imagePath, sourceDir);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -1279,18 +1280,32 @@ public static class DashboardApi
     }
 
     /// <summary>
-    /// Starts a WinRE USB build in the background. Returns 202 if accepted.
-    /// Destructive: the target USB drive is formatted.
+    /// Starts a WinRE recovery media build in the background. Returns 202 if accepted.
+    /// USB mode (driveLetter): destructive, the target USB drive is formatted.
+    /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
-    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string? sourceDir)
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string imagePath, string? sourceDir)
     {
         if (!OperatingSystem.IsWindows())
-            return (400, new { error = "WinRE USB creation requires Windows." });
+            return (400, new { error = "WinRE recovery media creation requires Windows." });
         if (_winReBuildStatus == "running")
             return (400, new { error = "A WinRE build is already running." });
-        driveLetter = driveLetter.Trim().TrimEnd(':', '\\');
-        if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
-            return (400, new { error = "driveLetter must be a single drive letter (e.g. E)." });
+
+        bool imageMode = !string.IsNullOrWhiteSpace(imagePath);
+        if (imageMode && !string.IsNullOrWhiteSpace(driveLetter))
+            return (400, new { error = "Specify either a drive letter or an image path, not both." });
+        if (!imageMode)
+        {
+            driveLetter = driveLetter.Trim().TrimEnd(':', '\\');
+            if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
+                return (400, new { error = "driveLetter must be a single drive letter (e.g. E)." });
+        }
+        else
+        {
+            imagePath = imagePath.Trim();
+            if (!imagePath.EndsWith(".vhdx", StringComparison.OrdinalIgnoreCase))
+                return (400, new { error = "imagePath must end with .vhdx" });
+        }
 
         var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
         if (prereq is null || !(prereq.TryGetValue("ready", out var readyObj) && readyObj is bool ready && ready))
@@ -1301,7 +1316,7 @@ public static class DashboardApi
 
         _winReBuildStatus = "running";
         _winReBuildError = null;
-        _winReBuildDrive = driveLetter.ToUpperInvariant();
+        _winReBuildDrive = imageMode ? imagePath : driveLetter.ToUpperInvariant();
         lock (_winReBuildStepsLock)
         {
             _winReBuildSteps.Clear();
@@ -1331,7 +1346,8 @@ public static class DashboardApi
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -DriveLetter \"{driveLetter}\"" +
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"" +
+                        (imageMode ? $" -ImagePath \"{imagePath}\"" : $" -DriveLetter \"{driveLetter}\"") +
                         binaryDirArg +
                         (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
                     UseShellExecute = false,
@@ -1355,13 +1371,13 @@ public static class DashboardApi
                 if (proc.ExitCode != 0)
                     throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{outputLines}");
                 _winReBuildStatus = "complete";
-                OperationLog.Append("", "winre-build", $"drive={driveLetter}: complete");
+                OperationLog.Append("", "winre-build", $"target={_winReBuildDrive}: complete");
             }
             catch (Exception ex)
             {
                 _winReBuildStatus = "failed";
                 _winReBuildError = ex.Message;
-                OperationLog.Append("", "winre-build", $"drive={driveLetter}: FAILED: {ex.Message}");
+                OperationLog.Append("", "winre-build", $"target={_winReBuildDrive}: FAILED: {ex.Message}");
             }
         });
         return (202, new { accepted = true });
@@ -1960,17 +1976,31 @@ public static class DashboardHtml
                 </div>
               </div>
               <div class="card">
-                <div class="name">Build WinRE USB (ADK-free)</div>
-                <div class="meta">Create a bootable FileKeep recovery USB directly from the host's WinRE image. No ADK required. Requires Administrator rights. Destructive — the USB drive is formatted.</div>
+                <div class="name">Build WinRE recovery media (ADK-free)</div>
+                <div class="meta">Create bootable FileKeep recovery media directly from the host's WinRE image. No ADK required. Requires Administrator rights.</div>
                 <div class="row" style="margin-top:8px">
                   <button onclick="checkWinRePrereqs()">Check prerequisites</button>
                   <span id="winre-prereq" style="margin-left:8px"></span>
                 </div>
                 <div class="row" style="margin-top:8px">
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="winre-mode" value="usb" checked onchange="winreModeChanged()"> Write to USB
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="winre-mode" value="image" onchange="winreModeChanged()"> Save disk image (.vhdx)
+                  </label>
+                </div>
+                <div class="row" style="margin-top:8px" id="winre-usb-row">
                   <input id="winre-drive" placeholder="Drive letter (e.g. E)" style="width:160px">
                   <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
                   <button class="danger" onclick="startWinReBuild()">Build USB</button>
                 </div>
+                <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
+                  <input id="winre-image" placeholder="C:\winre\filekeep-recovery.vhdx" style="flex:1">
+                  <input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1">
+                  <button onclick="startWinReBuild()">Build image</button>
+                </div>
+                <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
                 <div class="row" style="margin-top:8px">
                   <button onclick="checkWinReStatus()">Check build status</button>
                   <span id="winre-status" style="margin-left:8px"></span>
@@ -2495,14 +2525,32 @@ public static class DashboardHtml
             }
           } catch (e) { el.textContent = e.message; }
         }
+        function winreModeChanged() {
+          const mode = document.querySelector('input[name="winre-mode"]:checked').value;
+          document.getElementById('winre-usb-row').style.display = mode === 'usb' ? '' : 'none';
+          document.getElementById('winre-image-row').style.display = mode === 'image' ? '' : 'none';
+          document.getElementById('winre-mode-hint').textContent = mode === 'usb'
+            ? 'Destructive — the USB drive is formatted. All data on it is destroyed.'
+            : 'Builds a bootable .vhdx file you can flash later with Rufus/BalenaEtcher or boot in a VM. Not destructive.';
+        }
         async function startWinReBuild() {
-          const driveLetter = document.getElementById('winre-drive').value.trim();
-          const sourceDir = document.getElementById('winre-src').value.trim();
-          if (!driveLetter) { alert('Enter a drive letter (e.g. E).'); return; }
-          const confirmText = 'Build WinRE USB on drive ' + driveLetter + ':? This FORMATS the drive — all data is destroyed.';
+          const mode = document.querySelector('input[name="winre-mode"]:checked').value;
+          const sourceDir = (document.getElementById(mode === 'usb' ? 'winre-src' : 'winre-src-img').value || '').trim();
+          let body, confirmText;
+          if (mode === 'usb') {
+            const driveLetter = document.getElementById('winre-drive').value.trim();
+            if (!driveLetter) { alert('Enter a drive letter (e.g. E).'); return; }
+            confirmText = 'Build WinRE USB on drive ' + driveLetter + ':? This FORMATS the drive — all data is destroyed.';
+            body = { driveLetter, sourceDir: sourceDir || null };
+          } else {
+            const imagePath = document.getElementById('winre-image').value.trim();
+            if (!imagePath) { alert('Enter an image path (e.g. C:\\winre\\filekeep-recovery.vhdx).'); return; }
+            confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
+            body = { imagePath, sourceDir: sourceDir || null };
+          }
           if (!window.confirm(confirmText)) return;
           try {
-            await api('/api/operations/winre-build', { method: 'POST', body: JSON.stringify({ driveLetter, sourceDir: sourceDir || null }) });
+            await api('/api/operations/winre-build', { method: 'POST', body: JSON.stringify(body) });
             checkWinReStatus();
           } catch (e) { alert('Failed: ' + e.message); }
         }

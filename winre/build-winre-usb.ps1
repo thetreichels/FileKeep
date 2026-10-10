@@ -33,8 +33,9 @@
 # The dashboard parses these to render a progress bar and step list.
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$DriveLetter,
+    [string]$DriveLetter = "",
+    [string]$ImagePath = "",
+    [int]$ImageSizeMB = 4096,
     [string]$SourceDir = "C:\ub\src",
     [string]$BinaryDir = "",
     [string]$MountDir = "C:\winre-mount",
@@ -45,8 +46,17 @@ $ErrorActionPreference = "Stop"
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 
+# --- Mode selection ---
+# USB mode: writes directly to a USB drive (destructive).
+# Image mode: builds a bootable VHDX disk image file instead (ADK-free,
+# flashable later with Rufus/BalenaEtcher, bootable in Hyper-V/VirtualBox).
+$script:ImageMode = $ImagePath -ne ""
+if ($script:ImageMode -and $DriveLetter -ne "") { Fail "Specify either -DriveLetter or -ImagePath, not both." }
+if (-not $script:ImageMode -and $DriveLetter -eq "") { Fail "Specify -DriveLetter (USB) or -ImagePath (disk image)." }
+
 # --- Progress reporting ---
 # Steps with rough time estimates (seconds) for ETA calculation.
+$usbTargetName = if ($script:ImageMode) { "disk image" } else { "USB drive" }
 $script:Steps = @(
     @{ Name = "Checking prerequisites";       EstimateSec = 5   },
     @{ Name = "Locating WinRE image";          EstimateSec = 10  },
@@ -55,7 +65,7 @@ $script:Steps = @(
     @{ Name = "Mounting winre.wim";            EstimateSec = 60  },
     @{ Name = "Injecting FileKeep tools";      EstimateSec = 30  },
     @{ Name = "Committing and unmounting";     EstimateSec = 90  },
-    @{ Name = "Formatting USB drive";          EstimateSec = 60  },
+    @{ Name = $(if ($script:ImageMode) { "Creating disk image" } else { "Formatting USB drive" }); EstimateSec = 60  },
     @{ Name = "Copying boot files and image";  EstimateSec = 120 },
     @{ Name = "Re-enabling WinRE";             EstimateSec = 15  }
 )
@@ -95,24 +105,38 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not (Get-Command reagentc.exe -ErrorAction SilentlyContinue)) { Fail "reagentc.exe not found." }
 if (-not (Get-Command dism.exe -ErrorAction SilentlyContinue)) { Fail "dism.exe not found." }
 if (-not (Get-Command bcdboot.exe -ErrorAction SilentlyContinue)) { Fail "bcdboot.exe not found." }
+if (-not (Get-Command diskpart.exe -ErrorAction SilentlyContinue)) { Fail "diskpart.exe not found." }
 Step-Done 1
 
-# Normalize drive letter (accept "E", "E:", "E:\")
-$DriveLetter = $DriveLetter.TrimEnd(':', '\')
-if ($DriveLetter.Length -ne 1) { Fail "DriveLetter must be a single letter (e.g. E)." }
-$usbRoot = "$DriveLetter`:\"
-if (-not (Test-Path $usbRoot)) { Fail "Drive $usbRoot not found." }
+if ($script:ImageMode) {
+    # --- Image mode: validate output path ---
+    $ImagePath = [IO.Path]::GetFullPath($ImagePath)
+    if (-not $ImagePath.EndsWith(".vhdx", [StringComparison]::OrdinalIgnoreCase)) { Fail "ImagePath must end with .vhdx" }
+    $imgDir = Split-Path $ImagePath -Parent
+    if (-not (Test-Path $imgDir)) { Fail "Image directory not found: $imgDir" }
+    if (Test-Path $ImagePath) { Fail "Image already exists: $ImagePath (delete it first)." }
+    if ($ImageSizeMB -lt 1024) { Fail "ImageSizeMB must be at least 1024." }
+    Write-Host "=== FileKeep WinRE disk image builder ==="
+    Write-Host "Target image: $ImagePath ($ImageSizeMB MB expandable VHDX)"
+} else {
+    # --- USB mode: validate drive ---
+    # Normalize drive letter (accept "E", "E:", "E:\")
+    $DriveLetter = $DriveLetter.TrimEnd(':', '\')
+    if ($DriveLetter.Length -ne 1) { Fail "DriveLetter must be a single letter (e.g. E)." }
+    $usbRoot = "$DriveLetter`:\"
+    if (-not (Test-Path $usbRoot)) { Fail "Drive $usbRoot not found." }
 
-# Refuse to run against the system drive or a fixed internal drive.
-$vol = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
-if ($vol -and $vol.DriveType -ne 'Removable') {
-    Write-Warning "Drive $DriveLetter is not marked Removable (type: $($vol.DriveType))."
-    $confirm = Read-Host "Type YES to continue anyway"
-    if ($confirm -ne "YES") { Fail "Aborted." }
+    # Refuse to run against the system drive or a fixed internal drive.
+    $vol = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+    if ($vol -and $vol.DriveType -ne 'Removable') {
+        Write-Warning "Drive $DriveLetter is not marked Removable (type: $($vol.DriveType))."
+        $confirm = Read-Host "Type YES to continue anyway"
+        if ($confirm -ne "YES") { Fail "Aborted." }
+    }
+
+    Write-Host "=== FileKeep WinRE USB builder ==="
+    Write-Host "Target USB: $usbRoot"
 }
-
-Write-Host "=== FileKeep WinRE USB builder ==="
-Write-Host "Target USB: $usbRoot"
 
 # --- Locate WinRE ---
 Step-Start 2
@@ -246,32 +270,80 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
         Step-Done 7
     }
 
-    # --- Prepare the USB drive ---
-    Step-Start 8
-    Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
-    # Use diskpart-free approach: format via Format-Volume, then bcdboot.
-    Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
-    if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
-    Step-Done 8
+    if ($script:ImageMode) {
+        # --- Image mode: create and attach a VHDX, then treat it like the USB ---
+        Step-Start 8
+        Write-Host "Creating disk image $ImagePath..."
+        $dpCreate = @"
+create vdisk file="$ImagePath" maximum=$ImageSizeMB type=expandable
+select vdisk file="$ImagePath"
+attach vdisk
+create partition primary
+format fs=fat32 quick label="FILEKEEP"
+assign
+"@
+        $dpCreate | diskpart | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "diskpart create/attach failed." }
+        # Find the newly assigned drive letter.
+        Start-Sleep 2
+        $vhdVol = Get-Volume | Where-Object { $_.FileSystemLabel -eq "FILEKEEP" -and $_.DriveLetter } |
+                  Sort-Object -Property DriveLetter -Descending | Select-Object -First 1
+        if (-not $vhdVol) { Fail "Could not find the attached VHDX volume." }
+        $targetRoot = "$($vhdVol.DriveLetter):\"
+        Write-Host "VHDX attached as $($vhdVol.DriveLetter):"
+        Step-Done 8
 
-    Step-Start 9
-    Write-Host "Copying boot files..."
-    bcdboot C:\Windows /s "$DriveLetter`:" /f UEFI
-    if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
+        try {
+            Step-Start 9
+            Write-Host "Copying boot files..."
+            bcdboot C:\Windows /s $targetRoot /f UEFI
+            if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
 
-    Write-Host "Copying customized WinRE image to USB..."
-    $usbSources = Join-Path $usbRoot "sources"
-    New-Item -ItemType Directory -Force -Path $usbSources | Out-Null
-    # Boot expects boot.wim; place our customized image there.
-    Copy-Item $wimCopy (Join-Path $usbSources "boot.wim") -Force
+            Write-Host "Copying customized WinRE image..."
+            $imgSources = Join-Path $targetRoot "sources"
+            New-Item -ItemType Directory -Force -Path $imgSources | Out-Null
+            Copy-Item $wimCopy (Join-Path $imgSources "boot.wim") -Force
 
-    # Also copy the FileKeep tools to the USB root for easy access.
-    $usbFk = Join-Path $usbRoot "FileKeep"
-    New-Item -ItemType Directory -Force -Path $usbFk | Out-Null
-    Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
+            $imgFk = Join-Path $targetRoot "FileKeep"
+            New-Item -ItemType Directory -Force -Path $imgFk | Out-Null
+            Copy-Item (Join-Path $stageDir "*") $imgFk -Recurse -Force
 
-    Write-Host "USB build complete."
-    Step-Done 9
+            Write-Host "Disk image build complete."
+            Step-Done 9
+        } finally {
+            Write-Host "Detaching disk image..."
+            @"
+select vdisk file="$ImagePath"
+detach vdisk
+"@ | diskpart | Out-Null
+        }
+    } else {
+        # --- USB mode: prepare the physical drive ---
+        Step-Start 8
+        Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
+        Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
+        if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+        Step-Done 8
+
+        Step-Start 9
+        Write-Host "Copying boot files..."
+        bcdboot C:\Windows /s "$DriveLetter`:" /f UEFI
+        if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
+
+        Write-Host "Copying customized WinRE image to USB..."
+        $usbSources = Join-Path $usbRoot "sources"
+        New-Item -ItemType Directory -Force -Path $usbSources | Out-Null
+        # Boot expects boot.wim; place our customized image there.
+        Copy-Item $wimCopy (Join-Path $usbSources "boot.wim") -Force
+
+        # Also copy the FileKeep tools to the USB root for easy access.
+        $usbFk = Join-Path $usbRoot "FileKeep"
+        New-Item -ItemType Directory -Force -Path $usbFk | Out-Null
+        Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
+
+        Write-Host "USB build complete."
+        Step-Done 9
+    }
 } finally {
     # --- Re-enable WinRE on the host ---
     Step-Start 10
@@ -295,7 +367,12 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
 
 Write-Host ""
 Write-Host "=== Done ==="
-Write-Host "Bootable FileKeep recovery USB created on $usbRoot"
+if ($script:ImageMode) {
+    Write-Host "Bootable FileKeep recovery disk image created: $ImagePath"
+    Write-Host "Flash it to USB with Rufus or BalenaEtcher, or boot it directly in Hyper-V/VirtualBox."
+} else {
+    Write-Host "Bootable FileKeep recovery USB created on $usbRoot"
+}
 if (-not $winreReenabled -and $wasEnabled) {
     Write-Warning "WinRE was NOT re-enabled automatically. Run 'reagentc /enable' as Administrator."
 }
