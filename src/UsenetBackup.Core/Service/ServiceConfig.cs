@@ -296,6 +296,16 @@ public sealed class ServiceConfig
     public readonly object JobsLock = new();
 
     /// <summary>
+    /// Returns a snapshot copy of the Jobs list taken under <see cref="JobsLock"/>.
+    /// Use this for all read-only iterations outside the lock.
+    /// </summary>
+    public List<BackupJobConfig> SnapshotJobs()
+    {
+        lock (JobsLock)
+            return Jobs.ToList();
+    }
+
+    /// <summary>
     /// Named backup destinations (Usenet providers and SMB shares). Jobs
     /// reference these by name in their <c>targets</c>. This replaces the
     /// legacy per-job connection details and the top-level <see cref="Nntp"/>

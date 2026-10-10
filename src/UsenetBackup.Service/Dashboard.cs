@@ -16,6 +16,14 @@ namespace UsenetBackup.Service;
 /// </summary>
 public static class Dashboard
 {
+    /// <summary>
+    /// Safely reads a string property from a JSON body. Missing properties
+    /// yield "" (which downstream validation rejects with 400) instead of
+    /// throwing KeyNotFoundException (which becomes a 500).
+    /// </summary>
+    private static string GetBodyString(System.Text.Json.JsonElement body, string name) =>
+        body.TryGetProperty(name, out var el) ? el.GetString() ?? "" : "";
+
     public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
         string configPath, CancellationToken ct, Action<string>? log = null)
     {
@@ -92,8 +100,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string backupId = GetBodyString(body, "backupId");
             var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
@@ -103,8 +111,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string share = body.GetProperty("share").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string share = GetBodyString(body, "share");
             string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.StartSmbSync(config, repo, share, user);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
@@ -115,8 +123,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string backupId = body.GetProperty("backupId").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string backupId = GetBodyString(body, "backupId");
             var (status, payload) = DashboardApi.StartVerify(config, repo, backupId);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
@@ -126,7 +134,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
             var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, repo, dryRun);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
@@ -137,7 +145,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string host = body.GetProperty("host").GetString() ?? "";
+            string host = GetBodyString(body, "host");
             var (status, payload) = DashboardApi.RunDiagnose(host);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -153,9 +161,9 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string backupId = body.GetProperty("backupId").GetString() ?? "";
-            string destDir = body.GetProperty("destDir").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string backupId = GetBodyString(body, "backupId");
+            string destDir = GetBodyString(body, "destDir");
             string smbShare = body.TryGetProperty("smbShare", out var ss) ? ss.GetString() ?? "" : "";
             string smbUser = body.TryGetProperty("smbUser", out var su) ? su.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, smbShare, smbUser);
@@ -167,8 +175,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string sourceDir = body.GetProperty("sourceDir").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string sourceDir = GetBodyString(body, "sourceDir");
             var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
@@ -200,8 +208,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string device = body.GetProperty("device").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string device = GetBodyString(body, "device");
             string imageName = body.TryGetProperty("imageName", out var n) ? n.GetString() ?? "disk.img" : "disk.img";
             var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
@@ -212,9 +220,9 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
-            string backupId = body.GetProperty("backupId").GetString() ?? "";
-            string device = body.GetProperty("device").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
+            string backupId = GetBodyString(body, "backupId");
+            string device = GetBodyString(body, "device");
             string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirm);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
@@ -225,7 +233,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string path = body.GetProperty("path").GetString() ?? "";
+            string path = GetBodyString(body, "path");
             var (status, payload) = DashboardApi.InitRepo(path);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -258,7 +266,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = body.GetProperty("repo").GetString() ?? "";
+            string repo = GetBodyString(body, "repo");
             int port = body.TryGetProperty("port", out var p) ? p.GetInt32() : 8477;
             var (status, payload) = DashboardApi.StartLanServer(config, repo, port);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
@@ -280,7 +288,8 @@ public static class Dashboard
                 dashboardPort = config.DashboardPort,
                 dashboardBind = config.DashboardBind,
                 // Never expose the encrypted password blob to the UI.
-                jobs = config.Jobs.Select(j => new
+                // Snapshot under JobsLock: UpsertJob/DeleteJob mutate concurrently.
+                jobs = config.SnapshotJobs().Select(j => new
                 {
                     name = j.Name,
                     repo = j.Repo,
@@ -335,7 +344,7 @@ public static class Dashboard
                     share = l.Share,
                     smbUser = l.SmbUser,
                     hasPassword = l.HasPassword,
-                    usedBy = config.Jobs
+                    usedBy = config.SnapshotJobs()
                         .Where(j => j.EffectiveTargets.Any(t =>
                             t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
                         .Select(j => j.Name).ToList(),
@@ -512,7 +521,7 @@ public static class DashboardApi
     }
 
     public static bool IsKnownRepo(ServiceConfig config, string repo) =>
-        config.Jobs.Any(j => string.Equals(
+        config.SnapshotJobs().Any(j => string.Equals(
             Path.GetFullPath(j.Repo), Path.GetFullPath(repo), StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Returns (200, backup list) or (400/500, error payload).</summary>
@@ -682,7 +691,7 @@ public static class DashboardApi
         if (string.IsNullOrWhiteSpace(share))
             return (400, new { error = "SMB share path is required." });
         // Find SMB credentials: matching job's stored password, else env var.
-        var job = config.Jobs.FirstOrDefault(j =>
+        var job = config.SnapshotJobs().FirstOrDefault(j =>
             j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(j.SmbShare));
         string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
@@ -784,7 +793,7 @@ public static class DashboardApi
         string? smbPassword = null;
         if (!string.IsNullOrWhiteSpace(smbShare))
         {
-            var job = config.Jobs.FirstOrDefault(j =>
+            var job = config.SnapshotJobs().FirstOrDefault(j =>
                 j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
             smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
             if (string.IsNullOrEmpty(smbPassword) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
@@ -1257,16 +1266,45 @@ public static class DashboardApi
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"" +
-                        (imageMode ? $" -ImagePath \"{imagePath}\"" : $" -DriveLetter \"{driveLetter}\"") +
-                        $" -BootMode \"{bootMode}\"" +
-                        binaryDirArg +
-                        (string.IsNullOrWhiteSpace(sourceDir) ? "" : $" -SourceDir \"{sourceDir}\""),
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
                 };
+                // Use ArgumentList, not an Arguments string: user-controlled
+                // values (imagePath, sourceDir) must not be able to break out
+                // of quoting and inject PowerShell statements.
+                psi.ArgumentList.Add("-NoProfile");
+                psi.ArgumentList.Add("-ExecutionPolicy");
+                psi.ArgumentList.Add("Bypass");
+                psi.ArgumentList.Add("-File");
+                psi.ArgumentList.Add(scriptPath);
+                if (imageMode)
+                {
+                    psi.ArgumentList.Add("-ImagePath");
+                    psi.ArgumentList.Add(imagePath);
+                }
+                else
+                {
+                    psi.ArgumentList.Add("-DriveLetter");
+                    psi.ArgumentList.Add(driveLetter);
+                }
+                psi.ArgumentList.Add("-BootMode");
+                psi.ArgumentList.Add(bootMode);
+                if (isInstalledLayout)
+                {
+                    string? installRoot = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
+                    if (installRoot is not null)
+                    {
+                        psi.ArgumentList.Add("-BinaryDir");
+                        psi.ArgumentList.Add(installRoot);
+                    }
+                }
+                if (!string.IsNullOrWhiteSpace(sourceDir))
+                {
+                    psi.ArgumentList.Add("-SourceDir");
+                    psi.ArgumentList.Add(sourceDir);
+                }
                 using var proc = System.Diagnostics.Process.Start(psi)!;
                 // Read stdout line-by-line so FKPROGRESS markers update the
                 // dashboard in real time instead of only at the end.
@@ -1624,7 +1662,7 @@ public static class DashboardApi
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
             return (400, new { error = $"Unknown location '{name}'." });
-        var usedBy = config.Jobs
+        var usedBy = config.SnapshotJobs()
             .Where(j => j.EffectiveTargets.Any(t =>
                 t.Equals(name, StringComparison.OrdinalIgnoreCase)))
             .Select(j => j.Name).ToList();
