@@ -19,14 +19,14 @@
         .\install.ps1 -Source .\publish\service -Config .\service.json
 
 .PARAMETER Source
-    Directory containing the published UsenetBackupService.exe.
+    Directory containing the published FileKeepService.exe.
 
 .PARAMETER Config
     Your service.json (see src/UsenetBackup.Service/service.example.json).
     Copied next to the binary as service.json.
 
 .PARAMETER InstallDir
-    Install location. Defaults to C:\Program Files\UsenetBackup.
+    Install location. Defaults to C:\Program Files\FileKeep.
 
 .PARAMETER ServiceName
     SCM service name. Defaults to UsenetBackup.
@@ -48,7 +48,7 @@
 param(
     [string]$Source = "",
     [string]$Config = "",
-    [string]$InstallDir = "C:\Program Files\UsenetBackup",
+    [string]$InstallDir = "C:\Program Files\FileKeep",
     [string]$ServiceName = "FileKeep",
     [string]$ServiceAccount = "",
     [SecureString]$Passphrase,
@@ -75,7 +75,7 @@ if ($Uninstall) {
 if ([string]::IsNullOrWhiteSpace($Source) -or -not (Test-Path $Source)) { Fail "Source directory '$Source' not found. Publish the service first (see script header)." }
 if ([string]::IsNullOrWhiteSpace($Config) -or -not (Test-Path $Config)) { Fail "Config file '$Config' not found. Copy src/UsenetBackup.Service/service.example.json and edit it." }
 
-$exe = Join-Path $Source "UsenetBackupService.exe"
+$exe = Join-Path $Source "FileKeepService.exe"
 if (-not (Test-Path $exe)) { Fail "Expected $exe to exist. Did the publish succeed?" }
 
 Write-Host "Installing to $InstallDir..."
@@ -94,7 +94,7 @@ $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
 [Environment]::SetEnvironmentVariable("USENETBACKUP_PASSPHRASE", $plain, "Machine")
 $plain = $null
 
-$binPath = "`"$(Join-Path $InstallDir 'UsenetBackupService.exe')`""
+$binPath = "`"$(Join-Path $InstallDir 'FileKeepService.exe')`""
 # Least privilege: a virtual service account (NT SERVICE\<name>) or any
 # caller-supplied account can be used instead of LocalSystem. Note that
 # backup-privilege jobs require an administrator account.

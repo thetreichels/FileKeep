@@ -1251,17 +1251,15 @@ public static class DashboardApi
                 if (string.IsNullOrEmpty(scriptPath))
                     throw new FileNotFoundException("build-winre-usb.ps1 not found.");
 
-                // In the installed layout, use binary mode.
-                bool isInstalledLayout = scriptPath.StartsWith(
-                    Path.Combine(AppContext.BaseDirectory, "winre"),
-                    StringComparison.OrdinalIgnoreCase);
-                string binaryDirArg = "";
-                if (isInstalledLayout)
-                {
-                    string? installRoot = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
-                    if (installRoot is not null)
-                        binaryDirArg = $" -BinaryDir \"{installRoot}\"";
-                }
+                // In the installed layout, use binary mode. Detect by the
+                // presence of the installed binaries next to the script's
+                // grandparent dir (...\FileKeep\winre\ -> ...\FileKeep\),
+                // not by AppContext.BaseDirectory (the service exe lives in
+                // ...\FileKeep\service\, so the old StartsWith check was
+                // always false on installed systems).
+                string? scriptGrandparent = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
+                bool isInstalledLayout = scriptGrandparent is not null &&
+                    File.Exists(Path.Combine(scriptGrandparent, "cli", "FileKeep.exe"));
 
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
@@ -1291,14 +1289,10 @@ public static class DashboardApi
                 }
                 psi.ArgumentList.Add("-BootMode");
                 psi.ArgumentList.Add(bootMode);
-                if (isInstalledLayout)
+                if (isInstalledLayout && scriptGrandparent is not null)
                 {
-                    string? installRoot = Path.GetDirectoryName(Path.GetDirectoryName(scriptPath));
-                    if (installRoot is not null)
-                    {
-                        psi.ArgumentList.Add("-BinaryDir");
-                        psi.ArgumentList.Add(installRoot);
-                    }
+                    psi.ArgumentList.Add("-BinaryDir");
+                    psi.ArgumentList.Add(scriptGrandparent);
                 }
                 if (!string.IsNullOrWhiteSpace(sourceDir))
                 {

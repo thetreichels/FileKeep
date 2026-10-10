@@ -74,6 +74,21 @@ public sealed class ServiceTests : IDisposable
     }
 
     [Fact]
+    public void Config_ShippedExampleLoads()
+    {
+        // The example shipped in the MSI seeds fresh installs. If it fails
+        // strict JSON parsing, the service can't start on a new machine.
+        // Locate it relative to the test assembly: ../../../../src/UsenetBackup.Service/
+        string? dir = Path.GetDirectoryName(typeof(ServiceTests).Assembly.Location);
+        string example = Path.GetFullPath(Path.Combine(dir!, "..", "..", "..", "..",
+            "src", "UsenetBackup.Service", "service.example.json"));
+        Assert.True(File.Exists(example), $"Example not found at {example}");
+        var config = ServiceConfig.Load(example);
+        Assert.NotEmpty(config.Jobs);
+        config.Validate();
+    }
+
+    [Fact]
     public void Config_RejectsBadSchedules()
     {
         foreach (string bad in new[] { "", "daily", "daily 25:00", "daily 12:60", "interval 0", "interval -5", "weekly" })

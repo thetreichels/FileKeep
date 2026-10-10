@@ -94,19 +94,24 @@ public static class WindowsServiceHost
         ReportStatus(SERVICE_START_PENDING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 3000);
         _cts = new CancellationTokenSource();
 
+        bool crashed = false;
         try
         {
             ReportStatus(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN, 0);
             _runAsync!(_cts.Token).GetAwaiter().GetResult();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // The scheduler already logs job failures; an unhandled exception
-            // here means the host itself died.
+            // here means the host itself died. Report a non-zero exit code so
+            // SCM shows a start failure, not a clean stop.
+            crashed = true;
+            try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "service-crash.log"),
+                $"{DateTime.UtcNow:O} host died: {ex}{Environment.NewLine}"); } catch { }
         }
         finally
         {
-            ReportStatus(SERVICE_STOPPED, 0, 0);
+            ReportStatus(SERVICE_STOPPED, crashed ? 1 : 0, 0);
         }
     }
 

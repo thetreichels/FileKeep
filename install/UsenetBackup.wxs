@@ -3,7 +3,7 @@
      The apps publish as single-file executables (PublishSingleFile in the
      csproj), so the payload is a handful of explicit files — no harvesting.
      Build on Windows with the WiX v5 dotnet tool:
-       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -o filekeep-0.8.4.msi install/UsenetBackup.wxs
+       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d VssBin=C:\ub\publish\vss -o filekeep-0.8.4.msi install/UsenetBackup.wxs
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
@@ -26,6 +26,11 @@
         <Directory Id="DOCSDIR" Name="docs" />
         <Directory Id="WINREDIR" Name="winre" />
       </Directory>
+    </StandardDirectory>
+
+    <!-- Service runtime data (config, logs) lives here, not in Program Files -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="APPDATADIR" Name="FileKeep" />
     </StandardDirectory>
 
     <!-- Start menu shortcut: opens the dashboard (served by the FileKeep service) -->
@@ -62,6 +67,11 @@
     <ComponentGroup Id="ServiceRegistration" Directory="SERVICEDIR">
       <Component Id="ServiceExecutable">
         <File Id="ServiceExe" Source="$(var.ServiceBin)\FileKeepService.exe" KeyPath="yes" />
+        <!-- Clean up runtime data in ProgramData on uninstall (config has
+             machine-bound DPAPI blobs; logs may contain paths). -->
+        <RemoveFile Id="RemoveAppDataJson" Directory="APPDATADIR" Name="service.json" On="uninstall" />
+        <RemoveFile Id="RemoveAppDataLog" Directory="APPDATADIR" Name="service.log" On="uninstall" />
+        <RemoveFolder Id="RemoveAppDataDir" Directory="APPDATADIR" On="uninstall" />
         <ServiceInstall Id="BackupService"
                         Type="ownProcess"
                         Name="FileKeep"
