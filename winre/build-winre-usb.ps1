@@ -69,7 +69,8 @@ $script:Steps = @(
     @{ Name = "Copying boot files and image";  EstimateSec = 120 },
     @{ Name = "Re-enabling WinRE";             EstimateSec = 15  }
 )
-$script:TotalEstimateSec = ($script:Steps | Measure-Object -Property EstimateSec -Sum).Sum
+$script:TotalEstimateSec = 0
+foreach ($st in $script:Steps) { $script:TotalEstimateSec += $st.EstimateSec }
 $script:CurrentStep = 0
 
 function Write-ProgressStep([int]$step, [string]$state) {
