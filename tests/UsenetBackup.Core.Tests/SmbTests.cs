@@ -32,8 +32,8 @@ public sealed class SmbTests : IDisposable
     [Fact]
     public void EffectiveTargets_UsesExplicitTargets()
     {
-        var job = new BackupJobConfig { Targets = new List<string> { "smb" } };
-        Assert.Equal(new[] { "smb" }, job.EffectiveTargets);
+        var job = new BackupJobConfig { Targets = new List<string> { "NAS backups" } };
+        Assert.Equal(new[] { "NAS backups" }, job.EffectiveTargets);
     }
 
     [Fact]
@@ -42,9 +42,9 @@ public sealed class SmbTests : IDisposable
         var job = new BackupJobConfig
         {
             AutoUpload = true, // explicit targets win over legacy flag
-            Targets = new List<string> { "NNTP", "smb", "smb", "bogus" },
+            Targets = new List<string> { "Frugal Usenet", "NAS backups", "NAS backups" },
         };
-        Assert.Equal(new[] { "nntp", "smb" }, job.EffectiveTargets);
+        Assert.Equal(new[] { "Frugal Usenet", "NAS backups" }, job.EffectiveTargets);
     }
 
     [Fact]
@@ -54,10 +54,47 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
-    public void SmbShare_GetShareRoot_ExtractsServerAndShare()
+    public void MigrateToLocations_MigratesNntpAndSmb()
     {
-        Assert.Equal(@"\\NAS\backups", SmbShare.GetShareRoot(@"\\NAS\backups\filekeep\deep"));
-        Assert.Equal(@"\\srv\share", SmbShare.GetShareRoot(@"\\srv\share"));
+        var config = new ServiceConfig
+        {
+            Nntp = new NntpConfig { Host = "news.example.com", Port = 119, Username = "user" },
+            Jobs = new List<BackupJobConfig>
+            {
+                new BackupJobConfig
+                {
+                    Name = "Docs", AutoUpload = true,
+                    SmbShare = @"\\NAS\backups", SmbUser = "u",
+                },
+            },
+        };
+        config.MigrateToLocations();
+
+        Assert.Equal(2, config.Locations.Count);
+        var nntp = config.Locations.First(l => l.Type == "nntp");
+        Assert.Equal("news.example.com", nntp.Host);
+        var smb = config.Locations.First(l => l.Type == "smb");
+        Assert.Equal(@"\\NAS\backups", smb.Share);
+
+        var job = config.Jobs[0];
+        Assert.Equal(2, job.Targets!.Count);
+        Assert.Contains(nntp.Name, job.Targets);
+        Assert.Contains(smb.Name, job.Targets);
+        // Legacy per-job fields cleared.
+        Assert.Equal("", job.SmbShare);
+    }
+
+    [Fact]
+    public void MigrateToLocations_IsIdempotent()
+    {
+        var config = new ServiceConfig
+        {
+            Nntp = new NntpConfig { Host = "news.example.com" },
+        };
+        config.MigrateToLocations();
+        int count = config.Locations.Count;
+        config.MigrateToLocations();
+        Assert.Equal(count, config.Locations.Count);
     }
 
     [Fact]

@@ -322,6 +322,27 @@ public static class Dashboard
                     redundancyMode = p.RedundancyMode,
                     hasPassword = p.HasPassword,
                 }).ToList(),
+                // Backup locations (Usenet providers + SMB shares). Never
+                // expose encrypted password blobs to the UI.
+                locations = config.Locations.Select(l => new
+                {
+                    name = l.Name,
+                    type = l.Type,
+                    host = l.Host,
+                    port = l.Port,
+                    username = l.Username,
+                    ssl = l.Ssl,
+                    connections = l.Connections,
+                    newsgroup = l.Newsgroup,
+                    retentionDays = l.RetentionDays,
+                    share = l.Share,
+                    smbUser = l.SmbUser,
+                    hasPassword = l.HasPassword,
+                    usedBy = config.Jobs
+                        .Where(j => j.EffectiveTargets.Any(t =>
+                            t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
+                        .Select(j => j.Name).ToList(),
+                }).ToList(),
             }));
 
         app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
@@ -384,6 +405,35 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, name, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/locations", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            BackupLocation? loc;
+            try { loc = await request.ReadFromJsonAsync<BackupLocation>(); }
+            catch { return Results.BadRequest(new { error = "Invalid location JSON." }); }
+            if (loc is null)
+                return Results.BadRequest(new { error = "Empty location." });
+            var (status, payload) = DashboardApi.UpsertLocation(config, configPath, loc, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapDelete("/api/config/locations/{name}", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.DeleteLocation(config, configPath, name, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/locations/{name}/test", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.TestLocation(config, name);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -1662,11 +1712,9 @@ public static class DashboardApi
         var existing = config.Jobs.FirstOrDefault(j =>
             j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
         // Encrypt a supplied SMB password via DPAPI; blank keeps the stored blob.
-        string? smbBlobToKeep = existing?.SmbPasswordProtected;
-        if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
-            smbBlobToKeep = Dpapi.Protect(job.SmbPasswordPlaintext);
-        job.SmbPasswordProtected = smbBlobToKeep ?? "";
-        job.SmbPasswordPlaintext = null; // never persist plaintext
+        // Note: per-job SMB fields (SmbShare/SmbUser/SmbPasswordProtected) are
+        // legacy — migrated to BackupLocations on config load. New jobs use
+        // location names in Targets; credentials live on the location.
         if (existing is null)
             config.Jobs.Add(job);
         else
@@ -1674,9 +1722,6 @@ public static class DashboardApi
             existing.Repo = job.Repo;
             existing.Source = job.Source;
             existing.Targets = job.Targets;
-            existing.SmbShare = job.SmbShare;
-            existing.SmbUser = job.SmbUser;
-            existing.SmbPasswordProtected = job.SmbPasswordProtected;
             existing.Schedule = job.Schedule;
             existing.Mode = job.Mode;
             existing.BackupPrivilege = job.BackupPrivilege;
@@ -1731,6 +1776,126 @@ public static class DashboardApi
         catch (Exception ex)
         {
             return (400, new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Adds or updates a backup location (matched by name, case-insensitive).
+    /// Encrypts a supplied plaintext password via DPAPI; blank keeps the
+    /// existing stored blob. Returns (200, location) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) UpsertLocation(ServiceConfig config,
+        string configPath, BackupLocation loc, Action<string>? log = null)
+    {
+        if (string.IsNullOrWhiteSpace(loc.Name))
+            return (400, new { error = "Location name is required." });
+        if (loc.Type != "nntp" && loc.Type != "smb")
+            return (400, new { error = "Location type must be 'nntp' or 'smb'." });
+        if (loc.Type == "nntp" && string.IsNullOrWhiteSpace(loc.Host))
+            return (400, new { error = "Host is required for Usenet locations." });
+        if (loc.Type == "smb" && string.IsNullOrWhiteSpace(loc.Share))
+            return (400, new { error = "Share path is required for SMB locations." });
+
+        var existing = config.Locations.FirstOrDefault(l =>
+            l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
+        // Encrypt supplied passwords; blank keeps the stored blob.
+        string? pwBlob = existing?.PasswordProtected;
+        if (!string.IsNullOrEmpty(loc.PasswordPlaintext))
+            pwBlob = UsenetBackup.Core.Dpapi.Protect(loc.PasswordPlaintext);
+        string? smbPwBlob = existing?.SmbPasswordProtected;
+        if (!string.IsNullOrEmpty(loc.SmbPasswordPlaintext))
+            smbPwBlob = UsenetBackup.Core.Dpapi.Protect(loc.SmbPasswordPlaintext);
+        loc.PasswordProtected = pwBlob;
+        loc.SmbPasswordProtected = smbPwBlob;
+        loc.PasswordPlaintext = null;
+        loc.SmbPasswordPlaintext = null;
+
+        if (existing is null)
+            config.Locations.Add(loc);
+        else
+        {
+            existing.Type = loc.Type;
+            existing.Host = loc.Host; existing.Port = loc.Port;
+            existing.Ssl = loc.Ssl; existing.Username = loc.Username;
+            existing.Connections = loc.Connections;
+            existing.Newsgroup = loc.Newsgroup;
+            existing.RetentionDays = loc.RetentionDays;
+            existing.PasswordProtected = pwBlob;
+            existing.Share = loc.Share; existing.SmbUser = loc.SmbUser;
+            existing.SmbPasswordProtected = smbPwBlob;
+        }
+        try
+        {
+            config.Save(configPath);
+            log?.Invoke($"dashboard: location '{loc.Name}' saved");
+            return (200, loc);
+        }
+        catch (Exception ex) { return (400, new { error = ex.Message }); }
+    }
+
+    /// <summary>
+    /// Deletes a location by name. Refuses if any job still targets it.
+    /// Returns (200, {}) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) DeleteLocation(ServiceConfig config,
+        string configPath, string name, Action<string>? log = null)
+    {
+        var existing = config.Locations.FirstOrDefault(l =>
+            l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (existing is null)
+            return (400, new { error = $"Unknown location '{name}'." });
+        var usedBy = config.Jobs
+            .Where(j => j.EffectiveTargets.Any(t =>
+                t.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            .Select(j => j.Name).ToList();
+        if (usedBy.Count > 0)
+            return (400, new { error =
+                $"Location '{name}' is used by job(s): {string.Join(", ", usedBy)}. " +
+                "Remove it from those jobs first." });
+        config.Locations.Remove(existing);
+        try
+        {
+            config.Save(configPath);
+            log?.Invoke($"dashboard: location '{name}' deleted");
+            return (200, new { });
+        }
+        catch (Exception ex) { return (400, new { error = ex.Message }); }
+    }
+
+    /// <summary>
+    /// Tests connectivity to a location: NNTP connect+auth, or SMB share
+    /// reachability. Returns (200, { ok, message }) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) TestLocation(ServiceConfig config, string name)
+    {
+        var loc = config.Locations.FirstOrDefault(l =>
+            l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (loc is null)
+            return (400, new { error = $"Unknown location '{name}'." });
+        try
+        {
+            if (loc.Type == "nntp")
+            {
+                using var client = new UsenetBackup.Core.Nntp.NntpClient(loc.Host, loc.Port, loc.Ssl);
+                string? pw = Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD");
+                if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.PasswordProtected))
+                    pw = UsenetBackup.Core.Dpapi.Unprotect(loc.PasswordProtected);
+                if (!string.IsNullOrEmpty(loc.Username))
+                    client.Authenticate(loc.Username, pw ?? "");
+                return (200, new { ok = true, message = $"Connected to {loc.Host}:{loc.Port}." });
+            }
+            else
+            {
+                string? pw = Environment.GetEnvironmentVariable("USENETBACKUP_SMB_PASSWORD");
+                if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
+                    pw = UsenetBackup.Core.Dpapi.Unprotect(loc.SmbPasswordProtected);
+                using var share = UsenetBackup.Core.SmbShare.Connect(loc.Share, loc.SmbUser, pw);
+                return (200, new { ok = true, message = $"Share {loc.Share} is reachable." });
+            }
+        }
+        catch (Exception ex)
+        {
+            return (200, new { ok = false, message = ex.Message });
         }
     }
 
@@ -2233,12 +2398,8 @@ public static class DashboardHtml
                   <label class="check"><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
                   <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload after backup</label>
                   <div id="jf-targets" style="margin:4px 0 4px 24px; display:none">
-                    <label class="check" style="display:block"><input id="jf-target-nntp" type="checkbox" checked> Usenet (NNTP)</label>
-                    <label class="check" style="display:block"><input id="jf-target-smb" type="checkbox" onchange="document.getElementById('jf-smb-settings').style.display = this.checked ? '' : 'none'"> SMB network share</label>
-                  </div>
-                  <div id="jf-smb-settings" style="margin:4px 0 4px 24px; display:none">
-                    <div class="row" style="padding:4px 0"><input id="jf-smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1"></div>
-                    <div class="row" style="padding:4px 0"><input id="jf-smb-user" placeholder="Username (optional)" style="flex:1"><input id="jf-smb-pass" type="password" placeholder="Password (optional)" style="flex:1"></div>
+                    <div class="meta" style="margin-bottom:4px">Upload to these locations (manage them in Backup locations):</div>
+                    <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
                   </div>
                   <label class="check"><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
                   <label>Usenet redundancy:
@@ -2263,30 +2424,39 @@ public static class DashboardHtml
                 </div>
               </div>
               <div class="card">
-                <h2 style="margin-top:0">Usenet provider</h2>
-                <p style="color:var(--text-2);margin-top:0">Used for automatic uploads. The password is encrypted with Windows DPAPI and stored in the config file — only this machine's service account can decrypt it. Leave blank to keep the existing saved password.</p>
-                <div class="form-grid">
-                  <label>Host<input id="nntp-host" type="text" placeholder="news.example.com"></label>
-                  <label>Port<input id="nntp-port" type="number" min="1" max="65535" value="119"></label>
-                  <label>Username<input id="nntp-user" type="text" placeholder="(optional)"></label>
-                  <label>Password<input id="nntp-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-                  <label>Connections<input id="nntp-conn" type="number" min="1" max="100" value="10"></label>
-                  <label class="check"><input id="nntp-ssl" type="checkbox"> Use SSL (port 563)</label>
-                </div>
-                <div id="nntp-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
-                <div id="nntp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <h2 style="margin-top:0">Backup locations</h2>
+                <p style="color:var(--text-2);margin-top:0">Everywhere your backups can go — Usenet providers and network shares, in one place. Jobs pick from this list. Credentials are encrypted with Windows DPAPI; leave a password blank to keep the saved one.</p>
+                <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
-                  <button class="accent" onclick="saveNntp()">Save Usenet settings</button>
+                  <button onclick="showLocationForm('nntp')">＋ Add Usenet provider</button>
+                  <button onclick="showLocationForm('smb')">＋ Add network share</button>
                 </div>
               </div>
-              <div class="card" style="margin-top:16px">
-                <h3>Additional Usenet Providers (for redundancy)</h3>
-                <p style="color:var(--text-2);margin-top:0">Add backup providers. Uploads go to all providers; downloads try each in order. Each provider has its own connections, retention, and redundancy settings.</p>
-                <div id="provider-list"></div>
-                <div style="margin-top:12px;display:flex;gap:8px">
-                  <button onclick="addProvider()">Add provider</button>
-                  <button class="accent" onclick="saveProviders()">Save providers</button>
+              <div class="card" id="locationFormCard" style="display:none">
+                <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
+                <div class="form-grid">
+                  <label>Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
+                  <input id="lf-type" type="hidden">
                 </div>
+                <div class="form-grid" id="lf-nntp-fields">
+                  <label>Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
+                  <label>Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
+                  <label>Username<input id="lf-user" type="text" placeholder="(optional)"></label>
+                  <label>Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+                  <label>Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
+                  <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
+                </div>
+                <div class="form-grid" id="lf-smb-fields" style="display:none">
+                  <label>Share (UNC path)<input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"></label>
+                  <label>Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
+                  <label>Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+                </div>
+                <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button class="accent" onclick="saveLocation()">Save</button>
+                  <button onclick="hideLocationForm()">Cancel</button>
+                </div>
+              </div>
                 <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
               </div>
               <div class="foot">Changes are saved to service.json and take effect immediately. The service does not need to restart.</div>
@@ -2773,24 +2943,137 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join('+') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join(', ') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
                 ${esc(j.source)} → ${esc(j.repo)}</div>
               </div>
               <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
               <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
             </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
-          // Load Usenet provider settings
-          const nntp = cfg.nntp || {};
-          document.getElementById('nntp-host').value = nntp.host || '';
-          document.getElementById('nntp-port').value = nntp.port || 119;
-          document.getElementById('nntp-user').value = nntp.username || '';
-          document.getElementById('nntp-pass').value = '';
-          document.getElementById('nntp-conn').value = nntp.connections || 10;
-          document.getElementById('nntp-ssl').checked = !!nntp.ssl;
-          document.getElementById('nntp-status').textContent =
-            nntp.host ? (nntp.hasPassword ? 'Password: saved ✓' : 'Password: not set') : '';
-          // Load additional providers
-          renderProviders(cfg.nntpProviders || []);
+          // Load backup locations
+          renderLocations(cfg.locations || []);
+        }
+        // ---- Backup locations ----
+        let editingLocation = null;
+        function renderLocations(locations) {
+          const box = document.getElementById('locations-list');
+          if (!locations.length) {
+            box.innerHTML = '<p style="color:var(--text-2)">No locations yet. Add a Usenet provider or network share.</p>';
+            return;
+          }
+          box.innerHTML = locations.map(l => {
+            const icon = l.type === 'nntp' ? '📡' : '💾';
+            const detail = l.type === 'nntp'
+              ? `${esc(l.host)}:${l.port}${l.ssl ? ' · SSL' : ''}`
+              : esc(l.share);
+            const usedBy = l.usedBy && l.usedBy.length
+              ? `Used by ${l.usedBy.length} job${l.usedBy.length > 1 ? 's' : ''} · `
+              : 'Not used by any job · ';
+            const pw = l.hasPassword ? 'credentials saved ✓' : 'no credentials saved';
+            return `<div class="row">
+              <div style="font-size:20px">${icon}</div>
+              <div class="grow">
+                <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">${l.type}</span></div>
+                <div class="meta" style="font-family:monospace">${detail}</div>
+                <div class="meta">${usedBy}${pw}</div>
+              </div>
+              <button onclick='editLocation(${JSON.stringify(l.name)})'>Edit</button>
+              <button onclick='testLocation(${JSON.stringify(l.name)})'>Test</button>
+              <button onclick='deleteLocation(${JSON.stringify(l.name)})'>Remove</button>
+            </div>`;
+          }).join('');
+        }
+        function showLocationForm(type, loc) {
+          editingLocation = loc ? loc.name : null;
+          document.getElementById('locationFormTitle').textContent =
+            (loc ? 'Edit' : 'Add') + (type === 'nntp' ? ' Usenet provider' : ' network share');
+          document.getElementById('locationFormCard').style.display = '';
+          document.getElementById('lf-type').value = type;
+          document.getElementById('lf-name').value = loc ? loc.name : '';
+          document.getElementById('lf-name').disabled = !!loc;
+          document.getElementById('lf-nntp-fields').style.display = type === 'nntp' ? '' : 'none';
+          document.getElementById('lf-smb-fields').style.display = type === 'smb' ? '' : 'none';
+          if (type === 'nntp') {
+            document.getElementById('lf-host').value = loc ? loc.host : '';
+            document.getElementById('lf-port').value = loc ? loc.port : 119;
+            document.getElementById('lf-user').value = loc ? loc.username : '';
+            document.getElementById('lf-pass').value = '';
+            document.getElementById('lf-conn').value = loc ? loc.connections : 10;
+            document.getElementById('lf-ssl').checked = loc ? !!loc.ssl : false;
+          } else {
+            document.getElementById('lf-share').value = loc ? loc.share : '';
+            document.getElementById('lf-smbuser').value = loc ? loc.smbUser : '';
+            document.getElementById('lf-smbpass').value = '';
+          }
+          document.getElementById('lf-error').style.display = 'none';
+        }
+        function hideLocationForm() {
+          document.getElementById('locationFormCard').style.display = 'none';
+          editingLocation = null;
+        }
+        async function editLocation(name) {
+          const cfg = await api('/api/config');
+          const loc = (cfg.locations || []).find(l => l.name === name);
+          if (loc) showLocationForm(loc.type, loc);
+        }
+        async function saveLocation() {
+          const type = document.getElementById('lf-type').value;
+          const err = document.getElementById('lf-error');
+          const loc = {
+            name: document.getElementById('lf-name').value.trim(),
+            type,
+          };
+          if (type === 'nntp') {
+            loc.host = document.getElementById('lf-host').value.trim();
+            loc.port = parseInt(document.getElementById('lf-port').value) || 119;
+            loc.username = document.getElementById('lf-user').value.trim();
+            loc.password = document.getElementById('lf-pass').value;
+            loc.connections = parseInt(document.getElementById('lf-conn').value) || 10;
+            loc.ssl = document.getElementById('lf-ssl').checked;
+          } else {
+            loc.share = document.getElementById('lf-share').value.trim();
+            loc.smbUser = document.getElementById('lf-smbuser').value.trim();
+            loc.smbPassword = document.getElementById('lf-smbpass').value;
+          }
+          try {
+            await api('/api/config/locations', { method: 'POST', body: JSON.stringify(loc) });
+            hideLocationForm();
+            loadSettings();
+          } catch (e) {
+            err.textContent = e.message;
+            err.style.display = '';
+          }
+        }
+        async function deleteLocation(name) {
+          if (!confirm(`Remove location '${name}'?`)) return;
+          try {
+            await api('/api/config/locations/' + encodeURIComponent(name), { method: 'DELETE' });
+            loadSettings();
+          } catch (e) { alert(e.message); }
+        }
+        async function testLocation(name) {
+          try {
+            const r = await api('/api/locations/' + encodeURIComponent(name) + '/test', { method: 'POST' });
+            alert(r.ok ? '✓ ' + r.message : '✗ ' + r.message);
+          } catch (e) { alert(e.message); }
+        }
+        // Renders the location checklist in the job editor.
+        async function renderJobLocationChecklist(selected) {
+          const box = document.getElementById('jf-location-list');
+          try {
+            const cfg = await api('/api/config');
+            const locations = cfg.locations || [];
+            if (!locations.length) {
+              box.innerHTML = '<p style="color:var(--text-2)">No locations configured. Add one in <b>Backup locations</b> below.</p>';
+              return;
+            }
+            box.innerHTML = locations.map(l => {
+              const checked = selected.some(s => s.toLowerCase() === l.name.toLowerCase()) ? 'checked' : '';
+              const icon = l.type === 'nntp' ? '📡' : '💾';
+              return `<label class="check" style="display:block"><input type="checkbox" data-location="${esc(l.name)}" ${checked}> ${icon} ${esc(l.name)} <span style="color:var(--text-2);font-size:12px">(${l.type})</span></label>`;
+            }).join('');
+          } catch (e) {
+            box.innerHTML = '<p style="color:var(--bad)">Could not load locations.</p>';
+          }
         }
         function showJobForm(job) {
           editingJob = job ? job.name : null;
@@ -2803,16 +3086,10 @@ public static class DashboardHtml
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
           document.getElementById('jf-vss').checked = job ? !!job.vss : false;
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
-          // Upload targets: explicit list, or legacy autoUpload default.
-          const targets = job && job.targets && job.targets.length ? job.targets.map(t => t.toLowerCase())
-            : (job && job.autoUpload ? ['nntp'] : []);
+          // Upload targets: location names. Rendered as a checklist.
+          const targets = job && job.targets && job.targets.length ? job.targets : [];
           document.getElementById('jf-targets').style.display = document.getElementById('jf-autoupload').checked ? '' : 'none';
-          document.getElementById('jf-target-nntp').checked = targets.includes('nntp');
-          document.getElementById('jf-target-smb').checked = targets.includes('smb');
-          document.getElementById('jf-smb-share').value = job ? job.smbShare || '' : '';
-          document.getElementById('jf-smb-user').value = job ? job.smbUser || '' : '';
-          document.getElementById('jf-smb-pass').value = '';
-          document.getElementById('jf-smb-settings').style.display = targets.includes('smb') ? '' : 'none';
+          renderJobLocationChecklist(targets);
           document.getElementById('jf-autoupload').onchange = e => {
             document.getElementById('jf-targets').style.display = e.target.checked ? '' : 'none';
           };
@@ -2852,6 +3129,8 @@ public static class DashboardHtml
           const schedule = schedType === 'daily'
             ? 'daily ' + document.getElementById('jf-daily').value
             : 'interval ' + document.getElementById('jf-interval').value;
+          const checkedLocations = [...document.querySelectorAll('#jf-location-list input[data-location]:checked')]
+            .map(cb => cb.getAttribute('data-location'));
           const job = {
             name: document.getElementById('jf-name').value.trim(),
             source: document.getElementById('jf-source').value.trim(),
@@ -2861,15 +3140,7 @@ public static class DashboardHtml
             backupPrivilege: document.getElementById('jf-priv').checked,
             vss: document.getElementById('jf-vss').checked,
             autoUpload: document.getElementById('jf-autoupload').checked,
-            targets: document.getElementById('jf-autoupload').checked
-              ? [
-                  ...(document.getElementById('jf-target-nntp').checked ? ['nntp'] : []),
-                  ...(document.getElementById('jf-target-smb').checked ? ['smb'] : []),
-                ]
-              : [],
-            smbShare: document.getElementById('jf-smb-share').value.trim(),
-            smbUser: document.getElementById('jf-smb-user').value.trim(),
-            smbPassword: document.getElementById('jf-smb-pass').value,
+            targets: document.getElementById('jf-autoupload').checked ? checkedLocations : [],
             autoVerify: document.getElementById('jf-autoverify').checked,
             redundancyMode: document.getElementById('jf-redundancy').value,
             verificationMode: document.getElementById('jf-verification').value,

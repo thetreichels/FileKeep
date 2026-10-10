@@ -678,15 +678,26 @@ public sealed class BackupScheduler
     {
         var targets = job.EffectiveTargets;
         var errors = new List<string>();
-        if (targets.Contains("nntp"))
+        foreach (string targetName in targets)
         {
-            try { AutoUploadToUsenet(job, backupId, passphrase); }
-            catch (Exception ex) { errors.Add($"nntp: {ex.Message}"); }
-        }
-        if (targets.Contains("smb"))
-        {
-            try { SyncToSmb(job, backupId, passphrase); }
-            catch (Exception ex) { errors.Add($"smb: {ex.Message}"); }
+            // Resolve the target name to a location. Fall back to legacy
+            // "nntp"/"smb" type names for configs that bypassed migration.
+            BackupLocation? loc = _config.Locations.FirstOrDefault(l =>
+                l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
+            string type = loc?.Type ??
+                (targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" :
+                 targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" : "");
+            try
+            {
+                if (type == "nntp")
+                    UploadToNntpLocation(job, backupId, passphrase, loc);
+                else if (type == "smb")
+                    SyncToSmbLocation(job, backupId, loc);
+                else
+                    throw new InvalidOperationException(
+                        $"Unknown backup location '{targetName}'.");
+            }
+            catch (Exception ex) { errors.Add($"{targetName}: {ex.Message}"); }
         }
         if (errors.Count > 0)
             throw new InvalidOperationException(
@@ -694,24 +705,42 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
-    /// Syncs the repo to the job's configured SMB share. The share receives
-    /// chunks, manifests, and repo.json — enough for a recovery wizard to
-    /// open it directly as a read-only repo.
+    /// Uploads to a Usenet location. If <paramref name="loc"/> is null (legacy
+    /// "nntp" target), falls back to the scheduler's configured providers.
     /// </summary>
-    private void SyncToSmb(BackupJobConfig job, string backupId, string passphrase)
+    private void UploadToNntpLocation(
+        BackupJobConfig job, string backupId, string passphrase, BackupLocation? loc)
     {
-        if (string.IsNullOrWhiteSpace(job.SmbShare))
-            throw new InvalidOperationException(
-                $"Job '{job.Name}' targets smb but no smbShare is configured.");
-        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
-        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(job.SmbPasswordProtected))
-            smbPassword = Dpapi.Unprotect(job.SmbPasswordProtected);
+        // TODO: use loc's host/port/credentials when the multi-provider
+        // upload path supports per-location providers. For now, the existing
+        // provider-based upload is used.
+        AutoUploadToUsenet(job, backupId, passphrase);
+    }
 
-        Log($"job '{job.Name}': syncing backup {backupId} to SMB share {job.SmbShare}");
-        using var share = SmbShare.Connect(job.SmbShare, job.SmbUser, smbPassword);
+    /// <summary>
+    /// Syncs the repo to an SMB location. The share receives chunks,
+    /// manifests, and repo.json — enough for a recovery wizard to open it
+    /// directly as a read-only repo. If <paramref name="loc"/> is null
+    /// (legacy "smb" target), falls back to the job's own SMB settings.
+    /// </summary>
+    private void SyncToSmbLocation(BackupJobConfig job, string backupId, BackupLocation? loc)
+    {
+        string share = loc?.Share ?? job.SmbShare;
+        string user = loc?.SmbUser ?? job.SmbUser;
+        string? passwordProtected = loc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+        if (string.IsNullOrWhiteSpace(share))
+            throw new InvalidOperationException(
+                $"Job '{job.Name}' targets an SMB location but no share is configured.");
+        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
+        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
+            smbPassword = Dpapi.Unprotect(passwordProtected);
+
+        string locName = loc?.Name ?? "smb";
+        Log($"job '{job.Name}': syncing backup {backupId} to '{locName}' ({share})");
+        using var smb = SmbShare.Connect(share, user, smbPassword);
         var sync = new SmbSync(Log);
-        var result = sync.Sync(job.Repo, share);
-        Log($"job '{job.Name}': SMB sync complete — {result.ChunksCopied} chunks, " +
+        var result = sync.Sync(job.Repo, smb);
+        Log($"job '{job.Name}': SMB sync to '{locName}' complete — {result.ChunksCopied} chunks, " +
             $"{result.ManifestsCopied} manifests copied.");
     }
 

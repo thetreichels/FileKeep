@@ -68,6 +68,77 @@ public sealed class NntpConfig
 }
 
 /// <summary>
+/// A named backup destination: either a Usenet (NNTP) provider or an SMB
+/// network share. Jobs reference locations by name in their <c>targets</c>;
+/// connection details and credentials live here, in one place.
+/// </summary>
+public sealed class BackupLocation
+{
+    /// <summary>User-visible name, e.g. "Frugal Usenet" or "NAS backups". Unique.</summary>
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    /// <summary><c>"nntp"</c> or <c>"smb"</c>.</summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "";
+
+    // ---- NNTP fields (type == "nntp") ----
+
+    [JsonPropertyName("host")]
+    public string Host { get; set; } = "";
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 119;
+
+    [JsonPropertyName("ssl")]
+    public bool Ssl { get; set; }
+
+    [JsonPropertyName("username")]
+    public string Username { get; set; } = "";
+
+    [JsonPropertyName("connections")]
+    public int Connections { get; set; } = 10;
+
+    [JsonPropertyName("newsgroup")]
+    public string Newsgroup { get; set; } = "alt.binaries.test";
+
+    [JsonPropertyName("retentionDays")]
+    public int RetentionDays { get; set; } = 1095;
+
+    [JsonPropertyName("passwordProtected")]
+    public string? PasswordProtected { get; set; }
+
+    [JsonPropertyName("password")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PasswordPlaintext { get; set; }
+
+    // ---- SMB fields (type == "smb") ----
+
+    /// <summary>UNC path, e.g. \\NAS\backups\filekeep.</summary>
+    [JsonPropertyName("share")]
+    public string Share { get; set; } = "";
+
+    [JsonPropertyName("smbUser")]
+    public string SmbUser { get; set; } = "";
+
+    [JsonPropertyName("smbPasswordProtected")]
+    public string? SmbPasswordProtected { get; set; }
+
+    [JsonPropertyName("smbPassword")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SmbPasswordPlaintext { get; set; }
+
+    /// <summary>True if a password is available (stored blob or env var).</summary>
+    [JsonIgnore]
+    public bool HasPassword =>
+        Type == "nntp"
+            ? !string.IsNullOrEmpty(PasswordProtected) ||
+              !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD"))
+            : !string.IsNullOrEmpty(SmbPasswordProtected) ||
+              !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_SMB_PASSWORD"));
+}
+
+/// <summary>
 /// One scheduled backup job from the service configuration file.
 /// </summary>
 public sealed class BackupJobConfig
@@ -145,8 +216,9 @@ public sealed class BackupJobConfig
     public string? SmbPasswordPlaintext { get; set; }
 
     /// <summary>
-    /// Effective upload targets: explicit <see cref="Targets"/>, or the
-    /// legacy <see cref="AutoUpload"/> default.
+    /// Effective upload targets: explicit <see cref="Targets"/> (location
+    /// names), or the legacy <see cref="AutoUpload"/> default. The scheduler
+    /// resolves these against <see cref="ServiceConfig.Locations"/>.
     /// </summary>
     [JsonIgnore]
     public IReadOnlyList<string> EffectiveTargets
@@ -155,10 +227,13 @@ public sealed class BackupJobConfig
         {
             if (Targets is { Count: > 0 })
                 return Targets
-                    .Select(t => t.Trim().ToLowerInvariant())
-                    .Where(t => t == "nntp" || t == "smb")
-                    .Distinct()
+                    .Select(t => t.Trim())
+                    .Where(t => t.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
+            // Legacy: AutoUpload without explicit targets. The migration in
+            // ServiceConfig.MigrateToLocations rewrites this to a location
+            // name on load; this fallback covers configs that bypass it.
             return AutoUpload ? new List<string> { "nntp" } : new List<string>();
         }
     }
@@ -207,9 +282,19 @@ public sealed class ServiceConfig
     public List<BackupJobConfig> Jobs { get; set; } = new();
 
     /// <summary>
+    /// Named backup destinations (Usenet providers and SMB shares). Jobs
+    /// reference these by name in their <c>targets</c>. This replaces the
+    /// legacy per-job connection details and the top-level <see cref="Nntp"/>
+    /// config; see <see cref="MigrateToLocations"/> for the upgrade path.
+    /// </summary>
+    [JsonPropertyName("locations")]
+    public List<BackupLocation> Locations { get; set; } = new();
+
+    /// <summary>
     /// Usenet provider for automatic uploads. Null/empty host means no Usenet
     /// configured; jobs with auto-upload will fail with a clear error.
     /// The password comes from USENETBACKUP_NNTP_PASSWORD, never from this file.
+    /// Legacy: migrated into <see cref="Locations"/> on load.
     /// </summary>
     [JsonPropertyName("nntp")]
     public NntpConfig? Nntp { get; set; }
@@ -275,8 +360,97 @@ public sealed class ServiceConfig
         catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
         if (config is null)
             throw new InvalidOperationException($"Invalid service config '{path}': empty document.");
+        config.MigrateToLocations();
         config.Validate();
         return config;
+    }
+
+    /// <summary>
+    /// One-time migration from legacy config shapes to <see cref="Locations"/>:
+    /// <list type="bullet">
+    /// <item>The top-level <c>nntp</c> (and <c>nntpProviders</c>) become NNTP locations.</item>
+    /// <item>Per-job <c>smbShare</c>/<c>smbUser</c> become SMB locations.</item>
+    /// <item>Job <c>targets</c> of "nntp"/"smb" are rewritten to the new location names.</item>
+    /// </list>
+    /// Idempotent: if <see cref="Locations"/> is already populated, only fills gaps.
+    /// </summary>
+    public void MigrateToLocations()
+    {
+        // Migrate legacy NNTP configs.
+        var nntpSources = new List<(string Name, NntpConfig Cfg)>();
+        if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
+            nntpSources.Add(("Usenet", Nntp));
+        foreach (var p in NntpProviders)
+        {
+            if (!string.IsNullOrWhiteSpace(p.Host))
+                nntpSources.Add(($"Usenet {NntpProviders.IndexOf(p) + 1}", p));
+        }
+        foreach (var (name, cfg) in nntpSources)
+        {
+            if (Locations.Any(l => l.Type == "nntp" &&
+                l.Host.Equals(cfg.Host, StringComparison.OrdinalIgnoreCase) && l.Port == cfg.Port))
+                continue;
+            string locName = name;
+            int n = 2;
+            while (Locations.Any(l => l.Name.Equals(locName, StringComparison.OrdinalIgnoreCase)))
+                locName = $"{name} {n++}";
+            Locations.Add(new BackupLocation
+            {
+                Name = locName, Type = "nntp",
+                Host = cfg.Host, Port = cfg.Port, Ssl = cfg.Ssl,
+                Username = cfg.Username, Connections = cfg.Connections,
+                Newsgroup = cfg.Newsgroup, RetentionDays = cfg.RetentionDays,
+                PasswordProtected = cfg.PasswordProtected,
+            });
+        }
+
+        // Migrate per-job SMB settings.
+        foreach (var job in Jobs)
+        {
+            if (string.IsNullOrWhiteSpace(job.SmbShare))
+                continue;
+            var existing = Locations.FirstOrDefault(l => l.Type == "smb" &&
+                l.Share.Equals(job.SmbShare, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                string locName = $"{job.Name} share";
+                int n = 2;
+                while (Locations.Any(l => l.Name.Equals(locName, StringComparison.OrdinalIgnoreCase)))
+                    locName = $"{job.Name} share {n++}";
+                existing = new BackupLocation
+                {
+                    Name = locName, Type = "smb",
+                    Share = job.SmbShare, SmbUser = job.SmbUser,
+                    SmbPasswordProtected = job.SmbPasswordProtected,
+                };
+                Locations.Add(existing);
+            }
+            // Rewrite legacy "smb" target to the location name.
+            if (job.Targets is not null)
+            {
+                for (int i = 0; i < job.Targets.Count; i++)
+                {
+                    if (job.Targets[i].Equals("smb", StringComparison.OrdinalIgnoreCase))
+                        job.Targets[i] = existing.Name;
+                    else if (job.Targets[i].Equals("nntp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var nntpLoc = Locations.FirstOrDefault(l => l.Type == "nntp");
+                        if (nntpLoc is not null)
+                            job.Targets[i] = nntpLoc.Name;
+                    }
+                }
+            }
+            else if (job.AutoUpload)
+            {
+                var nntpLoc = Locations.FirstOrDefault(l => l.Type == "nntp");
+                if (nntpLoc is not null)
+                    job.Targets = new List<string> { nntpLoc.Name };
+            }
+            // Clear the legacy per-job fields (now on the location).
+            job.SmbShare = "";
+            job.SmbUser = "";
+            job.SmbPasswordProtected = "";
+        }
     }
 
     /// <summary>
