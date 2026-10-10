@@ -110,6 +110,60 @@ public sealed class BackupJobConfig
     public bool AutoUpload { get; set; }
 
     /// <summary>
+    /// Upload targets after a backup completes: any combination of
+    /// <c>"nntp"</c> (Usenet) and <c>"smb"</c> (network share). Default is
+    /// <c>["nntp"]</c> when <see cref="AutoUpload"/> is true, empty otherwise.
+    /// Set to <c>["smb"]</c> for SMB-only, or <c>["nntp","smb"]</c> for both.
+    /// </summary>
+    [JsonPropertyName("targets")]
+    public List<string>? Targets { get; set; }
+
+    /// <summary>
+    /// SMB share UNC path for the "smb" target (e.g. \\NAS\backups\filekeep).
+    /// </summary>
+    [JsonPropertyName("smbShare")]
+    public string SmbShare { get; set; } = "";
+
+    /// <summary>Username for the SMB share (optional).</summary>
+    [JsonPropertyName("smbUser")]
+    public string SmbUser { get; set; } = "";
+
+    /// <summary>
+    /// DPAPI-encrypted SMB password (like the NNTP password). Set via the
+    /// dashboard; decrypted only on this machine.
+    /// </summary>
+    [JsonPropertyName("smbPasswordProtected")]
+    public string SmbPasswordProtected { get; set; } = "";
+
+    /// <summary>
+    /// Plaintext SMB password on input only; the API encrypts it into
+    /// <see cref="SmbPasswordProtected"/> and nulls this before persisting.
+    /// Not written when null.
+    /// </summary>
+    [JsonPropertyName("smbPassword")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SmbPasswordPlaintext { get; set; }
+
+    /// <summary>
+    /// Effective upload targets: explicit <see cref="Targets"/>, or the
+    /// legacy <see cref="AutoUpload"/> default.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> EffectiveTargets
+    {
+        get
+        {
+            if (Targets is { Count: > 0 })
+                return Targets
+                    .Select(t => t.Trim().ToLowerInvariant())
+                    .Where(t => t == "nntp" || t == "smb")
+                    .Distinct()
+                    .ToList();
+            return AutoUpload ? new List<string> { "nntp" } : new List<string>();
+        }
+    }
+
+    /// <summary>
     /// Automatically verify the backup after it completes (checks all chunk
     /// hashes). Catches bitrot and corruption early.
     /// </summary>

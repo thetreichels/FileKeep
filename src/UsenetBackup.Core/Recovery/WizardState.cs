@@ -33,6 +33,21 @@ public sealed class WizardState : IDisposable
     /// </summary>
     public string? LanServer { get; set; }
 
+    /// <summary>
+    /// SMB share UNC path (e.g., \\NAS\backups) for SMB restores.
+    /// Set when the user checks a share; null if not using SMB.
+    /// </summary>
+    public string? SmbShare { get; set; }
+
+    /// <summary>SMB username (may be empty for guest/anonymous shares).</summary>
+    public string SmbUser { get; set; } = "";
+
+    /// <summary>
+    /// SMB password. Held in memory only; never written to disk.
+    /// Cleared from the UI after the share check completes.
+    /// </summary>
+    public string SmbPassword { get; set; } = "";
+
     /// <summary>Selected backup ID, or null if none selected yet.</summary>
     public string? SelectedBackupId { get; set; }
 
@@ -186,11 +201,66 @@ public sealed class WizardState : IDisposable
     }
 
     /// <summary>Restores files to a directory.</summary>
-    public void RestoreFiles(string destDir)
+    public void RestoreFiles(string destDir, Action<int, int>? progress = null)
     {
         if (SelectedBackupId is null)
             throw new InvalidOperationException("Select a backup first.");
+        EnsureSmbChunks(progress);
         OpenRepo().Restore(SelectedBackupId, destDir);
+    }
+
+    /// <summary>
+    /// If an SMB share was checked, copies the selected backup's chunks from
+    /// the share into the local repo before restore. Chunks are
+    /// content-addressed: files already present are skipped, so this is
+    /// idempotent and resumable. Verifies the manifest exists on the share.
+    /// </summary>
+    public void EnsureSmbChunks(Action<int, int>? progress = null)
+    {
+        if (string.IsNullOrWhiteSpace(SmbShare) || SelectedBackupId is null)
+            return;
+        using var smb = UsenetBackup.Core.SmbShare.Connect(
+            SmbShare,
+            string.IsNullOrEmpty(SmbUser) ? null : SmbUser,
+            string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword);
+        var repo = OpenRepo();
+        var manifest = repo.LoadManifest(SelectedBackupId);
+        // Collect chunk IDs from the manifest (volumes or per-file chunk lists).
+        var chunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (manifest.Volumes is { Count: > 0 })
+        {
+            foreach (var v in manifest.Volumes)
+                foreach (string id in v.ChunkIds)
+                    chunkIds.Add(id);
+        }
+        else
+        {
+            foreach (var f in manifest.Files)
+                foreach (string id in f.Chunks)
+                    chunkIds.Add(id);
+        }
+        string localChunks = Path.Combine(RepoPath, "chunks");
+        string remoteChunks = smb.Combine("chunks");
+        int done = 0;
+        int total = chunkIds.Count;
+        foreach (string id in chunkIds)
+        {
+            // Chunk files are sharded: chunks/ab/cdef... (first 2 hex chars).
+            string shard = id.Length >= 2 ? id[..2] : id;
+            string localPath = Path.Combine(localChunks, shard, id);
+            if (!File.Exists(localPath))
+            {
+                string remotePath = Path.Combine(remoteChunks, shard, id);
+                if (!File.Exists(remotePath))
+                    throw new FileNotFoundException(
+                        $"Chunk {id} not found on SMB share {SmbShare}.");
+                Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                File.Copy(remotePath, localPath);
+            }
+            done++;
+            if (done % 25 == 0) progress?.Invoke(done, total);
+        }
+        progress?.Invoke(done, total);
     }
 
     /// <summary>
@@ -218,11 +288,12 @@ public sealed class WizardState : IDisposable
     /// <see cref="ListPhysicalDrives"/> (not free-typed). The UI confirms via
     /// a native TaskDialog before calling this.
     /// </summary>
-    public void RestoreDiskToDrive(PhysicalDriveInfo drive)
+    public void RestoreDiskToDrive(PhysicalDriveInfo drive, Action<int, int>? progress = null)
     {
         if (SelectedBackupId is null)
             throw new InvalidOperationException("Select a backup first.");
         ArgumentNullException.ThrowIfNull(drive);
+        EnsureSmbChunks(progress);
         OpenRepo().RestoreDiskImage(SelectedBackupId, drive.DevicePath);
     }
 

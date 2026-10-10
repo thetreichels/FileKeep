@@ -129,6 +129,7 @@ public sealed class BackupScheduler
 {
     public const string PassphraseEnvVar = "USENETBACKUP_PASSPHRASE";
     public const string NntpPasswordEnvVar = "USENETBACKUP_NNTP_PASSWORD";
+    public const string SmbPasswordEnvVar = "USENETBACKUP_SMB_PASSWORD";
 
     private readonly List<JobState> _jobs;
     private readonly IClock _clock;
@@ -278,7 +279,7 @@ public sealed class BackupScheduler
             Source = "",
             AutoUpload = true,
         };
-        AutoUploadToUsenet(job, backupId, passphrase);
+        UploadToTargets(job, backupId, passphrase);
     }
 
     /// <summary>
@@ -525,12 +526,12 @@ public sealed class BackupScheduler
                 $"job={job.Name} id={manifest.BackupId} type={manifest.Type} files={manifest.Files.Count}");
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
 
-            // Auto-upload to Usenet if configured.
+            // Auto-upload to configured targets (nntp and/or smb) if any.
             bool autoUploadFailed = false;
             string? autoUploadError = null;
-            if (job.AutoUpload)
+            if (job.EffectiveTargets.Count > 0)
             {
-                try { AutoUploadToUsenet(job, manifest.BackupId, passphrase); }
+                try { UploadToTargets(job, manifest.BackupId, passphrase); }
                 catch (Exception ex)
                 {
                     // Upload failure doesn't fail the backup itself, but it's tracked
@@ -667,6 +668,53 @@ public sealed class BackupScheduler
     /// from the USENETBACKUP_NNTP_PASSWORD environment variable and is never
     /// stored. Throws on failure; the caller logs it.
     /// </summary>
+    /// <summary>
+    /// Uploads a completed backup to each of the job's configured targets
+    /// ("nntp" and/or "smb"). Each target runs independently: one failing
+    /// doesn't stop the other, but all failures are collected and thrown
+    /// together so the caller sees the full picture.
+    /// </summary>
+    private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase)
+    {
+        var targets = job.EffectiveTargets;
+        var errors = new List<string>();
+        if (targets.Contains("nntp"))
+        {
+            try { AutoUploadToUsenet(job, backupId, passphrase); }
+            catch (Exception ex) { errors.Add($"nntp: {ex.Message}"); }
+        }
+        if (targets.Contains("smb"))
+        {
+            try { SyncToSmb(job, backupId, passphrase); }
+            catch (Exception ex) { errors.Add($"smb: {ex.Message}"); }
+        }
+        if (errors.Count > 0)
+            throw new InvalidOperationException(
+                $"Upload to {errors.Count} target(s) failed: {string.Join("; ", errors)}");
+    }
+
+    /// <summary>
+    /// Syncs the repo to the job's configured SMB share. The share receives
+    /// chunks, manifests, and repo.json — enough for a recovery wizard to
+    /// open it directly as a read-only repo.
+    /// </summary>
+    private void SyncToSmb(BackupJobConfig job, string backupId, string passphrase)
+    {
+        if (string.IsNullOrWhiteSpace(job.SmbShare))
+            throw new InvalidOperationException(
+                $"Job '{job.Name}' targets smb but no smbShare is configured.");
+        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
+        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(job.SmbPasswordProtected))
+            smbPassword = Dpapi.Unprotect(job.SmbPasswordProtected);
+
+        Log($"job '{job.Name}': syncing backup {backupId} to SMB share {job.SmbShare}");
+        using var share = SmbShare.Connect(job.SmbShare, job.SmbUser, smbPassword);
+        var sync = new SmbSync(Log);
+        var result = sync.Sync(job.Repo, share);
+        Log($"job '{job.Name}': SMB sync complete — {result.ChunksCopied} chunks, " +
+            $"{result.ManifestsCopied} manifests copied.");
+    }
+
     private void AutoUploadToUsenet(BackupJobConfig job, string backupId, string passphrase)
     {
         var providers = _nntpProviders;

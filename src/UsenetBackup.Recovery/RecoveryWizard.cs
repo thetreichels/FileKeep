@@ -55,6 +55,10 @@ public sealed class RecoveryWizard : Form
     private readonly Button _checkRemote = new();
     private readonly Button _checkLan = new();
     private readonly TextBox _lanServer = new();
+    private readonly Button _checkSmb = new();
+    private readonly TextBox _smbShare = new();
+    private readonly TextBox _smbUser = new();
+    private readonly TextBox _smbPassword = new();
 
     // Page 4: download
     private readonly TextBox _nzbPath = new();
@@ -453,6 +457,28 @@ public sealed class RecoveryWizard : Form
         _checkLan.Click += CheckLan_Click;
         p.Controls.Add(_checkLan);
 
+        // SMB share input and check button
+        var smbLabel = new Label { Text = "SMB share (e.g., \\\\NAS\\backups):", Location = new Point(16, 404), Size = new Size(200, 20) };
+        p.Controls.Add(smbLabel);
+        _smbShare.Location = new Point(16, 424);
+        _smbShare.Size = new Size(180, 24);
+        _smbShare.PlaceholderText = "\\\\server\\share";
+        p.Controls.Add(_smbShare);
+        _smbUser.Location = new Point(204, 424);
+        _smbUser.Size = new Size(110, 24);
+        _smbUser.PlaceholderText = "Username";
+        p.Controls.Add(_smbUser);
+        _smbPassword.Location = new Point(322, 424);
+        _smbPassword.Size = new Size(110, 24);
+        _smbPassword.PlaceholderText = "Password";
+        _smbPassword.UseSystemPasswordChar = true;
+        p.Controls.Add(_smbPassword);
+        _checkSmb.Text = "Check share…";
+        _checkSmb.Location = new Point(440, 422);
+        _checkSmb.Size = new Size(136, 28);
+        _checkSmb.Click += CheckSmb_Click;
+        p.Controls.Add(_checkSmb);
+
         _backupList.SelectedIndexChanged += (_, _) =>
         {
             if (_backupList.SelectedItem is BackupSummaryView b)
@@ -585,6 +611,84 @@ public sealed class RecoveryWizard : Form
         finally
         {
             _checkLan.Enabled = true;
+        }
+    }
+
+    private async void CheckSmb_Click(object? sender, EventArgs e)
+    {
+        string share = _smbShare.Text.Trim();
+        if (string.IsNullOrEmpty(share))
+        {
+            SetStatus("Enter an SMB share path (e.g., \\\\NAS\\backups).", isError: true);
+            return;
+        }
+        string user = _smbUser.Text.Trim();
+        string password = _smbPassword.Text; // transient; never stored
+
+        _checkSmb.Enabled = false;
+        try
+        {
+            var found = await Task.Run(() =>
+            {
+                using var smb = UsenetBackup.Core.SmbShare.Connect(
+                    share,
+                    string.IsNullOrEmpty(user) ? null : user,
+                    string.IsNullOrEmpty(password) ? null : password);
+                string manifestsDir = smb.Combine("manifests");
+                var result = new List<(string BackupId, BackupManifest Manifest)>();
+                if (!Directory.Exists(manifestsDir))
+                    return result;
+                foreach (string file in Directory.GetFiles(manifestsDir, "*.json"))
+                {
+                    string id = Path.GetFileNameWithoutExtension(file);
+                    string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
+                    if (File.Exists(localPath)) continue; // already local
+                    try
+                    {
+                        var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(
+                            File.ReadAllText(file));
+                        if (manifest is not null)
+                            result.Add((id, manifest));
+                    }
+                    catch { /* skip unreadable manifests */ }
+                }
+                return result;
+            });
+            if (found.Count == 0)
+            {
+                SetStatus("No backups on the SMB share newer than this USB stick.");
+            }
+            else
+            {
+                // Save SMB manifests locally
+                foreach (var (id, manifest) in found)
+                {
+                    string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
+                    using var smb = UsenetBackup.Core.SmbShare.Connect(
+                        share,
+                        string.IsNullOrEmpty(user) ? null : user,
+                        string.IsNullOrEmpty(password) ? null : password);
+                    string remotePath = smb.Combine("manifests", id + ".json");
+                    File.Copy(remotePath, localPath, overwrite: true);
+                    _backupList.Items.Add(new BackupSummaryView(
+                        id, manifest.Type + " (from SMB)",
+                        manifest.Snapshot ?? "", manifest.CreatedUtc));
+                }
+                // Store the SMB share for the chunk-pull phase before restore
+                _state.SmbShare = share;
+                _state.SmbUser = user;
+                _state.SmbPassword = password;
+                SetStatus($"Found {found.Count} backup(s) on SMB share — marked '(from SMB)'.");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus("SMB discovery failed: " + ex.Message, isError: true);
+        }
+        finally
+        {
+            _checkSmb.Enabled = true;
+            _smbPassword.Text = ""; // never retain the password in the UI
         }
     }
 
@@ -871,11 +975,21 @@ public sealed class RecoveryWizard : Form
         _restoreLog.Clear();
         try
         {
+            // Progress reporter marshals back to the UI thread.
+            void ReportSmb(int done, int total)
+            {
+                if (total == 0) return;
+                BeginInvoke(() =>
+                {
+                    _restoreProgress.Value = Math.Min(100, done * 100 / total);
+                    _restoreLog.Text = $"Copying chunks from SMB share… {done}/{total}";
+                });
+            }
             if (_restoreFiles.Checked)
             {
                 if (string.IsNullOrWhiteSpace(_restoreDest.Text))
                     throw new InvalidOperationException("Choose a destination folder.");
-                await Task.Run(() => _state.RestoreFiles(_restoreDest.Text));
+                await Task.Run(() => _state.RestoreFiles(_restoreDest.Text, ReportSmb));
                 _restoreLog.Text = "File restore complete.";
             }
             else
@@ -888,7 +1002,7 @@ public sealed class RecoveryWizard : Form
                     _restoreLog.Text = "Restore cancelled.";
                     return;
                 }
-                await Task.Run(() => _state.RestoreDiskToDrive(drive));
+                await Task.Run(() => _state.RestoreDiskToDrive(drive, ReportSmb));
                 _restoreLog.Text = "Disk restore complete. Reboot from the restored drive.";
             }
             SetStatus("Restore complete.");

@@ -36,6 +36,7 @@ try
         "retention-check" => RetentionCheck(args[1..]),
         "serve" => Serve(args[1..]),
         "recovery-usb" => RecoveryUsbCommand(args[1..]),
+        "smb-sync" => SmbSyncCommand(args[1..]),
         _ => Unknown(args[0]),
     };
 }
@@ -69,6 +70,7 @@ static void PrintUsage()
           usenet-backup serve <repo> [--port PORT] [--bind ADDR]
           usenet-backup recovery-usb --list
           usenet-backup recovery-usb --iso <winpe.iso> --drive <N> [--yes]
+          usenet-backup smb-sync <repo> --share \\server\share\path [--user USER]
           usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
           (--user also accepts --username as an alias)
 
@@ -110,6 +112,13 @@ static void PrintUsage()
         backs up from the shadow copy (Windows only, requires administrator
         rights). This gives a point-in-time frozen view, so open files back
         up consistently. Mutually exclusive with --backup-privilege.
+
+        smb-sync copies a repo's chunks, manifests, and config to an SMB
+        network share (e.g. a NAS). Idempotent and resumable — files already
+        on the share are skipped. The share can be opened directly for
+        restores (WinRE wizard or the Windows recovery page), no Usenet
+        needed. Password via --password, USENETBACKUP_SMB_PASSWORD, or a
+        prompt; omit --user for shares the current user can already reach.
 
         backup-disk images a raw block device (e.g. \\.\C: on Windows,
         /dev/sda on Linux) through the normal chunk/encrypt pipeline as a
@@ -1238,5 +1247,57 @@ static int RecoveryUsbCommand(string[] args)
     });
     Console.WriteLine("\nDone. The drive is now a bootable FileKeep recovery USB.");
     Console.WriteLine("Windows may prompt to format the drive — decline; boot from it via your BIOS/UEFI boot menu.");
+    return 0;
+}
+
+/// <summary>
+/// Syncs a local repository to an SMB network share:
+/// usenet-backup smb-sync &lt;repo&gt; --share \\server\share\path [--user USER]
+/// Copies chunks (content-addressed, skipped if present), manifests, and
+/// repo.json. Idempotent and resumable. The password comes from --password,
+/// USENETBACKUP_SMB_PASSWORD, or an interactive prompt (never stored).
+/// </summary>
+static int SmbSyncCommand(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: smb-sync <repo> --share \\\\server\\share [--user USER]"); return 2; }
+    string? share = GetOption(args, "--share");
+    if (string.IsNullOrWhiteSpace(share)) { Console.Error.WriteLine("error: --share \\\\server\\share\\path is required."); return 2; }
+    string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
+    string? password = null;
+    if (!string.IsNullOrEmpty(user))
+    {
+        string? fromArg = GetOption(args, "--password");
+        if (!string.IsNullOrEmpty(fromArg))
+        {
+            WarnSecretOnCommandLine("--password", "USENETBACKUP_SMB_PASSWORD");
+            password = fromArg;
+        }
+        else
+        {
+            password = Environment.GetEnvironmentVariable("USENETBACKUP_SMB_PASSWORD");
+            if (string.IsNullOrEmpty(password))
+                password = PromptInteractive("SMB password: ", "--password", "USENETBACKUP_SMB_PASSWORD");
+        }
+    }
+
+    string repoRoot = Path.GetFullPath(pos[0]);
+    Console.WriteLine($"Connecting to {share}...");
+    using var smb = UsenetBackup.Core.SmbShare.Connect(share, user, password);
+    Console.WriteLine($"Connected. Syncing {repoRoot}...");
+    var sync = new UsenetBackup.Core.SmbSync(msg => Console.WriteLine(msg));
+    int lastPct = -1;
+    var result = sync.Sync(repoRoot, smb, (done, total) =>
+    {
+        if (total == 0) return;
+        int pct = done * 100 / total;
+        if (pct != lastPct)
+        {
+            lastPct = pct;
+            Console.Write($"\r  {pct}% ({done}/{total} files)");
+        }
+    });
+    Console.WriteLine($"\nDone: {result.ChunksCopied} chunks + {result.ManifestsCopied} manifests copied " +
+        $"({result.ChunksSkipped + result.ManifestsSkipped} already present).");
     return 0;
 }

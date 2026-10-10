@@ -91,6 +91,18 @@ public static class Dashboard
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
+        app.MapPost("/api/operations/smb-sync", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.GetProperty("repo").GetString() ?? "";
+            string share = body.GetProperty("share").GetString() ?? "";
+            string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.StartSmbSync(config, repo, share, user);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -137,7 +149,9 @@ public static class Dashboard
             string repo = body.GetProperty("repo").GetString() ?? "";
             string backupId = body.GetProperty("backupId").GetString() ?? "";
             string destDir = body.GetProperty("destDir").GetString() ?? "";
-            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir);
+            string smbShare = body.TryGetProperty("smbShare", out var ss) ? ss.GetString() ?? "" : "";
+            string smbUser = body.TryGetProperty("smbUser", out var su) ? su.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, smbShare, smbUser);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -590,6 +604,46 @@ public static class DashboardApi
     }
 
     /// <summary>
+    /// Starts a manual SMB sync in the background. The password comes from the
+    /// service config (per-job or global env var); the dashboard never handles
+    /// it. Returns (202, accepted) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) StartSmbSync(
+        ServiceConfig config, string repo, string share, string user)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new { error = "Unknown repo (not a configured job)." });
+        if (string.IsNullOrWhiteSpace(share))
+            return (400, new { error = "SMB share path is required." });
+        // Find SMB credentials: matching job's stored password, else env var.
+        var job = config.Jobs.FirstOrDefault(j =>
+            j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(j.SmbShare));
+        string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
+        if (string.IsNullOrEmpty(password) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
+            password = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
+        string effectiveUser = string.IsNullOrWhiteSpace(user) ? job?.SmbUser ?? "" : user;
+        Task.Run(() =>
+        {
+            try
+            {
+                using var smb = UsenetBackup.Core.SmbShare.Connect(share, effectiveUser, password);
+                var sync = new UsenetBackup.Core.SmbSync(msg =>
+                    OperationLog.Append(repo, "smb-sync", msg));
+                var result = sync.Sync(repo, smb);
+                OperationLog.Append(repo, "smb-sync",
+                    $"to {share} complete: {result.ChunksCopied} chunks, {result.ManifestsCopied} manifests");
+            }
+            catch (Exception ex)
+            {
+                OperationLog.Append(repo, "smb-sync", $"to {share} FAILED: {ex.Message}");
+            }
+        });
+        OperationLog.Append(repo, "smb-sync", $"to {share} started");
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
     /// Starts a manual backup verification in the background.
     /// </summary>
     public static (int Status, object Payload) StartVerify(
@@ -648,7 +702,8 @@ public static class DashboardApi
     /// Starts a restore of a backup to a destination directory in the background.
     /// </summary>
     public static (int Status, object Payload) StartRestore(
-        ServiceConfig config, string repo, string backupId, string destDir)
+        ServiceConfig config, string repo, string backupId, string destDir,
+        string? smbShare = null, string? smbUser = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
@@ -659,10 +714,36 @@ public static class DashboardApi
         string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
         if (string.IsNullOrEmpty(passphrase))
             return (500, new { error = "Service passphrase is not configured." });
+        // SMB credentials: matching job's stored password, else env var.
+        string? smbPassword = null;
+        if (!string.IsNullOrWhiteSpace(smbShare))
+        {
+            var job = config.Jobs.FirstOrDefault(j =>
+                j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
+            smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
+            if (string.IsNullOrEmpty(smbPassword) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
+                smbPassword = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
+            if (string.IsNullOrWhiteSpace(smbUser))
+                smbUser = job?.SmbUser;
+        }
         Task.Run(() =>
         {
             try
             {
+                // Pull missing chunks from the SMB share first, if one was given.
+                if (!string.IsNullOrWhiteSpace(smbShare))
+                {
+                    using var ws = new UsenetBackup.Core.Recovery.WizardState
+                    {
+                        RepoPath = repo,
+                        Passphrase = passphrase,
+                        SelectedBackupId = backupId,
+                        SmbShare = smbShare,
+                        SmbUser = smbUser ?? "",
+                        SmbPassword = smbPassword ?? "",
+                    };
+                    ws.EnsureSmbChunks();
+                }
                 using var r = BackupRepository.Open(repo, passphrase);
                 r.Restore(backupId, destDir);
                 OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} OK");
@@ -1247,12 +1328,22 @@ public static class DashboardApi
         // Apply to the live config.
         var existing = config.Jobs.FirstOrDefault(j =>
             j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
+        // Encrypt a supplied SMB password via DPAPI; blank keeps the stored blob.
+        string? smbBlobToKeep = existing?.SmbPasswordProtected;
+        if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
+            smbBlobToKeep = Dpapi.Protect(job.SmbPasswordPlaintext);
+        job.SmbPasswordProtected = smbBlobToKeep ?? "";
+        job.SmbPasswordPlaintext = null; // never persist plaintext
         if (existing is null)
             config.Jobs.Add(job);
         else
         {
             existing.Repo = job.Repo;
             existing.Source = job.Source;
+            existing.Targets = job.Targets;
+            existing.SmbShare = job.SmbShare;
+            existing.SmbUser = job.SmbUser;
+            existing.SmbPasswordProtected = job.SmbPasswordProtected;
             existing.Schedule = job.Schedule;
             existing.Mode = job.Mode;
             existing.BackupPrivilege = job.BackupPrivilege;
@@ -1669,6 +1760,11 @@ public static class DashboardHtml
                   <input id="restore-dest" placeholder="C:\Restore" style="flex:1">
                   <button onclick="startRestore()">Restore</button>
                 </div>
+                <div class="row" style="margin-top:4px">
+                  <input id="restore-smb" placeholder="SMB share (optional, e.g. \\NAS\backups)" style="flex:1">
+                  <input id="restore-smb-user" placeholder="Username (optional)" style="width:160px">
+                </div>
+                <div class="meta">If chunks are missing locally, enter the SMB share to pull them from (uses the job's saved SMB password).</div>
               </div>
               <div class="card">
                 <div class="name">Back up a folder now</div>
@@ -1685,6 +1781,17 @@ public static class DashboardHtml
                   <input id="nzb-file" type="file" accept=".nzb">
                   <button onclick="uploadNzb()">Download chunks</button>
                 </div>
+              </div>
+              <div class="card">
+                <div class="name">Sync to SMB share</div>
+                <div class="meta">Copy this repo's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
+                <div class="row" style="margin-top:8px">
+                  <select id="smb-repo"></select>
+                  <input id="smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1">
+                  <input id="smb-user" placeholder="Username (optional)" style="width:160px">
+                  <button onclick="startSmbSync()">Sync now</button>
+                </div>
+                <div class="meta">Password: uses the job's saved SMB password, or set USENETBACKUP_SMB_PASSWORD.</div>
               </div>
               <div class="card">
                 <div class="name">Disk imaging</div>
@@ -1751,7 +1858,15 @@ public static class DashboardHtml
                   </select></label>
                   <label class="check"><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
                   <label class="check"><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
-                  <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload to Usenet after backup</label>
+                  <label class="check"><input id="jf-autoupload" type="checkbox"> Automatically upload after backup</label>
+                  <div id="jf-targets" style="margin:4px 0 4px 24px; display:none">
+                    <label class="check" style="display:block"><input id="jf-target-nntp" type="checkbox" checked> Usenet (NNTP)</label>
+                    <label class="check" style="display:block"><input id="jf-target-smb" type="checkbox" onchange="document.getElementById('jf-smb-settings').style.display = this.checked ? '' : 'none'"> SMB network share</label>
+                  </div>
+                  <div id="jf-smb-settings" style="margin:4px 0 4px 24px; display:none">
+                    <div class="row" style="padding:4px 0"><input id="jf-smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1"></div>
+                    <div class="row" style="padding:4px 0"><input id="jf-smb-user" placeholder="Username (optional)" style="flex:1"><input id="jf-smb-pass" type="password" placeholder="Password (optional)" style="flex:1"></div>
+                  </div>
                   <label class="check"><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
                   <label>Usenet redundancy:
                     <select id="jf-redundancy">
@@ -1885,6 +2000,9 @@ public static class DashboardHtml
           const opSel = document.getElementById('op-repo');
           if (!opSel.options.length)
             s.jobs.forEach(j => opSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
+          const smbSel = document.getElementById('smb-repo');
+          if (!smbSel.options.length)
+            s.jobs.forEach(j => smbSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
           loadLog();
         }
@@ -1996,9 +2114,11 @@ public static class DashboardHtml
           const repo = document.getElementById('op-repo').value;
           const backupId = document.getElementById('restore-backup').value;
           const destDir = document.getElementById('restore-dest').value.trim();
+          const smbShare = document.getElementById('restore-smb').value.trim();
+          const smbUser = document.getElementById('restore-smb-user').value.trim();
           if (!backupId) { alert('Select a backup.'); return; }
           if (!destDir) { alert('Enter a destination folder.'); return; }
-          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir }) });
+          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir, smbShare, smbUser }) });
           alert('Restore started in the background. Watch the Operations log.');
         }
         async function startAdhocBackup() {
@@ -2007,6 +2127,14 @@ public static class DashboardHtml
           if (!sourceDir) { alert('Enter a source folder.'); return; }
           await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
           alert('Backup started in the background. Watch the Operations log.');
+        }
+        async function startSmbSync() {
+          const repo = document.getElementById('smb-repo').value;
+          const share = document.getElementById('smb-share').value.trim();
+          const user = document.getElementById('smb-user').value.trim();
+          if (!share) { alert('Enter the SMB share path.'); return; }
+          await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ repo, share, user }) });
+          alert('SMB sync started in the background. Watch the Operations log.');
         }
         async function uploadNzb() {
           const repo = document.getElementById('op-repo').value;
@@ -2186,7 +2314,7 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${j.autoUpload ? ' · auto-upload' : ''}<br>
+                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join('+') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
                 ${esc(j.source)} → ${esc(j.repo)}</div>
               </div>
               <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
@@ -2216,6 +2344,19 @@ public static class DashboardHtml
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
           document.getElementById('jf-vss').checked = job ? !!job.vss : false;
           document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
+          // Upload targets: explicit list, or legacy autoUpload default.
+          const targets = job && job.targets && job.targets.length ? job.targets.map(t => t.toLowerCase())
+            : (job && job.autoUpload ? ['nntp'] : []);
+          document.getElementById('jf-targets').style.display = document.getElementById('jf-autoupload').checked ? '' : 'none';
+          document.getElementById('jf-target-nntp').checked = targets.includes('nntp');
+          document.getElementById('jf-target-smb').checked = targets.includes('smb');
+          document.getElementById('jf-smb-share').value = job ? job.smbShare || '' : '';
+          document.getElementById('jf-smb-user').value = job ? job.smbUser || '' : '';
+          document.getElementById('jf-smb-pass').value = '';
+          document.getElementById('jf-smb-settings').style.display = targets.includes('smb') ? '' : 'none';
+          document.getElementById('jf-autoupload').onchange = e => {
+            document.getElementById('jf-targets').style.display = e.target.checked ? '' : 'none';
+          };
           document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
           document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
           document.getElementById('jf-verification').value = job && job.verificationMode ? job.verificationMode : 'fast';
@@ -2261,6 +2402,15 @@ public static class DashboardHtml
             backupPrivilege: document.getElementById('jf-priv').checked,
             vss: document.getElementById('jf-vss').checked,
             autoUpload: document.getElementById('jf-autoupload').checked,
+            targets: document.getElementById('jf-autoupload').checked
+              ? [
+                  ...(document.getElementById('jf-target-nntp').checked ? ['nntp'] : []),
+                  ...(document.getElementById('jf-target-smb').checked ? ['smb'] : []),
+                ]
+              : [],
+            smbShare: document.getElementById('jf-smb-share').value.trim(),
+            smbUser: document.getElementById('jf-smb-user').value.trim(),
+            smbPassword: document.getElementById('jf-smb-pass').value,
             autoVerify: document.getElementById('jf-autoverify').checked,
             redundancyMode: document.getElementById('jf-redundancy').value,
             verificationMode: document.getElementById('jf-verification').value,
