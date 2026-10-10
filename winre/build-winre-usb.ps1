@@ -139,11 +139,15 @@ if ($script:ImageMode) {
     Write-Host "Target USB: $usbRoot"
 }
 
-# --- Locate WinRE ---
+# --- Locate WinRE and copy the WIM ---
+# The copy happens here, BEFORE reagentc /disable, while all paths are valid.
+# reagentc often reports a \\?\GLOBALROOT\... location; for that we mount the
+# recovery partition to a temporary drive letter.
 Step-Start 2
 Write-Host "Locating WinRE..."
 $reInfo = reagentc /info 2>&1 | Out-String
 $wimPath = $null
+$recDriveLetter = $null
 foreach ($line in $reInfo -split "`r?`n") {
     if ($line -match 'Windows RE location:\s*(.+)') {
         $loc = $Matches[1].Trim()
@@ -153,25 +157,53 @@ foreach ($line in $reInfo -split "`r?`n") {
             $wimPath = Join-Path $loc "winre.wim"
         } else {
             Write-Host "WinRE location is not a plain path: $loc"
-            Write-Host "Attempting to resolve via mountvol/GLOBALROOT..."
+            Write-Host "Mounting the recovery partition to read the WIM..."
+            $recPart = Get-Partition | Where-Object { $_.Type -eq 'Recovery' } | Select-Object -First 1
+            if (-not $recPart) { Fail "No recovery partition found." }
+            $usedLetters = (Get-Volume).DriveLetter
+            $freeLetter = ([char[]](68..90) | Where-Object { $usedLetters -notcontains $_ } | Select-Object -First 1)
+            if (-not $freeLetter) { Fail "No free drive letter to mount the recovery partition." }
+            $recPart | Set-Partition -NewDriveLetter $freeLetter
+            $recDriveLetter = $freeLetter
+            # The WIM may be at the partition root or under Recovery\WindowsRE.
+            foreach ($rp in @("${freeLetter}:\Recovery\WindowsRE\winre.wim", "${freeLetter}:\winre.wim")) {
+                if (Test-Path $rp) { $wimPath = $rp; break }
+            }
         }
         break
     }
 }
 # Fallback: probe the standard Recovery path on the system drive.
-if (-not $wimPath -or -not (Test-Path $wimPath)) {
+if (-not $wimPath) {
     $sysDrive = $env:SystemDrive
     foreach ($candidate in @(
         "$sysDrive\Recovery\WindowsRE\winre.wim",
         "$sysDrive\Windows\System32\Recovery\winre.wim"
     )) {
-        if (Test-Path $candidate) { $wimPath = $candidate; break }
+        # Verify readability, not just Test-Path (junctions can mislead).
+        try { $fs = [IO.File]::OpenRead($candidate); $fs.Close(); $wimPath = $candidate; break }
+        catch { }
     }
 }
-if (-not $wimPath -or -not (Test-Path $wimPath)) {
-    Fail "Could not locate winre.wim. Ensure WinRE is enabled (reagentc /info)."
+if (-not $wimPath) {
+    if ($recDriveLetter) { Get-Partition -DriveLetter $recDriveLetter | Remove-PartitionAccessPath -AccessPath "${recDriveLetter}:\" -ErrorAction SilentlyContinue }
+    Fail "Could not locate a readable winre.wim. Ensure WinRE is enabled (reagentc /info)."
 }
 Write-Host "WinRE image: $wimPath"
+
+# Copy the WIM to a temp location now, while the source is guaranteed readable.
+$wimCopy = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre.wim"
+try {
+    Write-Host "Copying winre.wim to temp..."
+    Copy-Item $wimPath $wimCopy -Force
+} finally {
+    if ($recDriveLetter) {
+        Write-Host "Unmounting recovery partition..."
+        Get-Partition -DriveLetter $recDriveLetter | Remove-PartitionAccessPath -AccessPath "${recDriveLetter}:\" -ErrorAction SilentlyContinue
+    }
+}
+if (-not (Test-Path $wimCopy)) { Fail "Failed to copy winre.wim." }
+Write-Host "WinRE image copied."
 Step-Done 2
 
 # --- Stage FileKeep binaries ---
@@ -223,14 +255,11 @@ Step-Done 4
 
 $winreReenabled = $false
 try {
-    # --- Mount the WIM ---
+    # --- Mount the WIM (already copied to temp in step 2) ---
     Step-Start 5
     Write-Host "Mounting winre.wim..."
     if (Test-Path $MountDir) { Remove-Item $MountDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $MountDir | Out-Null
-    # Copy the WIM to a temp location so the original stays pristine.
-    $wimCopy = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre.wim"
-    Copy-Item $wimPath $wimCopy -Force
     dism /Mount-Wim /WimFile:$wimCopy /Index:1 /MountDir:$MountDir
     if ($LASTEXITCODE -ne 0) { Fail "DISM mount failed." }
     Step-Done 5
