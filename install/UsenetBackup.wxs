@@ -148,5 +148,8 @@
     <!-- Installer banner (top) and dialog (side) bitmaps -->
     <WixVariable Id="WixUIBannerBmp" Value="$(var.SrcRoot)/assets/filekeep-banner.bmp" />
     <WixVariable Id="WixUIDialogBmp" Value="$(var.SrcRoot)/assets/filekeep-dialog.bmp" />
+
+    <!-- License text shown in the wizard (replaces the WiX placeholder) -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SrcRoot)/install/gpl-3.0-license.rtf" />
   </Package>
 </Wix>
