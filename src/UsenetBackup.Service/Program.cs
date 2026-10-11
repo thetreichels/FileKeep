@@ -24,7 +24,11 @@ string? configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
 // This preserves the old workflow where users copied service.example.json to service.json.
 if (!File.Exists(configPath))
 {
-    string? parentDir = Path.GetDirectoryName(AppContext.BaseDirectory);
+    // AppContext.BaseDirectory ends with a separator (e.g. "C:\...\service\"),
+    // and Path.GetDirectoryName on such a path returns the path itself, not
+    // its parent. Trim first so we get the real parent (the install root).
+    string? parentDir = Path.GetDirectoryName(
+        Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
     string examplePath = parentDir != null
         ? Path.Combine(parentDir, "docs", "service.example.json")
         : Path.Combine("docs", "service.example.json");
