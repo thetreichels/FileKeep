@@ -1,6 +1,6 @@
 # FileKeep
 
-![FileKeep icon](assets/filekeep-icon-1024.png)
+![FileKeep](assets/filekeep-splash.png)
 
 **Encrypted backups that live on Usenet.** FileKeep is an open-source Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
 
