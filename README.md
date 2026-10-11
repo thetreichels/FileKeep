@@ -6,7 +6,7 @@
 
 [![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
-[![Tests](https://img.shields.io/badge/tests-286-blue.svg)]()
+[![Tests](https://img.shields.io/badge/tests-318-blue.svg)]()
 
 ## What it does
 
@@ -20,12 +20,13 @@
 - **Reed–Solomon parity** for recovery from damaged or missing articles
 - **Retention management** — monitors article age against provider retention and reposts with fresh identities before articles expire
 - **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
+- **Restore path hardening** — manifest paths are lexically anchored inside the destination (traversal, absolute, and UNC paths rejected) and pre-existing symlinks/junctions in the destination tree are never followed during restore
 - **Bootable WinRE recovery USB** (Windows 95 Setup-style wizard) for bare-metal restores — built ADK-free from the host's own WinRE image
 - **LAN mode** — serve a repository over HTTP so a recovery stick can pull from your NAS instead of re-downloading from Usenet
 
 ## Installation
 
-Download `filekeep-0.8.1.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
+Download `filekeep-0.8.5.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
 
 | Path | Contents |
 |------|----------|
@@ -125,7 +126,7 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 
 ```sh
 dotnet build FileKeep.slnx
-dotnet test FileKeep.slnx   # 286 tests; suite validated green on Windows
+dotnet test FileKeep.slnx   # 318 tests; suite validated green on Windows
 ```
 
 The core engine builds and tests cross-platform; Windows-only paths (backup privilege, VSS helper, service hosting, WiX installer) need a Windows 10/11 machine. The service also runs in `--console` mode on any OS for development.
@@ -140,7 +141,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, and the WinRE recovery environment are implemented and tested.
+FileKeep is in active development (v0.8.5). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 
