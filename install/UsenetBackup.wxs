@@ -12,7 +12,8 @@
            Version="0.8.5"
            Manufacturer="J. Treichel"
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
-           Scope="perMachine">
+           Scope="perMachine"
+           InstallerVersion="500">
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of FileKeep is already installed." />
 
