@@ -7,7 +7,7 @@
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="FileKeep"
            Version="0.8.5"
            Manufacturer="J. Treichel"
@@ -136,9 +136,10 @@
     </Feature>
 
     <!-- Standard install wizard (welcome, install dir, verify, progress).
-         Without this the MSI installs with no UI at all. -->
-    <UIRef Id="WixUI_InstallDir" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+         Without this the MSI installs with no UI at all.
+         NOTE (WiX v4+): the dialog set must be referenced via the UI
+         extension's ui:WixUI element; the old v3 <UIRef> no longer resolves. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
     <!-- Add/Remove Programs icon -->
     <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />
