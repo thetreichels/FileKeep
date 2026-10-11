@@ -189,4 +189,165 @@ public sealed class RestorePathSecurityTests : IDisposable
         Assert.False(File.Exists(canary),
             "Symlink redirect attack wrote outside the restore directory!");
     }
+
+    // A symlink that already exists in the destination tree must not be
+    // followed during restore. ResolveRestorePath is lexical — it cannot
+    // see reparse points — so every restore write site additionally walks
+    // its path components and fails closed on any reparse point.
+    private static bool CanCreateSymlinks()
+    {
+        string probeDir = Path.Combine(Path.GetTempPath(), "ub-sec-probe-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(probeDir);
+            Directory.CreateSymbolicLink(Path.Combine(probeDir, "link"), probeDir);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false; // Windows without Developer Mode / privilege.
+        }
+        finally
+        {
+            try { Directory.Delete(probeDir, recursive: true); } catch { }
+        }
+    }
+
+    private static void SkipIfNoSymlinkPrivilege()
+    {
+        if (!CanCreateSymlinks())
+            throw Xunit.Sdk.SkipException.ForSkip("Creating symlinks requires privilege on this machine.");
+    }
+
+    [Fact]
+    public void Restore_BlocksPreexistingSymlinkInParentComponent()
+    {
+        SkipIfNoSymlinkPrivilege();
+        string backupId = BackupSingleFile();
+        string dest = Path.Combine(_workDir, "restored");
+        string outside = Path.Combine(_workDir, "outside");
+        Directory.CreateDirectory(outside);
+        string canary = Path.Combine(outside, "pwned.txt");
+        Directory.CreateDirectory(dest);
+        Directory.CreateSymbolicLink(Path.Combine(dest, "sub"), outside);
+
+        // Lexically inside destDir ("sub/pwned.txt"), but the directory
+        // creation, temp-file write and rename would all traverse the
+        // pre-existing symlink into outside/.
+        PoisonManifest(backupId, m => m.Files[0].Path = "sub/pwned.txt");
+
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var ex = Assert.Throws<InvalidDataException>(() => repo.Restore(backupId, dest));
+        Assert.Contains("reparse point", ex.Message);
+        Assert.False(File.Exists(canary),
+            "Restore followed a pre-existing symlink outside the destination!");
+    }
+
+    [Fact]
+    public void Restore_BlocksTwoRestoreSymlinkPlanting()
+    {
+        // The realistic exploit: restore A (hostile manifest) plants
+        // dest/evil -> outside via a symlink entry — allowed, since the
+        // link path itself is inside destDir. A later restore into the
+        // same destination must not write regular files through it.
+        SkipIfNoSymlinkPrivilege();
+        string outside = Path.Combine(_workDir, "outside");
+        Directory.CreateDirectory(outside);
+        string canary = Path.Combine(outside, "pwned.txt");
+
+        string backupA, backupB;
+        using (var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations))
+        {
+            File.WriteAllText(Path.Combine(_srcDir, "good.txt"), "legit content");
+            backupA = repo.BackupDirectory(_srcDir).BackupId;
+            backupB = repo.BackupDirectory(_srcDir).BackupId;
+        }
+
+        PoisonManifest(backupA, m =>
+        {
+            m.Files[0].Path = "evil";
+            m.Files[0].SymlinkTarget = outside;
+            m.Files[0].Chunks.Clear();
+        });
+        string dest = Path.Combine(_workDir, "restored");
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            repo.Restore(backupA, dest);
+        Assert.True(Directory.Exists(Path.Combine(dest, "evil")));
+
+        PoisonManifest(backupB, m => m.Files[0].Path = "evil/pwned.txt");
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            var ex = Assert.Throws<InvalidDataException>(() => repo.Restore(backupB, dest));
+            Assert.Contains("reparse point", ex.Message);
+        }
+        Assert.False(File.Exists(canary),
+            "Second restore wrote through a symlink planted by the first!");
+    }
+
+    [Fact]
+    public void Restore_BlocksSymlinkAtFileLeaf()
+    {
+        SkipIfNoSymlinkPrivilege();
+        string backupId = BackupSingleFile();
+        string dest = Path.Combine(_workDir, "restored");
+        string outside = Path.Combine(_workDir, "outside");
+        Directory.CreateDirectory(outside);
+        string canary = Path.Combine(outside, "canary.txt");
+        Directory.CreateDirectory(dest);
+        string linkPath = Path.Combine(dest, "victim.txt");
+        File.CreateSymbolicLink(linkPath, canary);
+
+        PoisonManifest(backupId, m => m.Files[0].Path = "victim.txt");
+
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var ex = Assert.Throws<InvalidDataException>(() => repo.Restore(backupId, dest));
+        Assert.Contains("reparse point", ex.Message);
+        // Fail closed: the pre-existing link is left untouched, never
+        // replaced or followed.
+        Assert.NotNull(new FileInfo(linkPath).LinkTarget);
+        Assert.False(File.Exists(canary),
+            "Restore wrote through a symlink at the destination file path!");
+    }
+
+    [Fact]
+    public void Restore_BlocksPreexistingSymlinkInDirectoryEntries()
+    {
+        SkipIfNoSymlinkPrivilege();
+        string backupId = BackupSingleFile();
+        string dest = Path.Combine(_workDir, "restored");
+        string outside = Path.Combine(_workDir, "outside");
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(dest);
+        Directory.CreateSymbolicLink(Path.Combine(dest, "sub"), outside);
+
+        PoisonManifest(backupId, m => m.Directories = new List<string> { "sub/child" });
+
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var ex = Assert.Throws<InvalidDataException>(() => repo.Restore(backupId, dest));
+        Assert.Contains("reparse point", ex.Message);
+        Assert.False(Directory.Exists(Path.Combine(outside, "child")),
+            "Restore created directories through a pre-existing symlink!");
+    }
+
+    [Fact]
+    public void Restore_LegitimateSymlinkStillRestores()
+    {
+        // The reparse-point check must not break normal restores of
+        // backups that legitimately contain symlinks.
+        SkipIfNoSymlinkPrivilege();
+        File.WriteAllText(Path.Combine(_srcDir, "target.txt"), "target content");
+        File.CreateSymbolicLink(
+            Path.Combine(_srcDir, "link.txt"), Path.Combine(_srcDir, "target.txt"));
+        using (var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations))
+        {
+            string backupId = repo.BackupDirectory(_srcDir).BackupId;
+            string dest = Path.Combine(_workDir, "restored");
+            using var repo2 = BackupRepository.Open(_repoDir, Passphrase);
+            repo2.Restore(backupId, dest);
+            string linkPath = Path.Combine(dest, "link.txt");
+            Assert.NotNull(new FileInfo(linkPath).LinkTarget);
+            Assert.Equal("target content",
+                File.ReadAllText(Path.Combine(dest, "target.txt")));
+        }
+    }
 }

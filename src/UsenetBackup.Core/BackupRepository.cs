@@ -1384,6 +1384,11 @@ public sealed class BackupRepository : IDisposable
     /// <see cref="Path.GetFullPath"/> and rejected with
     /// <see cref="InvalidDataException"/> unless it stays under the
     /// normalized destination root.
+    /// <para>
+    /// Lexical only: <see cref="Path.GetFullPath"/> does not resolve reparse
+    /// points, so callers must also pass the result through
+    /// <see cref="AssertNoReparsePoints"/> before writing.
+    /// </para>
     /// </summary>
     private static string ResolveRestorePath(string destDir, string manifestPath)
     {
@@ -1401,6 +1406,61 @@ public sealed class BackupRepository : IDisposable
         return resolved;
     }
 
+    /// <summary>
+    /// Rejects a resolved restore path when any existing path component
+    /// strictly below <paramref name="destDir"/> is a reparse point
+    /// (symlink, junction, mount point). <see cref="ResolveRestorePath"/>
+    /// is lexical, so a symlink already present in the destination tree —
+    /// planted by an earlier restore of a hostile manifest, left behind by
+    /// a previous run, or a pre-existing junction — would otherwise
+    /// redirect directory creation, the temp-file write and the final
+    /// rename outside the destination. The destination root itself is the
+    /// caller's explicit choice and is not checked. Pass
+    /// <paramref name="includeLeaf"/> for paths created as regular files
+    /// or directories; symlink entries manage their own leaf
+    /// (delete-then-recreate), so only their parent chain is checked.
+    /// </summary>
+    private static void AssertNoReparsePoints(string destDir, string resolvedPath, bool includeLeaf)
+    {
+        string root = Path.GetFullPath(destDir);
+        string rootPrefix = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        string end = includeLeaf
+            ? resolvedPath
+            : Path.GetDirectoryName(resolvedPath) ?? root;
+        // resolvedPath passed through ResolveRestorePath, so it is at or
+        // beneath root; the walk covers only components strictly below root.
+        string relative = end.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase)
+            ? end.Substring(rootPrefix.Length)
+            : string.Empty;
+        string current = root;
+        foreach (string part in relative.Split(
+            Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, part);
+            if (IsReparsePoint(current))
+                throw new InvalidDataException(
+                    $"Refusing to restore through reparse point '{current}' under destination '{destDir}'.");
+        }
+    }
+
+    private static bool IsReparsePoint(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (FileNotFoundException)
+        {
+            return false; // Nonexistent components cannot be reparse points.
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
     private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly, List<string> errors)
     {
         if (!verifyOnly && destDir is not null && manifest.Directories is not null)
@@ -1409,7 +1469,9 @@ public sealed class BackupRepository : IDisposable
             {
                 try
                 {
-                    Directory.CreateDirectory(ResolveRestorePath(destDir, dir));
+                    string dirPath = ResolveRestorePath(destDir, dir);
+                    AssertNoReparsePoints(destDir, dirPath, includeLeaf: true);
+                    Directory.CreateDirectory(dirPath);
                 }
                 catch (Exception ex)
                 {
@@ -1464,6 +1526,7 @@ public sealed class BackupRepository : IDisposable
             if (!verifyOnly && destDir is not null)
             {
                 string linkPath = ResolveRestorePath(destDir, entry.Path);
+                AssertNoReparsePoints(destDir, linkPath, includeLeaf: false);
                 Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
                 if (File.Exists(linkPath) || Directory.Exists(linkPath))
                     File.Delete(linkPath);
@@ -1481,6 +1544,7 @@ public sealed class BackupRepository : IDisposable
             if (!verifyOnly && destDir is not null)
             {
                 outPath = ResolveRestorePath(destDir, entry.Path);
+                AssertNoReparsePoints(destDir, outPath, includeLeaf: true);
                 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
                 // Write to temp file first; rename to final path only after
                 // hash verification succeeds. This is atomic on the same
