@@ -78,9 +78,9 @@ public sealed class ServiceTests : IDisposable
     {
         // The example shipped in the MSI seeds fresh installs. If it fails
         // strict JSON parsing, the service can't start on a new machine.
-        // Locate it relative to the test assembly: ../../../../src/UsenetBackup.Service/
+        // Locate it relative to the test assembly: ../../../../../src/UsenetBackup.Service/
         string? dir = Path.GetDirectoryName(typeof(ServiceTests).Assembly.Location);
-        string example = Path.GetFullPath(Path.Combine(dir!, "..", "..", "..", "..",
+        string example = Path.GetFullPath(Path.Combine(dir!, "..", "..", "..", "..", "..",
             "src", "UsenetBackup.Service", "service.example.json"));
         Assert.True(File.Exists(example), $"Example not found at {example}");
         var config = ServiceConfig.Load(example);

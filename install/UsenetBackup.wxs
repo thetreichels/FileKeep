@@ -135,6 +135,11 @@
       <ComponentRef Id="DashboardShortcut" />
     </Feature>
 
+    <!-- Standard install wizard (welcome, install dir, verify, progress).
+         Without this the MSI installs with no UI at all. -->
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
     <!-- Add/Remove Programs icon -->
     <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />
     <Property Id="ARPPRODUCTICON" Value="FileKeepIcon" />

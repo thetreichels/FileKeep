@@ -155,7 +155,7 @@ Write-Host "Building VSS helper..."
 & "$srcRoot\src\UsenetBackup.VssHelper\build-vss-helper.ps1"
 if ($LASTEXITCODE -ne 0) { throw "VSS helper build failed" }
 
-wix build -arch x64 -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d VssBin=$srcRoot\src\UsenetBackup.VssHelper -o C:\ub\filekeep-0.8.4.msi install/UsenetBackup.wxs
+wix build -arch x64 -ext WixToolset.UI.wixext -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d VssBin=$srcRoot\src\UsenetBackup.VssHelper -o C:\ub\filekeep-0.8.4.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item C:\ub\filekeep-0.8.4.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)

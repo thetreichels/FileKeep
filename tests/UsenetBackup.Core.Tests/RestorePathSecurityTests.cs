@@ -176,11 +176,16 @@ public sealed class RestorePathSecurityTests : IDisposable
                 Size = 5,
                 Sha256 = sha,
                 Chunks = chunks,
+                MtimeUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc),
             });
         });
 
         using var repo = BackupRepository.Open(_repoDir, Passphrase);
-        repo.Restore(backupId, dest);
+        // The two-pass restore defeats the attack: pass 1 writes pwned.txt
+        // into a real restored/evil/ directory, and pass 2 then cannot
+        // replace that directory with the attacker's symlink, so the
+        // restore fails closed. The canary must never appear outside dest.
+        Assert.Throws<InvalidDataException>(() => repo.Restore(backupId, dest));
         Assert.False(File.Exists(canary),
             "Symlink redirect attack wrote outside the restore directory!");
     }
