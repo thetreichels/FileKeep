@@ -78,11 +78,6 @@ public sealed class RecoveryWizard : Form
     private readonly TextBox _restoreDest = new();
     private readonly ComboBox _drivePicker = new();
     private readonly Label _driveDetail = new();
-    private readonly Label _policyCaption = new();
-    private readonly RadioButton _policySkip = new();
-    private readonly RadioButton _policyOverwrite = new();
-    private readonly RadioButton _policyNewer = new();
-    private readonly Label _policyInfo = new();
     private readonly ProgressBar _restoreProgress = new();
     private readonly TextBox _restoreLog = new();
     private readonly Button _restoreStart = new();
@@ -936,38 +931,6 @@ public sealed class RecoveryWizard : Form
         };
         p.Controls.Add(destBrowse);
 
-        // Merge policy chooser (file-restore mode only): what to do when a
-        // file already exists in the destination.
-        _policyCaption.Text = "If a file already exists in the destination:";
-        _policyCaption.AutoSize = true;
-        _policyCaption.Location = new Point(16, 142);
-        p.Controls.Add(_policyCaption);
-
-        _policySkip.Text = MergePolicyInfo.DisplayName(MergePolicy.SkipDiffering);
-        _policySkip.Location = new Point(32, 164);
-        _policySkip.AutoSize = true;
-        _policySkip.Checked = true;
-        _policySkip.CheckedChanged += (_, _) => UpdatePolicyInfo();
-        p.Controls.Add(_policySkip);
-
-        _policyOverwrite.Text = MergePolicyInfo.DisplayName(MergePolicy.Overwrite);
-        _policyOverwrite.Location = new Point(32, 188);
-        _policyOverwrite.AutoSize = true;
-        _policyOverwrite.CheckedChanged += (_, _) => UpdatePolicyInfo();
-        p.Controls.Add(_policyOverwrite);
-
-        _policyNewer.Text = MergePolicyInfo.DisplayName(MergePolicy.KeepNewer);
-        _policyNewer.Location = new Point(32, 212);
-        _policyNewer.AutoSize = true;
-        _policyNewer.CheckedChanged += (_, _) => UpdatePolicyInfo();
-        p.Controls.Add(_policyNewer);
-
-        _policyInfo.Location = new Point(32, 238);
-        _policyInfo.Size = new Size(528, 60);
-        _policyInfo.AutoSize = false;
-        p.Controls.Add(_policyInfo);
-        UpdatePolicyInfo();
-
         // Drive picker (disk restore mode)
         var driveLbl = new Label { Text = "Target drive:", AutoSize = true, Location = new Point(16, 144) };
         driveLbl.Name = "driveLbl";
@@ -1040,28 +1003,11 @@ public sealed class RecoveryWizard : Form
         }
     }
 
-    private MergePolicy SelectedPolicy =>
-        _policyNewer.Checked ? MergePolicy.KeepNewer :
-        _policyOverwrite.Checked ? MergePolicy.Overwrite :
-        MergePolicy.SkipDiffering;
-
-    private void UpdatePolicyInfo()
-    {
-        _policyInfo.Text = MergePolicyInfo.Description(SelectedPolicy);
-    }
-
     private void UpdateRestoreMode()
     {
         bool disk = _restoreDisk.Checked;
         _drivePicker.Enabled = disk;
         _restoreDest.Enabled = !disk;
-        // Merge policy only applies to file restore; the drive controls
-        // only apply to disk restore.
-        _policyCaption.Visible = !disk;
-        _policySkip.Visible = !disk;
-        _policyOverwrite.Visible = !disk;
-        _policyNewer.Visible = !disk;
-        _policyInfo.Visible = !disk;
         // Show/hide drive controls vs folder controls
         foreach (Control c in Controls)
         {
@@ -1122,14 +1068,8 @@ public sealed class RecoveryWizard : Form
             {
                 if (string.IsNullOrWhiteSpace(_restoreDest.Text))
                     throw new InvalidOperationException("Choose a destination folder.");
-                var policy = SelectedPolicy;
-                var result = await Task.Run(() => _state.RestoreFiles(_restoreDest.Text, policy, ReportSmb));
-                _restoreLog.Text = $"File restore complete: {result.RestoredFiles} file(s) restored.";
-                if (result.SkippedIdentical > 0)
-                    _restoreLog.Text += $" {result.SkippedIdentical} already matched.";
-                if (result.SkippedDiffering.Count > 0)
-                    _restoreLog.Text += $" {result.SkippedDiffering.Count} differing file(s) left alone: " +
-                        string.Join(", ", result.SkippedDiffering);
+                await Task.Run(() => _state.RestoreFiles(_restoreDest.Text, ReportSmb));
+                _restoreLog.Text = "File restore complete.";
             }
             else
             {

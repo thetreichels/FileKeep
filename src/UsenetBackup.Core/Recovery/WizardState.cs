@@ -200,22 +200,13 @@ public sealed class WizardState : IDisposable
         return OpenRepo().Verify(SelectedBackupId);
     }
 
-    /// <summary>Restores files to a directory (classic snapshot/overwrite behavior).</summary>
-    public void RestoreFiles(string destDir, Action<int, int>? progress = null) =>
-        RestoreFiles(destDir, MergePolicy.Overwrite, progress);
-
-    /// <summary>
-    /// Restores files to a directory. <paramref name="policy"/> decides what
-    /// happens when a file already exists in the destination (chosen by the
-    /// user on the wizard's restore page). Returns the restore outcome so
-    /// the UI can report skipped files.
-    /// </summary>
-    public RestoreResult RestoreFiles(string destDir, MergePolicy policy, Action<int, int>? progress = null)
+    /// <summary>Restores files to a directory.</summary>
+    public void RestoreFiles(string destDir, Action<int, int>? progress = null)
     {
         if (SelectedBackupId is null)
             throw new InvalidOperationException("Select a backup first.");
         EnsureSmbChunks(progress);
-        return OpenRepo().Restore(SelectedBackupId, destDir, new RestoreOptions { MergePolicy = policy });
+        OpenRepo().Restore(SelectedBackupId, destDir);
     }
 
     /// <summary>

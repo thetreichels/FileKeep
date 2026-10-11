@@ -166,10 +166,7 @@ public static class Dashboard
             string destDir = GetBodyString(body, "destDir");
             string smbShare = body.TryGetProperty("smbShare", out var ss) ? ss.GetString() ?? "" : "";
             string smbUser = body.TryGetProperty("smbUser", out var su) ? su.GetString() ?? "" : "";
-            string mergePolicyRaw = body.TryGetProperty("mergePolicy", out var mpol) ? mpol.GetString() ?? "" : "";
-            // Unknown/absent policy falls back to Overwrite (classic behavior).
-            UsenetBackup.Core.MergePolicyInfo.TryParse(mergePolicyRaw, out var mergePolicy);
-            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser);
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, smbShare, smbUser);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -781,7 +778,6 @@ public static class DashboardApi
     /// </summary>
     public static (int Status, object Payload) StartRestore(
         ServiceConfig config, string repo, string backupId, string destDir,
-        UsenetBackup.Core.MergePolicy mergePolicy,
         string? smbShare = null, string? smbUser = null)
     {
         if (!IsKnownRepo(config, repo))
@@ -824,12 +820,8 @@ public static class DashboardApi
                     ws.EnsureSmbChunks();
                 }
                 using var r = BackupRepository.Open(repo, passphrase);
-                var restoreOptions = new UsenetBackup.Core.RestoreOptions { MergePolicy = mergePolicy };
-                var restoreResult = r.Restore(backupId, destDir, restoreOptions);
-                OperationLog.Append(repo, "manual-restore",
-                    $"backupId={backupId} dest={destDir} policy={mergePolicy} " +
-                    $"restored={restoreResult.RestoredFiles} " +
-                    $"skippedDiffering={restoreResult.SkippedDiffering.Count} OK");
+                r.Restore(backupId, destDir);
+                OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} OK");
             }
             catch (Exception ex)
             {
@@ -2119,16 +2111,6 @@ public static class DashboardHtml
                   <input id="restore-smb" placeholder="SMB share (optional, e.g. \\NAS\backups)" style="flex:1">
                   <input id="restore-smb-user" placeholder="Username (optional)" style="width:160px">
                 </div>
-                <div class="row" style="margin-top:4px">
-                  <label>If a file already exists:
-                    <select id="restore-policy" title="What to do when the destination already has the file">
-                      <option value="skip" selected>Skip files that differ (recommended)</option>
-                      <option value="overwrite">Overwrite with the backup's copies</option>
-                      <option value="newer">Keep whichever file is newer</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="meta">Skip: existing files are never overwritten; differing files are listed in the Operations log. Overwrite: classic snapshot restore. Newer: keeps the newer copy by modification date.</div>
                 <div class="meta">If chunks are missing locally, enter the SMB share to pull them from (uses the job's saved SMB password).</div>
               </div>
               <div class="card">
@@ -2486,10 +2468,9 @@ public static class DashboardHtml
           const destDir = document.getElementById('restore-dest').value.trim();
           const smbShare = document.getElementById('restore-smb').value.trim();
           const smbUser = document.getElementById('restore-smb-user').value.trim();
-          const mergePolicy = document.getElementById('restore-policy').value;
           if (!backupId) { alert('Select a backup.'); return; }
           if (!destDir) { alert('Enter a destination folder.'); return; }
-          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir, smbShare, smbUser, mergePolicy }) });
+          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir, smbShare, smbUser }) });
           alert('Restore started in the background. Watch the Operations log.');
         }
         async function startAdhocBackup() {

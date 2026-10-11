@@ -53,8 +53,7 @@ static void PrintUsage()
           usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES]
           usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
-          usenet-backup restore <repo> <backup-id> <dest-dir> [--store URL]
-              [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]
+          usenet-backup restore <repo> <backup-id> <dest-dir>
           usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
           usenet-backup verify <repo> <backup-id>
           usenet-backup list <repo>
@@ -185,15 +184,6 @@ static string? GetOption(string[] args, string name)
     return null;
 }
 
-static string[] GetOptions(string[] args, string name)
-{
-    var values = new List<string>();
-    for (int i = 0; i < args.Length - 1; i++)
-        if (args[i] == name)
-            values.Add(args[i + 1]);
-    return values.ToArray();
-}
-
 static string[] Positionals(string[] args) =>
     args.Where((a, i) => !(a.StartsWith("--") || (i > 0 && args[i - 1].StartsWith("--")))).ToArray();
 
@@ -309,7 +299,7 @@ static int RestoreDisk(string[] args)
 static int Restore(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--store URL] [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]"); return 2; }
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--store URL]"); return 2; }
     string? storeUrl = GetOption(args, "--store");
     // The LAN store's read cap is tightened to this repo's chunk-size-derived
     // bound once the repo (and its config) is open.
@@ -319,39 +309,8 @@ static int Restore(string[] args)
         : BackupRepository.Open(pos[0], GetPassphrase(args));
     if (lanStore is not null)
         lanStore.MaxDownloadBytes = repo.MaxDownloadBytes;
-    var options = new UsenetBackup.Core.RestoreOptions();
-    options.Include.AddRange(GetOptions(args, "--include"));
-    options.Exclude.AddRange(GetOptions(args, "--exclude"));
-    // What to do when a file already exists in the destination. --merge is
-    // shorthand for --merge-policy skip.
-    string? policyArg = GetOption(args, "--merge-policy");
-    if (policyArg is not null)
-    {
-        if (!UsenetBackup.Core.MergePolicyInfo.TryParse(policyArg, out var policy))
-        {
-            Console.Error.WriteLine("error: --merge-policy must be one of: skip, overwrite, newer");
-            Console.Error.WriteLine("  skip      - " + UsenetBackup.Core.MergePolicyInfo.Description(UsenetBackup.Core.MergePolicy.SkipDiffering));
-            Console.Error.WriteLine("  overwrite - " + UsenetBackup.Core.MergePolicyInfo.Description(UsenetBackup.Core.MergePolicy.Overwrite));
-            Console.Error.WriteLine("  newer     - " + UsenetBackup.Core.MergePolicyInfo.Description(UsenetBackup.Core.MergePolicy.KeepNewer));
-            return 2;
-        }
-        options.MergePolicy = policy;
-    }
-    else if (HasFlag(args, "--merge"))
-    {
-        options.MergePolicy = UsenetBackup.Core.MergePolicy.SkipDiffering;
-    }
-    var result = repo.Restore(pos[1], pos[2], options);
+    repo.Restore(pos[1], pos[2]);
     Console.WriteLine($"Restored backup {pos[1]} to {Path.GetFullPath(pos[2])}.");
-    if (options.MergePolicy != UsenetBackup.Core.MergePolicy.Overwrite ||
-        options.Include.Count > 0 || options.Exclude.Count > 0)
-    {
-        Console.WriteLine($"  files restored: {result.RestoredFiles}, " +
-            $"skipped identical: {result.SkippedIdentical}, " +
-            $"skipped differing: {result.SkippedDiffering.Count}");
-        foreach (string skipped in result.SkippedDiffering)
-            Console.WriteLine($"  skipped (differs): {skipped}");
-    }
     return 0;
 }
 
