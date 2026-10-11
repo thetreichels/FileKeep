@@ -272,7 +272,10 @@ public sealed class RestorePathSecurityTests : IDisposable
         string dest = Path.Combine(_workDir, "restored");
         using (var repo = BackupRepository.Open(_repoDir, Passphrase))
             repo.Restore(backupA, dest);
-        Assert.True(Directory.Exists(Path.Combine(dest, "evil")));
+        // Planted via File.CreateSymbolicLink, which on Windows creates a
+        // file-type link even for directory targets (Directory.Exists would
+        // be false); assert the link itself exists either way.
+        Assert.NotNull(new FileInfo(Path.Combine(dest, "evil")).LinkTarget);
 
         PoisonManifest(backupB, m => m.Files[0].Path = "evil/pwned.txt");
         using (var repo = BackupRepository.Open(_repoDir, Passphrase))
