@@ -43,6 +43,32 @@ public static class Dashboard
 
         app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
 
+        // Windows known user folders (Documents, Pictures, etc.) for the GUI's
+        // quick-pick. Uses Environment.GetFolderPath (SHGetKnownFolderPath wrapper).
+        app.MapGet("/api/user-folders", () =>
+        {
+            var folders = new List<object>();
+            var known = new (string name, Environment.SpecialFolder folder)[]
+            {
+                ("Desktop", Environment.SpecialFolder.Desktop),
+                ("Documents", Environment.SpecialFolder.MyDocuments),
+                ("Pictures", Environment.SpecialFolder.MyPictures),
+                ("Music", Environment.SpecialFolder.MyMusic),
+                ("Videos", Environment.SpecialFolder.MyVideos),
+                ("Downloads", Environment.SpecialFolder.UserProfile),
+            };
+            foreach (var (name, sf) in known)
+            {
+                string path = "";
+                try { path = Environment.GetFolderPath(sf); } catch { }
+                if (name == "Downloads" && !string.IsNullOrEmpty(path))
+                    path = Path.Combine(path, "Downloads");
+                if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+                    folders.Add(new { name, path });
+            }
+            return Results.Json(folders);
+        });
+
         app.MapPost("/api/jobs/{name}/run", (string name, HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -2198,16 +2224,26 @@ public static class DashboardHtml
               </div>
               <div class="card" id="jobFormCard" style="display:none">
                 <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
+                <!-- Quick pick from Windows user folders -->
+                <div id="jf-quickpick" style="margin-bottom:12px">
+                  <div class="meta" style="margin-bottom:6px">Quick pick a folder to back up:</div>
+                  <div id="jf-userfolders" style="display:flex;flex-wrap:wrap;gap:8px"><p style="color:var(--text-2)">Loading…</p></div>
+                </div>
                 <div class="form-grid">
                   <label>Name<input id="jf-name" type="text" placeholder="Documents"></label>
-                  <label>Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="C:\Users\You\Documents"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
-                  <label>Repository folder<span class="folder-row"><input id="jf-repo" type="text" placeholder="D:\Backups\Documents"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
+                  <label>Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+                  <label>Repository folder<span class="folder-row"><input id="jf-repo" type="text" placeholder="Where to store the backup"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
                   <label>Schedule<select id="jf-schedType">
                     <option value="daily">Daily at…</option>
                     <option value="interval">Every N minutes</option>
                   </select></label>
                   <label id="jf-dailyWrap">Time (HH:mm)<input id="jf-daily" type="time" value="02:00"></label>
                   <label id="jf-intervalWrap" style="display:none">Minutes<input id="jf-interval" type="number" min="5" value="60"></label>
+                </div>
+                <div style="margin:12px 0">
+                  <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle">Show advanced settings ▸</button>
+                </div>
+                <div class="form-grid" id="jf-advanced" style="display:none">
                   <label>Mode<select id="jf-mode">
                     <option value="incremental">Incremental</option>
                     <option value="full">Full</option>
@@ -2291,6 +2327,36 @@ public static class DashboardHtml
               if (path) document.getElementById(inputId).value = path;
             } catch (e) { /* dialog unavailable; leave the typed value */ }
           }
+        }
+        // Toggle advanced job settings.
+        function toggleAdvancedJob() {
+          const adv = document.getElementById('jf-advanced');
+          const btn = document.getElementById('jf-advToggle');
+          const show = adv.style.display === 'none';
+          adv.style.display = show ? '' : 'none';
+          btn.textContent = show ? 'Hide advanced settings ▾' : 'Show advanced settings ▸';
+        }
+        // Load Windows user folders for quick-pick.
+        async function loadUserFolders() {
+          const box = document.getElementById('jf-userfolders');
+          if (!box) return;
+          try {
+            const folders = await api('/api/user-folders');
+            if (!folders.length) {
+              box.innerHTML = '<p style="color:var(--text-2)">No user folders found.</p>';
+              return;
+            }
+            box.innerHTML = folders.map(f =>
+              `<button type="button" onclick="pickUserFolder('${esc(f.path)}', '${esc(f.name)}')">📁 ${esc(f.name)}</button>`
+            ).join('');
+          } catch (e) {
+            box.innerHTML = '<p style="color:var(--text-2)">Could not load user folders.</p>';
+          }
+        }
+        function pickUserFolder(path, name) {
+          document.getElementById('jf-source').value = path;
+          const nameInput = document.getElementById('jf-name');
+          if (!nameInput.value) nameInput.value = name;
         }
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
         async function api(path, opts) {
@@ -2908,6 +2974,11 @@ public static class DashboardHtml
         function showJobForm(job) {
           editingJob = job ? job.name : null;
           document.getElementById('jobFormTitle').textContent = job ? 'Edit backup job' : 'Add backup job';
+          // Reset advanced section to collapsed for a clean simple view.
+          document.getElementById('jf-advanced').style.display = 'none';
+          document.getElementById('jf-advToggle').textContent = 'Show advanced settings ▸';
+          // Load Windows user folders for quick-pick.
+          loadUserFolders();
           document.getElementById('jf-name').value = job ? job.name : '';
           document.getElementById('jf-name').disabled = !!job;
           document.getElementById('jf-source').value = job ? job.source : '';
