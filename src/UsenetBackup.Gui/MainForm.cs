@@ -111,7 +111,15 @@ public class MainForm : Form
     {
         try
         {
-            await _webView.EnsureCoreWebView2Async();
+            // WebView2 needs a writable user data folder. The default is next
+            // to the executable (Program Files — not writable), which fails
+            // with E_ACCESSDENIED. Use LocalAppData instead.
+            string userDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FileKeep", "WebView2");
+            Directory.CreateDirectory(userDataFolder);
+            var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
+            await _webView.EnsureCoreWebView2Async(env);
 
             // Expose native dialogs to JavaScript as window.chrome.webview.hostObjects.fileKeep
             _webView.CoreWebView2.AddHostObjectToScript("fileKeep", new NativeBridge(this));
