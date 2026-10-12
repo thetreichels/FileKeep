@@ -286,7 +286,8 @@ Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.5.msi", "/qn" -Wai
 Start-Sleep 15
 foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
                  "C:\Program Files\FileKeep\service\FileKeepService.exe",
-                 "C:\Program Files\FileKeep\wizard\FileKeepRecovery.exe")) {
+                 "C:\Program Files\FileKeep\wizard\FileKeepRecovery.exe",
+                 "C:\Program Files\FileKeep\gui\FileKeepGui.exe")) {
     if (Test-Path $c) { Write-Host "  OK installed: $c" } else { throw "MISSING after install: $c" }
 }
 $svc = sc.exe query FileKeep
