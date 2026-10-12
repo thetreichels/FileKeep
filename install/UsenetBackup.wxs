@@ -23,6 +23,7 @@
       <Directory Id="INSTALLFOLDER" Name="FileKeep">
         <Directory Id="CLIDIR" Name="cli" />
         <Directory Id="SERVICEDIR" Name="service" />
+        <Directory Id="GUIDIR" Name="gui" />
         <Directory Id="WIZARDDIR" Name="wizard" />
         <Directory Id="DOCSDIR" Name="docs" />
         <Directory Id="WINREDIR" Name="winre" />
@@ -34,16 +35,15 @@
       <Directory Id="APPDATADIR" Name="FileKeep" />
     </StandardDirectory>
 
-    <!-- Start menu shortcut: opens the dashboard (served by the FileKeep service) -->
+    <!-- Start menu shortcut: launches the native FileKeep GUI app -->
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="AppStartMenu" Name="FileKeep">
         <Component Id="DashboardShortcut" Guid="*" Directory="AppStartMenu">
           <Shortcut Id="DashboardShortcut"
                     Name="FileKeep"
-                    Description="Open the FileKeep dashboard"
-                    Target="[System64Folder]cmd.exe"
-                    Arguments="/c start http://127.0.0.1:15789"
-                    WorkingDirectory="INSTALLFOLDER" />
+                    Description="Open FileKeep"
+                    Target="[#GuiExeFile]"
+                    WorkingDirectory="GUIDIR" />
           <RemoveFolder Id="RemoveAppStartMenu" Directory="AppStartMenu" On="uninstall" />
           <RegistryValue Root="HKCU"
                          Key="Software\FileKeep"
@@ -62,6 +62,13 @@
         <File Id="VssHelperExe" Source="$(var.VssBin)\FileKeepVss.exe" />
         <RemoveFile Id="RemoveCliPdb" Directory="CLIDIR" Name="*.pdb" On="uninstall" />
         <RemoveFolder Id="RemoveCliDir" Directory="CLIDIR" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="GuiFiles" Directory="GUIDIR">
+      <Component Id="GuiExe" Guid="*">
+        <File Id="GuiExeFile" Source="$(var.GuiBin)\FileKeepGui.exe" KeyPath="yes" />
+        <RemoveFolder Id="RemoveGuiDir" Directory="GUIDIR" On="uninstall" />
       </Component>
     </ComponentGroup>
 
@@ -129,6 +136,7 @@
 
     <Feature Id="ProductFeature" Title="FileKeep" Level="1">
       <ComponentGroupRef Id="CliFiles" />
+      <ComponentGroupRef Id="GuiFiles" />
       <ComponentGroupRef Id="ServiceRegistration" />
       <ComponentGroupRef Id="RecoveryFiles" />
       <ComponentGroupRef Id="Docs" />

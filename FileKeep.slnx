@@ -4,6 +4,7 @@
     <Project Path="src/UsenetBackup.Core/UsenetBackup.Core.csproj" />
     <Project Path="src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj" />
     <Project Path="src/UsenetBackup.Service/UsenetBackup.Service.csproj" />
+    <Project Path="src/UsenetBackup.Gui/UsenetBackup.Gui.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/UsenetBackup.Core.Tests/UsenetBackup.Core.Tests.csproj" />

@@ -1848,6 +1848,10 @@ public static class DashboardHtml
             --ok: #107c10;
             --bad: #c42b1c;
           }
+          /* Folder picker row: text input + Browse button side by side. */
+          .folder-row { display: flex; gap: 6px; align-items: center; }
+          .folder-row input { flex: 1; min-width: 0; }
+          .browse-btn { white-space: nowrap; }
           * { box-sizing: border-box; }
           body {
             font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -2104,7 +2108,7 @@ public static class DashboardHtml
                 <div class="meta">Restore a backup's files to a destination folder.</div>
                 <div class="row" style="margin-top:8px">
                   <select id="restore-backup"><option value="">Select backup…</option></select>
-                  <input id="restore-dest" placeholder="C:\Restore" style="flex:1">
+                  <span class="folder-row" style="flex:1"><input id="restore-dest" placeholder="C:\Restore" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('restore-dest', 'Select restore destination')">Browse…</button></span>
                   <button onclick="startRestore()">Restore</button>
                 </div>
                 <div class="row" style="margin-top:4px">
@@ -2191,8 +2195,8 @@ public static class DashboardHtml
                 <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
                 <div class="form-grid">
                   <label>Name<input id="jf-name" type="text" placeholder="Documents"></label>
-                  <label>Source folder<input id="jf-source" type="text" placeholder="C:\Users\You\Documents"></label>
-                  <label>Repository folder<input id="jf-repo" type="text" placeholder="D:\Backups\Documents"></label>
+                  <label>Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="C:\Users\You\Documents"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+                  <label>Repository folder<span class="folder-row"><input id="jf-repo" type="text" placeholder="D:\Backups\Documents"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
                   <label>Schedule<select id="jf-schedType">
                     <option value="daily">Daily at…</option>
                     <option value="interval">Every N minutes</option>
@@ -2256,7 +2260,7 @@ public static class DashboardHtml
                   <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
                 </div>
                 <div class="form-grid" id="lf-smb-fields" style="display:none">
-                  <label>Share (UNC path)<input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"></label>
+                  <label>Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
                   <label>Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
                   <label>Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
                 </div>
@@ -2273,6 +2277,16 @@ public static class DashboardHtml
           </main>
         </div>
         <script>
+        // Native folder picker: uses the FileKeep GUI's native dialog when available,
+        // otherwise does nothing (user types the path manually in a plain browser).
+        async function browseFolder(inputId, title) {
+          if (typeof window.fileKeepPickFolder === 'function') {
+            try {
+              const path = await window.fileKeepPickFolder(title || 'Select a folder');
+              if (path) document.getElementById(inputId).value = path;
+            } catch (e) { /* dialog unavailable; leave the typed value */ }
+          }
+        }
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
         async function api(path, opts) {
           opts = opts || {};
