@@ -1528,8 +1528,15 @@ public static class DashboardApi
     {
         if (string.IsNullOrWhiteSpace(job.Name))
             return (400, new { error = "Job name is required." });
+        // Default the repo to AppData when not specified: the repo is
+        // FileKeep's internal storage and users shouldn't have to pick it.
         if (string.IsNullOrWhiteSpace(job.Repo))
-            return (400, new { error = "Repo path is required." });
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            // Sanitize job name for use as a directory name.
+            string safeName = string.Concat(job.Name.Split(Path.GetInvalidFileNameChars()));
+            job.Repo = Path.Combine(appData, "FileKeep", "repos", safeName);
+        }
         if (string.IsNullOrWhiteSpace(job.Source))
             return (400, new { error = "Source path is required." });
         // Validate schedule format and mode via a temporary config.
@@ -2232,7 +2239,6 @@ public static class DashboardHtml
                 <div class="form-grid">
                   <label>Name<input id="jf-name" type="text" placeholder="Documents"></label>
                   <label>Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
-                  <label>Repository folder<span class="folder-row"><input id="jf-repo" type="text" placeholder="Where to store the backup"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
                   <label>Schedule<select id="jf-schedType">
                     <option value="daily">Daily at…</option>
                     <option value="interval">Every N minutes</option>
@@ -2244,6 +2250,7 @@ public static class DashboardHtml
                   <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle">Show advanced settings ▸</button>
                 </div>
                 <div class="form-grid" id="jf-advanced" style="display:none">
+                  <label>Repository folder (optional, defaults to AppData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
                   <label>Mode<select id="jf-mode">
                     <option value="incremental">Incremental</option>
                     <option value="full">Full</option>
