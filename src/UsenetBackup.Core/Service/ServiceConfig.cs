@@ -535,8 +535,9 @@ public sealed class ServiceConfig
             throw new InvalidOperationException($"dashboardPort {DashboardPort} is out of range.");
         if (string.IsNullOrWhiteSpace(DashboardBind))
             throw new InvalidOperationException("dashboardBind must not be empty.");
-        if (Jobs.Count == 0)
-            throw new InvalidOperationException("Service config defines no jobs.");
+        // Empty jobs are valid: a fresh install has no jobs yet, and the
+        // dashboard is used to create the first one. The service must start
+        // so the dashboard is available.
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var job in Jobs)
         {

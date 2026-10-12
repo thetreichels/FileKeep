@@ -99,18 +99,25 @@ public sealed class ServiceTests : IDisposable
     }
 
     [Fact]
-    public void Config_RejectsDuplicateNamesNoJobsAndBadMode()
+    public void Config_RejectsDuplicateNamesAndBadMode()
     {
         string dup = ValidConfigJson().Replace("\"name\": \"docs\"", "\"name\": \"DOCS\"");
         // Two jobs with the same name (case-insensitive).
         string two = dup.Replace("]", ",{\"name\":\"docs\",\"repo\":\"r\",\"source\":\"s\",\"schedule\":\"interval 60\"}]");
         Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(WriteConfig(_workDir, two)));
 
-        string noJobs = """{ "jobs": [] }""";
-        Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(WriteConfig(_workDir, noJobs)));
-
         Assert.Throws<InvalidOperationException>(() =>
             ServiceConfig.Load(WriteConfig(_workDir, ValidConfigJson(mode: "sometimes"))));
+    }
+
+    [Fact]
+    public void Config_AllowsEmptyJobs()
+    {
+        // A fresh install has no jobs yet; the service must start so the
+        // dashboard is available for creating the first job.
+        string noJobs = """{ "jobs": [] }""";
+        var config = ServiceConfig.Load(WriteConfig(_workDir, noJobs));
+        Assert.Empty(config.Jobs);
     }
 
     [Fact]
