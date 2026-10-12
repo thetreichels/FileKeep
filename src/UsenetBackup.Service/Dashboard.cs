@@ -1528,14 +1528,17 @@ public static class DashboardApi
     {
         if (string.IsNullOrWhiteSpace(job.Name))
             return (400, new { error = "Job name is required." });
-        // Default the repo to AppData when not specified: the repo is
+        // Default the repo to ProgramData when not specified: the repo is
         // FileKeep's internal storage and users shouldn't have to pick it.
+        // ProgramData (not LocalAppData) because the service — not the user —
+        // runs the backups; LocalAppData would resolve to the service account's
+        // profile instead of the user's.
         if (string.IsNullOrWhiteSpace(job.Repo))
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             // Sanitize job name for use as a directory name.
             string safeName = string.Concat(job.Name.Split(Path.GetInvalidFileNameChars()));
-            job.Repo = Path.Combine(appData, "FileKeep", "repos", safeName);
+            job.Repo = Path.Combine(programData, "FileKeep", "repos", safeName);
         }
         if (string.IsNullOrWhiteSpace(job.Source))
             return (400, new { error = "Source path is required." });
@@ -2250,7 +2253,7 @@ public static class DashboardHtml
                   <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle">Show advanced settings ▸</button>
                 </div>
                 <div class="form-grid" id="jf-advanced" style="display:none">
-                  <label>Repository folder (optional, defaults to AppData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
+                  <label>Repository folder (optional, defaults to ProgramData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
                   <label>Mode<select id="jf-mode">
                     <option value="incremental">Incremental</option>
                     <option value="full">Full</option>
