@@ -2033,6 +2033,11 @@ public static class DashboardHtml
                 <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
               </div>
               <div class="card">
+                <h2 style="margin-top:0">Backup destinations</h2>
+                <p style="color:var(--text-2);margin-top:0">Everywhere backup data is kept — the local repository plus all configured Usenet providers and network shares.</p>
+                <div id="destinations-list"><p style="color:var(--text-2)">Loading…</p></div>
+              </div>
+              <div class="card">
                 <div class="row">
                   <div class="grow">
                     <div class="name">Discover from Usenet</div>
@@ -2453,6 +2458,8 @@ public static class DashboardHtml
               || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
           } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
           document.getElementById('remoteBackups').innerHTML = '';
+          // Refresh the destinations card with the current repo path.
+          if (typeof renderDestinations === 'function') renderDestinations(cachedLocations);
           // Populate the Operations-view backup selectors.
           const rb = document.getElementById('restore-backup');
           rb.innerHTML = '<option value="">Select backup…</option>' +
@@ -2729,6 +2736,51 @@ public static class DashboardHtml
             </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
           // Load backup locations
           renderLocations(cfg.locations || []);
+          renderDestinations(cfg.locations || []);
+        }
+        // ---- Backup destinations: everywhere backup data is kept ----
+        let cachedLocations = [];
+        function renderDestinations(locations) {
+          cachedLocations = locations;
+          const box = document.getElementById('destinations-list');
+          if (!box) return;
+          const repoSel = document.getElementById('repo');
+          const repoPath = repoSel && repoSel.value ? repoSel.value : '';
+          const nntp = locations.filter(l => l.type === 'nntp');
+          const smb = locations.filter(l => l.type === 'smb');
+          let html = '';
+          // Local repository
+          html += `<div class="row">
+            <div style="font-size:20px">🖥️</div>
+            <div class="grow">
+              <div class="name">Local repository <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">local</span></div>
+              <div class="meta" style="font-family:monospace">${repoPath ? esc(repoPath) : 'Select a repository above'}</div>
+            </div>
+          </div>`;
+          // Usenet providers
+          nntp.forEach(l => {
+            html += `<div class="row">
+              <div style="font-size:20px">📡</div>
+              <div class="grow">
+                <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">usenet</span></div>
+                <div class="meta" style="font-family:monospace">${esc(l.host)}:${l.port}${l.ssl ? ' · SSL' : ''} · ${esc(l.newsgroup)}</div>
+              </div>
+            </div>`;
+          });
+          // Network shares
+          smb.forEach(l => {
+            html += `<div class="row">
+              <div style="font-size:20px">💾</div>
+              <div class="grow">
+                <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">network</span></div>
+                <div class="meta" style="font-family:monospace">${esc(l.share)}</div>
+              </div>
+            </div>`;
+          });
+          if (!nntp.length && !smb.length) {
+            html += '<p style="color:var(--text-2)">No Usenet providers or network shares configured. Add them in <b>Backup locations</b> below.</p>';
+          }
+          box.innerHTML = html;
         }
         // ---- Backup locations ----
         let editingLocation = null;
