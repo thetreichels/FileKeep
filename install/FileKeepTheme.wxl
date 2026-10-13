@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Caption">FileKeep Setup</String>
+  <String Id="Title">Installing FileKeep</String>
+  <String Id="Subtitle">Encrypted backups, stored on Usenet. Please wait…</String>
+  <String Id="ProgressLabel">Progress</String>
+  <String Id="StatusLabel"></String>
+  <String Id="CancelButton">Cancel</String>
+  <String Id="ConfirmCancelMessage">Are you sure you want to cancel the FileKeep installation?</String>
+  <String Id="RetryButton">&amp;Retry</String>
+  <String Id="RepairButton">&amp;Repair</String>
+  <String Id="UninstallButton">&amp;Uninstall</String>
+  <String Id="CloseButton">&amp;Close</String>
+  <String Id="InstallHeader">Install</String>
+  <String Id="RepairHeader">Repair</String>
+  <String Id="UninstallHeader">Uninstall</String>
+  <String Id="InstallVersion">Version [WixBundleVersion]</String>
+</WixLocalization>

@@ -55,6 +55,23 @@
       </Directory>
     </StandardDirectory>
 
+    <!-- Desktop shortcut: optional, same target as the Start menu entry -->
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*" Directory="DesktopFolder">
+        <Shortcut Id="DesktopShortcut"
+                  Name="FileKeep"
+                  Description="Open FileKeep"
+                  Target="[#GuiExeFile]"
+                  WorkingDirectory="GUIDIR" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\FileKeep"
+                       Name="DesktopShortcut"
+                       Value="1"
+                       Type="integer"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
     <!-- CLI (single-file exe; native SQLite is bundled inside) -->
     <ComponentGroup Id="CliFiles" Directory="CLIDIR">
       <Component Id="CliExe" Guid="*">
@@ -142,6 +159,7 @@
       <ComponentGroupRef Id="Docs" />
       <ComponentGroupRef Id="WinREFiles" />
       <ComponentRef Id="DashboardShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
     </Feature>
 
     <!-- Standard install wizard (welcome, install dir, verify, progress).
@@ -149,6 +167,16 @@
          NOTE (WiX v4+): the dialog set must be referenced via the UI
          extension's ui:WixUI element; the old v3 <UIRef> no longer resolves. -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <!-- Launch FileKeep when the installer finishes (checkbox on the exit dialog) -->
+    <Property Id="WixShellExecTarget" Value="[#GuiExeFile]" />
+    <CustomAction Id="LaunchFileKeep" BinaryRef="WixCA" DllEntry="WixShellExec"
+                  Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction"
+               Value="LaunchFileKeep">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1</Publish>
+    </UI>
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch FileKeep" />
 
     <!-- Add/Remove Programs icon -->
     <Icon Id="FileKeepIcon" SourceFile="$(var.SrcRoot)/assets/filekeep.ico" />

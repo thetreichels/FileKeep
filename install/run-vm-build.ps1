@@ -278,8 +278,16 @@ if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item C:\ub\filekeep-0.8.5.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
-Write-Host "=== 5/6 Signing MSI ==="
-Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.5.msi")
+# Branded Burn bootstrapper: splash screen with progress instead of the MSI wizard.
+# Copy the splash image next to the theme so the theme's ImageFile resolves.
+Copy-Item "$srcRoot\assets\filekeep-splash.png" "$srcRoot\install\filekeep-splash.png" -Force
+wix build -arch x64 -ext WixToolset.BootstrapperApplications.wixext -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.8.5.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
+$bundle = Get-Item C:\ub\FileKeep-Setup.exe
+Write-Host ("  Bundle built: {0:N0} bytes" -f $bundle.Length)
+
+Write-Host "=== 5/6 Signing MSI + bundle ==="
+Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.5.msi", "C:\ub\FileKeep-Setup.exe")
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
 Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.5.msi", "/qn" -Wait

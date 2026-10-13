@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileKeep branded Burn theme: splash screen with progress, no wizard.
+     Based on the WixStandardBootstrapperApplication HyperlinkSidebar theme
+     structure, stripped to a clean install-progress splash. -->
+<Theme xmlns="http://wixtoolset.org/schemas/thmutil/2010">
+  <Window Width="485" Height="300" HexStyle="100a0000" FontId="0">#(loc.Caption)</Window>
+  <Font Id="0" Height="-12" Weight="500" Foreground="000000" Background="FFFFFF">Segoe UI</Font>
+  <Font Id="1" Height="-22" Weight="500" Foreground="000000" Background="FFFFFF">Segoe UI</Font>
+  <Font Id="2" Height="-12" Weight="500" Foreground="666666" Background="FFFFFF">Segoe UI</Font>
+  <Font Id="3" Height="-12" Weight="500" Foreground="000000" Background="FFFFFF">Segoe UI</Font>
+
+  <Image X="0" Y="0" Width="485" Height="300" ImageFile="filekeep-splash.png" Visible="yes"/>
+
+  <!-- Title -->
+  <Text X="30" Y="30" Width="425" Height="30" FontId="1" Visible="yes">#(loc.Title)</Text>
+  <Text X="30" Y="62" Width="425" Height="20" FontId="2" Visible="yes">#(loc.Subtitle)</Text>
+
+  <!-- Progress -->
+  <Progressbar X="30" Y="180" Width="425" Height="15" FontId="3" Visible="yes"/>
+  <Text X="30" Y="200" Width="425" Height="17" FontId="2" Visible="yes">#(loc.ProgressLabel)</Text>
+
+  <!-- Status / error text -->
+  <Text X="30" Y="225" Width="425" Height="40" FontId="2" Visible="yes">#(loc.StatusLabel)</Text>
+
+  <!-- Cancel button -->
+  <Button X="380" Y="265" Width="75" Height="23" FontId="0" Visible="yes" TabStop="yes">#(loc.CancelButton)
+    <Text X="0" Y="0" Width="75" Height="23" FontId="0" HideWhenDisabled="yes">#(loc.CancelButton)</Text>
+  </Button>
+</Theme>

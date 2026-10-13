@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX Burn bundle for FileKeep: branded splash screen with progress.
+     Wraps the MSI built from UsenetBackup.wxs. The standard bootstrapper
+     application shows the custom FileKeep theme (install/FileKeepTheme.xml)
+     instead of the MSI wizard: logo, progress bar, status text, no dialogs.
+
+     Build on Windows after the MSI:
+       wix build -arch x64 -d MsiPath=C:\ub\filekeep-0.8.5.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="FileKeep"
+          Version="0.8.5"
+          Manufacturer="J. Treichel"
+          UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
+          IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        LicenseFile="$(var.SrcRoot)/install/gpl-3.0-license.rtf"
+        LogoFile="$(var.SrcRoot)/assets/filekeep-banner.bmp"
+        ThemeFile="$(var.SrcRoot)/install/FileKeepTheme.xml"
+        LocalizationFile="$(var.SrcRoot)/install/FileKeepTheme.wxl"
+        ShowVersion="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage SourceFile="$(var.MsiPath)"
+                  DisplayInternalUI="no"
+                  Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>
