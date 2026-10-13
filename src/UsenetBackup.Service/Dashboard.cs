@@ -280,10 +280,11 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string driveLetter = body.TryGetProperty("driveLetter", out var dl) ? dl.GetString() ?? "" : "";
+            int diskNumber = body.TryGetProperty("diskNumber", out var dn) && dn.ValueKind == JsonValueKind.Number ? dn.GetInt32() : -1;
             string imagePath = body.TryGetProperty("imagePath", out var ip) ? ip.GetString() ?? "" : "";
             string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
             string bootMode = body.TryGetProperty("bootMode", out var bm) ? bm.GetString() ?? "Both" : "Both";
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, imagePath, sourceDir, bootMode);
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -1243,7 +1244,7 @@ public static class DashboardApi
     /// USB mode (driveLetter): destructive, the target USB drive is formatted.
     /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
-    public static (int Status, object Payload) StartWinReBuild(string driveLetter, string imagePath, string? sourceDir, string bootMode)
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode)
     {
         if (!OperatingSystem.IsWindows())
             return (400, new { error = "WinRE recovery media creation requires Windows." });
@@ -1258,13 +1259,17 @@ public static class DashboardApi
         }
 
         bool imageMode = !string.IsNullOrWhiteSpace(imagePath);
-        if (imageMode && !string.IsNullOrWhiteSpace(driveLetter))
-            return (400, new { error = "Specify either a drive letter or an image path, not both." });
+        if (imageMode && (!string.IsNullOrWhiteSpace(driveLetter) || diskNumber >= 0))
+            return (400, new { error = "Specify either a USB target or an image path, not both." });
         if (!imageMode)
         {
             driveLetter = driveLetter.Trim().TrimEnd(':', '\\');
-            if (driveLetter.Length != 1 || !char.IsLetter(driveLetter[0]))
-                return (400, new { error = "driveLetter must be a single drive letter (e.g. E)." });
+            bool hasLetter = driveLetter.Length == 1 && char.IsLetter(driveLetter[0]);
+            bool hasDisk = diskNumber >= 0;
+            if (!hasLetter && !hasDisk)
+                return (400, new { error = "Select a USB drive." });
+            if (hasLetter && hasDisk)
+                return (400, new { error = "Specify either a drive letter or a disk number, not both." });
         }
         else
         {
@@ -1326,6 +1331,11 @@ public static class DashboardApi
                 {
                     psi.ArgumentList.Add("-ImagePath");
                     psi.ArgumentList.Add(imagePath);
+                }
+                else if (diskNumber >= 0)
+                {
+                    psi.ArgumentList.Add("-DiskNumber");
+                    psi.ArgumentList.Add(diskNumber.ToString());
                 }
                 else
                 {
@@ -2268,7 +2278,8 @@ public static class DashboardHtml
                   </label>
                 </div>
                 <div class="row" style="margin-top:8px" id="winre-usb-row">
-                  <input id="winre-drive" placeholder="Drive letter (e.g. E)" style="width:160px">
+                  <select id="winre-drive" style="width:280px"><option value="">Select USB drive…</option></select>
+                  <button type="button" onclick="refreshWinReDrives()" title="Rescan for USB drives">↻</button>
                   <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
                   <button class="danger" onclick="startWinReBuild()">Build USB</button>
                 </div>
@@ -2837,10 +2848,11 @@ public static class DashboardHtml
           const bootMode = document.getElementById('winre-bootmode').value;
           let body, confirmText;
           if (mode === 'usb') {
-            const driveLetter = document.getElementById('winre-drive').value.trim();
-            if (!driveLetter) { alert('Enter a drive letter (e.g. E).'); return; }
-            confirmText = 'Build WinRE USB on drive ' + driveLetter + ':? This FORMATS the drive — all data is destroyed.';
-            body = { driveLetter, sourceDir: sourceDir || null, bootMode };
+            const diskNum = document.getElementById('winre-drive').value.trim();
+            if (!diskNum) { alert('Select a USB drive first.'); return; }
+            const diskLabel = document.querySelector('#winre-drive option:checked')?.textContent || ('Disk ' + diskNum);
+            confirmText = 'Build WinRE USB on ' + diskLabel + '? This FORMATS the drive — all data is destroyed.';
+            body = { diskNumber: parseInt(diskNum, 10), sourceDir: sourceDir || null, bootMode };
           } else {
             const imagePath = document.getElementById('winre-image').value.trim();
             if (!imagePath) { alert('Enter an image path (e.g. C:\\winre\\filekeep-recovery.vhdx).'); return; }
@@ -2896,16 +2908,25 @@ public static class DashboardHtml
             el.innerHTML = html;
           } catch (e) { el.textContent = e.message; }
         }
-        async function listUsbDrives() {
-          const box = document.getElementById('usbDrives');
-          box.innerHTML = '<p style="color:var(--text-2)">Listing…</p>';
+        async function refreshWinReDrives() {
+          const sel = document.getElementById('winre-drive');
+          if (!sel) return;
+          sel.innerHTML = '<option value="">Scanning…</option>';
           try {
             const ds = await api('/api/operations/usb-drives');
-            box.innerHTML = ds.length
-              ? '<ul>' + ds.map(d => `<li>[${d.number}] ${esc(d.model)} (${Math.round(d.sizeBytes/1048576)} MB)</li>`).join('') + '</ul>'
-              : '<p style="color:var(--text-2)">No USB drives found.</p>';
-          } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
+            sel.innerHTML = '<option value="">Select USB drive…</option>' + ds.map(d => {
+              const gb = (d.sizeBytes / 1073741824).toFixed(1);
+              const label = `${esc(d.model)} (${gb} GB)`;
+              return `<option value="${esc(d.number)}">Disk ${d.number}: ${label}</option>`;
+            }).join('');
+            if (!ds.length)
+              sel.innerHTML = '<option value="">No USB drives found</option>';
+          } catch (e) {
+            sel.innerHTML = '<option value="">Scan failed</option>';
+          }
         }
+        // Populate the USB dropdown when the Recovery view is opened.
+        document.querySelector('[data-view="recovery"]')?.addEventListener('click', refreshWinReDrives);
         async function loadLog() {
           const repo = document.getElementById('repo').value;
           if (!repo) return;

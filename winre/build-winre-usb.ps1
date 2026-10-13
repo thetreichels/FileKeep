@@ -34,6 +34,7 @@
 
 param(
     [string]$DriveLetter = "",
+    [int]$DiskNumber = -1,
     [string]$ImagePath = "",
     [int]$ImageSizeMB = 4096,
     [ValidateSet("UEFI", "BIOS", "Both")]
@@ -53,8 +54,9 @@ function Fail($msg) { Write-Error $msg; exit 1 }
 # Image mode: builds a bootable VHDX disk image file instead (ADK-free,
 # flashable later with Rufus/BalenaEtcher, bootable in Hyper-V/VirtualBox).
 $script:ImageMode = $ImagePath -ne ""
-if ($script:ImageMode -and $DriveLetter -ne "") { Fail "Specify either -DriveLetter or -ImagePath, not both." }
-if (-not $script:ImageMode -and $DriveLetter -eq "") { Fail "Specify -DriveLetter (USB) or -ImagePath (disk image)." }
+if ($script:ImageMode -and ($DriveLetter -ne "" -or $DiskNumber -ge 0)) { Fail "Specify either -DriveLetter/-DiskNumber or -ImagePath, not both." }
+if (-not $script:ImageMode -and $DriveLetter -eq "" -and $DiskNumber -lt 0) { Fail "Specify -DriveLetter or -DiskNumber (USB) or -ImagePath (disk image)." }
+if ($DriveLetter -ne "" -and $DiskNumber -ge 0) { Fail "Specify either -DriveLetter or -DiskNumber, not both." }
 
 # bcdboot firmware flag: ALL copies both UEFI and BIOS boot files.
 $script:BcdBootFlag = @{ UEFI = "UEFI"; BIOS = "BIOS"; Both = "ALL" }[$BootMode]
@@ -371,7 +373,7 @@ detach vdisk
         Step-Start 8
         if ($script:UseMbr) {
             Write-Host "Preparing USB drive $usbRoot (MBR, active FAT32 for BIOS+UEFI)..."
-            $diskNumber = (Get-Partition -DriveLetter $DriveLetter | Get-Disk).Number
+            $diskNumber = if ($DiskNumber -ge 0) { $DiskNumber } else { (Get-Partition -DriveLetter $DriveLetter | Get-Disk).Number }
             $dpUsb = @"
 select disk $diskNumber
 clean
