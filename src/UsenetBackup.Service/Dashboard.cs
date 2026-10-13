@@ -2021,6 +2021,7 @@ public static class DashboardHtml
             <a class="nav-item active" data-view="overview">Overview</a>
             <a class="nav-item" data-view="backups">Backups</a>
             <a class="nav-item" data-view="operations">Operations</a>
+            <a class="nav-item" data-view="recovery">Recovery</a>
             <a class="nav-item" data-view="log">Operations log</a>
             <a class="nav-item" data-view="settings">Settings</a>
           </nav>
@@ -2106,46 +2107,6 @@ public static class DashboardHtml
                 <div id="diagnoseResult" style="margin-top:8px"></div>
               </div>
               <div class="card">
-                <div class="name">Build WinRE recovery media (ADK-free)</div>
-                <div class="meta">Create bootable FileKeep recovery media directly from the host's WinRE image. No ADK required. Requires Administrator rights.</div>
-                <div class="row" style="margin-top:8px">
-                  <button onclick="checkWinRePrereqs()">Check prerequisites</button>
-                  <span id="winre-prereq" style="margin-left:8px"></span>
-                </div>
-                <div class="row" style="margin-top:8px">
-                  <label style="display:flex;align-items:center;gap:6px">
-                    <input type="radio" name="winre-mode" value="usb" checked onchange="winreModeChanged()"> Write to USB
-                  </label>
-                  <label style="display:flex;align-items:center;gap:6px">
-                    <input type="radio" name="winre-mode" value="image" onchange="winreModeChanged()"> Save disk image (.vhdx)
-                  </label>
-                </div>
-                <div class="row" style="margin-top:8px" id="winre-usb-row">
-                  <input id="winre-drive" placeholder="Drive letter (e.g. E)" style="width:160px">
-                  <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
-                  <button class="danger" onclick="startWinReBuild()">Build USB</button>
-                </div>
-                <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
-                  <input id="winre-image" placeholder="C:\winre\filekeep-recovery.vhdx" style="flex:1">
-                  <input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1">
-                  <button onclick="startWinReBuild()">Build image</button>
-                </div>
-                <div class="row" style="margin-top:8px">
-                  <label>Boot mode:
-                    <select id="winre-bootmode">
-                      <option value="Both" selected>Both (UEFI + legacy BIOS)</option>
-                      <option value="UEFI">UEFI only</option>
-                      <option value="BIOS">Legacy BIOS only</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
-                <div class="row" style="margin-top:8px">
-                  <button onclick="checkWinReStatus()">Check build status</button>
-                  <span id="winre-status" style="margin-left:8px"></span>
-                </div>
-              </div>
-              <div class="card">
                 <div class="name">Restore a backup</div>
                 <div class="meta">Restore a backup's files to a destination folder.</div>
                 <div class="row" style="margin-top:8px">
@@ -2217,6 +2178,49 @@ public static class DashboardHtml
                   <button onclick="startLanServer()">Start server</button>
                   <button onclick="stopLanServer()">Stop</button>
                   <span id="lan-status" style="color:var(--text-2)"></span>
+                </div>
+              </div>
+            </div>
+                        <div class="view" id="view-recovery">
+              <h1>Recovery</h1>
+              <div class="card">
+                <div class="name">Build WinRE recovery media (ADK-free)</div>
+                <div class="meta">Create bootable FileKeep recovery media directly from the host's WinRE image. No ADK required. Requires Administrator rights.</div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinRePrereqs()">Check prerequisites</button>
+                  <span id="winre-prereq" style="margin-left:8px"></span>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="winre-mode" value="usb" checked onchange="winreModeChanged()"> Write to USB
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="winre-mode" value="image" onchange="winreModeChanged()"> Save disk image (.vhdx)
+                  </label>
+                </div>
+                <div class="row" style="margin-top:8px" id="winre-usb-row">
+                  <input id="winre-drive" placeholder="Drive letter (e.g. E)" style="width:160px">
+                  <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
+                  <button class="danger" onclick="startWinReBuild()">Build USB</button>
+                </div>
+                <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
+                  <input id="winre-image" placeholder="C:\winre\filekeep-recovery.vhdx" style="flex:1">
+                  <input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1">
+                  <button onclick="startWinReBuild()">Build image</button>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <label>Boot mode:
+                    <select id="winre-bootmode">
+                      <option value="Both" selected>Both (UEFI + legacy BIOS)</option>
+                      <option value="UEFI">UEFI only</option>
+                      <option value="BIOS">Legacy BIOS only</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
+                <div class="row" style="margin-top:8px">
+                  <button onclick="checkWinReStatus()">Check build status</button>
+                  <span id="winre-status" style="margin-left:8px"></span>
                 </div>
               </div>
             </div>
