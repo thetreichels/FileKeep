@@ -340,6 +340,25 @@ public sealed class ServiceConfig
     public List<NntpConfig> NntpProviders { get; set; } = new();
 
     /// <summary>
+    /// DPAPI-encrypted repository passphrase for offline storage. When set,
+    /// the scheduler uses this if the USENETBACKUP_PASSPHRASE environment
+    /// variable is not present. Set via the dashboard Security card; the
+    /// plaintext never touches disk. Optional: protected by YubiKey
+    /// challenge-response instead of DPAPI (see YubiKeySlot).
+    /// </summary>
+    [JsonPropertyName("passphraseProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PassphraseProtected { get; set; }
+
+    /// <summary>
+    /// If true, the passphrase is encrypted with a key derived from a
+    /// YubiKey challenge-response (HMAC-SHA1) instead of DPAPI. The YubiKey
+    /// must be present (and touched) for the service to unlock the passphrase.
+    /// </summary>
+    [JsonPropertyName("passphraseYubiKey")]
+    public bool PassphraseYubiKey { get; set; }
+
+    /// <summary>
     /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
     /// otherwise the legacy single Nntp config as a singleton list.
     /// </summary>

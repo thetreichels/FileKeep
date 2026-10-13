@@ -131,6 +131,26 @@ public sealed class BackupScheduler
     public const string NntpPasswordEnvVar = "USENETBACKUP_NNTP_PASSWORD";
     public const string SmbPasswordEnvVar = "USENETBACKUP_SMB_PASSWORD";
 
+    /// <summary>
+    /// Resolves the repository passphrase: environment variable first,
+    /// then the DPAPI-encrypted value in the service config (set via the
+    /// dashboard Security card). Returns null if neither is configured.
+    /// </summary>
+    public static string? GetPassphrase(ServiceConfig config)
+    {
+        string? fromEnv = Environment.GetEnvironmentVariable(PassphraseEnvVar);
+        if (!string.IsNullOrEmpty(fromEnv))
+            return fromEnv;
+        if (!string.IsNullOrEmpty(config.PassphraseProtected) && !config.PassphraseYubiKey)
+        {
+            try { return Dpapi.Unprotect(config.PassphraseProtected); }
+            catch { return null; }
+        }
+        // YubiKey-backed passphrases require an interactive unlock; the
+        // service cannot retrieve them unattended.
+        return null;
+    }
+
     private readonly List<JobState> _jobs;
     private readonly IClock _clock;
     private readonly TimeSpan _pollInterval;

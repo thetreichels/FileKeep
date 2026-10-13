@@ -495,6 +495,25 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/config/passphrase-status", (HttpRequest request) =>
+        {
+            var (status, payload) = DashboardApi.GetPassphraseStatus(config);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/passphrase", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
+            bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
+            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         await app.RunAsync(ct);
     }
 }
@@ -1852,6 +1871,56 @@ public static class DashboardApi
             return (400, new { error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// Reports whether a repository passphrase is available (env var or
+    /// stored) and how it's protected. Never returns the passphrase itself.
+    /// </summary>
+    public static (int Status, object Payload) GetPassphraseStatus(ServiceConfig config)
+    {
+        bool fromEnv = !string.IsNullOrEmpty(
+            Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar));
+        bool stored = !string.IsNullOrEmpty(config.PassphraseProtected);
+        return (200, new
+        {
+            configured = fromEnv || stored,
+            source = fromEnv ? "environment" : stored ? "stored" : "none",
+            yubikey = stored && config.PassphraseYubiKey,
+        });
+    }
+
+    /// <summary>
+    /// Stores (or clears) the repository passphrase, DPAPI-encrypted.
+    /// A null/empty passphrase clears the stored value.
+    /// </summary>
+    public static (int Status, object Payload) SetPassphrase(ServiceConfig config,
+        string configPath, string? passphrase, bool useYubiKey,
+        Action<string>? log = null)
+    {
+        if (string.IsNullOrEmpty(passphrase))
+        {
+            config.PassphraseProtected = null;
+            config.PassphraseYubiKey = false;
+        }
+        else
+        {
+            if (useYubiKey)
+                return (400, new { error = "YubiKey challenge-response is not yet implemented. Save without YubiKey for DPAPI-encrypted offline storage." });
+            config.PassphraseProtected = Dpapi.Protect(passphrase);
+            config.PassphraseYubiKey = false;
+        }
+        try
+        {
+            config.Save(configPath);
+            log?.Invoke("dashboard: repository passphrase " +
+                (string.IsNullOrEmpty(passphrase) ? "cleared" : "saved (DPAPI-encrypted)"));
+            return (200, new { ok = true });
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = ex.Message });
+        }
+    }
 }
 
 public static class DashboardHtml
@@ -2301,6 +2370,25 @@ public static class DashboardHtml
                   <button onclick="showLocationForm('smb')">＋ Add network share</button>
                 </div>
               </div>
+              <div class="card">
+                <h2 style="margin-top:0">Security</h2>
+                <p style="color:var(--text-2);margin-top:0">The repository passphrase encrypts everything you back up. Store it here (Windows DPAPI-encrypted, never in plaintext) so scheduled jobs run without typing it, or keep it in the USENETBACKUP_PASSPHRASE environment variable.</p>
+                <div class="row" style="margin-top:8px">
+                  <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
+                </div>
+                <div class="form-grid" style="margin-top:8px">
+                  <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
+                  <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
+                </div>
+                <div class="row" style="margin-top:8px">
+                  <label class="check" title="YubiKey support coming soon"><input id="pp-yubikey" type="checkbox" disabled> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(coming soon)</span></label>
+                </div>
+                <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button class="accent" onclick="savePassphrase()">Save passphrase</button>
+                  <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
+                </div>
+              </div>
               <div class="card" id="locationFormCard" style="display:none">
                 <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
                 <div class="form-grid">
@@ -2308,6 +2396,15 @@ public static class DashboardHtml
                   <input id="lf-type" type="hidden">
                 </div>
                 <div class="form-grid" id="lf-nntp-fields">
+                  <label>Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
+                    <option value="">Custom…</option>
+                    <option value="frugal">Frugal Usenet</option>
+                    <option value="eweka">Eweka</option>
+                    <option value="newshosting">Newshosting</option>
+                    <option value="usenetserver">UsenetServer</option>
+                    <option value="giganews">Giganews</option>
+                    <option value="easynews">Easynews</option>
+                  </select></label>
                   <label>Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
                   <label>Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
                   <label>Username<input id="lf-user" type="text" placeholder="(optional)"></label>
@@ -2341,6 +2438,28 @@ public static class DashboardHtml
               const path = await window.fileKeepPickFolder(title || 'Select a folder');
               if (path) document.getElementById(inputId).value = path;
             } catch (e) { /* dialog unavailable; leave the typed value */ }
+          }
+        }
+        // NNTP provider presets: fill host/port/SSL from a known provider.
+        const nntpPresets = {
+          frugal: { host: 'news.frugalusenet.com', port: 563, ssl: true },
+          eweka: { host: 'news.eweka.nl', port: 563, ssl: true },
+          newshosting: { host: 'news.newshosting.com', port: 563, ssl: true },
+          usenetserver: { host: 'news.usenetserver.com', port: 563, ssl: true },
+          giganews: { host: 'news.giganews.com', port: 563, ssl: true },
+          easynews: { host: 'news.easynews.com', port: 563, ssl: true },
+        };
+        function applyNntpPreset() {
+          const key = document.getElementById('lf-preset').value;
+          const p = nntpPresets[key];
+          if (!p) return;
+          document.getElementById('lf-host').value = p.host;
+          document.getElementById('lf-port').value = p.port;
+          document.getElementById('lf-ssl').checked = p.ssl;
+          const nameEl = document.getElementById('lf-name');
+          if (!nameEl.value) {
+            const label = document.querySelector('#lf-preset option:checked').textContent;
+            nameEl.value = label;
           }
         }
         // Toggle advanced job settings.
@@ -2818,6 +2937,39 @@ public static class DashboardHtml
           // Load backup locations
           renderLocations(cfg.locations || []);
           renderDestinations(cfg.locations || []);
+          loadPassphraseStatus();
+        }
+        async function loadPassphraseStatus() {
+          const el = document.getElementById('passphrase-status');
+          if (!el) return;
+          try {
+            const s = await api('/api/config/passphrase-status');
+            el.textContent = s.configured
+              ? '✓ Passphrase ' + (s.source === 'environment' ? 'from environment variable' : 'stored (DPAPI-encrypted)') + (s.yubikey ? ' · YubiKey' : '')
+              : '✗ No passphrase configured — scheduled jobs will fail.';
+            el.style.color = s.configured ? 'var(--good)' : 'var(--bad)';
+          } catch (e) { el.textContent = 'Could not check passphrase status.'; }
+        }
+        async function savePassphrase() {
+          const err = document.getElementById('pp-error');
+          err.style.display = 'none';
+          const p1 = document.getElementById('pp-pass').value;
+          const p2 = document.getElementById('pp-confirm').value;
+          if (!p1) { err.textContent = 'Enter a passphrase.'; err.style.display = ''; return; }
+          if (p1 !== p2) { err.textContent = 'Passphrases do not match.'; err.style.display = ''; return; }
+          try {
+            await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: p1 }) });
+            document.getElementById('pp-pass').value = '';
+            document.getElementById('pp-confirm').value = '';
+            loadPassphraseStatus();
+          } catch (e) { err.textContent = e.message; err.style.display = ''; }
+        }
+        async function clearPassphrase() {
+          if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
+          try {
+            await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: '' }) });
+            loadPassphraseStatus();
+          } catch (e) { alert(e.message); }
         }
         // ---- Backup destinations: everywhere backup data is kept ----
         let cachedLocations = [];
