@@ -1725,6 +1725,7 @@ public static class DashboardApi
             if (loc.Type == "nntp")
             {
                 using var client = new UsenetBackup.Core.Nntp.NntpClient(loc.Host, loc.Port, loc.Ssl);
+                client.Connect();
                 string? pw = Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD");
                 if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.PasswordProtected))
                     pw = UsenetBackup.Core.Dpapi.Unprotect(loc.PasswordProtected);

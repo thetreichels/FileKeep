@@ -559,9 +559,29 @@ public sealed class ServiceConfig
             if (job.Vss && !OperatingSystem.IsWindows())
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' requires Windows.");
-            if (job.AutoUpload && !EffectiveProviders.Any(p => !string.IsNullOrWhiteSpace(p.Host)))
-                throw new InvalidOperationException(
-                    $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
+            // Auto-upload needs a Usenet provider: either a legacy global
+            // provider (EffectiveProviders) or an NNTP location referenced
+            // by the job's targets.
+            if (job.AutoUpload)
+            {
+                bool hasProvider = EffectiveProviders.Any(p => !string.IsNullOrWhiteSpace(p.Host));
+                if (!hasProvider)
+                {
+                    var targetNames = new HashSet<string>(job.EffectiveTargets, StringComparer.OrdinalIgnoreCase);
+                    hasProvider = Locations.Any(l =>
+                        l.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrWhiteSpace(l.Host) &&
+                        targetNames.Contains(l.Name));
+                    // Also accept a bare "nntp" target meaning "any NNTP location".
+                    if (!hasProvider && targetNames.Contains("nntp"))
+                        hasProvider = Locations.Any(l =>
+                            l.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrWhiteSpace(l.Host));
+                }
+                if (!hasProvider)
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
+            }
         }
         if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
         {
