@@ -27,12 +27,9 @@ function Invoke-CodeSigning {
     }
 
     $signtool = $null
-    foreach ($p in @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe",
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
-    )) {
-        if (Test-Path $p) { $signtool = $p; break }
-    }
+    # Version-agnostic: pick the newest installed Windows SDK's signtool.
+    $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1).FullName
     if (-not $signtool) {
         $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
     }
@@ -281,7 +278,22 @@ Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 # Branded Burn bootstrapper: splash screen with progress instead of the MSI wizard.
 # Copy the splash image next to the theme so the theme's ImageFile resolves.
 Copy-Item "$srcRoot\assets\filekeep-splash.png" "$srcRoot\install\filekeep-splash.png" -Force
-wix build -arch x64 -ext WixToolset.BootstrapperApplications.wixext -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.8.5.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+# NOTE: the Bal NuGet package (WixToolset.Bal.wixext) ships its assembly as
+# WixToolset.BootstrapperApplications.wixext.dll, so the -ext moniker cannot
+# resolve it by name. Pass the assembly path explicitly.
+$balDll = Get-ChildItem "$env:USERPROFILE\.wix\extensions\WixToolset.Bal.wixext" -Recurse `
+    -Filter "WixToolset.BootstrapperApplications.wixext.dll" -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+if (-not $balDll) {
+    Write-Host "  Bal extension not installed; acquiring..."
+    wix extension add --global WixToolset.Bal.wixext
+    if ($LASTEXITCODE -ne 0) { throw "wix extension add failed" }
+    $balDll = Get-ChildItem "$env:USERPROFILE\.wix\extensions\WixToolset.Bal.wixext" -Recurse `
+        -Filter "WixToolset.BootstrapperApplications.wixext.dll" |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $balDll) { throw "Bal extension assembly not found" }
+wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.8.5.msi -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
 if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
 $bundle = Get-Item C:\ub\FileKeep-Setup.exe
 Write-Host ("  Bundle built: {0:N0} bytes" -f $bundle.Length)

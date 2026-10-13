@@ -15,18 +15,36 @@
           UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
           IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
 
+    <!-- WixStandardBootstrapperApplication must sit directly under the inline
+         <BootstrapperApplication> (the extension only parses it there; a Ref
+         rejects the child). Theme="hyperlinkLicense" is required and selects
+         the stock payload group; ThemeFile/LocalizationFile/LogoFile override
+         its thm.xml/thm.wxl/logo.png with the branded FileKeep versions.
+         The MSI's own exit-dialog checkbox never shows inside a bundle, so
+         launch-on-finish lives here via LaunchTarget: the Success page shows
+         a "Launch FileKeep" button when it is set. -->
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
-        LicenseFile="$(var.SrcRoot)/install/gpl-3.0-license.rtf"
+        Theme="hyperlinkLicense"
+        LicenseUrl=""
         LogoFile="$(var.SrcRoot)/assets/filekeep-banner.bmp"
         ThemeFile="$(var.SrcRoot)/install/FileKeepTheme.xml"
         LocalizationFile="$(var.SrcRoot)/install/FileKeepTheme.wxl"
+        LaunchTarget="[ProgramFiles6432Folder]FileKeep\gui\FileKeepGui.exe"
+        LaunchWorkingFolder="[ProgramFiles6432Folder]FileKeep\gui"
+        SuppressOptionsUI="yes"
         ShowVersion="yes" />
+      <!-- Splash artwork for the theme's ImageControl: theme images resolve
+           at runtime from the UX-container payloads, addressed by payload name. -->
+      <Payload Name="filekeep-splash.png"
+               SourceFile="$(var.SrcRoot)/assets/filekeep-splash.png"
+               Compressed="yes" />
     </BootstrapperApplication>
 
     <Chain>
+      <!-- No DisplayInternalUI attribute: the default already routes everything
+           to the bootstrapper (bal:DisplayInternalUICondition unset = false). -->
       <MsiPackage SourceFile="$(var.MsiPath)"
-                  DisplayInternalUI="no"
                   Vital="yes" />
     </Chain>
   </Bundle>
