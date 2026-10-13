@@ -1339,18 +1339,32 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    public void Restore(string backupId, string destDir)
+    public void Restore(string backupId, string destDir) =>
+        Restore(backupId, destDir, new RestoreOptions());
+
+    /// <summary>
+    /// Restores a backup with selective/merge options. The
+    /// <see cref="RestoreOptions.MergePolicy"/> decides what happens when a
+    /// file already exists in the destination: overwrite it, skip it when it
+    /// differs, or keep whichever copy is newer.
+    /// </summary>
+    public RestoreResult Restore(string backupId, string destDir, RestoreOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options);
         var manifest = LoadManifest(backupId);
         if (manifest.IsDiskImage)
             throw new InvalidOperationException(
                 $"Backup {backupId} is a disk image; use RestoreDiskImage to write it to a device, not file restore.");
         var errors = new List<string>();
-        RestoreOrVerify(manifest, destDir, verifyOnly: false, errors);
+        var result = new RestoreResult();
+        RestoreOrVerify(manifest, destDir, verifyOnly: false, errors, options, result);
         OperationLog.Append(_root, "restore",
-            $"id={backupId} dest={destDir} files={manifest.Files.Count} errors={errors.Count}");
+            $"id={backupId} dest={destDir} files={manifest.Files.Count} errors={errors.Count} " +
+            $"policy={options.MergePolicy} restored={result.RestoredFiles} " +
+            $"skippedIdentical={result.SkippedIdentical} skippedDiffering={result.SkippedDiffering.Count}");
         if (errors.Count > 0)
             throw new InvalidDataException("Restore failed:\n" + string.Join("\n", errors));
+        return result;
     }
 
     /// <summary>Full verification. Returns empty list when the backup is intact.</summary>
@@ -1368,7 +1382,7 @@ public sealed class BackupRepository : IDisposable
             OperationLog.Append(_root, "verify", $"id={backupId} errors={errors.Count} ok=False");
             return errors;
         }
-        RestoreOrVerify(manifest, destDir: null, verifyOnly: true, errors);
+        RestoreOrVerify(manifest, destDir: null, verifyOnly: true, errors, options: null, result: null);
         OperationLog.Append(_root, "verify",
             $"id={backupId} files={manifest.Files.Count} errors={errors.Count} ok={errors.Count == 0}");
         return errors;
@@ -1445,6 +1459,28 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
+    /// <summary>
+    /// True when a path exists as anything, including a dangling symlink
+    /// (<see cref="File.Exists"/> reports those as missing, and
+    /// <see cref="File.GetAttributes"/> follows the link and throws).
+    /// </summary>
+    private static bool LinkPathExists(string path)
+    {
+        try
+        {
+            File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+        }
+        catch (DirectoryNotFoundException)
+        {
+        }
+        // Dangling symlink: attribute read fails, but the link itself exists.
+        return File.ResolveLinkTarget(path, returnFinalTarget: false) is not null;
+    }
+
     private static bool IsReparsePoint(string path)
     {
         try
@@ -1461,12 +1497,63 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly, List<string> errors)
+    /// <summary>
+    /// True when an existing file's SHA-256 matches the manifest entry.
+    /// Used by merge mode to detect identical files without restoring.
+    /// </summary>
+    private static bool FileContentMatches(string path, string expectedSha256)
     {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        byte[] buf = ArrayPool<byte>.Shared.Rent(81920);
+        try
+        {
+            int n;
+            while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+                hash.AppendData(buf, 0, n);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buf);
+        }
+        return Convert.ToHexString(hash.GetHashAndReset())
+            .Equals(expectedSha256, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly,
+        List<string> errors, RestoreOptions? options, RestoreResult? result)
+    {
+        // Selective restore: narrow the manifest down to the entries the
+        // include/exclude globs select. Verification always covers the
+        // whole backup (options only apply to real restores).
+        List<FileEntry> filesToRestore = manifest.Files;
+        HashSet<string>? neededDirs = null;
+        if (!verifyOnly && options is not null &&
+            (options.Include.Count > 0 || options.Exclude.Count > 0))
+        {
+            filesToRestore = manifest.Files.Where(f => MatchesRestoreFilter(f.Path, options)).ToList();
+            neededDirs = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var f in filesToRestore)
+            {
+                string parent = f.Path;
+                int slash;
+                while ((slash = parent.LastIndexOf('/')) > 0)
+                {
+                    parent = parent.Substring(0, slash);
+                    neededDirs.Add(parent);
+                }
+            }
+        }
+
         if (!verifyOnly && destDir is not null && manifest.Directories is not null)
         {
             foreach (string dir in manifest.Directories)
             {
+                // In selective mode, create a directory only if it is
+                // selected itself or an ancestor of a selected file.
+                if (neededDirs is not null && options is not null &&
+                    !MatchesRestoreFilter(dir, options) && !neededDirs.Contains(dir))
+                    continue;
                 try
                 {
                     string dirPath = ResolveRestorePath(destDir, dir);
@@ -1486,26 +1573,26 @@ public sealed class BackupRepository : IDisposable
             // Two-pass restore: regular files first, symlinks last. A symlink
             // created early could redirect a later file write outside destDir
             // (lexical path validation doesn't resolve symlinks).
-            foreach (var entry in manifest.Files)
+            foreach (var entry in filesToRestore)
             {
                 if (entry.SymlinkTarget is not null)
                     continue;
                 try
                 {
-                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer);
+                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result);
                 }
                 catch (Exception ex)
                 {
                     errors.Add($"{entry.Path}: {ex.Message}");
                 }
             }
-            foreach (var entry in manifest.Files)
+            foreach (var entry in filesToRestore)
             {
                 if (entry.SymlinkTarget is null)
                     continue;
                 try
                 {
-                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer);
+                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result);
                 }
                 catch (Exception ex)
                 {
@@ -1519,7 +1606,41 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private void RestoreOneFile(FileEntry entry, BackupManifest manifest, string? destDir, bool verifyOnly, byte[] buffer)
+    /// <summary>
+    /// True when a manifest-relative path ('/' separators) passes the
+    /// include/exclude globs. Empty includes select everything; excludes
+    /// win over includes. Case-insensitive on Windows, case-sensitive
+    /// elsewhere. Gitignore-style: a pattern without a '/' matches the
+    /// file name at any depth ('*.log'), and a bare directory name
+    /// implies its whole subtree ('docs' == 'docs/**').
+    /// </summary>
+    private static bool MatchesRestoreFilter(string manifestPath, RestoreOptions options)
+    {
+        bool ignoreCase = OperatingSystem.IsWindows();
+        bool included = options.Include.Count == 0 ||
+            options.Include.Any(p => GlobMatch(manifestPath, p, ignoreCase));
+        if (!included)
+            return false;
+        return !options.Exclude.Any(p => GlobMatch(manifestPath, p, ignoreCase));
+    }
+
+    private static bool GlobMatch(string manifestPath, string pattern, bool ignoreCase)
+    {
+        if (!pattern.Contains('/'))
+        {
+            string fileName = manifestPath.Substring(manifestPath.LastIndexOf('/') + 1);
+            if (GlobMatcher.IsMatch(fileName, pattern, ignoreCase))
+                return true;
+            // Bare directory name implies its subtree ('docs' == 'docs/**').
+            if (!pattern.Contains('*') && !pattern.Contains('?'))
+                return GlobMatcher.IsMatch(manifestPath, pattern + "/**", ignoreCase);
+            return false;
+        }
+        return GlobMatcher.IsMatch(manifestPath, pattern, ignoreCase);
+    }
+
+    private void RestoreOneFile(FileEntry entry, BackupManifest manifest, string? destDir,
+        bool verifyOnly, byte[] buffer, RestoreOptions? options, RestoreResult? result)
     {
         if (entry.SymlinkTarget is not null)
         {
@@ -1527,10 +1648,27 @@ public sealed class BackupRepository : IDisposable
             {
                 string linkPath = ResolveRestorePath(destDir, entry.Path);
                 AssertNoReparsePoints(destDir, linkPath, includeLeaf: false);
+                var policy = options?.MergePolicy ?? MergePolicy.Overwrite;
+                if (result is not null && policy != MergePolicy.Overwrite && LinkPathExists(linkPath))
+                {
+                    // SkipDiffering and KeepNewer never touch an existing
+                    // path (links have no meaningful "newer", so KeepNewer
+                    // treats them like SkipDiffering). An identical link is
+                    // skipped silently; anything else is reported.
+                    string? currentTarget =
+                        File.ResolveLinkTarget(linkPath, returnFinalTarget: false)?.ToString();
+                    if (string.Equals(currentTarget, entry.SymlinkTarget, StringComparison.Ordinal))
+                        result.SkippedIdentical++;
+                    else
+                        result.SkippedDiffering.Add(entry.Path);
+                    return;
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
                 if (File.Exists(linkPath) || Directory.Exists(linkPath))
                     File.Delete(linkPath);
                 File.CreateSymbolicLink(linkPath, entry.SymlinkTarget);
+                if (result is not null)
+                    result.RestoredFiles++;
             }
             return;
         }
@@ -1545,6 +1683,29 @@ public sealed class BackupRepository : IDisposable
             {
                 outPath = ResolveRestorePath(destDir, entry.Path);
                 AssertNoReparsePoints(destDir, outPath, includeLeaf: true);
+                var policy = options?.MergePolicy ?? MergePolicy.Overwrite;
+                if (result is not null && policy != MergePolicy.Overwrite && File.Exists(outPath))
+                {
+                    // The reparse-point check above already rejected links,
+                    // so this is a real file.
+                    if (policy == MergePolicy.SkipDiffering)
+                    {
+                        if (FileContentMatches(outPath, entry.Sha256))
+                            result.SkippedIdentical++;
+                        else
+                            result.SkippedDiffering.Add(entry.Path);
+                        return;
+                    }
+                    // KeepNewer: newer copy wins; ties keep the destination.
+                    // A kept destination file differs from the backup, so it
+                    // is reported alongside skipped-differing files.
+                    if (File.GetLastWriteTimeUtc(outPath) >= entry.MtimeUtc)
+                    {
+                        result.SkippedDiffering.Add(entry.Path);
+                        return;
+                    }
+                    // Backup is newer: fall through and overwrite.
+                }
                 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
                 // Write to temp file first; rename to final path only after
                 // hash verification succeeds. This is atomic on the same
@@ -1573,6 +1734,8 @@ public sealed class BackupRepository : IDisposable
                 outStream = null;
                 File.Move(tempPath, outPath, overwrite: true);
                 tempPath = null; // Moved successfully, don't delete
+                if (result is not null)
+                    result.RestoredFiles++;
             }
         }
         catch
