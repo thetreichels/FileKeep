@@ -351,9 +351,13 @@ public sealed class ServiceConfig
     public string? PassphraseProtected { get; set; }
 
     /// <summary>
-    /// If true, the passphrase is encrypted with a key derived from a
-    /// YubiKey challenge-response (HMAC-SHA1) instead of DPAPI. The YubiKey
-    /// must be present (and touched) for the service to unlock the passphrase.
+    /// If true, restore operations require a YubiKey touch to unlock the
+    /// passphrase for the session. The YubiKey is used exactly twice: once
+    /// during setup (to wrap the passphrase with a challenge-response
+    /// derived key) and again at the start of each restore session.
+    /// Scheduled backups use the DPAPI-stored passphrase unattended and
+    /// never need the key. This gates decryption (restores) on physical
+    /// presence while keeping backups automatic.
     /// </summary>
     [JsonPropertyName("passphraseYubiKey")]
     public bool PassphraseYubiKey { get; set; }

@@ -132,22 +132,23 @@ public sealed class BackupScheduler
     public const string SmbPasswordEnvVar = "USENETBACKUP_SMB_PASSWORD";
 
     /// <summary>
-    /// Resolves the repository passphrase: environment variable first,
-    /// then the DPAPI-encrypted value in the service config (set via the
-    /// dashboard Security card). Returns null if neither is configured.
+    /// Resolves the repository passphrase for backup operations: environment
+    /// variable first, then the DPAPI-encrypted value in the service config
+    /// (set via the dashboard Security card). Returns null if neither is
+    /// configured. Note: the YubiKey flag gates <em>restore</em> sessions on
+    /// a physical touch; backups always use the DPAPI-stored value
+    /// unattended and never need the key.
     /// </summary>
     public static string? GetPassphrase(ServiceConfig config)
     {
         string? fromEnv = Environment.GetEnvironmentVariable(PassphraseEnvVar);
         if (!string.IsNullOrEmpty(fromEnv))
             return fromEnv;
-        if (!string.IsNullOrEmpty(config.PassphraseProtected) && !config.PassphraseYubiKey)
+        if (!string.IsNullOrEmpty(config.PassphraseProtected))
         {
             try { return Dpapi.Unprotect(config.PassphraseProtected); }
             catch { return null; }
         }
-        // YubiKey-backed passphrases require an interactive unlock; the
-        // service cannot retrieve them unattended.
         return null;
     }
 
