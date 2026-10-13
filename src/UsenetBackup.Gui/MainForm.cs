@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -78,7 +79,15 @@ public class NativeBridge
 public class MainForm : Form
 {
     private readonly WebView2 _webView;
+    private readonly NotifyIcon _trayIcon;
+    private readonly ToolStripMenuItem _trayToggleItem;
+    private bool _trayEnabled;
+    private bool _allowClose;
     private const string DashboardUrl = "http://127.0.0.1:15789/";
+
+    private static string GuiSettingsPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "FileKeep", "gui-settings.json");
 
     public MainForm()
     {
@@ -88,14 +97,41 @@ public class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 600);
 
+        Icon? appIcon = null;
         // Try to set the FileKeep icon if available
         try
         {
             var iconPath = Path.Combine(AppContext.BaseDirectory, "filekeep.ico");
             if (File.Exists(iconPath))
-                Icon = new Icon(iconPath);
+            {
+                appIcon = new Icon(iconPath);
+                Icon = appIcon;
+            }
         }
         catch { /* icon is cosmetic */ }
+
+        _trayEnabled = LoadTraySetting();
+
+        // System tray icon (optional): shows while FileKeep is running,
+        // double-click or "Open FileKeep" restores the window.
+        _trayIcon = new NotifyIcon
+        {
+            Text = "FileKeep",
+            Icon = appIcon ?? SystemIcons.Application,
+            Visible = _trayEnabled,
+        };
+        _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+        var trayMenu = new ContextMenuStrip();
+        var openItem = new ToolStripMenuItem("Open FileKeep", null, (_, _) => RestoreFromTray());
+        _trayToggleItem = new ToolStripMenuItem("Show tray icon", null, (_, _) => ToggleTray());
+        _trayToggleItem.Checked = _trayEnabled;
+        var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApp());
+        trayMenu.Items.Add(openItem);
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add(_trayToggleItem);
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add(exitItem);
+        _trayIcon.ContextMenuStrip = trayMenu;
 
         _webView = new WebView2
         {
@@ -104,7 +140,84 @@ public class MainForm : Form
         Controls.Add(_webView);
 
         Load += async (_, _) => await InitializeWebViewAsync();
-        FormClosing += (_, _) => _webView?.Dispose();
+        Resize += (_, _) =>
+        {
+            // Minimize to tray instead of the taskbar when the tray icon is on.
+            if (_trayEnabled && WindowState == FormWindowState.Minimized)
+            {
+                Hide();
+                _trayIcon.ShowBalloonTip(2000, "FileKeep",
+                    "FileKeep is still running. Double-click the tray icon to reopen.",
+                    ToolTipIcon.Info);
+            }
+        };
+        FormClosing += (s, e) =>
+        {
+            if (_trayEnabled && !_allowClose)
+            {
+                // Close button minimizes to tray; use the tray menu to exit.
+                e.Cancel = true;
+                WindowState = FormWindowState.Minimized;
+                return;
+            }
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
+            _webView?.Dispose();
+        };
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private void ToggleTray()
+    {
+        _trayEnabled = !_trayEnabled;
+        _trayToggleItem.Checked = _trayEnabled;
+        _trayIcon.Visible = _trayEnabled;
+        SaveTraySetting(_trayEnabled);
+        if (!_trayEnabled && !Visible)
+            RestoreFromTray();
+    }
+
+    private void ExitApp()
+    {
+        _allowClose = true;
+        Close();
+    }
+
+    private static bool LoadTraySetting()
+    {
+        try
+        {
+            if (File.Exists(GuiSettingsPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(GuiSettingsPath));
+                if (doc.RootElement.TryGetProperty("trayIcon", out var v) &&
+                    v.ValueKind == JsonValueKind.True)
+                    return true;
+                if (doc.RootElement.TryGetProperty("trayIcon", out var v2) &&
+                    v2.ValueKind == JsonValueKind.False)
+                    return false;
+            }
+        }
+        catch { /* corrupt settings; fall through to default */ }
+        return true; // default: tray icon on
+    }
+
+    private static void SaveTraySetting(bool enabled)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(GuiSettingsPath)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(GuiSettingsPath,
+                JsonSerializer.Serialize(new { trayIcon = enabled }));
+        }
+        catch { /* settings are best-effort */ }
     }
 
     private async Task InitializeWebViewAsync()
