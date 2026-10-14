@@ -1973,6 +1973,14 @@ public static class DashboardHtml
             --ok: #107c10;
             --bad: #c42b1c;
           }
+          /* Toast notifications: replace alert() popups with inline feedback. */
+          #toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+          .toast { padding: 12px 16px; border-radius: 6px; background: #323232; color: white; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); max-width: 380px; animation: toast-in 0.2s ease-out; }
+          .toast.ok { background: #107c10; }
+          .toast.err { background: #c42b1c; }
+          @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+          /* Invalid field highlighting. */
+          input.invalid, select.invalid { border-color: var(--bad) !important; background: #fdf0ef; }
           /* Folder picker row: text input + Browse button side by side. */
           .folder-row { display: flex; gap: 6px; align-items: center; }
           .folder-row input { flex: 1; min-width: 0; }
@@ -2344,9 +2352,9 @@ public static class DashboardHtml
                   <div id="jf-userfolders" style="display:flex;flex-wrap:wrap;gap:8px"><p style="color:var(--text-2)">Loading…</p></div>
                 </div>
                 <div class="form-grid">
-                  <label>Name<input id="jf-name" type="text" placeholder="Documents"></label>
-                  <label>Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
-                  <label>Schedule<select id="jf-schedType">
+                  <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
+                  <label title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+                  <label title="How often to run this backup. Daily runs once per day at the specified time; Interval runs every N hours.">Schedule<select id="jf-schedType">
                     <option value="daily">Daily at…</option>
                     <option value="interval">Every N minutes</option>
                   </select></label>
@@ -2357,8 +2365,8 @@ public static class DashboardHtml
                   <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle">Show advanced settings ▸</button>
                 </div>
                 <div class="form-grid" id="jf-advanced" style="display:none">
-                  <label>Repository folder (optional, defaults to ProgramData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
-                  <label>Mode<select id="jf-mode">
+                  <label title="Where FileKeep stores its internal backup data (encrypted). Leave empty to use the default in ProgramData. You don't need to change this.">Repository folder (optional, defaults to ProgramData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
+                  <label title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
                     <option value="incremental">Incremental</option>
                     <option value="full">Full</option>
                   </select></label>
@@ -2422,11 +2430,11 @@ public static class DashboardHtml
               <div class="card" id="locationFormCard" style="display:none">
                 <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
                 <div class="form-grid">
-                  <label>Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
+                  <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
                   <input id="lf-type" type="hidden">
                 </div>
                 <div class="form-grid" id="lf-nntp-fields">
-                  <label>Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
+                  <label title="Choose your Usenet provider to auto-fill the host, port, and SSL settings below. Select 'Custom' to enter them manually.">Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
                     <option value="">Custom…</option>
                     <option value="frugal">Frugal Usenet</option>
                     <option value="eweka">Eweka</option>
@@ -2435,17 +2443,17 @@ public static class DashboardHtml
                     <option value="giganews">Giganews</option>
                     <option value="easynews">Easynews</option>
                   </select></label>
-                  <label>Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
-                  <label>Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
-                  <label>Username<input id="lf-user" type="text" placeholder="(optional)"></label>
-                  <label>Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-                  <label>Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
+                  <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
+                  <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
+                  <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
+                  <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+                  <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
                   <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
                 </div>
                 <div class="form-grid" id="lf-smb-fields" style="display:none">
-                  <label>Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
-                  <label>Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
-                  <label>Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+                  <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
+                  <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
+                  <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
                 </div>
                 <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
@@ -2542,6 +2550,20 @@ public static class DashboardHtml
           return r.status === 202 ? null : r.json();
         }
         function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        // Toast notifications: non-blocking inline feedback replacing alert().
+        function toast(msg, kind) {
+          let box = document.getElementById('toast-container');
+          if (!box) {
+            box = document.createElement('div');
+            box.id = 'toast-container';
+            document.body.appendChild(box);
+          }
+          const el = document.createElement('div');
+          el.className = 'toast' + (kind ? ' ' + kind : '');
+          el.textContent = msg;
+          box.appendChild(el);
+          setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 350); }, 4000);
+        }
         let jobNames = [];
         document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
           document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
@@ -2702,12 +2724,12 @@ public static class DashboardHtml
           const repo = document.getElementById('repo').value;
           if (!confirm(`Upload backup ${backupId} to Usenet?`)) return;
           await api('/api/operations/upload', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
-          alert('Upload started in the background. Watch the Operations log.');
+          toast('Upload started in the background. Watch the Operations log.');
         }
         async function verifyBackup(backupId) {
           const repo = document.getElementById('repo').value;
           await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
-          alert('Verification started in the background. Watch the Operations log.');
+          toast('Verification started in the background. Watch the Operations log.');
         }
         function downloadNzb(backupId) {
           const repo = document.getElementById('repo').value;
@@ -2720,64 +2742,64 @@ public static class DashboardHtml
           const smbShare = document.getElementById('restore-smb').value.trim();
           const smbUser = document.getElementById('restore-smb-user').value.trim();
           const mergePolicy = document.getElementById('restore-policy').value;
-          if (!backupId) { alert('Select a backup.'); return; }
-          if (!destDir) { alert('Enter a destination folder.'); return; }
+          if (!backupId) { toast('Select a backup.', 'err'); return; }
+          if (!destDir) { toast('Enter a destination folder.', 'err'); return; }
           await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir, smbShare, smbUser, mergePolicy }) });
-          alert('Restore started in the background. Watch the Operations log.');
+          toast('Restore started in the background. Watch the Operations log.');
         }
         async function startAdhocBackup() {
           const repo = document.getElementById('op-repo').value;
           const sourceDir = document.getElementById('adhoc-source').value.trim();
-          if (!sourceDir) { alert('Enter a source folder.'); return; }
+          if (!sourceDir) { toast('Enter a source folder.', 'err'); return; }
           await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
-          alert('Backup started in the background. Watch the Operations log.');
+          toast('Backup started in the background. Watch the Operations log.');
         }
         async function startSmbSync() {
           const repo = document.getElementById('smb-repo').value;
           const share = document.getElementById('smb-share').value.trim();
           const user = document.getElementById('smb-user').value.trim();
-          if (!share) { alert('Enter the SMB share path.'); return; }
+          if (!share) { toast('Enter the SMB share path.', 'err'); return; }
           await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ repo, share, user }) });
-          alert('SMB sync started in the background. Watch the Operations log.');
+          toast('SMB sync started in the background. Watch the Operations log.');
         }
         async function uploadNzb() {
           const repo = document.getElementById('op-repo').value;
           const input = document.getElementById('nzb-file');
-          if (!input.files.length) { alert('Choose an NZB file.'); return; }
+          if (!input.files.length) { toast('Choose an NZB file.', 'err'); return; }
           const form = new FormData();
           form.append('repo', repo);
           form.append('nzb', input.files[0]);
           const res = await fetch('/api/operations/download-nzb', {
             method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: form
           });
-          if (!res.ok) { alert('Failed: ' + (await res.text())); return; }
-          alert('NZB download started in the background. Watch the Operations log.');
+          if (!res.ok) { toast('Failed: ' + (await res.text()), 'err'); return; }
+          toast('NZB download started in the background. Watch the Operations log.');
         }
         async function startDiskBackup() {
           const repo = document.getElementById('op-repo').value;
           const device = document.getElementById('disk-device').value.trim();
           const imageName = document.getElementById('disk-imagename').value.trim() || 'disk.img';
-          if (!device) { alert('Enter a device path.'); return; }
+          if (!device) { toast('Enter a device path.', 'err'); return; }
           await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
-          alert('Disk backup started in the background. Watch the Operations log.');
+          toast('Disk backup started in the background. Watch the Operations log.');
         }
         async function startDiskRestore() {
           const repo = document.getElementById('op-repo').value;
           const backupId = document.getElementById('disk-backup').value;
           const device = document.getElementById('disk-target').value.trim();
           const confirmText = document.getElementById('disk-confirm').value;
-          if (!backupId) { alert('Select a disk-image backup.'); return; }
-          if (!device) { alert('Enter the target device.'); return; }
-          if (confirmText.trim() !== device) { alert('Confirmation does not match the device. Aborted.'); return; }
+          if (!backupId) { toast('Select a disk-image backup.', 'err'); return; }
+          if (!device) { toast('Enter the target device.', 'err'); return; }
+          if (confirmText.trim() !== device) { toast('Confirmation does not match the device. Aborted.', 'err'); return; }
           if (!window.confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
           await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId, device, confirm: confirmText }) });
-          alert('Disk restore started in the background. Watch the Operations log.');
+          toast('Disk restore started in the background. Watch the Operations log.');
         }
         async function initRepo() {
           const path = document.getElementById('init-path').value.trim();
-          if (!path) { alert('Enter a path.'); return; }
+          if (!path) { toast('Enter a path.', 'err'); return; }
           const r = await api('/api/operations/init-repo', { method: 'POST', body: JSON.stringify({ path }) });
-          alert('Repository initialized at ' + r.path + '. Add it as a job in Settings to schedule backups.');
+          toast('Repository initialized at ' + r.path + '. Add it as a job in Settings to schedule backups.');
         }
         async function refreshLanStatus() {
           try {
@@ -3122,10 +3144,15 @@ public static class DashboardHtml
         async function saveLocation() {
           const type = document.getElementById('lf-type').value;
           const err = document.getElementById('lf-error');
+          // Clear previous validation highlights.
+          document.querySelectorAll('#locationFormCard .invalid').forEach(el => el.classList.remove('invalid'));
           const loc = {
             name: document.getElementById('lf-name').value.trim(),
             type,
           };
+          let valid = true;
+          const markInvalid = id => { document.getElementById(id).classList.add('invalid'); valid = false; };
+          if (!loc.name) markInvalid('lf-name');
           if (type === 'nntp') {
             loc.host = document.getElementById('lf-host').value.trim();
             loc.port = parseInt(document.getElementById('lf-port').value) || 119;
@@ -3133,15 +3160,23 @@ public static class DashboardHtml
             loc.password = document.getElementById('lf-pass').value;
             loc.connections = parseInt(document.getElementById('lf-conn').value) || 10;
             loc.ssl = document.getElementById('lf-ssl').checked;
+            if (!loc.host) markInvalid('lf-host');
           } else {
             loc.share = document.getElementById('lf-share').value.trim();
             loc.smbUser = document.getElementById('lf-smbuser').value.trim();
             loc.smbPassword = document.getElementById('lf-smbpass').value;
+            if (!loc.share) markInvalid('lf-share');
+          }
+          if (!valid) {
+            err.textContent = 'Please fill in the highlighted fields.';
+            err.style.display = '';
+            return;
           }
           try {
             await api('/api/config/locations', { method: 'POST', body: JSON.stringify(loc) });
             hideLocationForm();
             loadSettings();
+            toast('Location saved.', 'ok');
           } catch (e) {
             err.textContent = e.message;
             err.style.display = '';
@@ -3152,13 +3187,14 @@ public static class DashboardHtml
           try {
             await api('/api/config/locations/' + encodeURIComponent(name), { method: 'DELETE' });
             loadSettings();
-          } catch (e) { alert(e.message); }
+            toast('Location removed.', 'ok');
+          } catch (e) { toast(e.message, 'err'); }
         }
         async function testLocation(name) {
           try {
             const r = await api('/api/locations/' + encodeURIComponent(name) + '/test', { method: 'POST' });
-            alert(r.ok ? '✓ ' + r.message : '✗ ' + r.message);
-          } catch (e) { alert(e.message); }
+            toast(r.ok ? '✓ ' + r.message : '✗ ' + r.message, r.ok ? 'ok' : 'err');
+          } catch (e) { toast(e.message, 'err'); }
         }
         // Renders the location checklist in the job editor.
         async function renderJobLocationChecklist(selected) {

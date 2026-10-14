@@ -257,6 +257,25 @@ public class MainForm : Form
                 window.fileKeepNative = true;
             ");
 
+            // Show a helpful error if the dashboard isn't reachable (instead of a blank page).
+            _webView.CoreWebView2.NavigationCompleted += (_, e) =>
+            {
+                if (!e.IsSuccess)
+                {
+                    _webView.CoreWebView2.NavigateToString(@"
+                        <html><head><style>
+                        body { font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f5f5f5; }
+                        .box { text-align: center; padding: 40px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; }
+                        h1 { color: #c00; font-size: 20px; margin-bottom: 12px; }
+                        p { color: #555; font-size: 14px; line-height: 1.5; }
+                        </style></head><body><div class='box'>
+                        <h1>Cannot reach the FileKeep service</h1>
+                        <p>The dashboard is not responding. Please check that the <b>FileKeep Service</b> is running (Services app), then close and reopen this window.</p>
+                        <p style='font-size:12px;color:#999'>If the problem persists, the service may need to be reinstalled.</p>
+                        </div></body></html>");
+                }
+            };
+
             _webView.CoreWebView2.Navigate(DashboardUrl);
         }
         catch (Exception ex)
