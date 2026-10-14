@@ -268,6 +268,12 @@ public class MainForm : Form
                         .box { text-align: center; padding: 40px; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 450px; }
                         h1 { color: #c00; font-size: 20px; margin-bottom: 12px; }
                         p { color: #555; font-size: 14px; line-height: 1.5; }
+                        @media (prefers-color-scheme: dark) {
+                          body { background: #202020; }
+                          .box { background: #2b2b2b; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+                          h1 { color: #f1707b; }
+                          p { color: #a7a7a7; }
+                        }
                         </style></head><body><div class='box'>
                         <h1>Cannot reach the FileKeep service</h1>
                         <p>The dashboard is not responding. Please check that the <b>FileKeep Service</b> is running (Services app), then close and reopen this window.</p>
