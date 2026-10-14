@@ -1585,6 +1585,7 @@ public static class DashboardApi
             DashboardPort = config.DashboardPort,
             DashboardBind = config.DashboardBind,
             Nntp = config.Nntp,
+            Locations = config.Locations,
             Jobs = config.Jobs
                 .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
                 .Concat(new[] { job }).ToList(),
