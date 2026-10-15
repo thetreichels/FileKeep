@@ -73,8 +73,12 @@ public static class NzbGenerator
 
             if (volumeMode)
             {
+                string setName = ArticleCodec.SetName(manifest.BackupId);
+                int totalParts = manifest.Volumes!.Count + 1;
+                int vi = 0;
                 foreach (VolumeEntry volume in manifest.Volumes!)
-                    WriteVolumeFile(writer, volume, getVolumeBlob!, getUploadTimeUtc, manifest, options);
+                    WriteVolumeFile(writer, volume, vi++, getVolumeBlob!, getUploadTimeUtc, manifest, options,
+                        setName, totalParts);
             }
             else
             {
@@ -102,7 +106,7 @@ public static class NzbGenerator
         long bytes = Encoding.Latin1.GetByteCount(article);
         string messageId = ArticleCodec.MakeMessageId(chunkId, options.RepoId);
         WriteFile(writer,
-            subject: $"[usenet-backup] chunk {chunkId}",
+            subject: ArticleCodec.SingleSubject($"{chunkId[..16].ToLowerInvariant()}.bin"),
             messageId, bytes, getUploadTimeUtc(chunkId) ?? manifest.CreatedUtc,
             options);
     }
@@ -110,18 +114,24 @@ public static class NzbGenerator
     private static void WriteVolumeFile(
         XmlWriter writer,
         VolumeEntry volume,
+        int volumeIndex,
         Func<string, byte[]> getVolumeBlob,
         Func<string, DateTime?> getUploadTimeUtc,
         BackupManifest manifest,
-        Options options)
+        Options options,
+        string setName,
+        int totalParts)
     {
         byte[] volumeBytes = getVolumeBlob(volume.Id);
+        string fileName = ArticleCodec.RarPartName(setName, volumeIndex);
+        int partNumber = volumeIndex + 2; // part 1 is the NFO
         string article = ArticleCodec.BuildVolumeArticle(
-            volume.Id, options.RepoId, volumeBytes, options.Newsgroup, options.Poster);
+            volume.Id, options.RepoId, volumeBytes, options.Newsgroup, options.Poster,
+            setName, partNumber, totalParts);
         long bytes = Encoding.Latin1.GetByteCount(article);
         string messageId = ArticleCodec.MakeVolumeMessageId(volume.Id, options.RepoId);
         WriteFile(writer,
-            subject: $"[usenet-backup] volume {volume.Id}",
+            subject: ArticleCodec.PartSubject(fileName, partNumber, totalParts),
             messageId, bytes, getUploadTimeUtc(volume.Id) ?? manifest.CreatedUtc,
             options);
     }

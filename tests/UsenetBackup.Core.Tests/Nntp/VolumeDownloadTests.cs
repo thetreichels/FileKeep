@@ -90,7 +90,7 @@ public sealed class VolumeDownloadTests : IDisposable
             {
                 var volume = VolumePacker.BuildVolume(group, id => blobs[id]);
                 if (!store.Exists(volume.Id))
-                    store.PutVolume(volume.Id, volume.Bytes);
+                    store.PutVolume(volume.Id, volume.Bytes, "testset0", 2, 9);
                 volumeBlobs[volume.Id] = volume.Bytes;
                 entries.Add(new VolumeEntry
                 {
@@ -113,7 +113,7 @@ public sealed class VolumeDownloadTests : IDisposable
                         group, volId => volumeBlobs[volId]);
                     foreach (var kvp in blocks)
                         if (!store.Exists(kvp.Key))
-                            store.PutVolume(kvp.Key, kvp.Value);
+                            store.PutVolume(kvp.Key, kvp.Value, "testset0", 3, 9);
                 }
             }
         }

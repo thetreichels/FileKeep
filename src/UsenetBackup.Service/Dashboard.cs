@@ -87,6 +87,20 @@ public static class Dashboard
             return Results.Accepted();
         });
 
+        // One-time manual backup to a local folder chosen at run time.
+        // This is the only supported path to a local-only backup: no
+        // scheduled job is created, and the repo is initialized if needed.
+        app.MapPost("/api/backup/once", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string sourceDir = GetBodyString(body, "sourceDir");
+            string repoPath = GetBodyString(body, "repoPath");
+            var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sourceDir, repoPath);
+            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+        });
+
         // Repo-scoped endpoints only accept repos belonging to configured
         // jobs, so the dashboard cannot be pointed at arbitrary paths.
         app.MapGet("/api/backups", (string repo) =>
@@ -920,6 +934,61 @@ public static class DashboardApi
     }
 
     /// <summary>
+    /// Starts a one-time manual backup to a local folder chosen at run time.
+    /// The only supported path to a local-only backup: no scheduled job is
+    /// created. The repo is initialized if it does not exist yet. Runs in
+    /// the background via the scheduler; progress lands in the Operations log.
+    /// Returns (202, {accepted:true}) or (400, {error}).
+    /// </summary>
+    public static (int Status, object Payload) StartOneTimeBackup(
+        BackupScheduler scheduler, string sourceDir, string repoPath)
+    {
+        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
+            return (400, new { error = "Choose an existing source folder." });
+        if (string.IsNullOrWhiteSpace(repoPath))
+            return (400, new { error = "Choose a destination folder for the backup." });
+        try
+        {
+            // The repo must not live inside the source: the backup would try
+            // to back up its own output.
+            string fullSource = Path.GetFullPath(sourceDir).TrimEnd(Path.DirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            string fullRepo = Path.GetFullPath(repoPath).TrimEnd(Path.DirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            if (fullRepo.StartsWith(fullSource, StringComparison.OrdinalIgnoreCase))
+                return (400, new { error = "The destination folder cannot be inside the source folder." });
+            if (fullSource.StartsWith(fullRepo, StringComparison.OrdinalIgnoreCase) && fullSource.Length != fullRepo.Length)
+                return (400, new { error = "The source folder cannot be inside the destination folder." });
+        }
+        catch
+        {
+            return (400, new { error = "Invalid folder paths." });
+        }
+        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (string.IsNullOrEmpty(passphrase))
+            return (400, new { error = "Set a repository passphrase first (Settings \u2192 Security)." });
+        Task.Run(() =>
+        {
+            try
+            {
+                var result = scheduler.RunOneTimeBackup(sourceDir, repoPath);
+                OperationLog.Append(repoPath, "one-time-backup",
+                    $"source={sourceDir} {(result.Success ? $"OK id={result.BackupId} files={result.Files}" : "FAILED: " + result.Error)}");
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    OperationLog.Append(repoPath, "one-time-backup",
+                        $"source={sourceDir} FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
+                catch { /* best effort */ }
+            }
+        });
+        return (202, new { accepted = true });
+    }
+
+    /// <summary>
     /// Generates an NZB for a backup and returns the XML bytes.
     /// </summary>
     public static (int Status, object Payload, string FileName) GenerateNzb(
@@ -1592,6 +1661,12 @@ public static class DashboardApi
         };
         try { test.Validate(); }
         catch (Exception ex) { return (400, new { error = ex.Message }); }
+        // Scheduled jobs must upload to at least one Usenet or network
+        // location. Local-only backups are only allowed as manual one-time
+        // runs, never on a schedule. This is the server-side enforcement;
+        // the dashboard form and the scheduler fail closed as well.
+        if (job.EffectiveTargets.Count == 0)
+            return (400, new { error = "Scheduled jobs must have at least one upload target (Usenet or network location)." });
 
         // Apply to the live config under the Jobs lock. Replace the object
         // rather than mutating in place: the scheduler may be running a job
@@ -2141,6 +2216,20 @@ public static class DashboardHtml
                   <div class="hero-sub" id="heroSub"></div>
                 </div>
                 <button class="accent" id="backupNow" onclick="runAll()">Back up now</button>
+                <button id="oneTimeBtn" onclick="showOneTimeForm()" title="Run a single backup to a local folder you choose. The only way to back up locally — one-time backups are never scheduled.">One-time backup…</button>
+              </div>
+              <div class="card" id="oneTimeCard" style="display:none">
+                <div class="name" style="font-size:16px;font-weight:600">One-time backup</div>
+                <div class="meta" style="color:var(--text-2);margin:4px 0 8px">Back up once to a local folder you pick. Nothing is scheduled and no backup job is created.</div>
+                <div class="form-grid">
+                  <label title="The folder to back up right now. Click Browse to pick it.">Source folder<span class="folder-row"><input id="ot-source" type="text" placeholder="Choose a folder to back up"><button type="button" class="browse-btn" onclick="browseFolder('ot-source', 'Select source folder')">Browse…</button></span></label>
+                  <label title="Where to save this one-time backup. A new encrypted repository is created here if there isn't one already.">Destination folder<span class="folder-row"><input id="ot-dest" type="text" placeholder="Choose where to save it"><button type="button" class="browse-btn" onclick="browseFolder('ot-dest', 'Select destination folder')">Browse…</button></span></label>
+                </div>
+                <div id="ot-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                  <button class="accent" onclick="runOneTimeBackup()">Run backup</button>
+                  <button onclick="hideOneTimeForm()">Cancel</button>
+                </div>
               </div>
               <div class="card" id="setupCard" style="display:none">
                 <div class="name" style="font-size:16px;font-weight:600">Get set up</div>
@@ -2395,9 +2484,8 @@ public static class DashboardHtml
                   </select></label>
                   <label class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
                   <label class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
-                  <label class="check" title="Upload each finished backup to the selected backup locations automatically."><input id="jf-autoupload" type="checkbox"> Automatically upload after backup</label>
-                  <div id="jf-targets" style="margin:4px 0 4px 24px; display:none">
-                    <div class="meta" style="margin-bottom:4px">Upload to these locations (manage them in Backup locations):</div>
+                  <div id="jf-targets" style="margin:4px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
+                    <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine; manage locations in Backup locations below)</span></div>
                     <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
                   </div>
                   <label class="check" title="Checks the backup's integrity automatically after it finishes. Recommended — catches problems early."><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
@@ -2764,6 +2852,45 @@ public static class DashboardHtml
           btn.disabled = true;
           try { for (const n of jobNames) await runJob(n); }
           finally { btn.disabled = false; setTimeout(load, 2000); }
+        }
+        function showOneTimeForm() {
+          document.getElementById('ot-source').value = '';
+          document.getElementById('ot-dest').value = '';
+          document.getElementById('ot-error').style.display = 'none';
+          document.querySelectorAll('#oneTimeCard .invalid').forEach(el => el.classList.remove('invalid'));
+          document.getElementById('oneTimeCard').style.display = '';
+          document.getElementById('oneTimeCard').scrollIntoView({behavior:'smooth',block:'nearest'});
+        }
+        function hideOneTimeForm() {
+          document.getElementById('oneTimeCard').style.display = 'none';
+        }
+        async function runOneTimeBackup() {
+          const errBox = document.getElementById('ot-error');
+          errBox.style.display = 'none';
+          document.querySelectorAll('#oneTimeCard .invalid').forEach(el => el.classList.remove('invalid'));
+          const source = document.getElementById('ot-source').value.trim();
+          const dest = document.getElementById('ot-dest').value.trim();
+          let valid = true;
+          if (!source) { document.getElementById('ot-source').classList.add('invalid'); valid = false; }
+          if (!dest) { document.getElementById('ot-dest').classList.add('invalid'); valid = false; }
+          if (!valid) {
+            errBox.textContent = 'Choose a source folder and a destination folder.';
+            errBox.style.display = '';
+            return;
+          }
+          const csrf = document.querySelector('meta[name=csrf-token]').content;
+          try {
+            await api('/api/backup/once', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+              body: JSON.stringify({ sourceDir: source, repoPath: dest }),
+            });
+            hideOneTimeForm();
+            toast('One-time backup started. Watch the Operations log for progress.', 'ok');
+          } catch (e) {
+            errBox.textContent = e.message;
+            errBox.style.display = '';
+          }
         }
         async function loadRepo() {
           const repo = document.getElementById('repo').value;
@@ -3420,14 +3547,9 @@ public static class DashboardHtml
           document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
           document.getElementById('jf-vss').checked = job ? !!job.vss : false;
-          document.getElementById('jf-autoupload').checked = job ? !!job.autoUpload : false;
-          // Upload targets: location names. Rendered as a checklist.
+          // Upload targets: location names, always required. Rendered as a checklist.
           const targets = job && job.targets && job.targets.length ? job.targets : [];
-          document.getElementById('jf-targets').style.display = document.getElementById('jf-autoupload').checked ? '' : 'none';
           renderJobLocationChecklist(targets);
-          document.getElementById('jf-autoupload').onchange = e => {
-            document.getElementById('jf-targets').style.display = e.target.checked ? '' : 'none';
-          };
           document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
           document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
           document.getElementById('jf-verification').value = job && job.verificationMode ? job.verificationMode : 'fast';
@@ -3467,7 +3589,6 @@ public static class DashboardHtml
           const schedType = document.getElementById('jf-schedType').value;
           const dailyTime = document.getElementById('jf-daily').value;
           const intervalMin = parseInt(document.getElementById('jf-interval').value, 10);
-          const autoUpload = document.getElementById('jf-autoupload').checked;
           const checkedLocations = [...document.querySelectorAll('#jf-location-list input[data-location]:checked')]
             .map(cb => cb.getAttribute('data-location'));
           let valid = true;
@@ -3481,9 +3602,14 @@ public static class DashboardHtml
           } else if (!intervalMin || intervalMin < 5) {
             markInvalid('jf-interval');
           }
-          if (autoUpload && !checkedLocations.length) {
+          // Scheduled backups must upload to Usenet or a network location —
+          // local-only jobs cannot be scheduled.
+          if (!checkedLocations.length) {
             document.getElementById('jf-location-list').classList.add('invalid');
             valid = false;
+            errBox.textContent = 'Scheduled backups must upload to Usenet or a network location \u2014 choose at least one. (Local-only backups can only be run manually, one at a time.)';
+            errBox.style.display = '';
+            return;
           }
           if (!valid) {
             errBox.textContent = 'Please fill in the highlighted fields.';
@@ -3499,8 +3625,7 @@ public static class DashboardHtml
             mode: document.getElementById('jf-mode').value,
             backupPrivilege: document.getElementById('jf-priv').checked,
             vss: document.getElementById('jf-vss').checked,
-            autoUpload,
-            targets: autoUpload ? checkedLocations : [],
+            targets: checkedLocations,
             autoVerify: document.getElementById('jf-autoverify').checked,
             redundancyMode: document.getElementById('jf-redundancy').value,
             verificationMode: document.getElementById('jf-verification').value,

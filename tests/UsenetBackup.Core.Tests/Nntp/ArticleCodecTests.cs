@@ -25,7 +25,7 @@ public sealed class ArticleCodecTests
         const string repoId = "0123456789abcdef";
 
         string article = ArticleCodec.BuildArticle(chunkId, repoId, blob, "alt.binaries.test", "usenet-backup");
-        Assert.Contains($"Message-ID: <{chunkId}.{repoId}@usenet-backup>", article);
+        Assert.Contains($"Message-ID: <{chunkId}.{repoId}@invalid>", article);
         Assert.Contains($"X-UsenetBackup-Chunk: {chunkId}", article);
 
         var (id, back) = ArticleCodec.ParseArticle(article);
@@ -37,7 +37,7 @@ public sealed class ArticleCodecTests
     public void MakeMessageId_Format()
     {
         string chunkId = new('a', 64);
-        Assert.Equal("<" + chunkId + ".0123456789abcdef@usenet-backup>",
+        Assert.Equal("<" + chunkId + ".0123456789abcdef@invalid>",
             ArticleCodec.MakeMessageId(chunkId, "0123456789abcdef"));
     }
 
@@ -85,8 +85,8 @@ public sealed class ArticleCodecTests
         string volumeId = ChunkIdOf(volumeBytes);
         const string repoId = "0123456789abcdef";
 
-        string article = ArticleCodec.BuildVolumeArticle(volumeId, repoId, volumeBytes, "alt.binaries.test", "usenet-backup");
-        Assert.Contains($"Message-ID: <{volumeId}.{repoId}@usenet-backup>", article);
+        string article = ArticleCodec.BuildVolumeArticle(volumeId, repoId, volumeBytes, "alt.binaries.test", "poster", "a1b2c3d4", 2, 4);
+        Assert.Contains($"Message-ID: <{volumeId}.{repoId}@invalid>", article);
         Assert.Contains($"X-UsenetBackup-Volume: {volumeId}", article);
         Assert.DoesNotContain("X-UsenetBackup-Chunk", article);
 
@@ -99,7 +99,7 @@ public sealed class ArticleCodecTests
     public void MakeVolumeMessageId_Format()
     {
         string volumeId = new('c', 64);
-        Assert.Equal("<" + volumeId + ".0123456789abcdef@usenet-backup>",
+        Assert.Equal("<" + volumeId + ".0123456789abcdef@invalid>",
             ArticleCodec.MakeVolumeMessageId(volumeId, "0123456789abcdef"));
     }
 
@@ -109,7 +109,7 @@ public sealed class ArticleCodecTests
         string volumeId = new('c', 64);
         string msgId = ArticleCodec.MakeRefreshVolumeMessageId(volumeId, "0123456789abcdef");
         Assert.StartsWith($"<{volumeId}.0123456789abcdef.refresh.", msgId, StringComparison.Ordinal);
-        Assert.EndsWith("@usenet-backup>", msgId, StringComparison.Ordinal);
+        Assert.EndsWith("@invalid>", msgId, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -126,7 +126,80 @@ public sealed class ArticleCodecTests
     {
         byte[] volumeBytes = RandomBytes(100);
         string volumeId = ChunkIdOf(volumeBytes);
-        string volumeArticle = ArticleCodec.BuildVolumeArticle(volumeId, "0123456789abcdef", volumeBytes, "alt.binaries.test", "x");
+        string volumeArticle = ArticleCodec.BuildVolumeArticle(volumeId, "0123456789abcdef", volumeBytes, "alt.binaries.test", "x", "a1b2c3d4", 2, 4);
         Assert.Throws<InvalidDataException>(() => ArticleCodec.ParseArticle(volumeArticle));
+    }
+
+    [Theory]
+    [InlineData("poster", "poster <poster@invalid>")]
+    [InlineData("", "poster <poster@invalid>")]
+    [InlineData("   ", "poster <poster@invalid>")]
+    [InlineData("alice", "alice <alice@invalid>")]
+    [InlineData("alice@example.com", "alice@example.com")]
+    [InlineData("Bob <bob@example.org>", "Bob <bob@example.org>")]
+    public void FormatFrom_NeutralMailbox(string input, string expected)
+    {
+        Assert.Equal(expected, ArticleCodec.FormatFrom(input));
+        // Never advertises the software in the default path.
+        Assert.DoesNotContain("usenet-backup", ArticleCodec.FormatFrom(input),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildArticle_HasDateAndValidFrom()
+    {
+        byte[] blob = RandomBytes(100);
+        string chunkId = ChunkIdOf(blob);
+        string article = ArticleCodec.BuildArticle(chunkId, "0123456789abcdef", blob, "alt.binaries.test", "poster");
+        Assert.Contains("From: poster <poster@invalid>\r\n", article);
+        Assert.Matches(@"(?m)^Date: \w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT\r$", article);
+        Assert.DoesNotContain("usenet-backup", article, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildVolumeArticle_HasDateAndValidFrom()
+    {
+        byte[] volumeBytes = RandomBytes(100);
+        string volumeId = ChunkIdOf(volumeBytes);
+        string article = ArticleCodec.BuildVolumeArticle(volumeId, "0123456789abcdef", volumeBytes,
+            "alt.binaries.test", "poster", "a1b2c3d4", 2, 4);
+        Assert.Contains("From: poster <poster@invalid>\r\n", article);
+        Assert.Contains("\r\nDate: ", article);
+        Assert.DoesNotContain("usenet-backup", article, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void WithLegacyDomain_RewritesNewIds()
+    {
+        const string repoId = "0123456789abcdef";
+        string chunkId = ChunkIdOf(RandomBytes(10));
+        string fresh = ArticleCodec.MakeMessageId(chunkId, repoId);
+        Assert.EndsWith("@invalid>", fresh);
+        string legacy = ArticleCodec.WithLegacyDomain(fresh);
+        Assert.Equal($"<{chunkId}.{repoId}@usenet-backup>", legacy);
+        // Already-legacy IDs pass through unchanged.
+        Assert.Equal(legacy, ArticleCodec.WithLegacyDomain(legacy));
+    }
+
+    [Fact]
+    public void TryParseManifestMessageId_AcceptsLegacyDomain()
+    {
+        const string repoId = "0123456789abcdef";
+        string backupId = Guid.NewGuid().ToString("N");
+        // New-domain ID parses.
+        Assert.Equal(backupId,
+            ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@invalid>", repoId));
+        // Legacy-domain ID (posted before neutralization) still parses.
+        Assert.Equal(backupId,
+            ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@usenet-backup>", repoId));
+    }
+
+    [Fact]
+    public void TryParseManifestIndexMessageId_AcceptsLegacyDomain()
+    {
+        var parsed = ArticleCodec.TryParseManifestIndexMessageId(
+            "<2026-10.abc123.index.3@usenet-backup>", "abc123");
+        Assert.NotNull(parsed);
+        Assert.Equal(("2026-10", 3), parsed.Value);
     }
 }

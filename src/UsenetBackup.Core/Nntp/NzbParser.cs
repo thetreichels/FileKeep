@@ -152,17 +152,23 @@ public static class NzbParser
             : DateTimeOffset.UnixEpoch;
 
     /// <summary>
-    /// Extracts the chunk ID from a usenet-backup deterministic message-ID
-    /// (&lt;{64 hex}.{16 hex}@usenet-backup&gt;). Returns null for anything else.
+    /// Extracts the chunk ID from a FileKeep deterministic message-ID
+    /// (&lt;{64 hex}.{16 hex}@invalid&gt;, or the legacy @usenet-backup&gt;).
+    /// Returns null for anything else.
     /// </summary>
     internal static string? ChunkIdFromMessageId(string messageId)
     {
-        const string domain = "@usenet-backup>";
-        // '<' + 64 hex + '.' + 16 hex + "@usenet-backup>"
-        if (messageId.Length != 1 + 64 + 1 + 16 + domain.Length)
+        // '<' + 64 hex + '.' + 16 hex + "@" + domain + ">"
+        string? domain = null;
+        foreach (string d in new[] { "invalid", "usenet-backup" })
+        {
+            if (messageId.EndsWith("@" + d + ">", StringComparison.Ordinal)) { domain = d; break; }
+        }
+        if (domain is null)
             return null;
-        if (messageId[0] != '<' || messageId[65] != '.' ||
-            !messageId.EndsWith(domain, StringComparison.Ordinal))
+        if (messageId.Length != 1 + 64 + 1 + 16 + 1 + domain.Length + 1)
+            return null;
+        if (messageId[0] != '<' || messageId[65] != '.')
             return null;
         string chunkId = messageId.Substring(1, 64);
         string repoId = messageId.Substring(66, 16);

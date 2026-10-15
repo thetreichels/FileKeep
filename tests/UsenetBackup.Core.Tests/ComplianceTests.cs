@@ -173,7 +173,8 @@ public sealed class ComplianceTests : IDisposable
             Jobs = new List<BackupJobConfig>
             {
                 new() { Name = "audit", Repo = repoDir, Source = srcDir,
-                        Schedule = schedule, Mode = "incremental", BackupPrivilege = false },
+                        Schedule = schedule, Mode = "incremental", BackupPrivilege = false,
+                        Targets = new List<string> { "nntp" } },
             },
         };
 

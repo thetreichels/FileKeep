@@ -167,9 +167,11 @@ posted as **one NNTP article** with a yEnc-encoded body. The article format
 is part of v1 so that any v1 reader can fetch and decode articles; NZB
 generation (which indexes these articles) is still a later milestone.
 
-**Message-ID.** Deterministic: `<chunkid.repoid@usenet-backup>`, where
+**Message-ID.** Deterministic: `<chunkid.repoid@invalid>`, where
 `chunkid` is the 64-char lowercase hex chunk ID and `repoid` is the first
-16 hex chars of SHA-256(repository salt). Determinism makes uploads
+16 hex chars of SHA-256(repository salt). (`.invalid` is RFC 2606 reserved:
+neutral and unresolvable. Versions before the v2 neutralization used
+`@usenet-backup`; readers still accept that legacy domain.) Determinism makes uploads
 idempotent (re-posting an existing message-ID is a server-side no-op),
 makes existence checks possible with a bare STAT, and means a download
 needs nothing but the chunk ID — no article index to lose.
@@ -177,10 +179,11 @@ needs nothing but the chunk ID — no article index to lose.
 **Headers.**
 
 ```
-From: usenet-backup
+From: poster <poster@invalid>
+Date: <RFC 2822 timestamp, required>
 Newsgroups: <configured group>
 Subject: [usenet-backup] chunk <chunkid>
-Message-ID: <chunkid.repoid@usenet-backup>
+Message-ID: <chunkid.repoid@invalid>
 X-UsenetBackup-Chunk: <chunkid>
 X-UsenetBackup-Format: v1
 ```
@@ -247,10 +250,10 @@ payload: concatenated encrypted chunk blobs
 ```
 
 **Volume ID.** SHA-256 hex of the complete volume bytes. The article
-message-ID is `<volumeid.repoid@usenet-backup>` — deliberately the same
+message-ID is `<volumeid.repoid@invalid>` — deliberately the same
 shape as chunk message-IDs, so NZB parsing, the message-identity index,
 and the catalog journal work unchanged. Retention refresh uses
-`<volumeid.repoid.refresh.<unixTime>.<nonce>@usenet-backup>`.
+`<volumeid.repoid.refresh.<unixTime>.<nonce>@invalid>`.
 
 **Article headers** (body is yEnc as in the chunk format):
 
@@ -275,7 +278,7 @@ hash-verify gate. Parity (XOR/PAR2) operates over volume IDs with the
 same grouping math; a reconstructed volume's chunks are re-verified
 before acceptance.
 
-**repo.json.** `volume_size_bytes` (default 32 MiB) and `use_volumes`
+**repo.json.** `volume_size_bytes` (default 100 MB) and `use_volumes`
 (default true). `nntp-upload --no-volumes` forces per-chunk posting.
 `nntp-check --probe-post-size <MB>` posts a single probe article to
 discover the provider's article-size ceiling.
@@ -286,7 +289,7 @@ A backup is recovered from Usenet by parsing its NZB and fetching every
 referenced article:
 
 1. Parse the NZB (`NzbParser`); extract each file's chunk ID from its
-   segment message-ID (`<{chunkid}.{repoid}@usenet-backup>`).
+   segment message-ID (`<{chunkid}.{repoid}@invalid>`).
 2. For each chunk: `ARTICLE <message-id>`, then validate in order —
    yEnc `size`/`crc32` trailer, `X-UsenetBackup-Chunk` header matches the
    expected chunk ID, AES-256-GCM decryption authenticates, and

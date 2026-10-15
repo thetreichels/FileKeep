@@ -651,7 +651,67 @@ public sealed class BackupScheduler
     }
 
     private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token)
+        => Execute(job, now, token, requireTargets: true, opName: "scheduled-backup");
+
+    /// <summary>
+    /// Runs a one-time manual backup to a local folder chosen at run time.
+    /// This is the only path that may produce a local-only backup: it is
+    /// never scheduled and never persists a job. The repo is initialized
+    /// here if it does not exist yet.
+    /// </summary>
+    public JobRunResult RunOneTimeBackup(string sourceDir, string repoPath)
     {
+        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
+            throw new ArgumentException("Source folder must be an existing directory.", nameof(sourceDir));
+        if (string.IsNullOrWhiteSpace(repoPath))
+            throw new ArgumentException("A destination folder is required.", nameof(repoPath));
+        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+        if (string.IsNullOrEmpty(passphrase))
+            throw new InvalidOperationException(
+                $"Cannot run a backup without a passphrase: set the {PassphraseEnvVar} " +
+                "environment variable for the service account.");
+        if (!File.Exists(Path.Combine(repoPath, "repo.json")))
+            BackupRepository.Init(repoPath, passphrase);
+        var job = new BackupJobConfig
+        {
+            Name = "One-time backup",
+            Source = sourceDir,
+            Repo = repoPath,
+            Mode = "full",
+        };
+        JobRunResult result;
+        lock (_operationLock)
+        {
+            CancellationToken token = BeginOperation();
+            try { result = Execute(job, _clock.Now, token, requireTargets: false, opName: "one-time-backup"); }
+            finally { EndOperation(); }
+        }
+        return result;
+    }
+
+    private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token,
+        bool requireTargets, string opName)
+    {
+        // Fail closed: a scheduled job must upload to at least one Usenet or
+        // network location. Local-only backups are only allowed as manual
+        // one-time runs (requireTargets: false). This catches hand-edited
+        // configs that bypass the dashboard validation.
+        if (requireTargets && job.EffectiveTargets.Count == 0)
+        {
+            string msg = $"Scheduled job '{job.Name}' has no upload targets. " +
+                "Scheduled backups must upload to Usenet or a network location; " +
+                "local-only backups can only be run manually, one at a time.";
+            Log($"job '{job.Name}': FAILED: {msg}");
+            try { OperationLog.Append(job.Repo, "scheduled-backup-failed", $"job={job.Name} error={msg}"); }
+            catch { /* best effort */ }
+            return new JobRunResult
+            {
+                JobName = job.Name,
+                StartedLocal = now,
+                Success = false,
+                Error = msg,
+            };
+        }
         Log($"job '{job.Name}': starting");
         try
         {
@@ -693,7 +753,7 @@ public sealed class BackupScheduler
                 throw;
             }
 
-            OperationLog.Append(job.Repo, "scheduled-backup",
+            OperationLog.Append(job.Repo, opName,
                 $"job={job.Name} id={manifest.BackupId} type={manifest.Type} files={manifest.Files.Count}");
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
 
@@ -1003,7 +1063,8 @@ public sealed class BackupScheduler
                     nntp.Host, nntp.Port, nntp.Ssl,
                     nntp.Username, nntpPassword, nntp.Connections);
                 using var store = new Nntp.NntpBlobStore(pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
+                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
+                    from: repo.GetOrCreatePoster());
                 // Determine redundancy mode: per-provider override, else job default
                 string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
                     ? nntp.RedundancyMode
@@ -1037,20 +1098,35 @@ public sealed class BackupScheduler
                 try
                 {
                     // volId -> chunk group, filled by the data phase; feeds parity.
-                    var volumeEntries = new List<VolumeEntry>();
+                    // (groupIndex, entry) pairs so the manifest keeps PlanVolumes
+                    // order — part numbers are index-derived and must agree
+                    // across the CLI, scheduler, and NZB paths.
+                    var volumeEntries = new List<(int Index, VolumeEntry Entry)>();
                     if (useVolumes)
                     {
                         progress.SetPhase("volumes");
-                        Parallel.ForEach(volumeGroups, parallelOptions, group =>
+                        // The post set reads as an ordinary multi-part binary post:
+                        // part 1 is the NFO, parts 2..n+1 are the RAR-named volumes.
+                        string setName = Nntp.ArticleCodec.SetName(manifest.BackupId);
+                        int totalParts = volumeGroups.Count + 1;
+                        string nfoText = Nntp.ArticleCodec.BuildNfoText(
+                            manifest.BackupId,
+                            manifest.CreatedUtc.ToString("yyyy-MM-dd"),
+                            volumeGroups.Count,
+                            repo.GetOrCreatePoster());
+                        store.PostNfo(manifest.BackupId, nfoText, setName, totalParts);
+                        progress.RecordUploaded(1, nfoText.Length);
+                        Parallel.For(0, volumeGroups.Count, parallelOptions, i =>
                         {
+                            var group = volumeGroups[i];
                             var volume = Nntp.VolumePacker.BuildVolume(group, repo.GetChunkBlob);
                             lock (volumeEntries)
-                                volumeEntries.Add(new VolumeEntry
+                                volumeEntries.Add((i, new VolumeEntry
                                 {
                                     Id = volume.Id,
                                     ChunkIds = volume.ChunkIds.ToList(),
                                     SizeBytes = volume.Bytes.Length,
-                                });
+                                }));
                             if (store.Exists(volume.Id))
                             {
                                 Interlocked.Increment(ref skipped);
@@ -1058,7 +1134,7 @@ public sealed class BackupScheduler
                             }
                             else
                             {
-                                store.PutVolume(volume.Id, volume.Bytes);
+                                store.PutVolume(volume.Id, volume.Bytes, setName, i + 2, totalParts);
                                 Interlocked.Increment(ref uploaded);
                                 progress.RecordUploaded(1, volume.Bytes.Length);
                             }
@@ -1069,7 +1145,7 @@ public sealed class BackupScheduler
                         if (manifest.Volumes is null)
                         {
                             manifest.Volumes = volumeEntries
-                                .OrderBy(e => e.Id, StringComparer.Ordinal).ToList();
+                                .OrderBy(x => x.Index).Select(x => x.Entry).ToList();
                             manifest.VolumeSize = repo.VolumeSizeBytes;
                             repo.SaveManifest(manifest);
                         }
@@ -1106,7 +1182,7 @@ public sealed class BackupScheduler
                         if (useVolumes)
                         {
                             var chunkMap = volumeEntries.ToDictionary(
-                                e => e.Id, e => (IReadOnlyList<string>)e.ChunkIds);
+                                e => e.Entry.Id, e => (IReadOnlyList<string>)e.Entry.ChunkIds);
                             string[] sortedVolIds = chunkMap.Keys
                                 .OrderBy(id => id, StringComparer.Ordinal).ToArray();
                             byte[] GetVolumeBytes(string volId) =>
@@ -1226,8 +1302,10 @@ public sealed class BackupScheduler
         if (largest is null)
             return;
         var volume = Nntp.VolumePacker.BuildVolume(largest, repo.GetChunkBlob);
+        // Measure with the real v2 framing (dummy set name keeps the size exact).
+        string poster = repo.GetOrCreatePoster();
         string article = Nntp.ArticleCodec.BuildVolumeArticle(
-            volume.Id, repo.RepoId, volume.Bytes, nntp.Newsgroup, "usenet-backup");
+            volume.Id, repo.RepoId, volume.Bytes, nntp.Newsgroup, poster, "00000000", 2, 2);
         long articleBytes = article.Length; // yEnc body is ASCII: chars == bytes
 
         var limits = new Nntp.ProviderLimits(repo.RepoRoot);
@@ -1244,22 +1322,15 @@ public sealed class BackupScheduler
         {
             byte[] payload = new byte[size];
             System.Random.Shared.NextBytes(payload);
-            string nonce = Guid.NewGuid().ToString("N")[..8];
-            var sb = new System.Text.StringBuilder();
-            sb.Append("From: usenet-backup\r\n");
-            sb.Append("Newsgroups: ").Append(nntp.Newsgroup).Append("\r\n");
-            sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
-            sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
-            sb.Append("X-UsenetBackup-Probe: 1\r\n");
-            sb.Append("\r\n");
-            sb.Append(Nntp.YEnc.Encode(payload, $"probe-{nonce}.bin"));
+            string probeArticle = Nntp.ArticleCodec.BuildProbeArticle(
+                payload, nntp.Newsgroup, poster, out _);
             try
             {
                 using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
                 client.Connect();
                 if (!string.IsNullOrEmpty(nntp.Username))
                     client.Authenticate(nntp.Username, nntpPassword ?? "");
-                client.Post(sb.ToString());
+                client.Post(probeArticle);
                 client.Quit();
                 return true;
             }

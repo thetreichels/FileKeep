@@ -54,7 +54,8 @@ public sealed class ServiceTests : IDisposable
           "jobs": [
             { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
               "source": "{{_srcDir.Replace("\\", "\\\\")}}",
-              "schedule": "{{schedule}}", "mode": "{{mode}}", "backupPrivilege": false }
+              "schedule": "{{schedule}}", "mode": "{{mode}}", "backupPrivilege": false,
+              "targets": ["nntp"] }
           ]
         }
         """;
@@ -84,7 +85,10 @@ public sealed class ServiceTests : IDisposable
             "src", "UsenetBackup.Service", "service.example.json"));
         Assert.True(File.Exists(example), $"Example not found at {example}");
         var config = ServiceConfig.Load(example);
-        Assert.NotEmpty(config.Jobs);
+        // Fresh installs start with an empty job list by design (2bb45a5
+        // removed the baked-in sample jobs); the user creates jobs through
+        // the dashboard. The example must still load and validate cleanly.
+        Assert.Empty(config.Jobs);
         config.Validate();
     }
 

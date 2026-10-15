@@ -78,17 +78,21 @@ public sealed class NzbTests
         var subjects = files.Cast<XmlElement>()
             .Select(e => e.GetAttribute("subject")).ToList();
         Assert.Equal(subjects.Count, subjects.Distinct().Count());
-        Assert.Contains("[usenet-backup] chunk " + IdA, subjects);
-        Assert.Contains("[usenet-backup] chunk " + IdD, subjects);
+        Assert.Contains($"\"{IdA[..16]}.bin\" - yEnc", subjects);
+        Assert.Contains($"\"{IdD[..16]}.bin\" - yEnc", subjects);
 
         // One segment per file, with the deterministic message-ID in brackets.
         foreach (XmlElement file in files)
         {
             var segments = file.SelectNodes("n:segments/n:segment", ns)!;
             Assert.Single(segments.Cast<XmlElement>());
-            string chunkId = file.GetAttribute("subject").Split(' ').Last();
-            Assert.Equal(ArticleCodec.MakeMessageId(chunkId, RepoId),
-                ((XmlElement)segments[0]!).InnerText);
+            string segmentText = ((XmlElement)segments[0]!).InnerText;
+            // Message-ID is <chunkId.repoId@usenet-backup>; subject filename
+            // carries the first 16 chars of the chunk ID.
+            string chunkId = segmentText.Trim('<', '>').Split('.')[0];
+            Assert.Equal(ArticleCodec.MakeMessageId(chunkId, RepoId), segmentText);
+            string subject = file.GetAttribute("subject");
+            Assert.Equal($"\"{chunkId[..16].ToLowerInvariant()}.bin\" - yEnc", subject);
         }
     }
 
@@ -101,12 +105,14 @@ public sealed class NzbTests
 
         foreach (XmlElement file in doc.SelectNodes("//n:file", ns)!.Cast<XmlElement>())
         {
-            string chunkId = file.GetAttribute("subject").Split(' ').Last();
+            var segment = (XmlElement)file.SelectSingleNode("n:segments/n:segment", ns)!;
+            // Message-ID is <chunkId.repoId@usenet-backup>; subject filename
+            // carries only the first 16 chars of the chunk ID.
+            string chunkId = segment.InnerText.Trim('<', '>').Split('.')[0];
             string article = ArticleCodec.BuildArticle(
                 chunkId, RepoId, Encoding.Latin1.GetBytes("blob:" + chunkId),
                 Newsgroup, Poster);
             long expected = Encoding.Latin1.GetByteCount(article);
-            var segment = (XmlElement)file.SelectSingleNode("n:segments/n:segment", ns)!;
             Assert.Equal(expected.ToString(), segment.GetAttribute("bytes"));
             Assert.Equal("1", segment.GetAttribute("number"));
             Assert.Equal(Newsgroup, file.SelectSingleNode("n:groups/n:group", ns)!.InnerText);
@@ -149,7 +155,7 @@ public sealed class NzbTests
         string DateFor(string chunkId)
         {
             var file = (XmlElement)doc.SelectSingleNode(
-                $"//n:file[@subject='[usenet-backup] chunk {chunkId}']", ns)!;
+                $"//n:file[@subject='\"{chunkId[..16].ToLowerInvariant()}.bin\" - yEnc']", ns)!;
             return file.GetAttribute("date");
         }
 
@@ -354,7 +360,7 @@ public sealed class NzbVolumeTests
         Assert.Equal(expectedIds, parsedIds);
         foreach (var file in doc.Files)
         {
-            Assert.StartsWith("[usenet-backup] volume ", file.Subject, StringComparison.Ordinal);
+            Assert.Matches("^\"[^\"]+\" \\[\\d{3}/\\d{3}\\] - yEnc$", file.Subject);
             Assert.Equal(ArticleCodec.MakeVolumeMessageId(file.VolumeId!, RepoId),
                 file.Segments[0].MessageId);
         }

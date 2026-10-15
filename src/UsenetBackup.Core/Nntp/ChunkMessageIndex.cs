@@ -7,7 +7,7 @@ namespace UsenetBackup.Core.Nntp;
 /// Maps chunk IDs to their current Usenet message IDs, per provider.
 ///
 /// Chunk message IDs are normally deterministic
-/// (&lt;chunkId.repoId@usenet-backup&gt;), but retention refresh republishes
+/// (&lt;chunkId.repoId@invalid&gt;, legacy @usenet-backup&gt;), but retention refresh republishes
 /// articles under NEW message IDs (servers reject duplicate IDs, so
 /// reposting the same ID does not extend retention). This index records
 /// which message ID is currently live for each republished chunk, so
@@ -149,7 +149,7 @@ public sealed class ChunkMessageIndex
     }
 
     /// <summary>
-    /// Message IDs we generate look like &lt;...@usenet-backup&gt;. At minimum,
+    /// Message IDs we generate look like &lt;...@invalid&gt; (legacy: &lt;...@usenet-backup&gt;). At minimum,
     /// an ID interpolated into an NNTP command must not contain CR, LF, or
     /// whitespace that would split protocol lines.
     /// </summary>

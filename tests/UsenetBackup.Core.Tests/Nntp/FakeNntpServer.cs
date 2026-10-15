@@ -118,7 +118,7 @@ internal sealed class FakeNntpServer : IDisposable
                         string article = ReadArticle(reader);
                         string? msgId = ExtractMessageId(article);
                         if (msgId is null) { writer.WriteLine("441 missing Message-ID"); break; }
-                        if (FailIndexPosts && article.Contains("[usenet-backup] message-index"))
+                        if (FailIndexPosts && msgId.Contains("index.", StringComparison.Ordinal))
                         { writer.WriteLine("441 index posting rejected (injected failure)"); break; }
                         Articles[msgId] = article;
                         Interlocked.Increment(ref _postCount);

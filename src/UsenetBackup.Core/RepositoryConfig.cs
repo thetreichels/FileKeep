@@ -24,13 +24,13 @@ public sealed class RepositoryConfig
     public int ChunkSize { get; set; }
 
     /// <summary>
-    /// Target packed-volume size in bytes for Usenet uploads (default 32 MiB).
+    /// Target packed-volume size in bytes for Usenet uploads (default 100 MB, the scene-standard DVD9 RAR size).
     /// Chunks are greedily packed into volumes of at most this size; one
     /// volume is posted as one article. Absent in older repo.json files ->
     /// default applies.
     /// </summary>
     [JsonPropertyName("volume_size_bytes")]
-    public long VolumeSizeBytes { get; set; } = 32L * 1024 * 1024;
+    public long VolumeSizeBytes { get; set; } = 100L * 1000 * 1000;
 
     /// <summary>
     /// When false, uploads post one article per chunk (v1 behavior) instead
@@ -38,4 +38,12 @@ public sealed class RepositoryConfig
     /// </summary>
     [JsonPropertyName("use_volumes")]
     public bool UseVolumes { get; set; } = true;
+
+    /// <summary>
+    /// Stable pseudonym used as the NNTP From header on posted articles.
+    /// Generated once (poster-&lt;8hex&gt;) on first upload if absent; never
+    /// advertises the software. Overridable per-run with --poster.
+    /// </summary>
+    [JsonPropertyName("poster")]
+    public string? Poster { get; set; }
 }

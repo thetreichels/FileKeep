@@ -63,7 +63,7 @@ public sealed class VolumeUploadTests : IDisposable
         Assert.True(chunkIds.Length > 2);
 
         // Shrink the volume target so this small backup actually splits.
-        // (Repo config default is 32 MiB; override via reflection-free path:
+        // (Repo config default is 100 MB; override via reflection-free path:
         // re-plan with an explicit small target through VolumePacker.)
         long targetBytes = 40 * 1024;
         var groups = VolumePacker.Plan(chunkIds, repo.GetChunkBlobSize, targetBytes);
@@ -78,7 +78,7 @@ public sealed class VolumeUploadTests : IDisposable
             {
                 var volume = VolumePacker.BuildVolume(group, repo.GetChunkBlob);
                 if (!store.Exists(volume.Id))
-                    store.PutVolume(volume.Id, volume.Bytes);
+                    store.PutVolume(volume.Id, volume.Bytes, "testset0", 2, 9);
                 entries.Add(new VolumeEntry
                 {
                     Id = volume.Id,
@@ -96,7 +96,7 @@ public sealed class VolumeUploadTests : IDisposable
             {
                 var volume = VolumePacker.BuildVolume(group, repo.GetChunkBlob);
                 if (!store.Exists(volume.Id))
-                    store.PutVolume(volume.Id, volume.Bytes);
+                    store.PutVolume(volume.Id, volume.Bytes, "testset0", 3, 9);
             }
             Assert.Equal(postsBefore, _server.PostCount);
         }

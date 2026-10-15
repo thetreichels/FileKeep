@@ -26,7 +26,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string newsgroup,
         string repoId,
         string catalogDbPath,
-        string from = "usenet-backup",
+        string from = "poster",
         ChunkMessageIndex? messageIndex = null,
         string? providerKey = null)
     {
@@ -39,7 +39,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 "refresh history to use.", nameof(providerKey));
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _newsgroup = newsgroup;
-        _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
+        _from = string.IsNullOrEmpty(from) ? "poster" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
@@ -55,7 +55,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string newsgroup,
         string repoId,
         string catalogDbPath,
-        string from = "usenet-backup",
+        string from = "poster",
         ChunkMessageIndex? messageIndex = null,
         string? providerKey = null)
     {
@@ -68,7 +68,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 "refresh history to use.", nameof(providerKey));
         _pool = pool ?? throw new ArgumentNullException(nameof(pool));
         _newsgroup = newsgroup;
-        _from = string.IsNullOrEmpty(from) ? "usenet-backup" : from;
+        _from = string.IsNullOrEmpty(from) ? "poster" : from;
         _repoId = repoId;
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
@@ -201,15 +201,50 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     }
 
     /// <summary>
-    /// Posts a packed volume as a single article. Idempotent via the journal
-    /// fast path and STAT fallback, like <see cref="Put"/>. Refuses up front
-    /// when the framed article would exceed <see cref="MaxArticleBytes"/>
-    /// instead of failing mid-POST with a bare server 441.
+    /// Posts a packed volume as a single article with neutral unnumbered naming
+    /// ("{volumeId8}.bin" - yEnc). For maintenance articles outside a backup's
+    /// numbered post set (e.g. parity blocks). Idempotent like <see cref="Put"/>.
     /// </summary>
     public void PutVolume(string volumeIdHex, byte[] volumeBytes)
     {
         ValidateChunkId(volumeIdHex);
         ArgumentNullException.ThrowIfNull(volumeBytes);
+        string messageId = ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
+        if (_journal.IsUploaded(messageId))
+            return;
+        if (UseClient(c => c.Stat(messageId)))
+        {
+            _journal.RecordUpload(messageId, volumeIdHex);
+            return;
+        }
+        string article = ArticleCodec.BuildVolumeArticleWithMessageId(
+            volumeIdHex, messageId, volumeBytes, _newsgroup, _from);
+        if (article.Length > MaxArticleBytes)
+            throw new InvalidDataException(
+                $"Volume article ({article.Length} bytes) exceeds the {MaxArticleBytes}-byte article limit. " +
+                "Lower volume_size_bytes in repo.json and re-run the upload.");
+        UseClient(c => c.Post(article));
+        WaitForArticle(messageId);
+        _journal.RecordUpload(messageId, volumeIdHex);
+    }
+
+    /// <summary>
+    /// Posts a packed volume as a single article, as part <paramref name="partNumber"/>
+    /// of <paramref name="partCount"/> in the backup's post set (part 1 is the NFO).
+    /// The viewable naming is neutral (RAR-style part name, standard multi-part
+    /// subject). Idempotent via the journal fast path and STAT fallback, like
+    /// <see cref="Put"/>. Refuses up front when the framed article would exceed
+    /// <see cref="MaxArticleBytes"/> instead of failing mid-POST with a bare
+    /// server 441.
+    /// </summary>
+    public void PutVolume(string volumeIdHex, byte[] volumeBytes, string setName, int partNumber, int partCount)
+    {
+        ValidateChunkId(volumeIdHex);
+        ArgumentNullException.ThrowIfNull(volumeBytes);
+        ArgumentException.ThrowIfNullOrEmpty(setName);
+        if (partNumber < 2 || partCount < partNumber)
+            throw new ArgumentOutOfRangeException(nameof(partNumber),
+                "Volume parts start at 2 (part 1 is the NFO).");
         string messageId = ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
         if (_journal.IsUploaded(messageId))
             return; // resume fast path: already posted
@@ -219,7 +254,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             return;
         }
         string article = ArticleCodec.BuildVolumeArticle(
-            volumeIdHex, _repoId, volumeBytes, _newsgroup, _from);
+            volumeIdHex, _repoId, volumeBytes, _newsgroup, _from, setName, partNumber, partCount);
         if (article.Length > MaxArticleBytes)
             throw new InvalidDataException(
                 $"Volume article ({article.Length} bytes) exceeds the {MaxArticleBytes}-byte article limit. " +
@@ -227,6 +262,34 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
         _journal.RecordUpload(messageId, volumeIdHex);
+    }
+
+    /// <summary>
+    /// Posts the backup's NFO as part 1 of the post set. The NFO carries no
+    /// software branding — just the set metadata and the archival notice.
+    /// Idempotent: the message-ID is derived from (backupId, repoId), so a
+    /// repost is a STAT-confirmed no-op.
+    /// </summary>
+    public void PostNfo(string backupId, string nfoText, string setName, int totalParts)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(backupId);
+        ArgumentException.ThrowIfNullOrEmpty(nfoText);
+        ArgumentException.ThrowIfNullOrEmpty(setName);
+        if (totalParts < 1)
+            throw new ArgumentOutOfRangeException(nameof(totalParts));
+        string messageId = ArticleCodec.MakeNfoMessageId(backupId, _repoId);
+        if (_journal.IsUploaded(messageId))
+            return;
+        if (UseClient(c => c.Stat(messageId)))
+        {
+            _journal.RecordUpload(messageId, backupId);
+            return;
+        }
+        string article = ArticleCodec.BuildNfoArticle(
+            nfoText, backupId, _repoId, _newsgroup, _from, setName, totalParts);
+        UseClient(c => c.Post(article));
+        WaitForArticle(messageId);
+        _journal.RecordUpload(messageId, backupId);
     }
 
     /// <summary>
@@ -338,6 +401,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
         string? article = UseClient(c => c.GetArticle(messageId, MaxArticleBytes));
+        // Manifests posted before the message-ID domain was neutralized
+        // live under the legacy domain.
+        article ??= UseClient(c => c.GetArticle(
+            ArticleCodec.WithLegacyDomain(messageId), MaxArticleBytes));
         if (article is null)
             return null;
         var (id, blob) = ArticleCodec.ParseManifestArticle(article);
@@ -356,7 +423,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         // Find the latest version by probing (tolerates expired versions).
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v),
+            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v)));
         int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         // This makes re-upload idempotent.
@@ -381,7 +449,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public IReadOnlyList<string>? GetLatestManifestIndex(string yearMonth)
     {
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v),
+            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v)));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, latestVersion);
@@ -404,7 +473,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         // Find the latest version by probing (tolerates expired versions).
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v),
+            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeMessageIndexMessageId(_repoId, v)));
         int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         if (latestVersion > 0)
@@ -415,9 +485,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         }
         string messageId = ArticleCodec.MakeMessageIndexMessageId(_repoId, version);
         var sb = new System.Text.StringBuilder();
-        sb.Append("From: ").Append(_from).Append("\r\n");
+        sb.Append("From: ").Append(ArticleCodec.FormatFrom(_from)).Append("\r\n");
+        sb.Append("Date: ").Append(ArticleCodec.Rfc2822DateNow()).Append("\r\n");
         sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
-        sb.Append("Subject: [usenet-backup] message-index v").Append(version).Append("\r\n");
+        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.idx")).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("Content-Type: application/json; charset=utf-8\r\n");
         sb.Append("\r\n");
@@ -443,7 +514,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public string? GetLatestMessageIndex()
     {
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v),
+            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeMessageIndexMessageId(_repoId, v)));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeMessageIndexMessageId(_repoId, latestVersion);
@@ -528,7 +600,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// hide newer surviving versions. Stops after a run of consecutive
     /// misses so a long-dead series still terminates quickly.
     /// </summary>
-    private int ProbeLatestVersion(Func<int, string> makeMessageId)
+    private int ProbeLatestVersion(Func<int, string> makeMessageId, Func<int, string>? makeLegacyMessageId = null)
     {
         const int maxConsecutiveMisses = 5;
         const int hardCap = 1000;
@@ -536,7 +608,12 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         int misses = 0;
         for (int version = 1; version <= hardCap; version++)
         {
-            if (UseClient(c => c.Stat(makeMessageId(version))))
+            // Articles posted before the message-ID domain was neutralized
+            // live under the legacy domain; probe both.
+            bool exists = UseClient(c => c.Stat(makeMessageId(version)));
+            if (!exists && makeLegacyMessageId is not null)
+                exists = UseClient(c => c.Stat(makeLegacyMessageId(version)));
+            if (exists)
             {
                 latest = version;
                 misses = 0;
@@ -553,9 +630,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
         var sb = new System.Text.StringBuilder();
-        sb.Append("From: ").Append(_from).Append("\r\n");
+        sb.Append("From: ").Append(ArticleCodec.FormatFrom(_from)).Append("\r\n");
+        sb.Append("Date: ").Append(ArticleCodec.Rfc2822DateNow()).Append("\r\n");
         sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
-        sb.Append("Subject: [usenet-backup] manifest-index ").Append(yearMonth).Append(" v").Append(version).Append("\r\n");
+        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.mft")).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("Content-Type: text/plain; charset=utf-8\r\n");
         sb.Append("\r\n");

@@ -14,7 +14,7 @@ public sealed class BackupRepository : IDisposable
 {
     public const string FormatVersion = "v1";
     public const int DefaultChunkSize = 4 * 1024 * 1024;
-    public const long DefaultVolumeSizeBytes = 32L * 1024 * 1024;
+    public const long DefaultVolumeSizeBytes = 100L * 1000 * 1000;
     public const int DefaultKdfIterations = 600_000;
 
     /// <summary>
@@ -44,6 +44,33 @@ public sealed class BackupRepository : IDisposable
 
     /// <summary>Repository root directory (for tracker files, etc.).</summary>
     public string RepoRoot => _root;
+
+    /// <summary>
+    /// Returns the stable NNTP poster pseudonym for this repository,
+    /// generating and persisting one (poster-&lt;8hex&gt;) on first use.
+    /// The name is a neutral pseudonym — it never advertises the software.
+    /// An explicit --poster run flag overrides this for the run without
+    /// persisting.
+    /// </summary>
+    public string GetOrCreatePoster()
+    {
+        if (!string.IsNullOrWhiteSpace(_config.Poster))
+            return _config.Poster!;
+        string poster = "poster-" + Convert.ToHexString(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(4)).ToLowerInvariant();
+        _config.Poster = poster;
+        SaveConfig();
+        return poster;
+    }
+
+    private void SaveConfig()
+    {
+        string repoJsonPath = Path.Combine(_root, "repo.json");
+        string tmpPath = repoJsonPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        File.WriteAllText(tmpPath,
+            JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmpPath, repoJsonPath, overwrite: true);
+    }
 
     private BackupRepository(string root, RepositoryConfig config, byte[] key)
     {

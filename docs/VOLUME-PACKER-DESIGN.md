@@ -44,8 +44,8 @@ payload:    concatenated encrypted chunk blobs
   the same canonical order parity and NZB generation already use.
 - Greedy fill: append chunk blobs until the next blob would exceed the target;
   then start a new volume.
-- Target size: repo.json `volume_size_bytes`, default **32 MiB** (33,554,432).
-  yEnc adds ~2-3%, so a 32 MiB volume posts as a ~33 MiB article.
+- Target size: repo.json `volume_size_bytes`, default **100 MB** (100,000,000).
+  yEnc adds ~2-3%, so a 100 MB volume posts as a ~102 MB article.
 - Toggle: repo.json `use_volumes` (default true); CLI `nntp-upload --no-volumes`
   and `init --volume-size BYTES`.
 

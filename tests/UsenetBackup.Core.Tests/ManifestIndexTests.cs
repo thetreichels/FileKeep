@@ -12,7 +12,7 @@ public sealed class ManifestIndexTests
     public void MakeManifestIndexMessageId_FormatsCorrectly()
     {
         string msgId = ArticleCodec.MakeManifestIndexMessageId("abc123", "2026-10", 1);
-        Assert.Equal("<2026-10.abc123.index.1@usenet-backup>", msgId);
+        Assert.Equal("<2026-10.abc123.index.1@invalid>", msgId);
     }
 
     [Fact]

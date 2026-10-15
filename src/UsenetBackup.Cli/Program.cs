@@ -62,6 +62,7 @@ static void PrintUsage()
               [--probe-post-size MB]
           usenet-backup nntp-upload <repo> <backup-id> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP] [--no-volumes]
+              [--poster POSTER]
           usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
               [--newsgroup GROUP] [--poster POSTER]
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
@@ -459,23 +460,16 @@ static int NntpProbePostSize(string[] args, string sizeArg)
 
     byte[] payload = new byte[bytes];
     Random.Shared.NextBytes(payload);
-    string nonce = Guid.NewGuid().ToString("N")[..8];
-    var sb = new StringBuilder();
-    sb.Append("From: usenet-backup\r\n");
-    sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
-    sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
-    sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
-    sb.Append("X-UsenetBackup-Probe: 1\r\n");
-    sb.Append("\r\n");
-    sb.Append(YEnc.Encode(payload, $"probe-{nonce}.bin"));
+    string probeArticle = UsenetBackup.Core.Nntp.ArticleCodec.BuildProbeArticle(
+        payload, newsgroup, "poster", out string probeMessageId);
 
     using var client = ConnectNntp(args);
     try
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        client.Post(sb.ToString());
+        client.Post(probeArticle);
         sw.Stop();
-        bool retrievable = client.Stat($"<probe-{nonce}@usenet-backup>");
+        bool retrievable = client.Stat(probeMessageId);
         client.Quit();
         Console.WriteLine($"POST accepted in {sw.Elapsed.TotalSeconds:F1}s; " +
             $"article {(retrievable ? "is retrievable" : "not yet visible via STAT")}.");
@@ -549,24 +543,17 @@ static int NntpProbePostSizeAuto(string[] args)
 /// Posts one probe article of exactly <paramref name="bytes"/> and returns
 /// true if the server accepted it. Quiet mode suppresses per-probe output.
 /// </summary>
-static bool TryPostProbe(string[] args, string newsgroup, long bytes, bool quiet)
+static bool TryPostProbe(string[] args, string newsgroup, long bytes, bool quiet, string from = "poster")
 {
     byte[] payload = new byte[bytes];
     Random.Shared.NextBytes(payload);
-    string nonce = Guid.NewGuid().ToString("N")[..8];
-    var sb = new StringBuilder();
-    sb.Append("From: usenet-backup\r\n");
-    sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
-    sb.Append("Subject: [usenet-backup] probe ").Append(nonce).Append("\r\n");
-    sb.Append("Message-ID: <probe-").Append(nonce).Append("@usenet-backup>\r\n");
-    sb.Append("X-UsenetBackup-Probe: 1\r\n");
-    sb.Append("\r\n");
-    sb.Append(UsenetBackup.Core.Nntp.YEnc.Encode(payload, $"probe-{nonce}.bin"));
+    string article = UsenetBackup.Core.Nntp.ArticleCodec.BuildProbeArticle(
+        payload, newsgroup, from, out _);
 
     try
     {
         using var client = ConnectNntp(args);
-        client.Post(sb.ToString());
+        client.Post(article);
         client.Quit();
         return true;
     }
@@ -617,8 +604,10 @@ static void PreflightVolumeSize(
     if (largest is null)
         return;
     var volume = UsenetBackup.Core.Nntp.VolumePacker.BuildVolume(largest, repo.GetChunkBlob);
+    // Measure with the real v2 framing (dummy set name keeps the size exact).
+    string poster = GetOption(args, "--poster") ?? repo.GetOrCreatePoster();
     string article = UsenetBackup.Core.Nntp.ArticleCodec.BuildVolumeArticle(
-        volume.Id, repo.RepoId, volume.Bytes, newsgroup, "usenet-backup");
+        volume.Id, repo.RepoId, volume.Bytes, newsgroup, poster, "00000000", 2, 2);
     long articleBytes = article.Length; // yEnc body is ASCII: chars == bytes
 
     var limits = new UsenetBackup.Core.Nntp.ProviderLimits(repo.RepoRoot);
@@ -632,7 +621,7 @@ static void PreflightVolumeSize(
     Console.WriteLine($"Preflight: probing {host}:{port} with a {articleBytes}-byte " +
         "article to verify the upload will succeed...");
     limits.EnsureCapacity(host, port, articleBytes,
-        size => TryPostProbe(args, newsgroup, size, quiet: false));
+        size => TryPostProbe(args, newsgroup, size, quiet: false, from: poster));
     Console.WriteLine("Preflight OK — provider accepts the volume size.");
 }
 
@@ -768,6 +757,9 @@ static int NntpUpload(string[] args)
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var manifest = repo.LoadManifest(pos[1]);
+    // Poster identity: explicit --poster wins for the run; otherwise the
+    // repo's stable pseudonym (generated once, never advertises the software).
+    string poster = GetOption(args, "--poster") ?? repo.GetOrCreatePoster();
     // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
     string[] chunkIds = UsenetBackup.Core.ChunkOrdering.GetOrderedChunkIds(manifest);
 
@@ -788,7 +780,8 @@ static int NntpUpload(string[] args)
     try
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            from: poster);
         store.MaxArticleBytes = repo.MaxDownloadBytes;
         int uploaded = 0, skipped = 0;
         if (useVolumes)
@@ -801,6 +794,17 @@ static int NntpUpload(string[] args)
             // when known; otherwise posts one probe article at the planned
             // size. Aborts the upload if the probe is rejected.
             PreflightVolumeSize(repo, groups, args, newsgroup);
+            // The post set reads as an ordinary multi-part binary post:
+            // part 1 is the NFO, parts 2..n+1 are the RAR-named volumes.
+            string setName = UsenetBackup.Core.Nntp.ArticleCodec.SetName(manifest.BackupId);
+            int totalParts = groups.Count + 1;
+            string nfoText = UsenetBackup.Core.Nntp.ArticleCodec.BuildNfoText(
+                manifest.BackupId,
+                manifest.CreatedUtc.ToString("yyyy-MM-dd"),
+                groups.Count,
+                poster);
+            store.PostNfo(manifest.BackupId, nfoText, setName, totalParts);
+            Console.WriteLine("  NFO posted (part 1 of " + totalParts + ").");
             var volumeEntries = new List<VolumeEntry>(groups.Count);
             for (int i = 0; i < groups.Count; i++)
             {
@@ -811,7 +815,7 @@ static int NntpUpload(string[] args)
                 }
                 else
                 {
-                    store.PutVolume(volume.Id, volume.Bytes);
+                    store.PutVolume(volume.Id, volume.Bytes, setName, i + 2, totalParts);
                     uploaded++;
                 }
                 volumeEntries.Add(new VolumeEntry

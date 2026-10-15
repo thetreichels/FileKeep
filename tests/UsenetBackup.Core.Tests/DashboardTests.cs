@@ -47,7 +47,8 @@ public sealed class DashboardTests : IDisposable
         Jobs = new List<BackupJobConfig>
         {
             new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
-                    Schedule = "interval 60", Mode = "incremental", BackupPrivilege = false },
+                    Schedule = "interval 60", Mode = "incremental", BackupPrivilege = false,
+                    Targets = new List<string> { "nntp" } },
         },
     };
 
