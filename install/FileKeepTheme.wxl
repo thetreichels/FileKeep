@@ -4,11 +4,11 @@
   <String Id="LoadingLabel">Loading…</String>
   <String Id="HelpHeader">Setup Help</String>
   <String Id="HelpText">Run FileKeep-Setup.exe to install FileKeep.</String>
-  <String Id="CloseButton">&amp;Close</String>
+  <String Id="CloseButton">Close</String>
   <String Id="InstallHeader">Install FileKeep</String>
   <String Id="InstallSubtitle">Encrypted backups, stored on Usenet.</String>
   <String Id="InstallVersion">Version [WixBundleVersion]</String>
-  <String Id="InstallInstallButton">&amp;Install</String>
+  <String Id="InstallInstallButton">Install</String>
   <String Id="InstallCancelButton">Cancel</String>
   <String Id="ProgressHeader">Installing FileKeep…</String>
   <String Id="OverallProgressPackageText"></String>
@@ -16,14 +16,14 @@
   <String Id="ConfirmCancelMessage">Are you sure you want to cancel the FileKeep installation?</String>
   <String Id="ModifyHeader">FileKeep is installed</String>
   <String Id="ModifySubtitle">Repair or uninstall FileKeep.</String>
-  <String Id="ModifyRepairButton">&amp;Repair</String>
-  <String Id="ModifyUninstallButton">&amp;Uninstall</String>
+  <String Id="ModifyRepairButton">Repair</String>
+  <String Id="ModifyUninstallButton">Uninstall</String>
   <String Id="ModifyCancelButton">Cancel</String>
   <String Id="SuccessHeader">Installation completed successfully</String>
   <String Id="SuccessBody">FileKeep is ready to use.</String>
-  <String Id="SuccessLaunchButton">&amp;Launch FileKeep</String>
-  <String Id="SuccessCloseButton">&amp;Close</String>
+  <String Id="SuccessLaunchButton">Launch FileKeep</String>
+  <String Id="SuccessCloseButton">Close</String>
   <String Id="FailureHeader">Installation failed</String>
   <String Id="FailureHyperlinkLogText">Open the setup log</String>
-  <String Id="FailureCloseButton">&amp;Close</String>
+  <String Id="FailureCloseButton">Close</String>
 </WixLocalization>
