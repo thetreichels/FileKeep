@@ -299,7 +299,26 @@ $bundle = Get-Item C:\ub\FileKeep-Setup.exe
 Write-Host ("  Bundle built: {0:N0} bytes" -f $bundle.Length)
 
 Write-Host "=== 5/6 Signing MSI + bundle ==="
-Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.5.1.msi", "C:\ub\FileKeep-Setup.exe")
+# Sign the MSI directly.
+Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.5.1.msi")
+
+# A Burn bundle must be signed in two pieces: detach the engine, sign it,
+# reattach it, then sign the whole bundle. Direct-signing the finished
+# bundle corrupts the recorded attached-container byte offsets and causes
+# a spurious source-resolution file dialog at install time
+# (Failed to acquire container: WixAttachedContainer).
+Write-Host "  Detaching Burn engine..."
+$engine = "C:\ub\burnengine.exe"
+$reattached = "C:\ub\FileKeep-Setup-signed.exe"
+& wix burn detach C:\ub\FileKeep-Setup.exe -engine $engine
+if ($LASTEXITCODE -ne 0) { throw "wix burn detach failed" }
+Invoke-CodeSigning -Files @($engine)
+Write-Host "  Reattaching signed engine..."
+& wix burn reattach C:\ub\FileKeep-Setup.exe -engine $engine -o $reattached
+if ($LASTEXITCODE -ne 0) { throw "wix burn reattach failed" }
+Invoke-CodeSigning -Files @($reattached)
+Move-Item -Force $reattached C:\ub\FileKeep-Setup.exe
+Write-Host "  Bundle signed via detach/sign/reattach/sign."
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
 Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.5.1.msi", "/qn" -Wait
