@@ -285,4 +285,46 @@ public sealed class SnapshotAndImageTests : IDisposable
         using var reader = new StreamReader(stream);
         Assert.Equal("hello", reader.ReadToEnd());
     }
+
+    [Fact]
+    public void BackupDiskImageStreaming_ChunksGoToSmb_NotLocal()
+    {
+        // Streaming disk-image backup: chunks go directly to the SMB share,
+        // nothing lands in the local repo's chunks directory.
+        byte[] diskBytes = RandomBytes(2 * ChunkSize + 12345);
+        string disk = Path.Combine(_workDir, "disk.bin");
+        File.WriteAllBytes(disk, diskBytes);
+
+        string shareDir = Path.Combine(_workDir, "share");
+        Directory.CreateDirectory(shareDir);
+        var share = SmbShare.Connect(shareDir, null, null);
+        var smbStore = new SmbBlobStore(share);
+
+        string backupId;
+        using (var repo = InitRepo())
+        {
+            var manifest = repo.BackupDiskImageStreaming(disk, smbStore, "disk.img");
+            backupId = manifest.BackupId;
+            Assert.Equal("disk-image", manifest.Kind);
+            Assert.Single(manifest.Files);
+            var entry = manifest.Files[0];
+            Assert.Equal(3, entry.Chunks.Count); // 2 full chunks + 1 partial
+
+            // Chunks are on the share, not in the local repo.
+            foreach (var chunkId in entry.Chunks)
+                Assert.True(smbStore.Exists(chunkId), $"Chunk {chunkId} missing from SMB share");
+            string localChunks = Path.Combine(_repoDir, "chunks");
+            Assert.False(Directory.Exists(localChunks) &&
+                Directory.GetFiles(localChunks, "*", SearchOption.AllDirectories).Length > 0,
+                "Local repo should have no chunks after streaming backup");
+        }
+
+        // Manifest round-trips from the local repo.
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            var loaded = repo.LoadManifest(backupId);
+            Assert.True(loaded.VerifyRootHash());
+            Assert.Equal("disk-image", loaded.Kind);
+        }
+    }
 }

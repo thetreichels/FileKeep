@@ -511,40 +511,7 @@
           <button onclick="showLocationForm('nntp')">＋ Add Usenet provider</button>
           <button onclick="showLocationForm('smb')">＋ Add network share</button>
         </div>
-      </div>
-      <div class="card">
-        <div class="name">NNTP connectivity diagnostic</div>
-        <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
-        <div class="row" style="margin-top:8px">
-          <input id="op-host" placeholder="news.example.com" style="flex:1">
-          <button onclick="runDiagnose()">Diagnose</button>
-        </div>
-        <div id="diagnoseResult" style="margin-top:8px"></div>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">Security</h2>
-        <p style="color:var(--text-2);margin-top:0">The repository passphrase encrypts everything you back up. Store it here (Windows DPAPI-encrypted, never in plaintext) so scheduled jobs run without typing it, or keep it in the USENETBACKUP_PASSPHRASE environment variable.</p>
-        <div class="row" style="margin-top:8px">
-          <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
-        </div>
-        <div class="form-grid" style="margin-top:8px">
-          <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
-          <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <label class="check" title="When enabled, opening a restore session requires touching your YubiKey. Scheduled backups still run unattended."><input id="pp-yubikey" type="checkbox"> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(touch to open restore sessions; backups stay automatic)</span></label>
-        </div>
-        <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:4px"></div>
-        <div id="pp-touch" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:6px;background:#eef5fc">
-          <strong>Touch your YubiKey</strong><span id="pp-touch-detail" style="color:var(--text-2)"> — press the button when it flashes.</span>
-        </div>
-        <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="savePassphrase()">Save passphrase</button>
-          <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
-        </div>
-      </div>
-      <div class="card" id="locationFormCard" style="display:none">
+      <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
         <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
         <div class="form-grid">
           <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
@@ -576,6 +543,39 @@
         <div style="margin-top:12px;display:flex;gap:8px">
           <button class="accent" onclick="saveLocation()">Save</button>
           <button onclick="hideLocationForm()">Cancel</button>
+        </div>
+      </div>
+      </div>
+      <div class="card">
+        <div class="name">NNTP connectivity diagnostic</div>
+        <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
+        <div class="row" style="margin-top:8px">
+          <input id="op-host" placeholder="news.example.com" style="flex:1">
+          <button onclick="runDiagnose()">Diagnose</button>
+        </div>
+        <div id="diagnoseResult" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
+        <h2 style="margin-top:0">Security</h2>
+        <p style="color:var(--text-2);margin-top:0">The repository passphrase encrypts everything you back up. Store it here (Windows DPAPI-encrypted, never in plaintext) so scheduled jobs run without typing it, or keep it in the USENETBACKUP_PASSPHRASE environment variable.</p>
+        <div class="row" style="margin-top:8px">
+          <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
+        </div>
+        <div class="form-grid" style="margin-top:8px">
+          <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
+          <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="check" title="When enabled, opening a restore session requires touching your YubiKey. Scheduled backups still run unattended."><input id="pp-yubikey" type="checkbox"> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(touch to open restore sessions; backups stay automatic)</span></label>
+        </div>
+        <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:4px"></div>
+        <div id="pp-touch" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:6px;background:#eef5fc">
+          <strong>Touch your YubiKey</strong><span id="pp-touch-detail" style="color:var(--text-2)"> — press the button when it flashes.</span>
+        </div>
+        <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="accent" onclick="savePassphrase()">Save passphrase</button>
+          <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
         </div>
       </div>
         <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>

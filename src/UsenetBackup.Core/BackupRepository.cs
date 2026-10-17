@@ -480,8 +480,15 @@ public sealed class BackupRepository : IDisposable
     /// Chunks, hashes, encrypts and stores a byte stream as one manifest file
     /// entry. Used for regular files and for raw disk images alike.
     /// </summary>
-    private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer)
+    private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
+        IBlobStore? destination = null)
     {
+        // Destination for chunk blobs: local repo by default, or a remote
+        // store (SMB/NNTP) for streaming backups where local staging of the
+        // full payload is infeasible. Chunks are encrypted before Put in
+        // either case; only the blob location differs.
+        var blobs = destination ?? _blobs;
+
         var entry = new FileEntry
         {
             Path = relPath,
@@ -506,11 +513,11 @@ public sealed class BackupRepository : IDisposable
             {
                 var span = buffer.AsSpan(0, read);
                 string chunkId = Hashing.Sha256Hex(span);
-                if (!_blobs.Exists(chunkId))
+                if (!blobs.Exists(chunkId))
                 {
                     var blobSpan = blobBuf.AsSpan(0, read + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
                     ChunkCrypto.EncryptInto(span, _key, Hashing.HexToBytes(chunkId), blobSpan);
-                    _blobs.Put(chunkId, blobSpan);
+                    blobs.Put(chunkId, blobSpan);
                 }
                 _catalog.RecordChunk(chunkId, read);
                 entry.Chunks.Add(chunkId);
@@ -551,6 +558,44 @@ public sealed class BackupRepository : IDisposable
         try
         {
             var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer);
+            var manifest = new BackupManifest
+            {
+                BackupId = Guid.NewGuid().ToString("N"),
+                CreatedUtc = DateTime.UtcNow,
+                Source = devicePath,
+                ChunkSize = _config.ChunkSize,
+                Kind = "disk-image",
+                Files = { entry },
+            };
+            manifest.Type = "full";
+            return FinalizeManifest(manifest);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Streams a raw block device backup directly to a remote blob store
+    /// (SMB share or Usenet), without staging chunks locally. Each chunk is
+    /// read, encrypted, and <c>Put</c> to <paramref name="destination"/> as
+    /// it comes off the device — only a single chunk buffer is held in memory
+    /// at a time, so a multi-terabyte drive can be imaged without needing
+    /// that much free local disk. The manifest and catalog (tiny) still go to
+    /// the local repo; the bulk payload lives only on the destination.
+    /// </summary>
+    public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName = "disk.img")
+    {
+        if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
+            throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
+        ArgumentNullException.ThrowIfNull(destination);
+
+        using var stream = new FileStream(devicePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        try
+        {
+            var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer, destination);
             var manifest = new BackupManifest
             {
                 BackupId = Guid.NewGuid().ToString("N"),
