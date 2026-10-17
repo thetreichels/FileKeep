@@ -201,7 +201,10 @@ public sealed class ServiceTests : IDisposable
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
         // Point the job at a source dir that doesn't exist. (Repos auto-initialize
         // on first use now, so a missing repo no longer fails the run.)
-        string json = ValidConfigJson().Replace(_srcDir, Path.Combine(_workDir, "no-source"));
+        // Note: the JSON escapes backslashes, so replace the escaped form.
+        string escapedSrc = _srcDir.Replace("\\", "\\\\");
+        string noSource = Path.Combine(_workDir, "no-source").Replace("\\", "\\\\");
+        string json = ValidConfigJson().Replace(escapedSrc, noSource);
         var config = ServiceConfig.Load(WriteConfig(_workDir, json));
         var scheduler = new BackupScheduler(config, clock);
 

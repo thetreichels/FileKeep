@@ -79,11 +79,13 @@ public sealed class GuiRefreshTests : IDisposable
     }
 
     [Fact]
-    public void PhysicalDrives_List_EmptyOnNonWindows()
+    public void PhysicalDrives_List_MatchesPlatform()
     {
+        var drives = PhysicalDrives.List();
         if (OperatingSystem.IsWindows())
-            throw Xunit.Sdk.SkipException.ForSkip("Windows enumerates real drives.");
-        Assert.Empty(PhysicalDrives.List());
+            Assert.NotEmpty(drives); // Windows enumerates real drives
+        else
+            Assert.Empty(drives); // Non-Windows returns empty list
     }
 
     [Fact]
