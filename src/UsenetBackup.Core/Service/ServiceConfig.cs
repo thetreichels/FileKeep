@@ -183,6 +183,15 @@ public sealed class BackupJobConfig
     public bool IsDiskImage =>
         JobType.Equals("disk", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// For disk-image jobs: back up only used space (via the NTFS volume
+    /// bitmap, falling back to zero-detection). Skipped regions restore as
+    /// zeros. Defaults to true — a sparse image is smaller and faster, and
+    /// restores byte-identically.
+    /// </summary>
+    [JsonPropertyName("sparse")]
+    public bool Sparse { get; set; } = true;
+
     /// <summary>Read files with Windows backup privilege to bypass exclusive locks (Windows only, admin required).</summary>
     [JsonPropertyName("backupPrivilege")]
     public bool BackupPrivilege { get; set; }

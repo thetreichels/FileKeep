@@ -267,7 +267,9 @@ public static class Dashboard
             string repo = GetBodyString(body, "repo");
             string device = GetBodyString(body, "device");
             string imageName = body.TryGetProperty("imageName", out var n) ? n.GetString() ?? "disk.img" : "disk.img";
-            var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName);
+            string? smbShare = body.TryGetProperty("smbShare", out var s) ? s.GetString() : null;
+            bool sparse = !body.TryGetProperty("sparse", out var sp) || sp.GetBoolean();
+            var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName, smbShare, sparse);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 

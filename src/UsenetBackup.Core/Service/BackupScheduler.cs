@@ -736,7 +736,13 @@ public sealed class BackupScheduler
                     // Whole-disk image jobs always capture the full device.
                     // The image name is derived from the job name so each
                     // scheduled run lands under a stable, no-typing name.
-                    manifest = repo.BackupDiskImage(job.Source, DiskImageName(job.Name));
+                    //
+                    // If an SMB target is configured, stream chunks directly
+                    // to the share (sparse: used space only) instead of
+                    // staging them locally — a full drive image cannot fit
+                    // in a repo on the same drive. The manifest stays local.
+                    // Without an SMB target, fall back to local staging.
+                    manifest = RunDiskImageJob(job, repo, token);
                 }
                 else if (job.Mode == "full")
                 {
@@ -1018,6 +1024,76 @@ public sealed class BackupScheduler
     /// directly as a read-only repo. If <paramref name="loc"/> is null
     /// (legacy "smb" target), falls back to the job's own SMB settings.
     /// </summary>
+    /// <summary>
+    /// Runs a whole-disk image job. If SMB is the only target (or the only
+    /// network target), streams chunks directly to the share (sparse: used
+    /// space only) — no local staging. If NNTP is also targeted, falls back
+    /// to local staging because volume packing requires local chunks.
+    /// The manifest is always written to the local repo.
+    /// </summary>
+    private BackupManifest RunDiskImageJob(
+        BackupJobConfig job, BackupRepository repo, CancellationToken token)
+    {
+        // Find SMB and NNTP targets.
+        bool hasSmb = false;
+        bool hasNntp = false;
+        BackupLocation? smbLoc = null;
+        foreach (string targetName in job.EffectiveTargets)
+        {
+            var loc = _config.Locations.FirstOrDefault(l =>
+                l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
+            string type = loc?.Type ??
+                (targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" :
+                 targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" : "");
+            if (type == "smb") { hasSmb = true; smbLoc ??= loc; }
+            if (type == "nntp") hasNntp = true;
+        }
+
+        string imageName = DiskImageName(job.Name);
+
+        // Stream only when SMB is the target and NNTP is not (volume packing
+        // needs local chunks). Otherwise, local staging (existing behavior).
+        if (!hasSmb || hasNntp)
+        {
+            if (hasSmb && hasNntp)
+                Log($"job '{job.Name}': SMB+NNTP targets — using local staging for volume packing.");
+            else
+                Log($"job '{job.Name}': no SMB target — staging disk image locally.");
+            return repo.BackupDiskImage(job.Source, imageName);
+        }
+
+        // Stream to SMB.
+        string share = smbLoc?.Share ?? job.SmbShare;
+        string user = smbLoc?.SmbUser ?? job.SmbUser;
+        string? passwordProtected = smbLoc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+        if (string.IsNullOrWhiteSpace(share))
+            throw new InvalidOperationException(
+                $"Job '{job.Name}' targets SMB but no share is configured.");
+
+        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
+        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
+            smbPassword = Dpapi.Unprotect(passwordProtected);
+
+        // Derive the volume letter for the bitmap (e.g. "C:" from \\.\PhysicalDrive0
+        // requires mapping; for now, try the source if it's a volume path).
+        string? volumeLetter = null;
+        var volMatch = System.Text.RegularExpressions.Regex.Match(
+            job.Source, @"\\\\\.\\([A-Za-z]):", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (volMatch.Success)
+            volumeLetter = volMatch.Groups[1].Value.ToUpperInvariant() + ":";
+
+        Log($"job '{job.Name}': streaming disk image to SMB share '{share}' " +
+            $"(sparse={job.Sparse})...");
+        using var smb = SmbShare.Connect(share, user, smbPassword);
+        var store = new SmbBlobStore(smb);
+        var manifest = repo.BackupDiskImageStreaming(
+            job.Source, store, imageName, sparse: job.Sparse, volumeLetter: volumeLetter);
+        Log($"job '{job.Name}': disk image {manifest.BackupId} streamed to SMB.");
+        OperationLog.Append(job.Repo, "disk-image-stream",
+            $"job={job.Name} id={manifest.BackupId} share={share} sparse={job.Sparse}");
+        return manifest;
+    }
+
     private void SyncToSmbLocation(BackupJobConfig job, string backupId, BackupLocation? loc)
     {
         string share = loc?.Share ?? job.SmbShare;

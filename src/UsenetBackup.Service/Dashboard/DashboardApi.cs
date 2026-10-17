@@ -604,9 +604,12 @@ public static partial class DashboardApi
 
     /// <summary>
     /// Starts a disk-image backup in the background.
+    /// If <paramref name="smbShare"/> is provided, streams chunks directly
+    /// to the share (sparse: used space only). Otherwise stages locally.
     /// </summary>
     public static (int Status, object Payload) StartDiskBackup(
-        ServiceConfig config, string repo, string device, string imageName)
+        ServiceConfig config, string repo, string device, string imageName,
+        string? smbShare = null, bool sparse = true)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
@@ -620,9 +623,21 @@ public static partial class DashboardApi
             try
             {
                 using var r = BackupRepository.Open(repo, passphrase);
-                var manifest = r.BackupDiskImage(device, imageName);
-                OperationLog.Append(repo, "manual-disk-backup",
-                    $"id={manifest.BackupId} device={device} OK");
+                BackupManifest manifest;
+                if (!string.IsNullOrWhiteSpace(smbShare))
+                {
+                    using var smb = SmbShare.Connect(smbShare, null, null);
+                    var store = new SmbBlobStore(smb);
+                    manifest = r.BackupDiskImageStreaming(device, store, imageName, sparse: sparse, volumeLetter: null);
+                    OperationLog.Append(repo, "manual-disk-backup",
+                        $"id={manifest.BackupId} device={device} smb={smbShare} sparse={sparse} OK");
+                }
+                else
+                {
+                    manifest = r.BackupDiskImage(device, imageName);
+                    OperationLog.Append(repo, "manual-disk-backup",
+                        $"id={manifest.BackupId} device={device} OK");
+                }
             }
             catch (Exception ex)
             {
