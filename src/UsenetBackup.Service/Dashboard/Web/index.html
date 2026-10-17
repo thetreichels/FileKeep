@@ -357,20 +357,11 @@
         <div class="meta">Copy every repository's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
         <div class="row" style="margin-top:8px">
           <input id="smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1">
+          <button type="button" class="browse-btn" onclick="browseFolder('smb-share', 'Select SMB share')">Browse…</button>
           <input id="smb-user" placeholder="Username (optional)" style="width:160px">
           <button onclick="startSmbSync()">Sync now</button>
         </div>
         <div class="meta">Password: uses the job's saved SMB password, or set USENETBACKUP_SMB_PASSWORD.</div>
-      </div>
-      <div class="card">
-        <div class="name">LAN server</div>
-        <div class="meta">Serve every configured repository's chunks over HTTP for LAN restores (e.g. from WinRE recovery).</div>
-        <div class="row" style="margin-top:8px">
-          <input id="lan-port" type="number" value="8477" min="1" max="65535" style="width:100px" title="Port for the LAN server">
-          <button onclick="startLanServer()">Start server</button>
-          <button onclick="stopLanServer()">Stop</button>
-          <span id="lan-status" style="color:var(--text-2)"></span>
-        </div>
       </div>
     </div>
                 <div class="view" id="view-recovery">
@@ -1085,23 +1076,6 @@ async function submitRestore() {
     toast('Restore started in the background. Watch the Operations log.');
   }
   closeRestoreModal();
-}
-async function refreshLanStatus() {
-  try {
-    const s = await api('/api/operations/lan-server');
-    document.getElementById('lan-status').textContent =
-      s.running ? `Running on port ${s.port}` : 'Stopped';
-  } catch (e) { /* ignore */ }
-}
-async function startLanServer() {
-  const port = parseInt(document.getElementById('lan-port').value, 10) || 8477;
-  if (!confirm(`Start the LAN server on port ${port}? Anyone on your network can read these repos' (encrypted) chunks.`)) return;
-  await api('/api/operations/lan-server/start', { method: 'POST', body: JSON.stringify({ port }) });
-  refreshLanStatus();
-}
-async function stopLanServer() {
-  await api('/api/operations/lan-server/stop', { method: 'POST' });
-  refreshLanStatus();
 }
 async function discoverRemote() {
   const repo = document.getElementById('repo').value;

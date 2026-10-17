@@ -27,9 +27,6 @@ public static partial class DashboardApi
     private static readonly object _winReBuildStepsLock = new();
     private static DateTime _winReBuildStartedAt;
 
-    private static LanServer? _lanServer;
-    private static readonly object _lanServerLock = new();
-
     /// <summary>
     /// Checks prerequisites for WinRE USB creation: Windows, admin rights,
     /// reagentc, DISM, bcdboot, and WinRE enabled with a locatable WIM.

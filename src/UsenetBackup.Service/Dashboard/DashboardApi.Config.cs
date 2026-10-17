@@ -9,50 +9,11 @@ using UsenetBackup.Core.Service;
 namespace UsenetBackup.Service;
 
 /// <summary>
-/// DashboardApi — LAN server, diagnostics, USB drives, operations log and
+/// DashboardApi — diagnostics, USB drives, operations log and
 /// service configuration (jobs, backup locations, NNTP settings).
 /// </summary>
 public static partial class DashboardApi
 {
-    /// <summary>Current LAN server state for the dashboard.</summary>
-    public static object GetLanServerStatus() =>
-        new { running = _lanServer?.IsRunning == true, port = _lanServer?.Port ?? 0 };
-
-    /// <summary>Starts the LAN chunk server for all configured job repos.</summary>
-    public static (int Status, object Payload) StartLanServer(ServiceConfig config, int port)
-    {
-        var repos = AllJobRepos(config);
-        if (repos.Count == 0)
-            return (400, new { error = "No backup jobs configured." });
-        lock (_lanServerLock)
-        {
-            if (_lanServer?.IsRunning == true)
-                return (400, new { error = "LAN server is already running." });
-            if (port is < 1 or > 65535)
-                return (400, new { error = "Invalid port." });
-            try
-            {
-                _lanServer?.Dispose();
-                _lanServer = new LanServer(repos, port, "0.0.0.0");
-                _lanServer.Start();
-                foreach (string repo in repos)
-                    OperationLog.Append(repo, "lan-server", $"started on port {port} ({repos.Count} repos)");
-                return (200, new { running = true, port, repos = repos.Count });
-            }
-            catch (Exception ex)
-            {
-                return (500, new { error = ex.Message });
-            }
-        }
-    }
-
-    /// <summary>Stops the LAN chunk server.</summary>
-    public static void StopLanServer()
-    {
-        try { _lanServer?.Dispose(); } catch { }
-        _lanServer = null;
-    }
-
     /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>

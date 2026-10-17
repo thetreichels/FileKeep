@@ -33,7 +33,6 @@ try
         "download" => Download(args[1..]),
         "expiration-check" => ExpirationCheck(args[1..]),
         "retention-check" => RetentionCheck(args[1..]),
-        "serve" => Serve(args[1..]),
         "smb-sync" => SmbSyncCommand(args[1..]),
         _ => Unknown(args[0]),
     };
@@ -53,7 +52,7 @@ static void PrintUsage()
           usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES]
           usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
-          usenet-backup restore <repo> <backup-id> <dest-dir> [--store URL]
+          usenet-backup restore <repo> <backup-id> <dest-dir>
               [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]
           usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
           usenet-backup verify <repo> <backup-id>
@@ -67,7 +66,6 @@ static void PrintUsage()
               [--newsgroup GROUP] [--poster POSTER]
           usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
-          usenet-backup serve <repo> [--port PORT] [--bind ADDR]
           usenet-backup smb-sync <repo> --share \\server\share\path [--user USER]
           usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
           (--user also accepts --username as an alias)
@@ -310,16 +308,8 @@ static int RestoreDisk(string[] args)
 static int Restore(string[] args)
 {
     var pos = Positionals(args);
-    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--store URL] [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]"); return 2; }
-    string? storeUrl = GetOption(args, "--store");
-    // The LAN store's read cap is tightened to this repo's chunk-size-derived
-    // bound once the repo (and its config) is open.
-    var lanStore = storeUrl is not null ? new UsenetBackup.Core.Lan.HttpBlobStore(storeUrl) : null;
-    using var repo = lanStore is not null
-        ? BackupRepository.OpenWithStore(pos[0], GetPassphrase(args), lanStore)
-        : BackupRepository.Open(pos[0], GetPassphrase(args));
-    if (lanStore is not null)
-        lanStore.MaxDownloadBytes = repo.MaxDownloadBytes;
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var options = new UsenetBackup.Core.RestoreOptions();
     options.Include.AddRange(GetOptions(args, "--include"));
     options.Exclude.AddRange(GetOptions(args, "--exclude"));
@@ -1021,42 +1011,6 @@ static int Download(string[] args)
 /// Usage: usenet-backup serve &lt;repo&gt; [--port PORT] [--bind ADDR]
 /// Endpoints: GET/HEAD /chunks/{id}, POST /chunks/{id}, GET /count
 /// </summary>
-static int Serve(string[] args)
-{
-    var pos = Positionals(args);
-    if (pos.Length < 1) { Console.Error.WriteLine("error: serve <repo> [--port PORT] [--bind ADDR]"); return 2; }
-    string repoPath = Path.GetFullPath(pos[0]);
-    int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : 8477;
-    string bind = GetOption(args, "--bind") ?? "127.0.0.1";
-    if (bind == "0.0.0.0")
-    {
-        Console.WriteLine("WARNING: Binding to all interfaces with no authentication. " +
-            "Anyone on your network can read your (encrypted) chunks.");
-    }
-
-    using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
-    using var server = new UsenetBackup.Core.Service.LanServer(repoPath, port, bind);
-    try
-    {
-        server.Start();
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"error: cannot listen on {bind}:{port}: {ex.Message}");
-        return 1;
-    }
-
-    Console.WriteLine($"Serving repo {repoPath} on http://{bind}:{port}/ (Ctrl+C to stop)");
-    Console.WriteLine($"LAN clients: usenet-backup restore --store http://<this-ip>:{port} <backup-id> <dest>");
-
-    var cts = new CancellationTokenSource();
-    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-    cts.Token.WaitHandle.WaitOne();
-    Console.WriteLine("Server stopped.");
-    return 0;
-}
-
-
 /// <summary>
 /// Checks Usenet upload expiration status.
 /// Usage: usenet-backup expiration-check &lt;repo&gt; [--warn-days DAYS] [--retention-days DAYS]

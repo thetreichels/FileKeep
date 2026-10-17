@@ -88,66 +88,6 @@ public sealed class GuiRefreshTests : IDisposable
             Assert.Empty(drives); // Non-Windows returns empty list
     }
 
-    [Fact]
-    public void LanServer_ServesUnionOfMultipleRepos()
-    {
-        string repo1 = Path.Combine(_workDir, "r1");
-        string repo2 = Path.Combine(_workDir, "r2");
-        string chunkA = new string('a', 64);
-        string chunkB = new string('b', 64);
-        string man1 = new string('1', 32);
-        string man2 = new string('2', 32);
-        WriteChunk(repo1, chunkA, "chunk-a-data");
-        WriteChunk(repo2, chunkB, "chunk-b-data");
-        File.WriteAllText(Path.Combine(ManifestsDir(repo1), man1 + ".json"), "{\"id\":1}");
-        File.WriteAllText(Path.Combine(ManifestsDir(repo2), man2 + ".json"), "{\"id\":2}");
-
-        int port = FreePort();
-        using var server = new LanServer(new[] { repo1, repo2 }, port, "127.0.0.1");
-        server.Start();
-        try
-        {
-            // Bypass any ambient egress proxy: this is a loopback test server.
-            // Short timeout: on a working loopback the server answers in ms;
-            // in this sandbox .NET loopback TCP is intercepted (RST/blackhole)
-            // while curl to the same server returns 200.
-            using var http = new HttpClient(new HttpClientHandler { UseProxy = false });
-            http.Timeout = TimeSpan.FromSeconds(15);
-            string baseUrl = $"http://127.0.0.1:{port}";
-            try
-            {
-                // Union count across both repos.
-                Assert.Equal("2", http.GetStringAsync(baseUrl + "/count").Result);
-                // Union manifests.
-                string manifests = http.GetStringAsync(baseUrl + "/manifests").Result;
-                Assert.Contains(man1, manifests);
-                Assert.Contains(man2, manifests);
-                // Each chunk resolvable from whichever repo holds it.
-                Assert.Equal("chunk-a-data",
-                    http.GetStringAsync(baseUrl + "/chunks/" + chunkA).Result);
-                Assert.Equal("chunk-b-data",
-                    http.GetStringAsync(baseUrl + "/chunks/" + chunkB).Result);
-                // Manifests resolvable per repo.
-                Assert.Contains("\"id\":1",
-                    http.GetStringAsync(baseUrl + "/manifests/" + man1).Result);
-                // Unknown chunk -> 404.
-                var notFound = http.GetAsync(baseUrl + "/chunks/" + new string('c', 64)).Result;
-                Assert.Equal(HttpStatusCode.NotFound, notFound.StatusCode);
-            }
-            catch (Exception ex) when (IsLoopbackBlocked(ex))
-            {
-                // This sandbox intercepts .NET loopback TCP below HTTP (curl to
-                // the same server returns 200); the HTTP assertions cannot run
-                // here. They run for real on Windows (Azure VM full suite).
-                throw Xunit.Sdk.SkipException.ForSkip(
-                    "Loopback TCP from .NET is blocked in this sandbox; HTTP assertions skipped.");
-            }
-        }
-        finally
-        {
-            server.Stop();
-        }
-    }
 
     /// <summary>True when the exception chain shows loopback TCP being
     /// refused, reset, or blackholed below HTTP (e.g. sandbox egress

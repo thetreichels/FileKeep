@@ -284,8 +284,6 @@ public static class Dashboard
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
-        app.MapGet("/api/operations/lan-server", () =>
-            Results.Json(DashboardApi.GetLanServerStatus()));
 
 
         app.MapGet("/api/operations/winre-prerequisites", () =>
@@ -317,23 +315,6 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
-        app.MapPost("/api/operations/lan-server/start", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            int port = body.TryGetProperty("port", out var p) ? p.GetInt32() : 8477;
-            var (status, payload) = DashboardApi.StartLanServer(config, port);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
-        });
-
-        app.MapPost("/api/operations/lan-server/stop", (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            DashboardApi.StopLanServer();
-            return Results.Json(new { stopped = true });
-        });
 
         // Settings UI: read and update the backup job configuration.
         // All writes require the CSRF token and are validated before saving.

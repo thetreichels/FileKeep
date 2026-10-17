@@ -28,12 +28,6 @@ public sealed class WizardState : IDisposable
     public string Newsgroup { get; set; } = "";
 
     /// <summary>
-    /// LAN server URL (e.g., http://192.168.1.10:8477) for LAN restores.
-    /// Set when user checks LAN; null if not using LAN.
-    /// </summary>
-    public string? LanServer { get; set; }
-
-    /// <summary>
     /// SMB share UNC path (e.g., \\NAS\backups) for SMB restores.
     /// Set when the user checks a share; null if not using SMB.
     /// </summary>
@@ -140,29 +134,6 @@ public sealed class WizardState : IDisposable
         if (Nzb is null)
             throw new InvalidOperationException("Load an NZB first.");
         var repo = OpenRepo();
-
-        // If a LAN server was discovered, download chunks from it via HTTP.
-        // Otherwise fall back to Usenet via NNTP.
-        if (!string.IsNullOrWhiteSpace(LanServer))
-        {
-            using var remote = new Lan.HttpBlobStore(LanServer);
-            remote.MaxDownloadBytes = repo.MaxDownloadBytes;
-            if (Nzb.IsVolumeNzb)
-            {
-                // The LAN server hosts chunks, not volume articles: expand
-                // the manifest's volume plan into plain chunk downloads.
-                if (Nzb.BackupId is null)
-                    throw new InvalidDataException("Volume NZB has no backup ID; cannot expand its chunk plan.");
-                var manifest = repo.LoadManifest(Nzb.BackupId);
-                if (manifest.Volumes is not { Count: > 0 })
-                    throw new InvalidDataException("Volume NZB but the manifest has no volumes list.");
-                var chunkIds = manifest.Volumes
-                    .SelectMany(v => v.ChunkIds).Distinct()
-                    .OrderBy(id => id, StringComparer.Ordinal).ToList();
-                return repo.DownloadChunkIds(chunkIds, remote, progress);
-            }
-            return repo.DownloadChunks(Nzb, remote, progress);
-        }
 
         var client = new NntpClient(NntpHost, NntpPort, NntpSsl);
         try
