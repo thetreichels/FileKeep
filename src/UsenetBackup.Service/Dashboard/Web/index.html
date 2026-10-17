@@ -656,9 +656,22 @@
         <div class="row" style="margin-top:8px">
           <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
         </div>
-        <div class="form-grid" style="margin-top:8px">
+        <div id="pp-form" class="form-grid" style="margin-top:8px">
           <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
           <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
+        </div>
+        <div id="pp-configured" style="display:none;margin-top:12px">
+          <div class="yk-card" style="margin-top:0">
+            <div class="yk-icon" style="background:linear-gradient(135deg, var(--ok), #0a5c0a)">&#10003;</div>
+            <div class="yk-body">
+              <div class="yk-title">Passphrase saved</div>
+              <div class="yk-desc" id="pp-configured-detail">Your passphrase is stored securely.</div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button onclick="showPassphraseForm()">Change passphrase</button>
+                <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="yk-card">
           <div class="yk-icon">&#128273;</div>
@@ -683,9 +696,8 @@
           </div>
         </div>
         <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
+        <div id="pp-actions" style="margin-top:12px;display:flex;gap:8px">
           <button class="accent" onclick="savePassphrase()">Save passphrase</button>
-          <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
         </div>
       </div>
         <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
@@ -1510,12 +1522,35 @@ async function loadPassphraseStatus() {
   if (!el) return;
   try {
     const s = await api('/api/config/passphrase-status');
-    el.textContent = s.configured
-      ? '✓ Passphrase ' + (s.source === 'environment' ? 'from environment variable' : 'stored (DPAPI-encrypted)') + (s.yubikey ? ' · YubiKey' : '')
-      : '✗ No passphrase configured — scheduled jobs will fail.';
-    el.style.color = s.configured ? 'var(--good)' : 'var(--bad)';
+    const form = document.getElementById('pp-form');
+    const configured = document.getElementById('pp-configured');
+    const actions = document.getElementById('pp-actions');
+    const detail = document.getElementById('pp-configured-detail');
+    if (s.configured) {
+      el.textContent = '✓ Passphrase ' + (s.source === 'environment' ? 'from environment variable' : 'stored (DPAPI-encrypted)') + (s.yubikey ? ' · YubiKey' : '');
+      el.style.color = 'var(--good)';
+      // Hide the form; show the configured summary instead.
+      if (form) form.style.display = 'none';
+      if (actions) actions.style.display = 'none';
+      if (configured) configured.style.display = '';
+      if (detail) detail.textContent = s.source === 'environment'
+        ? 'Using the passphrase from the environment variable.'
+        : 'Stored securely with Windows DPAPI' + (s.yubikey ? ' and YubiKey.' : '.');
+    } else {
+      el.textContent = '✗ No passphrase configured — scheduled jobs will fail.';
+      el.style.color = 'var(--bad)';
+      if (form) form.style.display = '';
+      if (actions) actions.style.display = '';
+      if (configured) configured.style.display = 'none';
+    }
   } catch (e) { el.textContent = 'Could not check passphrase status.'; }
   loadYubiKeyStatus();
+}
+function showPassphraseForm() {
+  document.getElementById('pp-form').style.display = '';
+  document.getElementById('pp-actions').style.display = '';
+  document.getElementById('pp-configured').style.display = 'none';
+  document.getElementById('pp-pass').focus();
 }
 async function loadYubiKeyStatus() {
   const el = document.getElementById('pp-yubikey-status');
