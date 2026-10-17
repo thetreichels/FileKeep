@@ -135,6 +135,47 @@
   .toggle input:checked + .track::after { transform: translateX(20px); background: #ffffff; }
   .toggle input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
   .toggle input:disabled + .track { opacity: .5; cursor: default; }
+  /* YubiKey slick UI: setup card, touch prompt, session badge. */
+  .yk-card {
+    border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+    margin-top: 12px; background: var(--card);
+    display: flex; gap: 14px; align-items: flex-start;
+  }
+  .yk-icon {
+    width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), #004578);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px; color: #fff;
+  }
+  .yk-card .yk-body { flex: 1; min-width: 0; }
+  .yk-card .yk-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .yk-card .yk-desc { color: var(--text-2); font-size: 13px; margin-bottom: 10px; }
+  .yk-toggle-row { display: flex; align-items: center; gap: 10px; }
+  /* Pulsing touch indicator */
+  @keyframes yk-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(0,103,192,0.4); }
+    70% { box-shadow: 0 0 0 12px rgba(0,103,192,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,103,192,0); }
+  }
+  .yk-touch {
+    display: none; margin-top: 12px; padding: 16px; border-radius: 8px;
+    border: 1px solid var(--accent); background: #eef5fc;
+    align-items: center; gap: 14px;
+  }
+  .yk-touch.show { display: flex; }
+  .yk-touch .yk-dot {
+    width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0;
+    background: var(--accent); animation: yk-pulse 1.5s ease-out infinite;
+  }
+  .yk-touch .yk-touch-text { font-size: 14px; }
+  .yk-touch .yk-touch-text strong { display: block; margin-bottom: 2px; }
+  /* Session badge */
+  .yk-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 12px; font-size: 13px; font-weight: 600;
+  }
+  .yk-badge.unlocked { background: #e6f4ea; color: var(--ok); }
+  .yk-badge.locked { background: #f0f0f0; color: var(--text-2); }
   /* Windows 11 InfoBar: colored banner for info/warning/error messages. */
   .infobar {
     display: flex; align-items: flex-start; gap: 12px;
@@ -210,6 +251,9 @@
     .toggle .track { background: #2d2d2d; border-color: #8a8a8a; }
     .toggle .track::after { background: #a7a7a7; }
     .infobar.warning { background: #2d2419; }
+    .yk-touch { background: #1a2b3c; }
+    .yk-badge.unlocked { background: #1d3325; }
+    .yk-badge.locked { background: #2d2d2d; }
     .infobar.error { background: #2d1f1e; }
     select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
     pre { background: #242424; }
@@ -308,9 +352,10 @@
         </div>
       </div>
       <div class="card" style="padding:8px 20px">
-        <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px">
-          <span id="restore-session-status" style="color:var(--text-2)">Restore session: locked</span>
-          <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory">Lock</button>
+        <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span id="restore-session-status" class="yk-badge locked">&#128273; Locked</span>
+          <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
+          <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto">Lock</button>
         </div>
         <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
       </div>
@@ -615,12 +660,27 @@
           <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
           <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
         </div>
-        <div class="row" style="margin-top:8px">
-          <label class="check" title="When enabled, opening a restore session requires touching your YubiKey. Scheduled backups still run unattended."><input id="pp-yubikey" type="checkbox"> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(touch to open restore sessions; backups stay automatic)</span></label>
+        <div class="yk-card">
+          <div class="yk-icon">&#128273;</div>
+          <div class="yk-body">
+            <div class="yk-title">YubiKey unlock</div>
+            <div class="yk-desc">Touch your YubiKey to open restore sessions. Scheduled backups keep running unattended — the key is only needed when you restore.</div>
+            <div class="yk-toggle-row">
+              <label class="toggle" title="When enabled, opening a restore session requires touching your YubiKey.">
+                <input id="pp-yubikey" type="checkbox">
+                <span class="track"></span>
+              </label>
+              <span style="font-size:14px">Require YubiKey touch to restore</span>
+            </div>
+            <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:8px"></div>
+          </div>
         </div>
-        <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:4px"></div>
-        <div id="pp-touch" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:6px;background:#eef5fc">
-          <strong>Touch your YubiKey</strong><span id="pp-touch-detail" style="color:var(--text-2)"> — press the button when it flashes.</span>
+        <div id="pp-touch" class="yk-touch">
+          <div class="yk-dot"></div>
+          <div class="yk-touch-text">
+            <strong>Touch your YubiKey</strong>
+            <span id="pp-touch-detail" style="color:var(--text-2)">Press the button when it flashes.</span>
+          </div>
         </div>
         <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
         <div style="margin-top:12px;display:flex;gap:8px">
@@ -1076,7 +1136,8 @@ async function refreshRestoreSession() {
     const s = await api('/api/restore/session');
     if (!s.yubikey) { row.style.display = 'none'; return; }
     row.style.display = '';
-    st.textContent = s.unlocked ? 'Restore session: unlocked ✓' : 'Restore session: locked — touch your YubiKey to restore';
+    st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
+    st.innerHTML = s.unlocked ? '&#128275; Unlocked' : '&#128273; Locked';
     st.style.color = s.unlocked ? 'var(--good)' : 'var(--text-2)';
   } catch (e) { row.style.display = 'none'; }
 }
@@ -1475,7 +1536,7 @@ async function savePassphrase() {
   if (yk && !confirm('This will program YubiKey slot 2 for FileKeep challenge-response (overwriting anything in that slot). You will touch the key twice: once to program it, once to wrap the passphrase. Continue?')) return;
   const touch = document.getElementById('pp-touch');
   try {
-    if (yk) { touch.style.display = ''; document.getElementById('pp-touch-detail').textContent = ' — programming slot 2, touch the key when it flashes.'; }
+    if (yk) { touch.classList.add('show'); document.getElementById('pp-touch-detail').textContent = 'Programming slot 2 — touch the key when it flashes.'; }
     await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: p1, yubikey: yk }) });
     document.getElementById('pp-pass').value = '';
     document.getElementById('pp-confirm').value = '';
@@ -1483,7 +1544,7 @@ async function savePassphrase() {
     toast(yk ? 'Passphrase saved — YubiKey setup complete. Restores will ask for a touch.' : 'Passphrase saved.', 'ok');
     loadPassphraseStatus();
   } catch (e) { err.textContent = e.message; err.style.display = ''; }
-  finally { touch.style.display = 'none'; }
+  finally { touch.classList.remove('show'); }
 }
 async function clearPassphrase() {
   if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
