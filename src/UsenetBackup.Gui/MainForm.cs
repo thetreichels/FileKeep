@@ -125,17 +125,24 @@ public class MainForm : Form
         MinimumSize = new Size(900, 600);
 
         Icon? appIcon = null;
-        // Try to set the FileKeep icon if available
+        // Load the branded FileKeep icon from embedded resources.
+        // (Falls back to the exe's associated icon, then the system default.)
         try
         {
-            var iconPath = Path.Combine(AppContext.BaseDirectory, "filekeep.ico");
-            if (File.Exists(iconPath))
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            using var s = asm.GetManifestResourceStream("FileKeep.Gui.filekeep.ico");
+            if (s is not null)
             {
-                appIcon = new Icon(iconPath);
+                appIcon = new Icon(s);
                 Icon = appIcon;
             }
         }
         catch { /* icon is cosmetic */ }
+        if (appIcon is null)
+        {
+            try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            if (appIcon is not null) Icon = appIcon;
+        }
 
         _trayEnabled = LoadTraySetting();
 

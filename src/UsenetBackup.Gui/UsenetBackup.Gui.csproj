@@ -19,4 +19,12 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Embed the branded icon so the tray can load it from the assembly
+         (works with single-file publish; no loose file needed). -->
+    <EmbeddedResource Include="..\..\assets\filekeep.ico">
+      <LogicalName>FileKeep.Gui.filekeep.ico</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
 </Project>
