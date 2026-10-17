@@ -255,12 +255,15 @@ public sealed class WizardState : IDisposable
         int total = chunkIds.Count;
         foreach (string id in chunkIds)
         {
-            // Chunk files are sharded: chunks/ab/cdef... (first 2 hex chars).
+            // Chunk files are sharded: chunks/ab/cdef... (first 2 hex chars
+            // as the directory, remaining 62 as the file name) — same layout
+            // as LocalBlobStore.
             string shard = id.Length >= 2 ? id[..2] : id;
-            string localPath = Path.Combine(localChunks, shard, id);
+            string fileName = id.Length >= 2 ? id[2..] : id;
+            string localPath = Path.Combine(localChunks, shard, fileName);
             if (!File.Exists(localPath))
             {
-                string remotePath = Path.Combine(remoteChunks, shard, id);
+                string remotePath = Path.Combine(remoteChunks, shard, fileName);
                 if (!File.Exists(remotePath))
                     throw new FileNotFoundException(
                         $"Chunk {id} not found on SMB share {SmbShare}.");

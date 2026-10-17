@@ -196,4 +196,89 @@ public sealed class RecoveryWizardTests : IDisposable
         var ex = Assert.ThrowsAny<Exception>(() => s.RestoreDiskToDrive(drive));
         Assert.DoesNotContain("confirmation", ex.Message.ToLower());
     }
+
+    [Fact]
+    public void EnsureSmbChunks_PullsMissingChunksFromShare()
+    {
+        // Simulate: full repo on the "SMB share" (a local dir acts as the
+        // share when no credentials are given), USB stick has only metadata.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string shareDir = Path.Combine(Path.GetTempPath(), "ub-smb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CopyDir(_repoDir, shareDir);
+            // Strip chunks locally to simulate the USB stick.
+            Directory.Delete(Path.Combine(_repoDir, "chunks"), recursive: true);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+                SmbShare = shareDir, // local path = no creds, handy for tests
+            };
+            int progressCalls = 0;
+            s.EnsureSmbChunks((done, total) => progressCalls++);
+            Assert.True(progressCalls > 0);
+
+            // Chunks are back; a full restore works without the share.
+            string dest = Path.Combine(_repoDir, "restored");
+            s.RestoreFiles(dest, MergePolicy.Overwrite);
+            Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+        }
+        finally
+        {
+            try { Directory.Delete(shareDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void EnsureSmbChunks_NoShare_IsNoop()
+    {
+        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+        s.SelectedBackupId = "nonexistent";
+        // Must not throw when no SMB share was configured.
+        s.EnsureSmbChunks();
+    }
+
+    [Fact]
+    public void EnsureSmbChunks_MissingChunk_ThrowsClearError()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string shareDir = Path.Combine(Path.GetTempPath(), "ub-smb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // Share has the manifest but no chunks.
+            Directory.CreateDirectory(Path.Combine(shareDir, "chunks"));
+            Directory.CreateDirectory(Path.Combine(shareDir, "manifests"));
+            foreach (string f in Directory.GetFiles(Path.Combine(_repoDir, "manifests")))
+                File.Copy(f, Path.Combine(shareDir, "manifests", Path.GetFileName(f)));
+            Directory.Delete(Path.Combine(_repoDir, "chunks"), recursive: true);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+                SmbShare = shareDir,
+            };
+            var ex = Assert.Throws<FileNotFoundException>(() => s.EnsureSmbChunks());
+            Assert.Contains("not found on SMB share", ex.Message);
+        }
+        finally
+        {
+            try { Directory.Delete(shareDir, recursive: true); } catch { }
+        }
+    }
+
+    private static void CopyDir(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (string dir in Directory.GetDirectories(src, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(dst, Path.GetRelativePath(src, dir)));
+        foreach (string file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(dst, Path.GetRelativePath(src, file)));
+    }
 }
