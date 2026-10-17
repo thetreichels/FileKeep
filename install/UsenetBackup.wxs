@@ -3,13 +3,13 @@
      The apps publish as single-file executables (PublishSingleFile in the
      csproj), so the payload is a handful of explicit files — no harvesting.
      Build on Windows with the WiX v5 dotnet tool:
-       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d VssBin=C:\ub\publish\vss -o filekeep-0.8.5.msi install/UsenetBackup.wxs
+       wix build -arch x64 -d SrcRoot=C:\ub\src -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d VssBin=C:\ub\publish\vss -o filekeep-0.8.5.1.msi install/UsenetBackup.wxs
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="FileKeep"
-           Version="0.8.5"
+           Version="0.8.5.1"
            Manufacturer="J. Treichel"
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
            Scope="perMachine"

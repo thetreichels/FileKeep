@@ -26,7 +26,7 @@
 
 ## Installation
 
-Download `filekeep-0.8.5.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
+Download `filekeep-0.8.5.1.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
 
 | Path | Contents |
 |------|----------|
@@ -141,7 +141,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.5). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
+FileKeep is in active development (v0.8.5.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 

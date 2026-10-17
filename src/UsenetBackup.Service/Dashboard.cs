@@ -2096,6 +2096,17 @@ public static class DashboardHtml
             background: var(--card); border: 1px solid var(--border);
             border-radius: 8px; padding: 20px; margin: 0 0 12px;
           }
+          /* Modal dialog overlay. */
+          .modal {
+            position: fixed; inset: 0; z-index: 100;
+            background: rgba(0,0,0,0.45);
+            display: flex; align-items: center; justify-content: center;
+          }
+          .modal-box {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 24px; width: 520px; max-width: 90vw;
+            max-height: 85vh; overflow-y: auto;
+          }
           /* Status hero, Windows Update style. */
           .hero { display: flex; align-items: center; gap: 20px; }
           .hero-icon {
@@ -2201,8 +2212,8 @@ public static class DashboardHtml
             </div>
             <a class="nav-item active" data-view="overview">Overview</a>
             <a class="nav-item" data-view="backups">Backups</a>
-            <a class="nav-item" data-view="operations">Operations</a>
             <a class="nav-item" data-view="recovery">Recovery</a>
+            <a class="nav-item" data-view="tools">Tools</a>
             <a class="nav-item" data-view="log">Operations log</a>
             <a class="nav-item" data-view="settings">Settings</a>
           </nav>
@@ -2271,6 +2282,76 @@ public static class DashboardHtml
                 <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
               </div>
               <div class="card">
+                <div class="name">Back up now</div>
+                <div class="meta">Ad-hoc backup into the selected repository, outside the schedule.</div>
+                <div class="row" style="margin-top:8px">
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="backupnow-type" value="files" checked onchange="backupNowTypeChanged()"> Files &amp; folders
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="radio" name="backupnow-type" value="disk" onchange="backupNowTypeChanged()"> Whole disk
+                  </label>
+                </div>
+                <div class="row" style="margin-top:8px" id="backupnow-files-row">
+                  <span class="folder-row" style="flex:1"><input id="adhoc-source" placeholder="C:\Users\You\Documents" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('adhoc-source', 'Select source folder')">Browse…</button></span>
+                  <button onclick="startAdhocBackup()">Back up now</button>
+                </div>
+                <div id="backupnow-disk-row" style="display:none">
+                  <div class="row" style="margin-top:8px">
+                    <input id="disk-device" placeholder="\\.\PhysicalDrive2 or /dev/sdb" style="flex:1">
+                    <input id="disk-imagename" placeholder="disk.img" style="width:120px">
+                    <button onclick="startDiskBackup()">Back up disk</button>
+                  </div>
+                  <div class="meta">Images the entire disk bit-for-bit. Use the Restore button on the disk-image backup above to write it back.</div>
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">New repository</div>
+                <div class="meta">Initialize a fresh encrypted backup repository at a path.</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="init-path" placeholder="D:\Backups\NewRepo" style="flex:1">
+                  <button onclick="initRepo()">Initialize</button>
+                </div>
+              </div>
+              <div id="restoreModal" class="modal" style="display:none">
+                <div class="modal-box">
+                  <h2 style="margin-top:0" id="restoreModalTitle">Restore backup</h2>
+                  <div class="meta" id="restoreModalSub"></div>
+                  <div id="restoreFilesForm">
+                    <div class="row" style="margin-top:8px">
+                      <span class="folder-row" style="flex:1"><input id="m-restore-dest" placeholder="C:\Restore" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('m-restore-dest', 'Select restore destination')">Browse…</button></span>
+                    </div>
+                    <div class="row" style="margin-top:8px">
+                      <label>If a file already exists:
+                        <select id="m-restore-policy" title="What to do when the destination already has the file">
+                          <option value="skip" selected>Skip files that differ (recommended)</option>
+                          <option value="overwrite">Overwrite with the backup's copies</option>
+                          <option value="newer">Keep whichever file is newer</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="row" style="margin-top:8px">
+                      <input id="m-restore-smb" placeholder="SMB share (optional, e.g. \\NAS\backups)" style="flex:1">
+                      <input id="m-restore-smb-user" placeholder="Username (optional)" style="width:160px">
+                    </div>
+                    <div class="meta">If chunks are missing locally, enter the SMB share to pull them from (uses the job's saved SMB password).</div>
+                  </div>
+                  <div id="restoreDiskForm" style="display:none">
+                    <div class="row" style="margin-top:8px">
+                      <input id="m-disk-target" placeholder="\\.\PhysicalDrive2" style="flex:1">
+                    </div>
+                    <div class="row" style="margin-top:8px">
+                      <input id="m-disk-confirm" placeholder="Type the device path to confirm" style="flex:1">
+                    </div>
+                    <div class="meta" style="color:var(--bad)">Destructive — all data on the target device will be destroyed.</div>
+                  </div>
+                  <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+                    <button onclick="closeRestoreModal()">Cancel</button>
+                    <button class="accent" id="restoreModalGo" onclick="submitRestore()">Restore</button>
+                  </div>
+                </div>
+              </div>
+              <div class="card">
                 <h2 style="margin-top:0">Backup destinations</h2>
                 <p style="color:var(--text-2);margin-top:0">Everywhere backup data is kept — the local repository plus all configured Usenet providers and network shares.</p>
                 <div id="destinations-list"><p style="color:var(--text-2)">Loading…</p></div>
@@ -2286,56 +2367,23 @@ public static class DashboardHtml
                 <div id="remoteBackups" style="margin-top:8px"></div>
               </div>
             </div>
-            <div class="view" id="view-operations">
-              <h1>Operations</h1>
+            <div class="view" id="view-tools">
+              <h1>Tools</h1>
+              <div class="card">
+                <div class="row">
+                  <div class="grow">
+                    <div class="name">Repository</div>
+                    <div class="meta">Tools operate on the selected repository.</div>
+                  </div>
+                  <select id="tool-repo"></select>
+                </div>
+              </div>
               <div class="card">
                 <div class="name">Retention check</div>
                 <div class="meta">STAT-sample articles against provider retention; repost aging ones with fresh IDs.</div>
                 <div class="row" style="margin-top:8px">
-                  <select id="op-repo"></select>
                   <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run</label>
                   <button onclick="runRetentionCheck()">Run retention check</button>
-                </div>
-              </div>
-              <div class="card">
-                <div class="name">NNTP connectivity diagnostic</div>
-                <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
-                <div class="row" style="margin-top:8px">
-                  <input id="op-host" placeholder="news.example.com" style="flex:1">
-                  <button onclick="runDiagnose()">Diagnose</button>
-                </div>
-                <div id="diagnoseResult" style="margin-top:8px"></div>
-              </div>
-              <div class="card">
-                <div class="name">Restore a backup</div>
-                <div class="meta">Restore a backup's files to a destination folder.</div>
-                <div class="row" style="margin-top:8px">
-                  <select id="restore-backup"><option value="">Select backup…</option></select>
-                  <span class="folder-row" style="flex:1"><input id="restore-dest" placeholder="C:\Restore" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('restore-dest', 'Select restore destination')">Browse…</button></span>
-                  <button onclick="startRestore()">Restore</button>
-                </div>
-                <div class="row" style="margin-top:4px">
-                  <input id="restore-smb" placeholder="SMB share (optional, e.g. \\NAS\backups)" style="flex:1">
-                  <input id="restore-smb-user" placeholder="Username (optional)" style="width:160px">
-                </div>
-                <div class="row" style="margin-top:4px">
-                  <label>If a file already exists:
-                    <select id="restore-policy" title="What to do when the destination already has the file">
-                      <option value="skip" selected>Skip files that differ (recommended)</option>
-                      <option value="overwrite">Overwrite with the backup's copies</option>
-                      <option value="newer">Keep whichever file is newer</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="meta">Skip: existing files are never overwritten; differing files are listed in the Operations log. Overwrite: classic snapshot restore. Newer: keeps the newer copy by modification date.</div>
-                <div class="meta">If chunks are missing locally, enter the SMB share to pull them from (uses the job's saved SMB password).</div>
-              </div>
-              <div class="card">
-                <div class="name">Back up a folder now</div>
-                <div class="meta">Ad-hoc backup of any folder into the selected repository (outside the schedule).</div>
-                <div class="row" style="margin-top:8px">
-                  <input id="adhoc-source" placeholder="C:\Users\You\Documents" style="flex:1">
-                  <button onclick="startAdhocBackup()">Back up now</button>
                 </div>
               </div>
               <div class="card">
@@ -2350,35 +2398,11 @@ public static class DashboardHtml
                 <div class="name">Sync to SMB share</div>
                 <div class="meta">Copy this repo's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
                 <div class="row" style="margin-top:8px">
-                  <select id="smb-repo"></select>
                   <input id="smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1">
                   <input id="smb-user" placeholder="Username (optional)" style="width:160px">
                   <button onclick="startSmbSync()">Sync now</button>
                 </div>
                 <div class="meta">Password: uses the job's saved SMB password, or set USENETBACKUP_SMB_PASSWORD.</div>
-              </div>
-              <div class="card">
-                <div class="name">Disk imaging</div>
-                <div class="meta">Back up a whole disk to an image, or restore an image back to a disk (destructive).</div>
-                <div class="row" style="margin-top:8px">
-                  <input id="disk-device" placeholder="\\.\PhysicalDrive2 or /dev/sdb" style="flex:1">
-                  <input id="disk-imagename" placeholder="disk.img" style="width:120px">
-                  <button onclick="startDiskBackup()">Back up disk</button>
-                </div>
-                <div class="row" style="margin-top:8px">
-                  <select id="disk-backup"><option value="">Select disk-image backup…</option></select>
-                  <input id="disk-target" placeholder="Target device" style="flex:1">
-                  <input id="disk-confirm" placeholder="Type device to confirm" style="width:200px">
-                  <button class="danger" onclick="startDiskRestore()">Restore image to disk</button>
-                </div>
-              </div>
-              <div class="card">
-                <div class="name">New repository</div>
-                <div class="meta">Initialize a fresh encrypted backup repository at a path.</div>
-                <div class="row" style="margin-top:8px">
-                  <input id="init-path" placeholder="D:\Backups\NewRepo" style="flex:1">
-                  <button onclick="initRepo()">Initialize</button>
-                </div>
               </div>
               <div class="card">
                 <div class="name">LAN server</div>
@@ -2518,6 +2542,15 @@ public static class DashboardHtml
                   <button onclick="showLocationForm('nntp')">＋ Add Usenet provider</button>
                   <button onclick="showLocationForm('smb')">＋ Add network share</button>
                 </div>
+              </div>
+              <div class="card">
+                <div class="name">NNTP connectivity diagnostic</div>
+                <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
+                <div class="row" style="margin-top:8px">
+                  <input id="op-host" placeholder="news.example.com" style="flex:1">
+                  <button onclick="runDiagnose()">Diagnose</button>
+                </div>
+                <div id="diagnoseResult" style="margin-top:8px"></div>
               </div>
               <div class="card">
                 <h2 style="margin-top:0">Security</h2>
@@ -2778,12 +2811,9 @@ public static class DashboardHtml
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
-          const opSel = document.getElementById('op-repo');
-          if (!opSel.options.length)
-            s.jobs.forEach(j => opSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
-          const smbSel = document.getElementById('smb-repo');
-          if (!smbSel.options.length)
-            s.jobs.forEach(j => smbSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
+          const toolSel = document.getElementById('tool-repo');
+          if (toolSel && !toolSel.options.length)
+            s.jobs.forEach(j => toolSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
           loadLog();
         }
@@ -2903,19 +2933,13 @@ public static class DashboardHtml
               `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td>` +
               `<td><button onclick="uploadBackup('${esc(b.backupId)}')">Upload</button> ` +
               `<button onclick="verifyBackup('${esc(b.backupId)}')">Verify</button> ` +
-              `<button onclick="downloadNzb('${esc(b.backupId)}')">NZB</button></td></tr>`).join('')
+              `<button onclick="downloadNzb('${esc(b.backupId)}')">NZB</button> ` +
+              `<button onclick="openRestoreModal('${esc(b.backupId)}','${esc(b.type)}')">Restore</button></td></tr>`).join('')
               || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
           } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
           document.getElementById('remoteBackups').innerHTML = '';
           // Refresh the destinations card with the current repo path.
           if (typeof renderDestinations === 'function') renderDestinations(cachedLocations);
-          // Populate the Operations-view backup selectors.
-          const rb = document.getElementById('restore-backup');
-          rb.innerHTML = '<option value="">Select backup…</option>' +
-            bs.map(b => `<option value="${esc(b.backupId)}">${esc(b.backupId)} (${esc(b.type)}, ${esc(b.createdUtc)})</option>`).join('');
-          const db = document.getElementById('disk-backup');
-          db.innerHTML = '<option value="">Select disk-image backup…</option>' +
-            bs.filter(b => b.type === 'disk-image').map(b => `<option value="${esc(b.backupId)}">${esc(b.backupId)} (${esc(b.createdUtc)})</option>`).join('');
         }
         async function uploadBackup(backupId) {
           const repo = document.getElementById('repo').value;
@@ -2932,27 +2956,15 @@ public static class DashboardHtml
           const repo = document.getElementById('repo').value;
           window.location = '/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId);
         }
-        async function startRestore() {
-          const repo = document.getElementById('op-repo').value;
-          const backupId = document.getElementById('restore-backup').value;
-          const destDir = document.getElementById('restore-dest').value.trim();
-          const smbShare = document.getElementById('restore-smb').value.trim();
-          const smbUser = document.getElementById('restore-smb-user').value.trim();
-          const mergePolicy = document.getElementById('restore-policy').value;
-          if (!backupId) { toast('Select a backup.', 'err'); return; }
-          if (!destDir) { toast('Enter a destination folder.', 'err'); return; }
-          await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId, destDir, smbShare, smbUser, mergePolicy }) });
-          toast('Restore started in the background. Watch the Operations log.');
-        }
         async function startAdhocBackup() {
-          const repo = document.getElementById('op-repo').value;
+          const repo = document.getElementById('repo').value;
           const sourceDir = document.getElementById('adhoc-source').value.trim();
           if (!sourceDir) { toast('Enter a source folder.', 'err'); return; }
           await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
           toast('Backup started in the background. Watch the Operations log.');
         }
         async function startSmbSync() {
-          const repo = document.getElementById('smb-repo').value;
+          const repo = document.getElementById('tool-repo').value;
           const share = document.getElementById('smb-share').value.trim();
           const user = document.getElementById('smb-user').value.trim();
           if (!share) { toast('Enter the SMB share path.', 'err'); return; }
@@ -2960,7 +2972,7 @@ public static class DashboardHtml
           toast('SMB sync started in the background. Watch the Operations log.');
         }
         async function uploadNzb() {
-          const repo = document.getElementById('op-repo').value;
+          const repo = document.getElementById('tool-repo').value;
           const input = document.getElementById('nzb-file');
           if (!input.files.length) { toast('Choose an NZB file.', 'err'); return; }
           const form = new FormData();
@@ -2973,24 +2985,58 @@ public static class DashboardHtml
           toast('NZB download started in the background. Watch the Operations log.');
         }
         async function startDiskBackup() {
-          const repo = document.getElementById('op-repo').value;
+          const repo = document.getElementById('repo').value;
           const device = document.getElementById('disk-device').value.trim();
           const imageName = document.getElementById('disk-imagename').value.trim() || 'disk.img';
           if (!device) { toast('Enter a device path.', 'err'); return; }
           await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
           toast('Disk backup started in the background. Watch the Operations log.');
         }
-        async function startDiskRestore() {
-          const repo = document.getElementById('op-repo').value;
-          const backupId = document.getElementById('disk-backup').value;
-          const device = document.getElementById('disk-target').value.trim();
-          const confirmText = document.getElementById('disk-confirm').value;
-          if (!backupId) { toast('Select a disk-image backup.', 'err'); return; }
-          if (!device) { toast('Enter the target device.', 'err'); return; }
-          if (confirmText.trim() !== device) { toast('Confirmation does not match the device. Aborted.', 'err'); return; }
-          if (!window.confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
-          await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId, device, confirm: confirmText }) });
-          toast('Disk restore started in the background. Watch the Operations log.');
+        function backupNowTypeChanged() {
+          const isDisk = document.querySelector('input[name="backupnow-type"]:checked').value === 'disk';
+          document.getElementById('backupnow-files-row').style.display = isDisk ? 'none' : '';
+          document.getElementById('backupnow-disk-row').style.display = isDisk ? '' : 'none';
+        }
+        // Restore is an action on a backup: the Restore button on each row opens
+        // this modal, pre-set for file or disk-image restores.
+        let restoreTarget = null;
+        function openRestoreModal(backupId, type) {
+          restoreTarget = { backupId, type };
+          const isDisk = type === 'disk-image';
+          document.getElementById('restoreModalTitle').textContent = isDisk ? 'Restore disk image' : 'Restore backup';
+          document.getElementById('restoreModalSub').textContent = 'Backup ' + backupId.substring(0, 8) + '\u2026 (' + type + ')';
+          document.getElementById('restoreFilesForm').style.display = isDisk ? 'none' : '';
+          document.getElementById('restoreDiskForm').style.display = isDisk ? '' : 'none';
+          const go = document.getElementById('restoreModalGo');
+          go.className = isDisk ? 'danger' : 'accent';
+          go.textContent = isDisk ? 'Restore image to disk' : 'Restore';
+          document.getElementById('restoreModal').style.display = '';
+        }
+        function closeRestoreModal() {
+          document.getElementById('restoreModal').style.display = 'none';
+          restoreTarget = null;
+        }
+        async function submitRestore() {
+          const repo = document.getElementById('repo').value;
+          if (!restoreTarget) return;
+          if (restoreTarget.type === 'disk-image') {
+            const device = document.getElementById('m-disk-target').value.trim();
+            const confirmText = document.getElementById('m-disk-confirm').value;
+            if (!device) { toast('Enter the target device.', 'err'); return; }
+            if (confirmText.trim() !== device) { toast('Confirmation does not match the device. Aborted.', 'err'); return; }
+            if (!window.confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
+            await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, device, confirm: confirmText }) });
+            toast('Disk restore started in the background. Watch the Operations log.');
+          } else {
+            const destDir = document.getElementById('m-restore-dest').value.trim();
+            const smbShare = document.getElementById('m-restore-smb').value.trim();
+            const smbUser = document.getElementById('m-restore-smb-user').value.trim();
+            const mergePolicy = document.getElementById('m-restore-policy').value;
+            if (!destDir) { toast('Enter a destination folder.', 'err'); return; }
+            await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, destDir, smbShare, smbUser, mergePolicy }) });
+            toast('Restore started in the background. Watch the Operations log.');
+          }
+          closeRestoreModal();
         }
         async function initRepo() {
           const path = document.getElementById('init-path').value.trim();
@@ -3006,7 +3052,7 @@ public static class DashboardHtml
           } catch (e) { /* ignore */ }
         }
         async function startLanServer() {
-          const repo = document.getElementById('op-repo').value;
+          const repo = document.getElementById('tool-repo').value;
           const port = parseInt(document.getElementById('lan-port').value, 10) || 8477;
           if (!confirm(`Start the LAN server on port ${port}? Anyone on your network can read this repo's (encrypted) chunks.`)) return;
           await api('/api/operations/lan-server/start', { method: 'POST', body: JSON.stringify({ repo, port }) });
@@ -3040,7 +3086,7 @@ public static class DashboardHtml
         }
         // ---- Operations ----
         async function runRetentionCheck() {
-          const repo = document.getElementById('op-repo').value;
+          const repo = document.getElementById('tool-repo').value;
           const dryRun = document.getElementById('op-dryrun').checked;
           if (!repo) { toast('Select a repository.', 'err'); return; }
           if (!dryRun && !confirm('Run a live retention check (may repost articles)?')) return;

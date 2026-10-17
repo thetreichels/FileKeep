@@ -5,12 +5,12 @@
      instead of the MSI wizard: logo, progress bar, status text, no dialogs.
 
      Build on Windows after the MSI:
-       wix build -arch x64 -d MsiPath=C:\ub\filekeep-0.8.5.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+       wix build -arch x64 -d MsiPath=C:\ub\filekeep-0.8.5.1.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
   <Bundle Name="FileKeep"
-          Version="0.8.5"
+          Version="0.8.5.1"
           Manufacturer="J. Treichel"
           UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
           IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
