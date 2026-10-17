@@ -1,5 +1,7 @@
 namespace UsenetBackup.Core.Service;
 
+using UsenetBackup.Core.Nntp;
+
 /// <summary>
 /// Clock abstraction so the scheduler is unit-testable.
 /// </summary>
@@ -1038,6 +1040,7 @@ public sealed class BackupScheduler
         bool hasSmb = false;
         bool hasNntp = false;
         BackupLocation? smbLoc = null;
+        BackupLocation? nntpLoc = null;
         foreach (string targetName in job.EffectiveTargets)
         {
             var loc = _config.Locations.FirstOrDefault(l =>
@@ -1046,23 +1049,31 @@ public sealed class BackupScheduler
                 (targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" :
                  targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" : "");
             if (type == "smb") { hasSmb = true; smbLoc ??= loc; }
-            if (type == "nntp") hasNntp = true;
+            if (type == "nntp") { hasNntp = true; nntpLoc ??= loc; }
         }
 
         string imageName = DiskImageName(job.Name);
 
-        // Stream only when SMB is the target and NNTP is not (volume packing
-        // needs local chunks). Otherwise, local staging (existing behavior).
-        if (!hasSmb || hasNntp)
-        {
-            if (hasSmb && hasNntp)
-                Log($"job '{job.Name}': SMB+NNTP targets — using local staging for volume packing.");
-            else
-                Log($"job '{job.Name}': no SMB target — staging disk image locally.");
-            return repo.BackupDiskImage(job.Source, imageName);
-        }
+        // Stream to a single target when possible; fall back to local staging
+        // when both are targeted (fan-out) or neither is.
+        if (hasSmb && !hasNntp)
+            return StreamDiskImageToSmb(job, repo, imageName, smbLoc);
+        if (hasNntp && !hasSmb)
+            return StreamDiskImageToNntp(job, repo, imageName, nntpLoc, token);
 
-        // Stream to SMB.
+        if (hasSmb && hasNntp)
+            Log($"job '{job.Name}': SMB+NNTP targets — using local staging for fan-out.");
+        else
+            Log($"job '{job.Name}': no network target — staging disk image locally.");
+        return repo.BackupDiskImage(job.Source, imageName);
+    }
+
+    /// <summary>
+    /// Streams a disk image directly to an SMB share (sparse: used space only).
+    /// </summary>
+    private BackupManifest StreamDiskImageToSmb(
+        BackupJobConfig job, BackupRepository repo, string imageName, BackupLocation? smbLoc)
+    {
         string share = smbLoc?.Share ?? job.SmbShare;
         string user = smbLoc?.SmbUser ?? job.SmbUser;
         string? passwordProtected = smbLoc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
@@ -1074,13 +1085,7 @@ public sealed class BackupScheduler
         if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
             smbPassword = Dpapi.Unprotect(passwordProtected);
 
-        // Derive the volume letter for the bitmap (e.g. "C:" from \\.\PhysicalDrive0
-        // requires mapping; for now, try the source if it's a volume path).
-        string? volumeLetter = null;
-        var volMatch = System.Text.RegularExpressions.Regex.Match(
-            job.Source, @"\\\\\.\\([A-Za-z]):", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (volMatch.Success)
-            volumeLetter = volMatch.Groups[1].Value.ToUpperInvariant() + ":";
+        string? volumeLetter = GetVolumeLetterForDevice(job.Source);
 
         Log($"job '{job.Name}': streaming disk image to SMB share '{share}' " +
             $"(sparse={job.Sparse})...");
@@ -1092,6 +1097,75 @@ public sealed class BackupScheduler
         OperationLog.Append(job.Repo, "disk-image-stream",
             $"job={job.Name} id={manifest.BackupId} share={share} sparse={job.Sparse}");
         return manifest;
+    }
+
+    /// <summary>
+    /// Streams a disk image directly to Usenet via volume packing (sparse:
+    /// used space only). Chunks are packed into 100MB volumes and posted as
+    /// they accumulate — no local staging. The manifest is written locally;
+    /// post it via the dashboard's manual upload to make the backup
+    /// discoverable.
+    /// </summary>
+    private BackupManifest StreamDiskImageToNntp(
+        BackupJobConfig job, BackupRepository repo, string imageName,
+        BackupLocation? nntpLoc, CancellationToken token)
+    {
+        // Build the NNTP provider from the location or legacy config.
+        NntpConfig provider;
+        string newsgroup;
+        if (nntpLoc is null)
+        {
+            // Legacy: use the scheduler's configured providers.
+            if (_nntpProviders.Count == 0)
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}' targets NNTP but no provider is configured.");
+            provider = _nntpProviders[0];
+            newsgroup = provider.Newsgroup;
+        }
+        else
+        {
+            provider = new NntpConfig
+            {
+                Host = nntpLoc.Host ?? "",
+                Port = nntpLoc.Port,
+                Ssl = nntpLoc.Ssl,
+                Username = nntpLoc.Username ?? "",
+            };
+            newsgroup = nntpLoc.Newsgroup ?? provider.Newsgroup;
+        }
+
+        string? volumeLetter = GetVolumeLetterForDevice(job.Source);
+
+        Log($"job '{job.Name}': streaming disk image to Usenet " +
+            $"(sparse={job.Sparse}, volumes=100MB)...");
+        using var client = new Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
+        // TODO: Authenticate with provider.Username/Password if configured.
+        using var nntp = new NntpBlobStore(
+            client, newsgroup, repo.RepoId, repo.CatalogPath);
+        using var streaming = new StreamingVolumeBlobStore(nntp);
+        var manifest = repo.BackupDiskImageStreaming(
+            job.Source, streaming, imageName, sparse: job.Sparse, volumeLetter: volumeLetter);
+        streaming.Flush();
+
+        Log($"job '{job.Name}': disk image {manifest.BackupId} streamed to Usenet " +
+            $"({streaming.PostedVolumes.Count} volumes). Manifest is local; " +
+            $"use manual upload to post it.");
+        OperationLog.Append(job.Repo, "disk-image-stream",
+            $"job={job.Name} id={manifest.BackupId} target=nntp volumes={streaming.PostedVolumes.Count} sparse={job.Sparse}");
+        return manifest;
+    }
+
+    /// <summary>
+    /// Derives a volume letter (e.g. "C:") from a device path, for the NTFS
+    /// bitmap. Returns null if the path isn't a volume path.
+    /// </summary>
+    private static string? GetVolumeLetterForDevice(string devicePath)
+    {
+        var volMatch = System.Text.RegularExpressions.Regex.Match(
+            devicePath, @"\\\\\.\\([A-Za-z]):", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return volMatch.Success
+            ? volMatch.Groups[1].Value.ToUpperInvariant() + ":"
+            : null;
     }
 
     private void SyncToSmbLocation(BackupJobConfig job, string backupId, BackupLocation? loc)
