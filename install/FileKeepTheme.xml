@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileKeep branded Burn theme: splash screen with progress, no MSI wizard.
+<!-- FileKeep branded Burn theme (DARK): splash screen with progress, no MSI wizard.
      Structure follows the stock WixStandardBootstrapperApplication themes
      (v4 thmutil namespace, Label/ImageControl elements, CloseWindowAction on
      the buttons that dismiss the window). Control and page names must match
@@ -15,11 +15,15 @@
      on a plain background (no text-on-text over the artwork). The splash
      image is window-level so the branding persists on every page. -->
 <Theme xmlns="http://wixtoolset.org/schemas/v4/thmutil">
-    <Font Id="0" Height="-12" Weight="400" Foreground="000000" Background="FFFFFF">Segoe UI</Font>
-    <Font Id="1" Height="-20" Weight="600" Foreground="1F3A5F" Background="FFFFFF">Segoe UI</Font>
-    <Font Id="2" Height="-12" Weight="400" Foreground="666666" Background="FFFFFF">Segoe UI</Font>
+    <Font Id="0" Height="-12" Weight="400" Foreground="F3F3F3" Background="202020">Segoe UI</Font>
+    <Font Id="1" Height="-20" Weight="600" Foreground="4CC2FF" Background="202020">Segoe UI</Font>
+    <Font Id="2" Height="-12" Weight="400" Foreground="A7A7A7" Background="202020">Segoe UI</Font>
 
     <Window Width="620" Height="380" HexStyle="100a0000" FontId="0" Caption="#(loc.Caption)">
+        <!-- Dark window background: full-window solid image behind everything.
+             thmutil has no window background color, so we paint it with an image. -->
+        <ImageControl X="0" Y="0" Width="620" Height="380" ImageFile="filekeep-dark-bg.png" Visible="yes" />
+
         <!-- Branding: splash art, left side, ~half the window width.
              Resolved at runtime from the filekeep-splash.png UX payload. -->
         <ImageControl X="20" Y="20" Width="280" Height="158" ImageFile="filekeep-splash.png" Visible="yes" />
