@@ -17,6 +17,45 @@ public static partial class DashboardApi
     /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
+    public static (int Status, object Payload) TestNntpConnection(string host, int port, string user, string pass, bool ssl)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+            return (400, new { ok = false, error = "host is required." });
+        try
+        {
+            using var client = new UsenetBackup.Core.Nntp.NntpClient(host, port, ssl);
+            client.Connect();
+            string greeting = client.Greeting ?? "";
+            if (!string.IsNullOrEmpty(user))
+            {
+                client.Authenticate(user, pass);
+            }
+            try { client.Quit(); } catch { }
+            return (200, new { ok = true, detail = greeting.Length > 80 ? greeting[..80] + "…" : greeting });
+        }
+        catch (Exception ex)
+        {
+            return (200, new { ok = false, error = ex.Message });
+        }
+    }
+
+    public static (int Status, object Payload) TestSmbConnection(string share)
+    {
+        if (string.IsNullOrWhiteSpace(share))
+            return (400, new { ok = false, error = "share path is required." });
+        try
+        {
+            bool exists = Directory.Exists(share);
+            if (!exists)
+                return (200, new { ok = false, error = "Share not reachable or does not exist." });
+            return (200, new { ok = true, detail = "Share is accessible." });
+        }
+        catch (Exception ex)
+        {
+            return (200, new { ok = false, error = ex.Message });
+        }
+    }
+
     public static (int Status, object Payload) RunDiagnose(string host)
     {
         if (string.IsNullOrWhiteSpace(host))

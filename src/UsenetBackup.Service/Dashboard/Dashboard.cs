@@ -198,6 +198,40 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapPost("/api/operations/nntp-test", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string host = GetBodyString(body, "host");
+            int port = body.TryGetProperty("port", out var p) ? p.GetInt32() : 119;
+            string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
+            string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
+            bool ssl = body.TryGetProperty("ssl", out var s) && s.GetBoolean();
+            var (status, payload) = DashboardApi.TestNntpConnection(host, port, user, pass, ssl);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/smb-test", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string share = GetBodyString(body, "share");
+            var (status, payload) = DashboardApi.TestSmbConnection(share);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/file-exists", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string path = GetBodyString(body, "path");
+            bool exists = !string.IsNullOrEmpty(path) && File.Exists(path);
+            return Results.Json(new { exists });
+        });
+
         app.MapGet("/api/operations/usb-drives", () =>
         {
             var (status, payload) = DashboardApi.ListUsbDrives();

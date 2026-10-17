@@ -47,6 +47,74 @@ public abstract class Schedule
         public override DateTime NextAfter(DateTime now) => now.AddMinutes(Minutes);
         public override string ToString() => $"interval {Minutes}";
     }
+
+    public sealed class Weekly : Schedule
+    {
+        public DayOfWeek Day { get; }
+        public int Hour { get; }
+        public int Minute { get; }
+        public Weekly(DayOfWeek day, int hour, int minute) { Day = day; Hour = hour; Minute = minute; }
+
+        public override DateTime NextAfter(DateTime now)
+        {
+            var target = new DateTime(now.Year, now.Month, now.Day, Hour, Minute, 0, now.Kind);
+            int daysUntil = ((int)Day - (int)target.DayOfWeek + 7) % 7;
+            if (daysUntil == 0 && target <= now) daysUntil = 7;
+            return target.AddDays(daysUntil);
+        }
+
+        public override string ToString() => $"weekly {Day} {Hour:D2}:{Minute:D2}";
+    }
+
+    public sealed class Monthly : Schedule
+    {
+        public int Day { get; }
+        public int Hour { get; }
+        public int Minute { get; }
+        public Monthly(int day, int hour, int minute) { Day = day; Hour = hour; Minute = minute; }
+
+        public override DateTime NextAfter(DateTime now)
+        {
+            int daysInMonth = DateTime.DaysInMonth(now.Year, now.Month);
+            int targetDay = Math.Min(Day, daysInMonth);
+            var target = new DateTime(now.Year, now.Month, targetDay, Hour, Minute, 0, now.Kind);
+            if (target <= now)
+            {
+                var nextMonth = now.AddMonths(1);
+                daysInMonth = DateTime.DaysInMonth(nextMonth.Year, nextMonth.Month);
+                targetDay = Math.Min(Day, daysInMonth);
+                target = new DateTime(nextMonth.Year, nextMonth.Month, targetDay, Hour, Minute, 0, nextMonth.Kind);
+            }
+            return target;
+        }
+
+        public override string ToString() => $"monthly {Day} {Hour:D2}:{Minute:D2}";
+    }
+
+    public sealed class Yearly : Schedule
+    {
+        public int Month { get; }
+        public int Day { get; }
+        public int Hour { get; }
+        public int Minute { get; }
+        public Yearly(int month, int day, int hour, int minute) { Month = month; Day = day; Hour = hour; Minute = minute; }
+
+        public override DateTime NextAfter(DateTime now)
+        {
+            int daysInMonth = DateTime.DaysInMonth(now.Year, Month);
+            int targetDay = Math.Min(Day, daysInMonth);
+            var target = new DateTime(now.Year, Month, targetDay, Hour, Minute, 0, now.Kind);
+            if (target <= now)
+            {
+                daysInMonth = DateTime.DaysInMonth(now.Year + 1, Month);
+                targetDay = Math.Min(Day, daysInMonth);
+                target = new DateTime(now.Year + 1, Month, targetDay, Hour, Minute, 0, now.Kind);
+            }
+            return target;
+        }
+
+        public override string ToString() => $"yearly {Month:D2}-{Day:D2} {Hour:D2}:{Minute:D2}";
+    }
 }
 
 /// <summary>
@@ -74,8 +142,37 @@ public static class ScheduleParser
         if (parts.Length == 2 && parts[0].Equals("interval", StringComparison.OrdinalIgnoreCase) &&
             int.TryParse(parts[1], out int minutes) && minutes > 0)
             return new Schedule.Interval(minutes);
+        if (parts.Length == 3 && parts[0].Equals("weekly", StringComparison.OrdinalIgnoreCase) &&
+            Enum.TryParse<DayOfWeek>(parts[1], true, out var day))
+        {
+            string[] hm = parts[2].Split(':');
+            if (hm.Length == 2 &&
+                int.TryParse(hm[0], out int wh) && wh is >= 0 and < 24 &&
+                int.TryParse(hm[1], out int wm) && wm is >= 0 and < 60)
+                return new Schedule.Weekly(day, wh, wm);
+        }
+        if (parts.Length == 3 && parts[0].Equals("monthly", StringComparison.OrdinalIgnoreCase) &&
+            int.TryParse(parts[1], out int mday) && mday is >= 1 and <= 31)
+        {
+            string[] hm = parts[2].Split(':');
+            if (hm.Length == 2 &&
+                int.TryParse(hm[0], out int mh) && mh is >= 0 and < 24 &&
+                int.TryParse(hm[1], out int mm) && mm is >= 0 and < 60)
+                return new Schedule.Monthly(mday, mh, mm);
+        }
+        if (parts.Length == 3 && parts[0].Equals("yearly", StringComparison.OrdinalIgnoreCase))
+        {
+            string[] md = parts[1].Split('-');
+            string[] hm = parts[2].Split(':');
+            if (md.Length == 2 && hm.Length == 2 &&
+                int.TryParse(md[0], out int ymo) && ymo is >= 1 and <= 12 &&
+                int.TryParse(md[1], out int yday) && yday is >= 1 and <= 31 &&
+                int.TryParse(hm[0], out int yh) && yh is >= 0 and < 24 &&
+                int.TryParse(hm[1], out int ymin) && ymin is >= 0 and < 60)
+                return new Schedule.Yearly(ymo, yday, yh, ymin);
+        }
         throw new InvalidOperationException(
-            $"Invalid schedule '{text}' (expected \"daily HH:mm\" or \"interval N\" minutes).");
+            $"Invalid schedule '{text}' (expected \"daily HH:mm\", \"interval N\", \"weekly Day HH:mm\", \"monthly D HH:mm\", or \"yearly MM-DD HH:mm\").");
     }
 }
 

@@ -287,8 +287,14 @@
     <a class="nav-item" data-view="backups">Backups</a>
     <a class="nav-item" data-view="recovery">Recovery</a>
     <a class="nav-item" data-view="tools">Tools</a>
-    <a class="nav-item" data-view="log">Operations log</a>
     <a class="nav-item" data-view="settings">Settings</a>
+    <div id="sidebar-log" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);min-height:120px;max-height:40vh;overflow:hidden;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:12px;font-weight:600;color:var(--text-2)">OPERATIONS LOG</span>
+        <button onclick="toggleSidebarLog()" style="font-size:11px;padding:2px 8px" id="sidebar-log-toggle">−</button>
+      </div>
+      <div id="sidebar-log-content" style="flex:1;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.4;color:var(--text-2)"></div>
+    </div>
   </nav>
   <main>
     <div class="view active" id="view-overview">
@@ -300,20 +306,6 @@
           <div class="hero-sub" id="heroSub"></div>
         </div>
         <button class="accent" id="backupNow" onclick="runAll()">Back up now</button>
-        <button id="oneTimeBtn" onclick="showOneTimeForm()" title="Run a single backup to a local folder you choose. The only way to back up locally — one-time backups are never scheduled.">One-time backup…</button>
-      </div>
-      <div class="card" id="oneTimeCard" style="display:none">
-        <div class="name" style="font-size:16px;font-weight:600">One-time backup</div>
-        <div class="meta" style="color:var(--text-2);margin:4px 0 8px">Back up once to a local folder you pick. Nothing is scheduled and no backup job is created.</div>
-        <div class="form-grid">
-          <label title="The folder to back up right now. Click Browse to pick it.">Source folder<span class="folder-row"><input id="ot-source" type="text" placeholder="Choose a folder to back up"><button type="button" class="browse-btn" onclick="browseFolder('ot-source', 'Select source folder')">Browse…</button></span></label>
-          <label title="Where to save this one-time backup. A new encrypted repository is created here if there isn't one already.">Destination folder<span class="folder-row"><input id="ot-dest" type="text" placeholder="Choose where to save it"><button type="button" class="browse-btn" onclick="browseFolder('ot-dest', 'Select destination folder')">Browse…</button></span></label>
-        </div>
-        <div id="ot-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="runOneTimeBackup()">Run backup</button>
-          <button onclick="hideOneTimeForm()">Cancel</button>
-        </div>
       </div>
       <div class="card" id="setupCard" style="display:none">
         <div class="name" style="font-size:16px;font-weight:600">Get set up</div>
@@ -337,7 +329,6 @@
       </div>
       <h2>Usenet expiration warnings</h2>
       <div class="card" id="expiration" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
-      <div class="foot">Backups are encrypted locally and posted to Usenet. Your passphrase never leaves this machine's memory.</div>
     </div>
     <div class="view" id="view-backups">
       <h1>Backups</h1>
@@ -357,11 +348,11 @@
           <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
           <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto">Lock</button>
         </div>
-        <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
+        <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="card">
         <div class="name">Back up now</div>
-        <div class="meta">Ad-hoc backup into the selected repository, outside the schedule.</div>
+        <div class="meta">Run a backup immediately to your configured destinations, outside the schedule.</div>
         <div class="row" style="margin-top:8px">
           <label style="display:flex;align-items:center;gap:6px">
             <input type="radio" name="backupnow-type" value="files" checked onchange="backupNowTypeChanged()"> Files &amp; folders
@@ -424,9 +415,52 @@
       </div>
       <div class="card">
         <h2 style="margin-top:0">Backup destinations</h2>
-        <p style="color:var(--text-2);margin-top:0">Everywhere backup data is kept — the local repository plus all configured Usenet providers and network shares.</p>
+        <p style="color:var(--text-2);margin-top:0">Where your backups are stored — all configured Usenet providers and network shares.</p>
         <div id="destinations-list"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
+    </div>
+    <div class="view" id="view-tools">
+      <h1>Tools</h1>
+      <div class="card">
+        <div class="name">One-time backup</div>
+        <div class="meta">Run a single backup now — files or a full disk image — to one of your configured destinations. One-time backups are never scheduled.</div>
+        <div class="row" style="margin-top:8px">
+          <label class="check"><input type="radio" name="ot-type" value="files" checked> Files</label>
+          <label class="check"><input type="radio" name="ot-type" value="disk"> Disk image</label>
+        </div>
+        <div class="row" style="margin-top:8px" id="ot-files-row">
+          <span class="folder-row" style="flex:1"><input id="ot-source" placeholder="Folder to back up" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('ot-source', 'Select folder to back up')">Browse…</button></span>
+        </div>
+        <div class="row" style="margin-top:8px;display:none" id="ot-disk-row">
+          <select id="ot-disk" style="flex:1"><option>Loading drives…</option></select>
+          <button type="button" onclick="refreshOtDisks()">Rescan</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <select id="ot-destination" style="flex:1"><option>Loading destinations…</option></select>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="accent" onclick="startOneTimeBackup()">Start backup</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="name">Check backup health</div>
+        <div class="meta">Verify that your backups are still retrievable from Usenet. Samples articles from your provider and re-posts any that are aging out, keeping your backups healthy.</div>
+        <div class="row" style="margin-top:8px">
+          <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run (check only, don't re-post)</label>
+          <button onclick="runRetentionCheck()">Check now</button>
+        </div>
+      </div>
+      <div class="card" id="smb-sync-card" style="display:none">
+        <div class="name">Sync to SMB share</div>
+        <div class="meta">Copy backup data to your network share. Only shown because you have an SMB destination configured.</div>
+        <div class="row" style="margin-top:8px">
+          <select id="smb-sync-dest" style="flex:1"></select>
+          <button onclick="startSmbSync()">Sync now</button>
+        </div>
+      </div>
+    </div>
+                <div class="view" id="view-recovery">
+      <h1>Recovery</h1>
       <div class="card">
         <div class="row">
           <div class="grow">
@@ -437,39 +471,14 @@
         </div>
         <div id="remoteBackups" style="margin-top:8px"></div>
       </div>
-    </div>
-    <div class="view" id="view-tools">
-      <h1>Tools</h1>
-      <div class="card">
-        <div class="name">Retention check</div>
-        <div class="meta">STAT-sample articles against provider retention; repost aging ones with fresh IDs. Runs across every configured repository.</div>
-        <div class="row" style="margin-top:8px">
-          <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run</label>
-          <button onclick="runRetentionCheck()">Run retention check</button>
-        </div>
-      </div>
       <div class="card">
         <div class="name">Download from NZB</div>
-        <div class="meta">Fetch chunks referenced by an NZB file from Usenet into the first configured repository.</div>
+        <div class="meta">Fetch backup data referenced by an NZB file from Usenet.</div>
         <div class="row" style="margin-top:8px">
           <input id="nzb-file" type="file" accept=".nzb">
-          <button onclick="uploadNzb()">Download chunks</button>
+          <button onclick="uploadNzb()">Download</button>
         </div>
       </div>
-      <div class="card">
-        <div class="name">Sync to SMB share</div>
-        <div class="meta">Copy every repository's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
-        <div class="row" style="margin-top:8px">
-          <input id="smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1">
-          <button type="button" class="browse-btn" onclick="browseFolder('smb-share', 'Select SMB share')">Browse…</button>
-          <input id="smb-user" placeholder="Username (optional)" style="width:160px">
-          <button onclick="startSmbSync()">Sync now</button>
-        </div>
-        <div class="meta">Password: uses the job's saved SMB password, or set USENETBACKUP_SMB_PASSWORD.</div>
-      </div>
-    </div>
-                <div class="view" id="view-recovery">
-      <h1>Recovery</h1>
       <div class="card">
         <div class="name">Build WinRE recovery media (ADK-free)</div>
         <div class="meta">Create bootable FileKeep recovery media directly from the host's WinRE image. No ADK required. Requires Administrator rights.</div>
@@ -478,24 +487,17 @@
           <span id="winre-prereq" style="margin-left:8px"></span>
         </div>
         <div class="row" style="margin-top:8px">
-          <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="winre-mode" value="usb" checked onchange="winreModeChanged()"> Write to USB
-          </label>
-          <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="winre-mode" value="image" onchange="winreModeChanged()"> Save disk image (.vhdx)
-          </label>
+          <select id="winre-target" style="flex:1" onchange="winreTargetChanged()">
+            <option value="">Select target…</option>
+          </select>
+          <button type="button" onclick="refreshWinReTargets()" title="Rescan for USB drives">↻ Rescan</button>
         </div>
-        <div class="row" style="margin-top:8px" id="winre-usb-row">
-          <select id="winre-drive" style="width:280px"><option value="">Select USB drive…</option></select>
-          <button type="button" onclick="refreshWinReDrives()" title="Rescan for USB drives">↻</button>
-          <span class="folder-row" style="flex:1"><input id="winre-src" placeholder="Source dir (optional)" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-src', 'Select source folder')">Browse…</button></span>
-          <button class="danger" onclick="startWinReBuild()">Build USB</button>
+        <div class="row" style="margin-top:8px;display:none" id="winre-file-row">
+          <span class="folder-row" style="flex:1"><input id="winre-filename" placeholder="File name (e.g. filekeep-recovery)" style="flex:1"></span>
+          <span class="folder-row" style="flex:1"><input id="winre-folder" placeholder="Save folder" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-folder', 'Select save folder')">Browse…</button></span>
         </div>
-        <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
-          <span class="folder-row" style="flex:1"><input id="winre-image" placeholder="Full path to the .vhdx file, e.g. D:\images\filekeep-recovery.vhdx" title="Type the full file path including the file name, or pick one with Browse… A folder alone also works — the file is saved there as filekeep-recovery.vhdx." style="flex:1"><button type="button" class="browse-btn" onclick="browseSaveFile('winre-image', 'Save recovery image as', 'VHDX image (*.vhdx)|*.vhdx', 'filekeep-recovery.vhdx')">Browse…</button></span>
-          <label title="Maximum size of the expandable .vhdx image, in megabytes.">Size (MB): <input id="winre-imgsize" type="number" value="4096" min="1024" step="1024" style="width:90px"></label>
-          <span class="folder-row" style="flex:1"><input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-src-img', 'Select source folder')">Browse…</button></span>
-          <button onclick="startWinReBuild()">Build image</button>
+        <div class="row" style="margin-top:8px">
+          <button class="danger" onclick="startWinReBuild()">Build recovery media</button>
         </div>
         <div class="row" style="margin-top:8px">
           <label>Boot mode:
@@ -513,18 +515,6 @@
           <span id="winre-status" style="margin-left:8px"></span>
         </div>
       </div>
-    </div>
-    <div class="view" id="view-log">
-      <h1>Operations log</h1>
-      <div class="card">
-        <div class="name" style="font-weight:600;margin-bottom:4px">Recent activity</div>
-        <div class="meta" style="color:var(--text-2);margin-bottom:4px">A plain-language summary of the latest operations. Newest first.</div>
-        <div id="opSummary"><p style="color:var(--text-2)">Loading…</p></div>
-      </div>
-      <details class="card" open>
-        <summary style="cursor:pointer;font-weight:600" title="The complete unfiltered log, for troubleshooting.">Raw log <span style="font-weight:400;font-size:13px;color:var(--text-2)">(for diagnostics)</span></summary>
-        <pre id="log" style="margin-top:8px">(loading…)</pre>
-      </details>
     </div>
     <div class="view" id="view-settings">
       <h1>Settings</h1>
@@ -554,28 +544,46 @@
         <div class="form-grid">
           <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
           <label id="jf-source-label" title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
-          <label title="How often to run this backup. Daily runs once per day at the specified time; Interval runs every N hours.">Schedule<select id="jf-schedType">
+          <label title="How often to run this backup.">Schedule<select id="jf-schedType">
             <option value="daily">Daily at…</option>
             <option value="interval">Every N minutes</option>
+            <option value="weekly">Weekly on…</option>
+            <option value="monthly">Monthly on day…</option>
+            <option value="yearly">Yearly on…</option>
           </select></label>
           <label id="jf-dailyWrap" title="The time of day to run the backup, in 24-hour format.">Time (HH:mm)<input id="jf-daily" type="time" value="02:00"></label>
           <label id="jf-intervalWrap" style="display:none" title="How often to run the backup, in minutes. Minimum 5.">Minutes<input id="jf-interval" type="number" min="5" value="60"></label>
+          <div id="jf-weeklyWrap" style="display:none">
+            <label title="Day of the week to run the backup.">Day<select id="jf-weekly-day">
+              <option value="Sunday">Sunday</option><option value="Monday">Monday</option><option value="Tuesday">Tuesday</option>
+              <option value="Wednesday">Wednesday</option><option value="Thursday">Thursday</option><option value="Friday">Friday</option>
+              <option value="Saturday">Saturday</option>
+            </select></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-weekly-time" type="time" value="02:00"></label>
+          </div>
+          <div id="jf-monthlyWrap" style="display:none">
+            <label title="Day of the month (1-31). If the month is shorter, runs on the last day.">Day of month<input id="jf-monthly-day" type="number" min="1" max="31" value="1"></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-monthly-time" type="time" value="02:00"></label>
+          </div>
+          <div id="jf-yearlyWrap" style="display:none">
+            <label title="Month and day to run the backup each year.">Date<input id="jf-yearly-date" type="date"></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-yearly-time" type="time" value="02:00"></label>
+          </div>
         </div>
         <div style="margin:12px 0">
           <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle" title="Show settings most people can leave alone (repository location, upload targets, verification).">Show advanced settings ▸</button>
         </div>
+          <div id="jf-targets" style="margin:12px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
+            <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine)</span></div>
+            <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
+          </div>
         <div class="form-grid" id="jf-advanced" style="display:none">
-          <label title="Where FileKeep stores its internal backup data (encrypted). Leave empty to use the default in ProgramData. You don't need to change this.">Repository folder (optional, defaults to ProgramData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
           <label id="jf-mode-label" title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
             <option value="incremental">Incremental</option>
             <option value="full">Full</option>
           </select></label>
           <label id="jf-priv-label" class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
           <label id="jf-vss-label" class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
-          <div id="jf-targets" style="margin:4px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
-            <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine; manage locations in Backup locations below)</span></div>
-            <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
-          </div>
           <label class="check" title="Checks the backup's integrity automatically after it finishes. Recommended — catches problems early."><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
           <label title="Extra recovery data posted alongside uploads, in case some Usenet articles are lost before you download.">Usenet redundancy:
             <select id="jf-redundancy">
@@ -584,12 +592,13 @@
               <option value="par2">PAR2 (recovers up to 3 missing)</option>
             </select>
           </label>
-          <label title="How thoroughly files that look unchanged are re-checked on incremental backups. 'Fast' trusts size and date; 'Paranoid' re-hashes everything.">Incremental verification:
+          <label>Incremental verification:
             <select id="jf-verification">
-              <option value="fast">Fast (size + mtime only)</option>
-              <option value="verify">Verify (hash files that look unchanged)</option>
-              <option value="paranoid">Paranoid (hash every file)</option>
+              <option value="fast">Fast — trust file size and date (quickest)</option>
+              <option value="verify">Verify — re-hash files that look unchanged (catches silent corruption)</option>
+              <option value="paranoid">Paranoid — hash every file, every time (slowest, most thorough)</option>
             </select>
+            <div class="meta" style="margin-top:4px">Controls how carefully incremental backups check files that appear unchanged. Fast is fine for most use; Verify catches bit-rot; Paranoid is for critical data where you want absolute certainty.</div>
           </label>
         </div>
         <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
@@ -603,8 +612,8 @@
         <p style="color:var(--text-2);margin-top:0">Everywhere your backups can go — Usenet providers and network shares, in one place. Jobs pick from this list. Credentials are encrypted with Windows DPAPI; leave a password blank to keep the saved one.</p>
         <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
         <div style="margin-top:12px;display:flex;gap:8px">
-          <button onclick="showLocationForm('nntp')">＋ Add Usenet provider</button>
-          <button onclick="showLocationForm('smb')">＋ Add network share</button>
+          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
+          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
         </div>
       <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
         <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
@@ -635,18 +644,24 @@
           <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
         </div>
         <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+        <div id="lf-test-result" style="margin:8px 0;display:none"></div>
         <div style="margin-top:12px;display:flex;gap:8px">
+          <button onclick="testLocationConnection()">Test connection</button>
           <button class="accent" onclick="saveLocation()">Save</button>
           <button onclick="hideLocationForm()">Cancel</button>
         </div>
       </div>
       </div>
       <div class="card">
-        <div class="name">NNTP connectivity diagnostic</div>
-        <div class="meta">Probe 119/563/443 with classified failures; falls back to a free server to distinguish ISP blocking.</div>
+        <div class="name">Test Usenet connectivity</div>
+        <div class="meta">Check if your network can reach Usenet servers. Tests free public servers to verify basic connectivity.</div>
         <div class="row" style="margin-top:8px">
-          <input id="op-host" placeholder="news.example.com" style="flex:1">
-          <button onclick="runDiagnose()">Diagnose</button>
+          <button onclick="testFreeServers()">Test free servers</button>
+        </div>
+        <div id="freeServerResult" style="margin-top:8px"></div>
+        <div class="row" style="margin-top:12px">
+          <input id="op-host" placeholder="news.example.com (optional - test a specific server)" style="flex:1">
+          <button onclick="runDiagnose()">Diagnose server</button>
         </div>
         <div id="diagnoseResult" style="margin-top:8px"></div>
       </div>
@@ -702,7 +717,6 @@
       </div>
         <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
       </div>
-      <div class="foot">Changes are saved to service.json and take effect immediately. The service does not need to restart.</div>
     </div>
   </main>
 </div>
@@ -850,12 +864,25 @@ function gotoSettingsJob() {
   document.querySelector('[data-view="settings"]').click();
   showJobForm();
 }
-function renderSetupCard(jobs, locations) {
+function gotoSettingsSecurity() {
+  document.querySelector('[data-view="settings"]').click();
+  setTimeout(() => {
+    const el = document.getElementById('pp-form') || document.querySelector('[id*="passphrase"]');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 100);
+}
+async function renderSetupCard(jobs, locations) {
   const sig = jobs.length + ':' + locations.length + ':' + jobs.some(j => j.lastResult);
   if (sig === lastSetupSig) return;
   lastSetupSig = sig;
   const card = document.getElementById('setupCard');
-  if (locations.length && jobs.length) { card.style.display = 'none'; return; }
+  // Check if passphrase is configured
+  let passphraseSet = false;
+  try {
+    const pp = await api('/api/config/passphrase-status');
+    passphraseSet = pp.configured;
+  } catch (e) { }
+  if (locations.length && jobs.length && passphraseSet) { card.style.display = 'none'; return; }
   const hasRun = jobs.some(j => j.lastResult);
   const step = (done, n, title, meta, btnHtml) => `
     <div class="row">
@@ -867,13 +894,16 @@ function renderSetupCard(jobs, locations) {
       ${done ? '<span class="pill">done</span>' : btnHtml}
     </div>`;
   document.getElementById('setupSteps').innerHTML =
-    step(locations.length > 0, 1, 'Add a backup location',
+    step(passphraseSet, 1, 'Set your backup passphrase',
+      'Protects your backups. You can leave it blank, but you must make the choice.',
+      '<button class="accent" onclick="gotoSettingsSecurity()">Set passphrase</button>') +
+    step(locations.length > 0, 2, 'Add a backup location',
       'Where backups go — a Usenet provider or a network share.',
       '<button class="accent" onclick="gotoSettingsLocation()" title="Open the add-location form in Settings">Add location</button>') +
-    step(jobs.length > 0, 2, 'Create a backup job',
+    step(jobs.length > 0, 3, 'Create a backup job',
       'Pick a folder and a schedule.',
       '<button class="accent" onclick="gotoSettingsJob()" title="Open the add-job form in Settings">Add job</button>') +
-    step(hasRun, 3, 'Run your first backup',
+    step(hasRun, 4, 'Run your first backup',
       'Back up now, or wait for the schedule.',
       `<button onclick="runAll()" ${jobs.length ? '' : 'disabled'} title="Run all backup jobs now">Back up now</button>`);
   card.style.display = '';
@@ -1042,6 +1072,7 @@ async function loadRepo() {
   let bs = [];
   try {
     bs = await api('/api/backups' + q);
+    document.getElementById('backups').style.display = bs.length ? '' : 'none';
     document.querySelector('#backups tbody').innerHTML = bs.map(b =>
       `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td>` +
       `<td><button onclick="uploadBackup('${esc(b.backupId)}')">Upload</button> ` +
@@ -1077,12 +1108,84 @@ async function startAdhocBackup() {
   toast('Backup started in the background. Watch the Operations log.');
 }
 async function startSmbSync() {
-  const share = document.getElementById('smb-share').value.trim();
-  const user = document.getElementById('smb-user').value.trim();
-  if (!share) { toast('Enter the SMB share path.', 'err'); return; }
-  await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ share, user }) });
+  const dest = document.getElementById('smb-sync-dest').value;
+  if (!dest) { toast('Select a destination.', 'err'); return; }
+  await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ share: dest }) });
   toast('SMB sync started in the background. Watch the Operations log.');
 }
+// Show SMB sync card only if SMB locations exist
+async function updateSmbSyncVisibility() {
+  try {
+    const cfg = await api('/api/config');
+    const smbLocs = (cfg.locations || []).filter(l => l.type === 'smb');
+    const card = document.getElementById('smb-sync-card');
+    if (card) {
+      card.style.display = smbLocs.length ? '' : 'none';
+      const sel = document.getElementById('smb-sync-dest');
+      if (sel) sel.innerHTML = smbLocs.map(l => `<option value="${esc(l.share)}">${esc(l.name)} (${esc(l.share)})</option>`).join('');
+    }
+  } catch (e) { }
+}
+// One-time backup functions
+document.querySelectorAll('input[name="ot-type"]').forEach(r => {
+  r.addEventListener('change', e => {
+    document.getElementById('ot-files-row').style.display = e.target.value === 'files' ? '' : 'none';
+    document.getElementById('ot-disk-row').style.display = e.target.value === 'disk' ? '' : 'none';
+    if (e.target.value === 'disk') refreshOtDisks();
+  });
+});
+async function refreshOtDisks() {
+  const sel = document.getElementById('ot-disk');
+  if (!sel) return;
+  sel.innerHTML = '<option>Loading drives…</option>';
+  try {
+    const drives = await api('/api/operations/drives');
+    sel.innerHTML = drives.map(d => `<option value="${esc(d.devicePath)}">${esc(d.model)} (${esc(d.size)})</option>`).join('') || '<option>No drives found</option>';
+  } catch (e) {
+    sel.innerHTML = '<option>Failed to load drives</option>';
+  }
+}
+async function loadOneTimeDestinations() {
+  const sel = document.getElementById('ot-destination');
+  if (!sel) return;
+  try {
+    const cfg = await api('/api/config');
+    const locs = cfg.locations || [];
+    sel.innerHTML = locs.map(l => `<option value="${esc(l.name)}">${esc(l.name)} (${esc(l.type)})</option>`).join('') || '<option value="">No destinations configured — add one in Settings</option>';
+  } catch (e) {
+    sel.innerHTML = '<option>Failed to load</option>';
+  }
+}
+async function startOneTimeBackup() {
+  const type = document.querySelector('input[name="ot-type"]:checked').value;
+  const dest = document.getElementById('ot-destination').value;
+  if (!dest) { toast('Select a destination. Add one in Settings → Backup locations.', 'err'); return; }
+  try {
+    if (type === 'files') {
+      const source = document.getElementById('ot-source').value.trim();
+      if (!source) { toast('Select a folder to back up.', 'err'); return; }
+      await api('/api/operations/backup-now', {
+        method: 'POST',
+        body: JSON.stringify({ source, location: dest })
+      });
+    } else {
+      const device = document.getElementById('ot-disk').value;
+      if (!device) { toast('Select a disk.', 'err'); return; }
+      await api('/api/operations/disk-backup', {
+        method: 'POST',
+        body: JSON.stringify({ device, location: dest })
+      });
+    }
+    toast('One-time backup started. Watch the Operations log for progress.', 'ok');
+  } catch (e) {
+    toast('Failed: ' + e.message, 'err');
+  }
+}
+// Load destinations when Tools view is opened
+document.querySelector('[data-view="tools"]')?.addEventListener('click', () => {
+  loadOneTimeDestinations();
+  updateSmbSyncVisibility();
+});
 async function uploadNzb() {
   const input = document.getElementById('nzb-file');
   if (!input.files.length) { toast('Choose an NZB file.', 'err'); return; }
@@ -1264,32 +1367,33 @@ async function checkWinRePrereqs() {
     }
   } catch (e) { el.textContent = e.message; }
 }
-function winreModeChanged() {
-  const mode = document.querySelector('input[name="winre-mode"]:checked').value;
-  document.getElementById('winre-usb-row').style.display = mode === 'usb' ? '' : 'none';
-  document.getElementById('winre-image-row').style.display = mode === 'image' ? '' : 'none';
-  document.getElementById('winre-mode-hint').textContent = mode === 'usb'
-    ? 'Destructive — the USB drive is formatted. All data on it is destroyed.'
-    : 'Builds a bootable .vhdx file you can flash later with Rufus/BalenaEtcher or boot in a VM. Not destructive.';
+function winreTargetChanged() {
+  const target = document.getElementById('winre-target').value;
+  document.getElementById('winre-file-row').style.display = target === 'folder' ? '' : 'none';
 }
 async function startWinReBuild() {
-  const mode = document.querySelector('input[name="winre-mode"]:checked').value;
-  const sourceDir = (document.getElementById(mode === 'usb' ? 'winre-src' : 'winre-src-img').value || '').trim();
+  const target = document.getElementById('winre-target').value;
+  if (!target) { toast('Select a target first.', 'err'); return; }
   const bootMode = document.getElementById('winre-bootmode').value;
   let body, confirmText;
-  if (mode === 'usb') {
-    const diskNum = document.getElementById('winre-drive').value.trim();
-    if (!diskNum) { toast('Select a USB drive first.', 'err'); return; }
-    const diskLabel = document.querySelector('#winre-drive option:checked')?.textContent || ('Disk ' + diskNum);
-    confirmText = 'Build WinRE USB on ' + diskLabel + '? This FORMATS the drive — all data is destroyed.';
-    body = { diskNumber: parseInt(diskNum, 10), sourceDir: sourceDir || null, bootMode };
-  } else {
-    const imagePath = document.getElementById('winre-image').value.trim();
-    if (!imagePath) { toast('Choose where to save the recovery image (Browse…).', 'err'); return; }
-    const imageSizeMB = Math.max(1024, parseInt(document.getElementById('winre-imgsize').value, 10) || 4096);
-    confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.'
-      + (/\.[^\\/]+$/.test(imagePath) ? '' : ' (A folder saves as filekeep-recovery.vhdx inside it; otherwise .vhdx is appended.)');
-    body = { imagePath, sourceDir: sourceDir || null, bootMode, imageSizeMB };
+  if (target.startsWith('usb:')) {
+    const diskNum = target.substring(4);
+    const diskLabel = document.querySelector('#winre-target option:checked')?.textContent || ('Disk ' + diskNum);
+    confirmText = 'Build WinRE on ' + diskLabel + '? This FORMATS the drive — all data is destroyed.';
+    body = { diskNumber: parseInt(diskNum, 10), sourceDir: null, bootMode };
+  } else if (target === 'folder') {
+    let fileName = document.getElementById('winre-filename').value.trim() || 'filekeep-recovery';
+    if (!/\.vhdx$/i.test(fileName)) fileName += '.vhdx';
+    const folder = document.getElementById('winre-folder').value.trim();
+    if (!folder) { toast('Choose a folder to save the image.', 'err'); return; }
+    const imagePath = folder.replace(/\\$/, '') + '\\' + fileName;
+    // Check for overwrite
+    try {
+      const check = await api('/api/operations/file-exists', { method: 'POST', body: JSON.stringify({ path: imagePath }) });
+      if (check.exists && !window.confirm(imagePath + ' already exists. Overwrite it?')) return;
+    } catch (e) { /* check is best-effort */ }
+    confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
+    body = { imagePath, sourceDir: null, bootMode, imageSizeMB: 4096 };
   }
   if (!window.confirm(confirmText)) return;
   try {
@@ -1349,25 +1453,29 @@ async function cancelWinReBuild() {
     checkWinReStatus();
   } catch (e) { toast('Failed: ' + e.message, 'err'); }
 }
-async function refreshWinReDrives() {
-  const sel = document.getElementById('winre-drive');
+async function refreshWinReTargets() {
+  const sel = document.getElementById('winre-target');
   if (!sel) return;
+  const current = sel.value;
   sel.innerHTML = '<option value="">Scanning…</option>';
   try {
     const ds = await api('/api/operations/usb-drives');
-    sel.innerHTML = '<option value="">Select USB drive…</option>' + ds.map(d => {
+    let html = '<option value="">Select target…</option>';
+    html += ds.map(d => {
       const gb = (d.sizeBytes / 1073741824).toFixed(1);
       const label = `${esc(d.model)} (${gb} GB)`;
-      return `<option value="${esc(d.number)}">Disk ${d.number}: ${label}</option>`;
+      return `<option value="usb:${esc(d.number)}">USB — Disk ${d.number}: ${label}</option>`;
     }).join('');
-    if (!ds.length)
-      sel.innerHTML = '<option value="">No USB drives found</option>';
+    html += '<option value="folder">Save to folder (.vhdx file)…</option>';
+    sel.innerHTML = html;
+    if (current) sel.value = current;
+    winreTargetChanged();
   } catch (e) {
-    sel.innerHTML = '<option value="">Scan failed</option>';
+    sel.innerHTML = '<option value="">Scan failed</option><option value="folder">Save to folder (.vhdx file)…</option>';
   }
 }
-// Populate the USB dropdown when the Recovery view is opened.
-document.querySelector('[data-view="recovery"]')?.addEventListener('click', refreshWinReDrives);
+// Populate the target dropdown when the Recovery view is opened.
+document.querySelector('[data-view="recovery"]')?.addEventListener('click', refreshWinReTargets);
 document.querySelector('[data-view="backups"]')?.addEventListener('click', refreshDiskList);
 // Human-readable summary of the operations log.
 // Raw lines look like: 2026-10-13T12:34:56.789Z [backup] type=full id=abc files=5 ...
@@ -1480,24 +1588,43 @@ function renderOpSummary(lines) {
       </div>
     </div>`).join('');
 }
+function toggleSidebarLog() {
+  const content = document.getElementById('sidebar-log-content');
+  const btn = document.getElementById('sidebar-log-toggle');
+  if (content.style.display === 'none') {
+    content.style.display = '';
+    btn.textContent = '−';
+  } else {
+    content.style.display = 'none';
+    btn.textContent = '+';
+  }
+}
 async function loadLog() {
   const repo = document.getElementById('repo').value;
   if (!repo) return;
   try {
-    const lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=60');
-    document.getElementById('log').textContent = lines.join('\n') || '(empty)';
-    renderOpSummary(lines);
+    const lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=30');
+    const logContent = document.getElementById('sidebar-log-content');
+    if (logContent) {
+      logContent.innerHTML = lines.slice().reverse().map(l => '<div>' + esc(l) + '</div>').join('') || '<div style="color:var(--text-2)">(empty)</div>';
+      logContent.scrollTop = logContent.scrollHeight;
+    }
   } catch (e) {
-    document.getElementById('log').textContent = e.message;
-    document.getElementById('opSummary').innerHTML = '<p style="color:var(--bad)">' + esc(e.message) + '</p>';
+    const logContent = document.getElementById('sidebar-log-content');
+    if (logContent) logContent.textContent = e.message;
   }
 }
+// Refresh sidebar log every 10 seconds
+setInterval(loadLog, 10000);
 // ---- Settings ----
 let editingJob = null;
 document.getElementById('jf-schedType').addEventListener('change', e => {
-  const daily = e.target.value === 'daily';
-  document.getElementById('jf-dailyWrap').style.display = daily ? '' : 'none';
-  document.getElementById('jf-intervalWrap').style.display = daily ? 'none' : '';
+  const t = e.target.value;
+  document.getElementById('jf-dailyWrap').style.display = t === 'daily' ? '' : 'none';
+  document.getElementById('jf-intervalWrap').style.display = t === 'interval' ? '' : 'none';
+  document.getElementById('jf-weeklyWrap').style.display = t === 'weekly' ? '' : 'none';
+  document.getElementById('jf-monthlyWrap').style.display = t === 'monthly' ? '' : 'none';
+  document.getElementById('jf-yearlyWrap').style.display = t === 'yearly' ? '' : 'none';
 });
 async function loadSettings() {
   const cfg = await api('/api/config');
@@ -1690,6 +1817,62 @@ function hideLocationForm() {
   document.getElementById('locationFormCard').style.display = 'none';
   editingLocation = null;
 }
+async function testLocationConnection() {
+  const type = document.getElementById('lf-type').value;
+  const resultEl = document.getElementById('lf-test-result');
+  resultEl.style.display = '';
+  resultEl.innerHTML = '<span style="color:var(--text-2)">Testing…</span>';
+  try {
+    let result;
+    if (type === 'nntp') {
+      const host = document.getElementById('lf-host').value.trim();
+      const port = parseInt(document.getElementById('lf-port').value, 10) || 119;
+      const user = document.getElementById('lf-user').value.trim();
+      const pass = document.getElementById('lf-pass').value;
+      const ssl = document.getElementById('lf-ssl').checked;
+      if (!host) { resultEl.innerHTML = '<span style="color:var(--bad)">Enter a host first.</span>'; return; }
+      result = await api('/api/operations/nntp-test', {
+        method: 'POST',
+        body: JSON.stringify({ host, port, user: user || null, pass: pass || null, ssl })
+      });
+    } else {
+      const share = document.getElementById('lf-share').value.trim();
+      if (!share) { resultEl.innerHTML = '<span style="color:var(--bad)">Enter a share path first.</span>'; return; }
+      result = await api('/api/operations/smb-test', {
+        method: 'POST',
+        body: JSON.stringify({ share })
+      });
+    }
+    if (result.ok) {
+      resultEl.innerHTML = '<span style="color:var(--good)">✓ Connection successful</span>' + (result.detail ? ' — ' + esc(result.detail) : '');
+    } else {
+      resultEl.innerHTML = '<span style="color:var(--bad)">✗ ' + esc(result.error || 'Connection failed') + '</span>';
+    }
+  } catch (e) {
+    resultEl.innerHTML = '<span style="color:var(--bad)">✗ ' + esc(e.message) + '</span>';
+  }
+}
+async function testFreeServers() {
+  const resultEl = document.getElementById('freeServerResult');
+  resultEl.innerHTML = '<span style="color:var(--text-2)">Testing free servers…</span>';
+  const freeServers = [
+    { host: 'news.eternal-september.org', port: 119, name: 'Eternal September' },
+    { host: 'nntp.aioe.org', port: 119, name: 'AIOE' }
+  ];
+  let html = '';
+  for (const srv of freeServers) {
+    try {
+      const result = await api('/api/operations/nntp-test', {
+        method: 'POST',
+        body: JSON.stringify({ host: srv.host, port: srv.port })
+      });
+      html += '<div>' + (result.ok ? '<span style="color:var(--good)">✓</span>' : '<span style="color:var(--bad)">✗</span>') + ' ' + esc(srv.name) + ' (' + esc(srv.host) + ')' + (result.ok ? '' : ' — ' + esc(result.error || 'failed')) + '</div>';
+    } catch (e) {
+      html += '<div><span style="color:var(--bad)">✗</span> ' + esc(srv.name) + ' — ' + esc(e.message) + '</div>';
+    }
+  }
+  resultEl.innerHTML = html;
+}
 async function editLocation(name) {
   const cfg = await api('/api/config');
   const loc = (cfg.locations || []).find(l => l.name === name);
@@ -1806,16 +1989,43 @@ async function showJobForm(job) {
   document.getElementById('jf-verification').value = job && job.verificationMode ? job.verificationMode : 'fast';
   // Parse schedule
   const sched = job ? job.schedule : 'daily 02:00';
+  const setWraps = t => {
+    document.getElementById('jf-dailyWrap').style.display = t === 'daily' ? '' : 'none';
+    document.getElementById('jf-intervalWrap').style.display = t === 'interval' ? '' : 'none';
+    document.getElementById('jf-weeklyWrap').style.display = t === 'weekly' ? '' : 'none';
+    document.getElementById('jf-monthlyWrap').style.display = t === 'monthly' ? '' : 'none';
+    document.getElementById('jf-yearlyWrap').style.display = t === 'yearly' ? '' : 'none';
+  };
   if (sched.startsWith('daily ')) {
     document.getElementById('jf-schedType').value = 'daily';
     document.getElementById('jf-daily').value = sched.slice(6);
-    document.getElementById('jf-dailyWrap').style.display = '';
-    document.getElementById('jf-intervalWrap').style.display = 'none';
+    setWraps('daily');
   } else if (sched.startsWith('interval ')) {
     document.getElementById('jf-schedType').value = 'interval';
     document.getElementById('jf-interval').value = sched.slice(9);
-    document.getElementById('jf-dailyWrap').style.display = 'none';
-    document.getElementById('jf-intervalWrap').style.display = '';
+    setWraps('interval');
+  } else if (sched.startsWith('weekly ')) {
+    const parts = sched.slice(7).split(' ');
+    document.getElementById('jf-schedType').value = 'weekly';
+    document.getElementById('jf-weekly-day').value = parts[0] || 'Sunday';
+    document.getElementById('jf-weekly-time').value = parts[1] || '02:00';
+    setWraps('weekly');
+  } else if (sched.startsWith('monthly ')) {
+    const parts = sched.slice(8).split(' ');
+    document.getElementById('jf-schedType').value = 'monthly';
+    document.getElementById('jf-monthly-day').value = parts[0] || '1';
+    document.getElementById('jf-monthly-time').value = parts[1] || '02:00';
+    setWraps('monthly');
+  } else if (sched.startsWith('yearly ')) {
+    const parts = sched.slice(7).split(' ');
+    document.getElementById('jf-schedType').value = 'yearly';
+    if (parts[0]) {
+      const md = parts[0].split('-');
+      const d = new Date();
+      document.getElementById('jf-yearly-date').value = d.getFullYear() + '-' + md[0].padStart(2,'0') + '-' + md[1].padStart(2,'0');
+    }
+    document.getElementById('jf-yearly-time').value = parts[1] || '02:00';
+    setWraps('yearly');
   }
   document.getElementById('jf-error').style.display = 'none';
   document.querySelectorAll('#jobFormCard .invalid').forEach(el => el.classList.remove('invalid'));
@@ -1853,8 +2063,15 @@ async function saveJob() {
   if (!source) markInvalid(isDiskJob ? 'jf-disk' : 'jf-source');
   if (schedType === 'daily') {
     if (!dailyTime) markInvalid('jf-daily');
-  } else if (!intervalMin || intervalMin < 5) {
-    markInvalid('jf-interval');
+  } else if (schedType === 'interval') {
+    if (!intervalMin || intervalMin < 5) markInvalid('jf-interval');
+  } else if (schedType === 'weekly') {
+    if (!document.getElementById('jf-weekly-time').value) markInvalid('jf-weekly-time');
+  } else if (schedType === 'monthly') {
+    const md = parseInt(document.getElementById('jf-monthly-day').value, 10);
+    if (!md || md < 1 || md > 31) markInvalid('jf-monthly-day');
+  } else if (schedType === 'yearly') {
+    if (!document.getElementById('jf-yearly-date').value) markInvalid('jf-yearly-date');
   }
   // Scheduled backups must upload to Usenet or a network location —
   // local-only jobs cannot be scheduled.
@@ -1870,7 +2087,15 @@ async function saveJob() {
     errBox.style.display = '';
     return;
   }
-  const schedule = schedType === 'daily' ? 'daily ' + dailyTime : 'interval ' + intervalMin;
+  let schedule;
+  if (schedType === 'daily') schedule = 'daily ' + dailyTime;
+  else if (schedType === 'interval') schedule = 'interval ' + intervalMin;
+  else if (schedType === 'weekly') schedule = 'weekly ' + document.getElementById('jf-weekly-day').value + ' ' + document.getElementById('jf-weekly-time').value;
+  else if (schedType === 'monthly') schedule = 'monthly ' + document.getElementById('jf-monthly-day').value + ' ' + document.getElementById('jf-monthly-time').value;
+  else if (schedType === 'yearly') {
+    const yd = document.getElementById('jf-yearly-date').value.split('-');
+    schedule = 'yearly ' + yd[1] + '-' + yd[2] + ' ' + document.getElementById('jf-yearly-time').value;
+  }
   const job = {
     name,
     source,
