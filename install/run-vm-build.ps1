@@ -33,6 +33,10 @@ function Invoke-CodeSigning {
     if (-not $signtool) {
         $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
     }
+    if (-not $signtool -and (Test-Path "C:\ub\signtool.exe")) {
+        # Standalone signtool from the Microsoft.Windows.SDK.BuildTools NuGet package.
+        $signtool = "C:\ub\signtool.exe"
+    }
     if (-not $signtool) {
         Write-Host "  WARNING: signtool.exe not found - skipping code signing."
         Write-Host "  Install the Windows SDK to enable signing."
