@@ -46,6 +46,7 @@ public sealed class SmbSync
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(repoRoot);
         ArgumentNullException.ThrowIfNull(share);
+        StorageGuard.EnsureSmbShareNotInRepo(repoRoot, share.UncPath);
         var result = new SyncResult();
 
         string chunksDir = Path.Combine(repoRoot, "chunks");

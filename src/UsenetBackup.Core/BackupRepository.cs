@@ -200,6 +200,7 @@ public sealed class BackupRepository : IDisposable
     /// </summary>
     public BackupManifest BackupDirectory(string sourceDir, ISnapshotProvider? snapshotProvider = null)
     {
+        StorageGuard.EnsureRepoNotInSource(_root, sourceDir);
         var manifest = BackupDirectoryInternal(sourceDir, parent: null, snapshotProvider);
         manifest.Type = "full";
         return FinalizeManifest(manifest);
@@ -552,6 +553,7 @@ public sealed class BackupRepository : IDisposable
     {
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
             throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
+        StorageGuard.EnsureRepoNotOnDrive(_root, devicePath);
 
         using var stream = new FileStream(devicePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
@@ -605,6 +607,8 @@ public sealed class BackupRepository : IDisposable
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
             throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
         ArgumentNullException.ThrowIfNull(destination);
+        if (destination is SmbBlobStore smb)
+            StorageGuard.EnsureSmbShareNotOnDrive(smb.SharePath, devicePath);
 
         using var stream = new FileStream(devicePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
@@ -1592,6 +1596,7 @@ public sealed class BackupRepository : IDisposable
     public RestoreResult Restore(string backupId, string destDir, RestoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        StorageGuard.EnsureRestoreDestNotInRepo(_root, destDir);
         var manifest = LoadManifest(backupId);
         if (manifest.IsDiskImage)
             throw new InvalidOperationException(

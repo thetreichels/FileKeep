@@ -126,9 +126,16 @@ public sealed class RecoveryWizardTests : IDisposable
         var manifest = repo.BackupDirectory(_srcDir);
         using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
         s.SelectedBackupId = manifest.BackupId;
-        string dest = Path.Combine(_repoDir, "restored");
-        s.RestoreFiles(dest);
-        Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+        string dest = Path.Combine(Path.GetTempPath(), "ub-restored-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            s.RestoreFiles(dest);
+            Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+        }
+        finally
+        {
+            try { Directory.Delete(dest, recursive: true); } catch { }
+        }
     }
 
     [Fact]
@@ -223,9 +230,16 @@ public sealed class RecoveryWizardTests : IDisposable
             Assert.True(progressCalls > 0);
 
             // Chunks are back; a full restore works without the share.
-            string dest = Path.Combine(_repoDir, "restored");
-            s.RestoreFiles(dest, MergePolicy.Overwrite);
-            Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+            string dest = Path.Combine(Path.GetTempPath(), "ub-restored-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                s.RestoreFiles(dest, MergePolicy.Overwrite);
+                Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+            }
+            finally
+            {
+                try { Directory.Delete(dest, recursive: true); } catch { }
+            }
         }
         finally
         {

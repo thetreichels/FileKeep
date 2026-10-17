@@ -11,6 +11,10 @@ namespace UsenetBackup.Core;
 public sealed class SmbBlobStore : IBlobStore
 {
     private readonly string _chunksDir;
+    private readonly SmbShare _share;
+
+    /// <summary>The share path (UNC or local) this store writes to.</summary>
+    public string SharePath => _share.UncPath;
 
     public SmbBlobStore(SmbShare share)
     {
@@ -18,8 +22,6 @@ public sealed class SmbBlobStore : IBlobStore
         _chunksDir = share.Combine("chunks");
         _share = share;
     }
-
-    private readonly SmbShare _share;
 
     public string PathFor(string chunkIdHex)
     {
