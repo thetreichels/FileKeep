@@ -82,7 +82,7 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
-    /// Opens a repo using a custom blob store (e.g., HttpBlobStore for LAN restores).
+    /// Opens a repo using a custom blob store (e.g., SmbBlobStore for remote chunks).
     /// The repo directory must still exist locally for manifests and catalog.
     /// </summary>
     internal BackupRepository(string root, RepositoryConfig config, byte[] key, IBlobStore blobs)
@@ -168,7 +168,7 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
-    /// Opens a repo using a custom blob store (e.g., HttpBlobStore for LAN).
+    /// Opens a repo using a custom blob store (e.g., SmbBlobStore for remote).
     /// Manifests and catalog are still read from the local repo directory.
     /// </summary>
     public static BackupRepository OpenWithStore(string repoPath, string passphrase, IBlobStore blobs)
@@ -1628,10 +1628,47 @@ public sealed class BackupRepository : IDisposable
             OperationLog.Append(_root, "verify", $"id={backupId} errors={errors.Count} ok=False");
             return errors;
         }
-        RestoreOrVerify(manifest, destDir: null, verifyOnly: true, errors, options: null, result: null);
+        if (manifest.IsDiskImage)
+        {
+            // Disk images verify by checking chunk presence (skipping sparse
+            // positions) and manifest integrity. Full content verification
+            // requires a restore target.
+            VerifyDiskImage(manifest, errors);
+        }
+        else
+        {
+            RestoreOrVerify(manifest, destDir: null, verifyOnly: true, errors, options: null, result: null);
+        }
         OperationLog.Append(_root, "verify",
             $"id={backupId} files={manifest.Files.Count} errors={errors.Count} ok={errors.Count == 0}");
         return errors;
+    }
+
+    /// <summary>
+    /// Verifies a disk-image backup: manifest integrity plus chunk presence.
+    /// Sparse positions (empty chunk IDs) are skipped — they restore as zeros.
+    /// </summary>
+    private void VerifyDiskImage(BackupManifest manifest, List<string> errors)
+    {
+        if (manifest.Files.Count != 1)
+        {
+            errors.Add($"Disk image manifest has {manifest.Files.Count} files, expected 1.");
+            return;
+        }
+        var entry = manifest.Files[0];
+        foreach (string chunkId in entry.Chunks)
+        {
+            if (string.IsNullOrEmpty(chunkId))
+                continue; // Sparse: skipped position, restores as zeros.
+            try
+            {
+                VerifyChunk(chunkId);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Chunk {chunkId}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>

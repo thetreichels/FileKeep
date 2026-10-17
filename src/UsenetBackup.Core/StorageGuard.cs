@@ -32,16 +32,33 @@ public static class StorageGuard
     /// <summary>
     /// Throws if the repo is on the physical drive being imaged.
     /// Called at the start of disk-image backups.
-    /// <paramref name="devicePath"/> is like \\.\PhysicalDrive0.
+    /// <paramref name="devicePath"/> is like \\.\PhysicalDrive0 or \\.\C:.
     /// </summary>
     public static void EnsureRepoNotOnDrive(string repoRoot, string devicePath)
     {
         if (!OperatingSystem.IsWindows())
             return; // Physical-drive mapping is Windows-specific; non-Windows callers use path checks.
 
+        // Volume path (\\.\C:): check if repo is on that volume via path prefix.
+        var volMatch = System.Text.RegularExpressions.Regex.Match(
+            devicePath, @"\\\\\.\\([A-Za-z]):", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (volMatch.Success)
+        {
+            string volRoot = volMatch.Groups[1].Value.ToUpperInvariant() + Path.DirectorySeparatorChar;
+            string repoFull = Path.GetFullPath(repoRoot);
+            if (repoFull.StartsWith(volRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Repository '{repoRoot}' is on volume {volMatch.Groups[1].Value}:, the volume being imaged. " +
+                    "Backup chunks would land on the drive they are backing up. " +
+                    "Use a repository on a different volume, or stream to SMB/NNTP.");
+            }
+            return;
+        }
+
         int? targetDrive = ParsePhysicalDriveNumber(devicePath);
         if (targetDrive is null)
-            return; // Not a physical-drive path (e.g. a volume); path checks apply instead.
+            return; // Not a physical-drive or volume path; path checks apply instead.
 
         int? repoDrive = GetPhysicalDriveForPath(repoRoot);
         if (repoDrive is null)
