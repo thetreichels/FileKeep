@@ -71,6 +71,33 @@ public class NativeBridge
 
         return result;
     }
+
+    /// <summary>
+    /// Shows the native Windows save-file dialog. Returns the chosen path,
+    /// or empty string if the user cancelled.
+    /// </summary>
+    public string PickSaveFile(string title, string filter, string defaultName)
+    {
+        string result = "";
+        if (_owner.InvokeRequired)
+        {
+            _owner.Invoke(() => result = PickSaveFile(title, filter, defaultName));
+            return result;
+        }
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = string.IsNullOrEmpty(title) ? "Save as" : title,
+            Filter = string.IsNullOrEmpty(filter) ? "All files (*.*)|*.*" : filter,
+            FileName = defaultName ?? "",
+            OverwritePrompt = true,
+        };
+
+        if (dialog.ShowDialog(_owner) == DialogResult.OK)
+            result = dialog.FileName;
+
+        return result;
+    }
 }
 
 /// <summary>
@@ -250,6 +277,13 @@ public class MainForm : Form
                     try {
                         const bridge = chrome.webview.hostObjects.fileKeep;
                         const path = await bridge.PickFile(title || 'Select a file', filter || '');
+                        return path || '';
+                    } catch (e) { return ''; }
+                };
+                window.fileKeepPickSaveFile = async function(title, filter, defaultName) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        const path = await bridge.PickSaveFile(title || 'Save as', filter || '', defaultName || '');
                         return path || '';
                     } catch (e) { return ''; }
                 };

@@ -722,14 +722,23 @@ public sealed class BackupScheduler
                     $"Cannot run scheduled backup without a passphrase: set the {PassphraseEnvVar} " +
                     "environment variable for the service account.");
 
-            using var repo = BackupRepository.Open(job.Repo, passphrase);
-            using ISnapshotProvider? snap = CreateSnapshotProvider(job);
+            using var repo = OpenOrInitRepo(job.Repo, passphrase);
+            // Disk-image jobs read the raw device; file snapshot providers
+            // (VSS, backup privilege) do not apply.
+            using ISnapshotProvider? snap = job.IsDiskImage ? null : CreateSnapshotProvider(job);
 
             BackupManifest manifest;
             try
             {
                 token.ThrowIfCancellationRequested();
-                if (job.Mode == "full")
+                if (job.IsDiskImage)
+                {
+                    // Whole-disk image jobs always capture the full device.
+                    // The image name is derived from the job name so each
+                    // scheduled run lands under a stable, no-typing name.
+                    manifest = repo.BackupDiskImage(job.Source, DiskImageName(job.Name));
+                }
+                else if (job.Mode == "full")
                 {
                     manifest = repo.BackupDirectory(job.Source, snap);
                 }
@@ -857,6 +866,32 @@ public sealed class BackupScheduler
     /// privilege, or null for a live read. VSS and backup-privilege are
     /// mutually exclusive (validated at config load).
     /// </summary>
+    /// <summary>
+    /// Opens the job's repo, initializing it first if it does not exist yet.
+    /// Repositories are FileKeep's internal storage: they are always
+    /// auto-created on first use, never something the user manages by hand.
+    /// </summary>
+    private static BackupRepository OpenOrInitRepo(string repoPath, string passphrase)
+    {
+        if (!File.Exists(Path.Combine(repoPath, "repo.json")))
+            BackupRepository.Init(repoPath, passphrase);
+        return BackupRepository.Open(repoPath, passphrase);
+    }
+
+    /// <summary>
+    /// Derives a stable, filesystem-safe image name for a whole-disk image
+    /// job from its job name (e.g. "System disk" -&gt; "Systemdisk.img").
+    /// BackupDiskImage requires a plain file name (no separators).
+    /// </summary>
+    internal static string DiskImageName(string jobName)
+    {
+        string safe = string.Concat(jobName.Split(Path.GetInvalidFileNameChars()));
+        safe = new string(safe.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        if (string.IsNullOrEmpty(safe))
+            safe = "disk";
+        return safe + ".img";
+    }
+
     private static ISnapshotProvider? CreateSnapshotProvider(BackupJobConfig job)
     {
         if (job.Vss && job.BackupPrivilege)

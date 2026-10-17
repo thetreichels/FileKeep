@@ -199,8 +199,9 @@ public sealed class ServiceTests : IDisposable
     public void Scheduler_RecordsFailuresAndKeepsSchedule()
     {
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
-        // Point the job at a repo that was never initialized.
-        string json = ValidConfigJson().Replace(_repoDir, Path.Combine(_workDir, "no-repo"));
+        // Point the job at a source dir that doesn't exist. (Repos auto-initialize
+        // on first use now, so a missing repo no longer fails the run.)
+        string json = ValidConfigJson().Replace(_srcDir, Path.Combine(_workDir, "no-source"));
         var config = ServiceConfig.Load(WriteConfig(_workDir, json));
         var scheduler = new BackupScheduler(config, clock);
 
