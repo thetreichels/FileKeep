@@ -64,7 +64,8 @@
   h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   .card {
     background: var(--card); border: 1px solid var(--border);
-    border-radius: 8px; padding: 20px; margin: 0 0 12px;
+    border-radius: 4px; padding: 20px; margin: 0 0 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
   }
   /* Modal dialog overlay. */
   .modal {
@@ -101,16 +102,51 @@
   .pill.fail { background: #fdecea; color: var(--bad); }
   .pill.idle { background: #f0f0f0; color: var(--text-2); }
   button {
-    font-family: inherit; font-size: 14px;
-    padding: 6px 18px; border-radius: 4px; cursor: pointer;
-    border: 1px solid #d1d1d1; background: #fbfbfb; color: var(--text);
+    font-family: inherit; font-size: 14px; line-height: 20px;
+    min-height: 32px; padding: 4px 16px; border-radius: 4px; cursor: pointer;
+    border: 1px solid rgba(0,0,0,0.1); border-bottom-color: rgba(0,0,0,0.2);
+    background: #ffffff; color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    transition: background 0.1s ease;
   }
-  button:hover { background: #f0f0f0; }
-  button.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:hover { background: #f5f5f5; }
+  button:active { background: #e8e8e8; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.accent { background: var(--accent); border-color: var(--accent); border-bottom-color: #005a9e; color: #fff; }
   button.accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  button.danger { background: #c42b1c; border-color: #c42b1c; color: #fff; }
+  button.accent:active { background: #005a9e; }
+  button.danger { background: #c42b1c; border-color: #c42b1c; border-bottom-color: #a92418; color: #fff; }
   button.danger:hover { background: #a92418; border-color: #a92418; }
-  button:disabled { opacity: .5; cursor: default; }
+  button:disabled { opacity: .5; cursor: default; box-shadow: none; }
+  /* Windows 11 toggle switch: replaces checkboxes for on/off settings. */
+  .toggle { position: relative; display: inline-block; width: 40px; height: 20px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .track {
+    position: absolute; inset: 0; border-radius: 10px; cursor: pointer;
+    background: #ffffff; border: 1px solid #8a8a8a;
+    transition: background 0.1s ease, border-color 0.1s ease;
+  }
+  .toggle .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #616161; transition: transform 0.1s ease, background 0.1s ease;
+  }
+  .toggle input:checked + .track { background: var(--accent); border-color: var(--accent); }
+  .toggle input:checked + .track::after { transform: translateX(20px); background: #ffffff; }
+  .toggle input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .toggle input:disabled + .track { opacity: .5; cursor: default; }
+  /* Windows 11 InfoBar: colored banner for info/warning/error messages. */
+  .infobar {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 16px; border-radius: 4px; margin: 0 0 12px;
+    border: 1px solid var(--border); border-left-width: 3px;
+    background: var(--card); font-size: 13px;
+  }
+  .infobar.info { border-left-color: var(--accent); }
+  .infobar.success { border-left-color: var(--ok); }
+  .infobar.warning { border-left-color: #ca5010; background: #fdf6f0; }
+  .infobar.error { border-left-color: var(--bad); background: #fdf0ef; }
+  .infobar .title { font-weight: 600; margin-bottom: 2px; }
   select {
     font-family: inherit; font-size: 14px; padding: 6px 10px;
     border: 1px solid #d1d1d1; border-radius: 4px; background: #fbfbfb;
@@ -136,6 +172,22 @@
     border: 1px solid #d1d1d1; border-radius: 4px; background: #fbfbfb; color: var(--text);
   }
   .form-grid input[type=checkbox] { width: 16px; height: 16px; }
+  /* Win11 checkbox: 20px box, 4px radius, accent fill when checked. */
+  input[type=checkbox] {
+    width: 20px; height: 20px; border-radius: 4px; cursor: pointer;
+    border: 1px solid #8a8a8a; background: #ffffff;
+    appearance: none; -webkit-appearance: none; margin: 0; flex-shrink: 0;
+    position: relative; vertical-align: middle;
+  }
+  input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
+  input[type=checkbox]:checked::after {
+    content: ""; position: absolute; left: 6px; top: 2px;
+    width: 5px; height: 10px; border: solid #fff; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input[type=checkbox]:disabled { opacity: .5; cursor: default; }
+  label.check { display: flex; align-items: center; gap: 10px; cursor: pointer; }
   /* Dark mode: follow the OS color scheme, Windows 11 dark palette. */
   @media (prefers-color-scheme: dark) {
     :root {
@@ -150,9 +202,15 @@
     }
     .nav-item:hover, .nav-item.active { background: #2d2d2d; }
     button {
-      background: #2d2d2d; border-color: #3a3a3a; color: var(--text);
+      background: #2d2d2d; border-color: rgba(255,255,255,0.1);
+      border-bottom-color: rgba(255,255,255,0.2); color: var(--text);
     }
     button:hover { background: #323232; }
+    button:active { background: #2a2a2a; }
+    .toggle .track { background: #2d2d2d; border-color: #8a8a8a; }
+    .toggle .track::after { background: #a7a7a7; }
+    .infobar.warning { background: #2d2419; }
+    .infobar.error { background: #2d1f1e; }
     select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
     pre { background: #242424; }
     .pill { background: #1d3325; }
@@ -161,6 +219,7 @@
     .form-grid input[type=text], .form-grid input[type=time], .form-grid input[type=number] {
       background: #2d2d2d; border-color: #3a3a3a; color: var(--text);
     }
+    input[type=checkbox] { background: #2d2d2d; border-color: #8a8a8a; }
     /* Toasts stay readable on dark surfaces. */
     .toast { background: #3a3a3a; border: 1px solid #4d4d4d; }
     .toast.ok { background: #0f7a0f; }
