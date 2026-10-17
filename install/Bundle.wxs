@@ -39,6 +39,10 @@
       <Payload Name="filekeep-splash.png"
                SourceFile="$(var.SrcRoot)/assets/filekeep-splash.png"
                Compressed="yes" />
+      <!-- Dark theme window background (used by FileKeepTheme-Dark.xml). -->
+      <Payload Name="filekeep-dark-bg.png"
+               SourceFile="$(var.SrcRoot)/install/filekeep-dark-bg.png"
+               Compressed="yes" />
     </BootstrapperApplication>
 
     <Chain>

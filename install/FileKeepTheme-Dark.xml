@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileKeep branded Burn theme (DARK): splash screen with progress, no MSI wizard.
+     Structure follows the stock WixStandardBootstrapperApplication themes
+     (v4 thmutil namespace, Label/ImageControl elements, CloseWindowAction on
+     the buttons that dismiss the window). Control and page names must match
+     what WixStdBA drives: Install, Progress, Modify, Success, Failure.
+     Do NOT put Visible="yes" on page-level controls: an explicit Visible
+     pins the control visible on EVERY page (WixStdBA's page switching only
+     hides controls without it), so all pages' labels stack and the last
+     page's text wins. The window-level ImageControl keeps Visible="yes"
+     because it must show on all pages.
+
+     Layout follows the standing installer-imagery rule: the splash art sits
+     at about half width on the left; all text and controls live on the right
+     on a plain background (no text-on-text over the artwork). The splash
+     image is window-level so the branding persists on every page. -->
+<Theme xmlns="http://wixtoolset.org/schemas/v4/thmutil">
+    <Font Id="0" Height="-12" Weight="400" Foreground="F3F3F3" Background="202020">Segoe UI</Font>
+    <Font Id="1" Height="-20" Weight="600" Foreground="4CC2FF" Background="202020">Segoe UI</Font>
+    <Font Id="2" Height="-12" Weight="400" Foreground="A7A7A7" Background="202020">Segoe UI</Font>
+
+    <Window Width="620" Height="380" HexStyle="100a0000" FontId="0" Caption="#(loc.Caption)">
+        <!-- Dark window background: full-window solid image behind everything.
+             thmutil has no window background color, so we paint it with an image. -->
+        <ImageControl X="0" Y="0" Width="620" Height="380" ImageFile="filekeep-dark-bg.png" Visible="yes" />
+
+        <!-- Branding: splash art, left side, ~half the window width.
+             Resolved at runtime from the filekeep-splash.png UX payload. -->
+        <ImageControl X="20" Y="20" Width="280" Height="158" ImageFile="filekeep-splash.png" Visible="yes" />
+
+        <Page Name="Loading">
+            <Label X="324" Y="28" Width="272" Height="30" FontId="2" DisablePrefix="yes">#(loc.LoadingLabel)</Label>
+        </Page>
+
+        <Page Name="Help">
+            <Label X="324" Y="28" Width="272" Height="30" FontId="1" DisablePrefix="yes">#(loc.HelpHeader)</Label>
+            <Label X="324" Y="66" Width="272" Height="200" FontId="2" DisablePrefix="yes">#(loc.HelpText)</Label>
+            <Button Name="HelpCloseButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0"><Text>#(loc.CloseButton)</Text>
+                <CloseWindowAction />
+            </Button>
+        </Page>
+
+        <Page Name="Install">
+            <Label X="324" Y="28" Width="272" Height="34" FontId="1" DisablePrefix="yes">#(loc.InstallHeader)</Label>
+            <Label X="324" Y="66" Width="272" Height="22" FontId="2" DisablePrefix="yes">#(loc.InstallSubtitle)</Label>
+            <Label X="324" Y="94" Width="272" Height="18" FontId="2" DisablePrefix="yes">#(loc.InstallVersion)</Label>
+            <Button Name="InstallButton" X="324" Y="316" Width="110" Height="30" TabStop="yes" FontId="0">#(loc.InstallInstallButton)</Button>
+            <Button Name="InstallCancelButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0"><Text>#(loc.InstallCancelButton)</Text>
+                <CloseWindowAction />
+            </Button>
+        </Page>
+
+        <Page Name="Progress">
+            <Label X="324" Y="28" Width="272" Height="34" FontId="1" DisablePrefix="yes">#(loc.ProgressHeader)</Label>
+            <Label Name="OverallProgressPackageText" X="324" Y="80" Width="272" Height="18" FontId="2" DisablePrefix="yes">#(loc.OverallProgressPackageText)</Label>
+            <Progressbar Name="OverallCalculatedProgressbar" X="324" Y="110" Width="272" Height="16" />
+            <Button Name="ProgressCancelButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0">#(loc.ProgressCancelButton)</Button>
+        </Page>
+
+        <Page Name="Modify">
+            <Label X="324" Y="28" Width="272" Height="34" FontId="1" DisablePrefix="yes">#(loc.ModifyHeader)</Label>
+            <Label X="324" Y="66" Width="272" Height="22" FontId="2" DisablePrefix="yes">#(loc.ModifySubtitle)</Label>
+            <Button Name="RepairButton" X="324" Y="280" Width="110" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes">#(loc.ModifyRepairButton)</Button>
+            <Button Name="UninstallButton" X="324" Y="316" Width="110" Height="30" TabStop="yes" FontId="0">#(loc.ModifyUninstallButton)</Button>
+            <Button Name="ModifyCancelButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0"><Text>#(loc.ModifyCancelButton)</Text>
+                <CloseWindowAction />
+            </Button>
+        </Page>
+
+        <Page Name="Success">
+            <Label X="324" Y="28" Width="272" Height="60" FontId="1" DisablePrefix="yes">#(loc.SuccessHeader)</Label>
+            <Label X="324" Y="94" Width="272" Height="22" FontId="2" DisablePrefix="yes">#(loc.SuccessBody)</Label>
+            <Button Name="LaunchButton" X="324" Y="316" Width="140" Height="30" TabStop="yes" FontId="0" HideWhenDisabled="yes">#(loc.SuccessLaunchButton)</Button>
+            <Button Name="SuccessCloseButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0"><Text>#(loc.SuccessCloseButton)</Text>
+                <CloseWindowAction />
+            </Button>
+        </Page>
+
+        <Page Name="Failure">
+            <Label X="324" Y="28" Width="272" Height="34" FontId="1" DisablePrefix="yes">#(loc.FailureHeader)</Label>
+            <Hypertext Name="FailureLogFileLink" X="324" Y="70" Width="272" Height="42" FontId="2" TabStop="yes" HideWhenDisabled="yes">#(loc.FailureHyperlinkLogText)</Hypertext>
+            <Hypertext Name="FailureMessageText" X="324" Y="116" Width="272" Height="120" FontId="2" TabStop="yes" HideWhenDisabled="yes" />
+            <Button Name="FailureCloseButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0"><Text>#(loc.FailureCloseButton)</Text>
+                <CloseWindowAction />
+            </Button>
+        </Page>
+    </Window>
+</Theme>
