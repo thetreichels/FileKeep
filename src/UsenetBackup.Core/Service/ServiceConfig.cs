@@ -169,6 +169,20 @@ public sealed class BackupJobConfig
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "incremental";
 
+    /// <summary>
+    /// <c>"files"</c> (default) or <c>"disk"</c> (whole-disk image).
+    /// For disk jobs, <see cref="Source"/> holds the device path
+    /// (e.g. <c>\\.\PhysicalDrive2</c>) instead of a folder, the image
+    /// is always a full capture, and VSS/backup-privilege do not apply.
+    /// </summary>
+    [JsonPropertyName("jobType")]
+    public string JobType { get; set; } = "files";
+
+    /// <summary>True when this job captures a whole-disk image.</summary>
+    [JsonIgnore]
+    public bool IsDiskImage =>
+        JobType.Equals("disk", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Read files with Windows backup privilege to bypass exclusive locks (Windows only, admin required).</summary>
     [JsonPropertyName("backupPrivilege")]
     public bool BackupPrivilege { get; set; }
@@ -361,6 +375,33 @@ public sealed class ServiceConfig
     /// </summary>
     [JsonPropertyName("passphraseYubiKey")]
     public bool PassphraseYubiKey { get; set; }
+
+    /// <summary>
+    /// Base64 random challenge for the YubiKey HMAC-SHA1 slot. Generated
+    /// once at YubiKey setup; the challenge never changes afterwards so the
+    /// same touch always reproduces the same wrapping key.
+    /// </summary>
+    [JsonPropertyName("yubiKeyChallenge")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? YubiKeyChallenge { get; set; }
+
+    /// <summary>
+    /// YubiKey OTP slot holding the HMAC-SHA1 credential (1 or 2).
+    /// Default 2 (long press), leaving slot 1 free for the user's own use.
+    /// </summary>
+    [JsonPropertyName("yubiKeySlot")]
+    public int YubiKeySlot { get; set; } = 2;
+
+    /// <summary>
+    /// The repository passphrase wrapped (AES-256-GCM) under the
+    /// YubiKey-derived KEK; see <see cref="Security.YubiKeyCrypto"/>.
+    /// Unwrapping requires a YubiKey touch. The DPAPI copy in
+    /// <see cref="PassphraseProtected"/> is kept alongside so scheduled
+    /// backups run unattended.
+    /// </summary>
+    [JsonPropertyName("passphraseYubiKeyWrapped")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PassphraseYubiKeyWrapped { get; set; }
 
     /// <summary>
     /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
@@ -576,6 +617,10 @@ public sealed class ServiceConfig
             if (job.Mode is not ("incremental" or "full"))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown mode '{job.Mode}' (expected \"incremental\" or \"full\").");
+            if (!job.JobType.Equals("files", StringComparison.OrdinalIgnoreCase) &&
+                !job.JobType.Equals("disk", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}' has unknown jobType '{job.JobType}' (expected \"files\" or \"disk\").");
             if (job.Vss && job.BackupPrivilege)
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
+using UsenetBackup.Core.Security;
 using UsenetBackup.Core.Service;
 
 namespace UsenetBackup.Service;
@@ -33,6 +34,15 @@ public static class Dashboard
         // in the served HTML (unreadable cross-origin) and never logged.
         string csrfToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         log?.Invoke("dashboard CSRF token generated (embedded in served pages)");
+
+        // YubiKey integration: the provider talks to the key over HID;
+        // the restore session holds the touch-unwrapped passphrase in memory.
+        // FILEKEEP_YUBIKEY_SIMULATE=1 selects the software emulation (tests).
+        var restoreSession = new RestoreSession();
+        IYubiKeyProvider? yubiKeyProvider =
+            Environment.GetEnvironmentVariable("FILEKEEP_YUBIKEY_SIMULATE") == "1"
+                ? new SimulatedYubiKeyProvider()
+                : OperatingSystem.IsWindows() ? new YubicoSdkYubiKeyProvider() : null;
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{config.DashboardBind}:{config.DashboardPort}");
@@ -97,7 +107,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string sourceDir = GetBodyString(body, "sourceDir");
             string repoPath = GetBodyString(body, "repoPath");
-            var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sourceDir, repoPath);
+            var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sourceDir, repoPath, config);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -105,13 +115,13 @@ public static class Dashboard
         // jobs, so the dashboard cannot be pointed at arbitrary paths.
         app.MapGet("/api/backups", (string repo) =>
         {
-            var (status, payload) = DashboardApi.GetBackups(config, repo);
+            var (status, payload) = DashboardApi.GetBackups(config, repo, restoreSession);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
         app.MapGet("/api/backups/remote", (string repo) =>
         {
-            var (status, payload) = DashboardApi.GetRemoteBackups(config, repo);
+            var (status, payload) = DashboardApi.GetRemoteBackups(config, repo, restoreSession);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -123,7 +133,7 @@ public static class Dashboard
             string[] ids = body.TryGetProperty("backupIds", out var el) && el.ValueKind == JsonValueKind.Array
                 ? el.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray()
                 : Array.Empty<string>();
-            var (status, payload) = DashboardApi.ImportRemoteBackups(config, repo, ids);
+            var (status, payload) = DashboardApi.ImportRemoteBackups(config, repo, ids, restoreSession);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -151,10 +161,9 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = GetBodyString(body, "repo");
             string share = GetBodyString(body, "share");
             string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
-            var (status, payload) = DashboardApi.StartSmbSync(config, repo, share, user);
+            var (status, payload) = DashboardApi.StartSmbSync(config, share, user);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -165,7 +174,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
-            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId);
+            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -174,9 +183,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = GetBodyString(body, "repo");
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
-            var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, repo, dryRun);
+            var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, dryRun);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -196,6 +204,12 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/operations/drives", () =>
+        {
+            var (status, payload) = DashboardApi.ListPhysicalDrives();
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/operations/restore", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -209,7 +223,7 @@ public static class Dashboard
             string mergePolicyRaw = body.TryGetProperty("mergePolicy", out var mpol) ? mpol.GetString() ?? "" : "";
             // Unknown/absent policy falls back to Overwrite (classic behavior).
             UsenetBackup.Core.MergePolicyInfo.TryParse(mergePolicyRaw, out var mergePolicy);
-            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser);
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -226,7 +240,7 @@ public static class Dashboard
 
         app.MapGet("/api/operations/nzb", (string repo, string backupId) =>
         {
-            var (status, payload, fileName) = DashboardApi.GenerateNzb(config, repo, backupId);
+            var (status, payload, fileName) = DashboardApi.GenerateNzb(config, repo, backupId, restoreSession);
             if (status != 200) return Results.BadRequest(payload);
             return Results.File((byte[])payload, "application/x-nzb", fileName);
         });
@@ -237,12 +251,11 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             if (!request.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form." });
             var form = await request.ReadFormAsync();
-            string repo = form["repo"].ToString();
             var file = form.Files["nzb"];
             if (file is null || file.Length == 0) return Results.BadRequest(new { error = "No NZB file uploaded." });
             string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
             await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
-            var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, repo, tmp);
+            var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, tmp, restoreSession);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -266,19 +279,9 @@ public static class Dashboard
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
             string device = GetBodyString(body, "device");
-            string confirm = body.TryGetProperty("confirm", out var c) ? c.GetString() ?? "" : "";
-            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirm);
+            bool confirmed = body.TryGetProperty("confirmed", out var c) && c.GetBoolean();
+            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
-        });
-
-        app.MapPost("/api/operations/init-repo", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            string path = GetBodyString(body, "path");
-            var (status, payload) = DashboardApi.InitRepo(path);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
         app.MapGet("/api/operations/lan-server", () =>
@@ -310,9 +313,8 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = GetBodyString(body, "repo");
             int port = body.TryGetProperty("port", out var p) ? p.GetInt32() : 8477;
-            var (status, payload) = DashboardApi.StartLanServer(config, repo, port);
+            var (status, payload) = DashboardApi.StartLanServer(config, port);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
@@ -340,6 +342,7 @@ public static class Dashboard
                     source = j.Source,
                     schedule = j.Schedule,
                     mode = j.Mode,
+                    jobType = j.JobType,
                     backupPrivilege = j.BackupPrivilege,
                     vss = j.Vss,
                     autoUpload = j.AutoUpload,
@@ -528,8 +531,37 @@ public static class Dashboard
             catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
-            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, log);
+            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapGet("/api/yubikey/status", () =>
+        {
+            var (status, payload) = DashboardApi.GetYubiKeyStatus(yubiKeyProvider);
+            return Results.Json(payload);
+        });
+
+        app.MapPost("/api/restore/unlock", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            // The touch blocks until the user presses the key (or 60s timeout).
+            var (status, payload) = DashboardApi.UnlockRestoreSession(config, restoreSession, yubiKeyProvider, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/restore/lock", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.LockRestoreSession(restoreSession);
+            return Results.Json(payload);
+        });
+
+        app.MapGet("/api/restore/session", () =>
+        {
+            var (status, payload) = DashboardApi.GetRestoreSessionStatus(config, restoreSession);
+            return Results.Json(payload);
         });
 
         await app.RunAsync(ct);
@@ -587,14 +619,59 @@ public static class DashboardApi
         config.SnapshotJobs().Any(j => string.Equals(
             Path.GetFullPath(j.Repo), Path.GetFullPath(repo), StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// All distinct repository paths from the configured backup jobs, in
+    /// job order. Tools operate across these without asking the user to
+    /// pick one — the repo is FileKeep's internal storage.
+    /// </summary>
+    public static IReadOnlyList<string> AllJobRepos(ServiceConfig config) =>
+        config.SnapshotJobs()
+            .Select(j => j.Repo)
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>First configured job's repo (the primary one), or null when no jobs exist.</summary>
+    public static string? PrimaryRepo(ServiceConfig config) =>
+        AllJobRepos(config).FirstOrDefault();
+
+    /// <summary>
+    /// Lists all physical drives (Windows only) for disk pickers.
+    /// </summary>
+    public static (int Status, object Payload) ListPhysicalDrives()
+    {
+        if (!OperatingSystem.IsWindows())
+            return (400, new { error = "Drive listing requires Windows." });
+        try
+        {
+            var drives = UsenetBackup.Core.Recovery.PhysicalDrives.List()
+                .Select(d => new
+                {
+                    number = d.Number,
+                    devicePath = d.DevicePath,
+                    model = d.Model,
+                    sizeBytes = d.SizeBytes,
+                    isSystemDrive = d.IsSystemDrive,
+                })
+                .ToArray();
+            return (200, drives);
+        }
+        catch (Exception ex)
+        {
+            return (500, new { error = ex.Message });
+        }
+    }
+
     /// <summary>Returns (200, backup list) or (400/500, error payload).</summary>
-    public static (int Status, object Payload) GetBackups(ServiceConfig config, string repo)
+    public static (int Status, object Payload) GetBackups(ServiceConfig config, string repo, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
         try
         {
             using var r = BackupRepository.Open(repo, passphrase);
@@ -611,16 +688,18 @@ public static class DashboardApi
     /// index). Returns manifests not present locally — "all backups FileKeep
     /// is aware of" beyond the local repo. Uses the first configured provider.
     /// </summary>
-    public static (int Status, object Payload) GetRemoteBackups(ServiceConfig config, string repo)
+    public static (int Status, object Payload) GetRemoteBackups(ServiceConfig config, string repo, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
             return (400, new { error = "No Usenet provider configured." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -664,16 +743,18 @@ public static class DashboardApi
     /// Imports remote-discovered manifests into the local repo so they can
     /// be downloaded/restored like local backups.
     /// </summary>
-    public static (int Status, object Payload) ImportRemoteBackups(ServiceConfig config, string repo, string[] backupIds)
+    public static (int Status, object Payload) ImportRemoteBackups(ServiceConfig config, string repo, string[] backupIds, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
             return (400, new { error = "No Usenet provider configured." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -747,15 +828,15 @@ public static class DashboardApi
     /// it. Returns (202, accepted) or (400, error).
     /// </summary>
     public static (int Status, object Payload) StartSmbSync(
-        ServiceConfig config, string repo, string share, string user)
+        ServiceConfig config, string share, string user)
     {
-        if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
         if (string.IsNullOrWhiteSpace(share))
             return (400, new { error = "SMB share path is required." });
-        // Find SMB credentials: matching job's stored password, else env var.
+        var repos = AllJobRepos(config);
+        if (repos.Count == 0)
+            return (400, new { error = "No backup jobs configured." });
+        // Find SMB credentials: first matching job's stored password, else env var.
         var job = config.SnapshotJobs().FirstOrDefault(j =>
-            j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(j.SmbShare));
         string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
         if (string.IsNullOrEmpty(password) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
@@ -763,37 +844,44 @@ public static class DashboardApi
         string effectiveUser = string.IsNullOrWhiteSpace(user) ? job?.SmbUser ?? "" : user;
         Task.Run(() =>
         {
-            try
+            foreach (string repo in repos)
             {
-                using var smb = UsenetBackup.Core.SmbShare.Connect(share, effectiveUser, password);
-                var sync = new UsenetBackup.Core.SmbSync(msg =>
-                    OperationLog.Append(repo, "smb-sync", msg));
-                var result = sync.Sync(repo, smb);
-                OperationLog.Append(repo, "smb-sync",
-                    $"to {share} complete: {result.ChunksCopied} chunks, {result.ManifestsCopied} manifests");
-            }
-            catch (Exception ex)
-            {
-                OperationLog.Append(repo, "smb-sync", $"to {share} FAILED: {ex.Message}");
+                try
+                {
+                    using var smb = UsenetBackup.Core.SmbShare.Connect(share, effectiveUser, password);
+                    var sync = new UsenetBackup.Core.SmbSync(msg =>
+                        OperationLog.Append(repo, "smb-sync", msg));
+                    var result = sync.Sync(repo, smb);
+                    OperationLog.Append(repo, "smb-sync",
+                        $"to {share} complete: {result.ChunksCopied} chunks, {result.ManifestsCopied} manifests");
+                }
+                catch (Exception ex)
+                {
+                    OperationLog.Append(repo, "smb-sync", $"to {share} FAILED: {ex.Message}");
+                }
             }
         });
-        OperationLog.Append(repo, "smb-sync", $"to {share} started");
-        return (202, new { accepted = true });
+        foreach (string repo in repos)
+            OperationLog.Append(repo, "smb-sync", $"to {share} started");
+        return (202, new { accepted = true, repos = repos.Count });
     }
 
     /// <summary>
     /// Starts a manual backup verification in the background.
     /// </summary>
     public static (int Status, object Payload) StartVerify(
-        ServiceConfig config, string repo, string backupId)
+        ServiceConfig config, string repo, string backupId,
+        RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
         if (string.IsNullOrWhiteSpace(backupId))
             return (400, new { error = "backupId is required." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = "Service passphrase is not configured." });
         Task.Run(() =>
         {
             try
@@ -816,24 +904,29 @@ public static class DashboardApi
     /// Starts a manual retention check in the background.
     /// </summary>
     public static (int Status, object Payload) StartRetentionCheck(
-        ServiceConfig config, BackupScheduler scheduler, string repo, bool dryRun)
+        ServiceConfig config, BackupScheduler scheduler, bool dryRun)
     {
-        if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+        var repos = AllJobRepos(config);
+        if (repos.Count == 0)
+            return (400, new { error = "No backup jobs configured." });
         Task.Run(() =>
         {
-            try
+            foreach (string repo in repos)
             {
-                scheduler.RunRetentionCheck(repo, dryRun);
-            }
-            catch (Exception ex)
-            {
-                OperationLog.Append(repo, "manual-retention",
-                    $"dryRun={dryRun} FAILED: {ex.Message}");
+                try
+                {
+                    scheduler.RunRetentionCheck(repo, dryRun);
+                }
+                catch (Exception ex)
+                {
+                    OperationLog.Append(repo, "manual-retention",
+                        $"dryRun={dryRun} FAILED: {ex.Message}");
+                }
             }
         });
-        OperationLog.Append(repo, "manual-retention", $"dryRun={dryRun} started");
-        return (202, new { accepted = true });
+        foreach (string repo in repos)
+            OperationLog.Append(repo, "manual-retention", $"dryRun={dryRun} started");
+        return (202, new { accepted = true, repos = repos.Count });
     }
 
     /// <summary>
@@ -842,7 +935,8 @@ public static class DashboardApi
     public static (int Status, object Payload) StartRestore(
         ServiceConfig config, string repo, string backupId, string destDir,
         UsenetBackup.Core.MergePolicy mergePolicy,
-        string? smbShare = null, string? smbUser = null)
+        string? smbShare = null, string? smbUser = null,
+        RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
@@ -850,9 +944,11 @@ public static class DashboardApi
             return (400, new { error = "backupId is required." });
         if (string.IsNullOrWhiteSpace(destDir))
             return (400, new { error = "destDir is required." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = "Service passphrase is not configured." });
         // SMB credentials: matching job's stored password, else env var.
         string? smbPassword = null;
         if (!string.IsNullOrWhiteSpace(smbShare))
@@ -911,7 +1007,7 @@ public static class DashboardApi
             return (400, new { error = "Unknown repo (not a configured job)." });
         if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
             return (400, new { error = "sourceDir must be an existing directory." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
             return (500, new { error = "Service passphrase is not configured." });
         Task.Run(() =>
@@ -941,7 +1037,7 @@ public static class DashboardApi
     /// Returns (202, {accepted:true}) or (400, {error}).
     /// </summary>
     public static (int Status, object Payload) StartOneTimeBackup(
-        BackupScheduler scheduler, string sourceDir, string repoPath)
+        BackupScheduler scheduler, string sourceDir, string repoPath, ServiceConfig? config = null)
     {
         if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
             return (400, new { error = "Choose an existing source folder." });
@@ -964,7 +1060,9 @@ public static class DashboardApi
         {
             return (400, new { error = "Invalid folder paths." });
         }
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = config is null
+            ? Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar)
+            : BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
             return (400, new { error = "Set a repository passphrase first (Settings \u2192 Security)." });
         Task.Run(() =>
@@ -992,15 +1090,18 @@ public static class DashboardApi
     /// Generates an NZB for a backup and returns the XML bytes.
     /// </summary>
     public static (int Status, object Payload, string FileName) GenerateNzb(
-        ServiceConfig config, string repo, string backupId)
+        ServiceConfig config, string repo, string backupId,
+        RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." }, "");
         if (string.IsNullOrWhiteSpace(backupId))
             return (400, new { error = "backupId is required." }, "");
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." }, "");
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." }, "")
+                : (500, new { error = "Service passphrase is not configured." }, "");
         try
         {
             var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
@@ -1026,16 +1127,21 @@ public static class DashboardApi
     /// Starts a download from an uploaded NZB file in the background.
     /// </summary>
     public static (int Status, object Payload) StartNzbDownload(
-        ServiceConfig config, BackupScheduler scheduler, string repo, string nzbPath)
+        ServiceConfig config, BackupScheduler scheduler, string nzbPath,
+        RestoreSession? session = null)
     {
-        if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+        // Chunks are content-addressed; fetch into the primary repo.
+        string? repo = PrimaryRepo(config);
+        if (repo is null)
+            return (400, new { error = "No backup jobs configured." });
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
             return (400, new { error = "No Usenet provider configured." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = "Service passphrase is not configured." });
         Task.Run(() =>
         {
             try
@@ -1067,7 +1173,7 @@ public static class DashboardApi
             return (400, new { error = "Unknown repo (not a configured job)." });
         if (string.IsNullOrWhiteSpace(device))
             return (400, new { error = "device is required." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
             return (500, new { error = "Service passphrase is not configured." });
         Task.Run(() =>
@@ -1090,11 +1196,13 @@ public static class DashboardApi
     }
 
     /// <summary>
-    /// Starts a disk-image restore in the background. Destructive: requires
-    /// the caller to type the device path as confirmation.
+    /// Starts a disk-image restore in the background. Destructive: the caller
+    /// must pass confirmed=true (the UI requires an explicit checkbox plus a
+    /// confirm dialog, and never lists the running system drive as a target).
     /// </summary>
     public static (int Status, object Payload) StartDiskRestore(
-        ServiceConfig config, string repo, string backupId, string device, string confirm)
+        ServiceConfig config, string repo, string backupId, string device, bool confirmed,
+        RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new { error = "Unknown repo (not a configured job)." });
@@ -1102,11 +1210,13 @@ public static class DashboardApi
             return (400, new { error = "backupId is required." });
         if (string.IsNullOrWhiteSpace(device))
             return (400, new { error = "device is required." });
-        if (!string.Equals(confirm?.Trim(), device, StringComparison.Ordinal))
-            return (400, new { error = "Confirmation did not match the device path. Restore aborted." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        if (!confirmed)
+            return (400, new { error = "Restore not confirmed. Restore aborted." });
+        string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return config.PassphraseYubiKey
+                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
+                : (500, new { error = "Service passphrase is not configured." });
         Task.Run(() =>
         {
             try
@@ -1125,28 +1235,6 @@ public static class DashboardApi
         OperationLog.Append(repo, "manual-disk-restore", $"backupId={backupId} device={device} started");
         return (202, new { accepted = true });
     }
-
-    /// <summary>
-    /// Initializes a new repository at the given path.
-    /// </summary>
-    public static (int Status, object Payload) InitRepo(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return (400, new { error = "path is required." });
-        string? passphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
-        if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
-        try
-        {
-            using var repo = BackupRepository.Init(path, passphrase, BackupRepository.DefaultChunkSize);
-            return (200, new { path = Path.GetFullPath(path) });
-        }
-        catch (Exception ex)
-        {
-            return (500, new { error = ex.Message });
-        }
-    }
-
 
     /// <summary>WinRE USB build state.</summary>
     private static string? _winReBuildStatus;
@@ -1328,13 +1416,11 @@ public static class DashboardApi
         bootMode = (bootMode ?? "Both").Trim();
         if (bootMode != "UEFI" && bootMode != "BIOS" && bootMode != "Both")
             return (400, new { error = "bootMode must be UEFI, BIOS, or Both." });
-        lock (_winReBuildStepsLock)
-        {
-            if (_winReBuildStatus == "running")
-                return (400, new { error = "A WinRE build is already running." });
-            _winReBuildStatus = "running";
-        }
 
+        // Validate everything BEFORE claiming the running flag: every return
+        // below must leave _winReBuildStatus untouched, or a rejected request
+        // wedges the builder as "running" forever (a retry then reports
+        // "A WinRE build is already running." with nothing actually running).
         bool imageMode = !string.IsNullOrWhiteSpace(imagePath);
         if (imageMode && (!string.IsNullOrWhiteSpace(driveLetter) || diskNumber >= 0))
             return (400, new { error = "Specify either a USB target or an image path, not both." });
@@ -1350,9 +1436,10 @@ public static class DashboardApi
         }
         else
         {
-            imagePath = imagePath.Trim();
-            if (!imagePath.EndsWith(".vhdx", StringComparison.OrdinalIgnoreCase))
-                return (400, new { error = "imagePath must end with .vhdx" });
+            var (normalizedPath, pathError) = NormalizeWinReImagePath(imagePath);
+            if (pathError is not null)
+                return (400, new { error = pathError });
+            imagePath = normalizedPath!;
         }
 
         var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
@@ -1362,13 +1449,16 @@ public static class DashboardApi
             return (400, new { error = $"Prerequisites not met: {missing}" });
         }
 
-        _winReBuildError = null;
-        _winReBuildDrive = imageMode ? imagePath : driveLetter.ToUpperInvariant();
         lock (_winReBuildStepsLock)
         {
+            if (_winReBuildStatus == "running")
+                return (400, new { error = "A WinRE build is already running." });
+            _winReBuildStatus = "running";
             _winReBuildSteps.Clear();
             _winReBuildStartedAt = DateTime.UtcNow;
         }
+        _winReBuildError = null;
+        _winReBuildDrive = imageMode ? imagePath : driveLetter.ToUpperInvariant();
 
         Task.Run(() =>
         {
@@ -1459,6 +1549,26 @@ public static class DashboardApi
         return (202, new { accepted = true });
     }
 
+    /// <summary>
+    /// Forgiving normalization for the image-mode output path. Accepts a folder
+    /// (an existing directory, or a path with no file name, gets the default
+    /// file name) or a path without an extension (".vhdx" is appended); only a
+    /// non-.vhdx extension is rejected.
+    /// </summary>
+    private static (string? Path, string? Error) NormalizeWinReImagePath(string raw)
+    {
+        string p = raw.Trim().Trim('"').TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (p.Length == 0)
+            return (null, "Choose where to save the recovery image (full file path, e.g. D:\\images\\filekeep-recovery.vhdx).");
+        if (Directory.Exists(p) || string.IsNullOrEmpty(Path.GetFileName(p)))
+            p = Path.Combine(p, "filekeep-recovery.vhdx");
+        else if (string.IsNullOrEmpty(Path.GetExtension(p)))
+            p += ".vhdx";
+        else if (!p.EndsWith(".vhdx", StringComparison.OrdinalIgnoreCase))
+            return (null, $"The image path must end with .vhdx (got \"{p}\").");
+        return (p, null);
+    }
+
     /// <summary>Parses one FKPROGRESS JSON line from build-winre-usb.ps1.</summary>
     private static void ParseWinReProgress(string json)
     {
@@ -1504,11 +1614,12 @@ public static class DashboardApi
     public static object GetLanServerStatus() =>
         new { running = _lanServer?.IsRunning == true, port = _lanServer?.Port ?? 0 };
 
-    /// <summary>Starts the LAN chunk server for a repo.</summary>
-    public static (int Status, object Payload) StartLanServer(ServiceConfig config, string repo, int port)
+    /// <summary>Starts the LAN chunk server for all configured job repos.</summary>
+    public static (int Status, object Payload) StartLanServer(ServiceConfig config, int port)
     {
-        if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+        var repos = AllJobRepos(config);
+        if (repos.Count == 0)
+            return (400, new { error = "No backup jobs configured." });
         lock (_lanServerLock)
         {
             if (_lanServer?.IsRunning == true)
@@ -1518,10 +1629,11 @@ public static class DashboardApi
             try
             {
                 _lanServer?.Dispose();
-                _lanServer = new LanServer(repo, port, "0.0.0.0");
+                _lanServer = new LanServer(repos, port, "0.0.0.0");
                 _lanServer.Start();
-                OperationLog.Append(repo, "lan-server", $"started on port {port}");
-                return (200, new { running = true, port });
+                foreach (string repo in repos)
+                    OperationLog.Append(repo, "lan-server", $"started on port {port} ({repos.Count} repos)");
+                return (200, new { running = true, port, repos = repos.Count });
             }
             catch (Exception ex)
             {
@@ -1984,37 +2096,151 @@ public static class DashboardApi
     }
 
     /// <summary>
-    /// Stores (or clears) the repository passphrase, DPAPI-encrypted.
-    /// A null/empty passphrase clears the stored value.
+    /// Stores (or clears) the repository passphrase.
+    /// A null/empty passphrase clears the stored value and disables YubiKey mode.
+    /// With <paramref name="useYubiKey"/>, the key's OTP slot is programmed
+    /// (two touches: program + wrap) and the passphrase is stored wrapped
+    /// under the challenge-response-derived KEK; a DPAPI copy is still kept
+    /// so scheduled backups run unattended. Restores then require a touch
+    /// to open a session.
     /// </summary>
     public static (int Status, object Payload) SetPassphrase(ServiceConfig config,
         string configPath, string? passphrase, bool useYubiKey,
-        Action<string>? log = null)
+        IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null)
     {
         if (string.IsNullOrEmpty(passphrase))
         {
             config.PassphraseProtected = null;
             config.PassphraseYubiKey = false;
+            config.YubiKeyChallenge = null;
+            config.PassphraseYubiKeyWrapped = null;
+        }
+        else if (useYubiKey)
+        {
+            if (yubiKeyProvider is null)
+                return (400, new { error = "YubiKey support is unavailable in this build." });
+            try
+            {
+                var (challenge, wrapped) = YubiKeySetup.Setup(
+                    yubiKeyProvider, passphrase, config.YubiKeySlot);
+                config.PassphraseProtected = Dpapi.Protect(passphrase);
+                config.YubiKeyChallenge = challenge;
+                config.PassphraseYubiKeyWrapped = wrapped;
+                config.PassphraseYubiKey = true;
+            }
+            catch (InvalidOperationException ex)
+            {
+                return (400, new { error = ex.Message });
+            }
+            catch (TimeoutException)
+            {
+                return (400, new { error = "Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes." });
+            }
+            catch (Exception ex)
+            {
+                return (400, new { error = "YubiKey setup failed: " + ex.Message });
+            }
         }
         else
         {
-            if (useYubiKey)
-                return (400, new { error = "YubiKey challenge-response is not yet implemented. Save without YubiKey for DPAPI-encrypted offline storage." });
             config.PassphraseProtected = Dpapi.Protect(passphrase);
             config.PassphraseYubiKey = false;
+            config.YubiKeyChallenge = null;
+            config.PassphraseYubiKeyWrapped = null;
         }
         try
         {
             config.Save(configPath);
             log?.Invoke("dashboard: repository passphrase " +
-                (string.IsNullOrEmpty(passphrase) ? "cleared" : "saved (DPAPI-encrypted)"));
-            return (200, new { ok = true });
+                (string.IsNullOrEmpty(passphrase) ? "cleared" :
+                 useYubiKey ? "saved (DPAPI + YubiKey-wrapped)" : "saved (DPAPI-encrypted)"));
+            return (200, new { ok = true, yubikey = useYubiKey && !string.IsNullOrEmpty(passphrase) });
         }
         catch (Exception ex)
         {
             return (400, new { error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// Lists attached YubiKeys for the setup UI.
+    /// </summary>
+    public static (int Status, object Payload) GetYubiKeyStatus(IYubiKeyProvider? provider)
+    {
+        if (provider is null)
+            return (200, new { detected = false, devices = Array.Empty<string>() });
+        IReadOnlyList<YubiKeyInfo> devices;
+        try { devices = provider.FindDevices(); }
+        catch { devices = Array.Empty<YubiKeyInfo>(); }
+        return (200, new
+        {
+            detected = devices.Count > 0,
+            devices = devices.Select(d => d.Description).ToArray(),
+        });
+    }
+
+    /// <summary>
+    /// Opens a restore session: touches the YubiKey, unwraps the passphrase
+    /// and holds it in <paramref name="session"/> memory. Only meaningful
+    /// when the config has YubiKey mode enabled.
+    /// </summary>
+    public static (int Status, object Payload) UnlockRestoreSession(ServiceConfig config,
+        RestoreSession session, IYubiKeyProvider? provider, Action<string>? log = null)
+    {
+        if (!config.PassphraseYubiKey)
+            return (400, new { error = "YubiKey mode is not enabled for this passphrase." });
+        if (string.IsNullOrEmpty(config.YubiKeyChallenge) ||
+            string.IsNullOrEmpty(config.PassphraseYubiKeyWrapped))
+            return (400, new { error = "YubiKey was not set up completely. Re-save the passphrase with YubiKey enabled." });
+        if (provider is null)
+            return (400, new { error = "YubiKey support is unavailable in this build." });
+        try
+        {
+            string passphrase = YubiKeySetup.Unlock(provider,
+                config.YubiKeyChallenge, config.PassphraseYubiKeyWrapped, config.YubiKeySlot);
+            session.Unlock(passphrase);
+            log?.Invoke("dashboard: restore session unlocked via YubiKey");
+            return (200, new { ok = true });
+        }
+        catch (TimeoutException)
+        {
+            return (400, new { error = "Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes." });
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            return (400, new { error = "The YubiKey touch succeeded but the passphrase did not decrypt. Wrong key, or the slot was reprogrammed after setup." });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (400, new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = "Unlock failed: " + ex.Message });
+        }
+    }
+
+    /// <summary>Locks the restore session, wiping the held passphrase.</summary>
+    public static (int Status, object Payload) LockRestoreSession(RestoreSession session)
+    {
+        session.Lock();
+        return (200, new { ok = true });
+    }
+
+    /// <summary>Reports whether YubiKey mode is on and the session is unlocked.</summary>
+    public static (int Status, object Payload) GetRestoreSessionStatus(
+        ServiceConfig config, RestoreSession session) =>
+        (200, new { yubikey = config.PassphraseYubiKey, unlocked = session.IsUnlocked });
+
+    /// <summary>
+    /// Resolves the passphrase for restore-side operations. When YubiKey
+    /// mode is on, only the unlocked session passphrase is used (null when
+    /// locked); otherwise the environment/DPAPI value. Backup-creation
+    /// endpoints use <see cref="BackupScheduler.GetPassphrase"/> directly
+    /// and never consult the session.
+    /// </summary>
+    public static string? GetRestorePassphrase(ServiceConfig config, RestoreSession? session) =>
+        config.PassphraseYubiKey ? session?.GetPassphrase() : BackupScheduler.GetPassphrase(config);
 }
 
 public static class DashboardHtml
@@ -2279,6 +2505,10 @@ public static class DashboardHtml
                 </div>
               </div>
               <div class="card" style="padding:8px 20px">
+                <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px">
+                  <span id="restore-session-status" style="color:var(--text-2)">Restore session: locked</span>
+                  <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory">Lock</button>
+                </div>
                 <table id="backups"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
               </div>
               <div class="card">
@@ -2298,19 +2528,11 @@ public static class DashboardHtml
                 </div>
                 <div id="backupnow-disk-row" style="display:none">
                   <div class="row" style="margin-top:8px">
-                    <input id="disk-device" placeholder="\\.\PhysicalDrive2 or /dev/sdb" style="flex:1">
-                    <input id="disk-imagename" placeholder="disk.img" style="width:120px">
+                    <select id="disk-device" style="flex:1"><option value="">Select a disk…</option></select>
+                    <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button>
                     <button onclick="startDiskBackup()">Back up disk</button>
                   </div>
-                  <div class="meta">Images the entire disk bit-for-bit. Use the Restore button on the disk-image backup above to write it back.</div>
-                </div>
-              </div>
-              <div class="card">
-                <div class="name">New repository</div>
-                <div class="meta">Initialize a fresh encrypted backup repository at a path.</div>
-                <div class="row" style="margin-top:8px">
-                  <input id="init-path" placeholder="D:\Backups\NewRepo" style="flex:1">
-                  <button onclick="initRepo()">Initialize</button>
+                  <div class="meta">Images the entire disk bit-for-bit. The image name is generated automatically. Use the Restore button on the disk-image backup above to write it back.</div>
                 </div>
               </div>
               <div id="restoreModal" class="modal" style="display:none">
@@ -2338,12 +2560,13 @@ public static class DashboardHtml
                   </div>
                   <div id="restoreDiskForm" style="display:none">
                     <div class="row" style="margin-top:8px">
-                      <input id="m-disk-target" placeholder="\\.\PhysicalDrive2" style="flex:1">
+                      <select id="m-disk-target" style="flex:1"><option value="">Select target disk…</option></select>
+                      <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button>
                     </div>
                     <div class="row" style="margin-top:8px">
-                      <input id="m-disk-confirm" placeholder="Type the device path to confirm" style="flex:1">
+                      <label class="check" title="Required: acknowledges the destructive restore"><input id="m-disk-ack" type="checkbox"> I understand this DESTROYS all data on the selected disk.</label>
                     </div>
-                    <div class="meta" style="color:var(--bad)">Destructive — all data on the target device will be destroyed.</div>
+                    <div class="meta" style="color:var(--bad)">Destructive — all data on the target device will be destroyed. The disk running Windows is never listed here.</div>
                   </div>
                   <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
                     <button onclick="closeRestoreModal()">Cancel</button>
@@ -2370,17 +2593,8 @@ public static class DashboardHtml
             <div class="view" id="view-tools">
               <h1>Tools</h1>
               <div class="card">
-                <div class="row">
-                  <div class="grow">
-                    <div class="name">Repository</div>
-                    <div class="meta">Tools operate on the selected repository.</div>
-                  </div>
-                  <select id="tool-repo"></select>
-                </div>
-              </div>
-              <div class="card">
                 <div class="name">Retention check</div>
-                <div class="meta">STAT-sample articles against provider retention; repost aging ones with fresh IDs.</div>
+                <div class="meta">STAT-sample articles against provider retention; repost aging ones with fresh IDs. Runs across every configured repository.</div>
                 <div class="row" style="margin-top:8px">
                   <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run</label>
                   <button onclick="runRetentionCheck()">Run retention check</button>
@@ -2388,7 +2602,7 @@ public static class DashboardHtml
               </div>
               <div class="card">
                 <div class="name">Download from NZB</div>
-                <div class="meta">Fetch chunks referenced by an NZB file from Usenet into the repository.</div>
+                <div class="meta">Fetch chunks referenced by an NZB file from Usenet into the first configured repository.</div>
                 <div class="row" style="margin-top:8px">
                   <input id="nzb-file" type="file" accept=".nzb">
                   <button onclick="uploadNzb()">Download chunks</button>
@@ -2396,7 +2610,7 @@ public static class DashboardHtml
               </div>
               <div class="card">
                 <div class="name">Sync to SMB share</div>
-                <div class="meta">Copy this repo's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
+                <div class="meta">Copy every repository's chunks and manifests to a network share (e.g. a NAS). Idempotent — files already on the share are skipped.</div>
                 <div class="row" style="margin-top:8px">
                   <input id="smb-share" placeholder="\\\\NAS\\backups\\filekeep" style="flex:1">
                   <input id="smb-user" placeholder="Username (optional)" style="width:160px">
@@ -2406,9 +2620,9 @@ public static class DashboardHtml
               </div>
               <div class="card">
                 <div class="name">LAN server</div>
-                <div class="meta">Serve this repo's chunks over HTTP for LAN restores (e.g. from WinRE recovery).</div>
+                <div class="meta">Serve every configured repository's chunks over HTTP for LAN restores (e.g. from WinRE recovery).</div>
                 <div class="row" style="margin-top:8px">
-                  <input id="lan-port" placeholder="8477" style="width:100px">
+                  <input id="lan-port" type="number" value="8477" min="1" max="65535" style="width:100px" title="Port for the LAN server">
                   <button onclick="startLanServer()">Start server</button>
                   <button onclick="stopLanServer()">Stop</button>
                   <span id="lan-status" style="color:var(--text-2)"></span>
@@ -2435,12 +2649,12 @@ public static class DashboardHtml
                 <div class="row" style="margin-top:8px" id="winre-usb-row">
                   <select id="winre-drive" style="width:280px"><option value="">Select USB drive…</option></select>
                   <button type="button" onclick="refreshWinReDrives()" title="Rescan for USB drives">↻</button>
-                  <input id="winre-src" placeholder="Source dir (optional)" style="flex:1">
+                  <span class="folder-row" style="flex:1"><input id="winre-src" placeholder="Source dir (optional)" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-src', 'Select source folder')">Browse…</button></span>
                   <button class="danger" onclick="startWinReBuild()">Build USB</button>
                 </div>
                 <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
-                  <input id="winre-image" placeholder="C:\winre\filekeep-recovery.vhdx" style="flex:1">
-                  <input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1">
+                  <span class="folder-row" style="flex:1"><input id="winre-image" placeholder="Full path to the .vhdx file, e.g. D:\images\filekeep-recovery.vhdx" title="Type the full file path including the file name, or pick one with Browse… A folder alone also works — the file is saved there as filekeep-recovery.vhdx." style="flex:1"><button type="button" class="browse-btn" onclick="browseSaveFile('winre-image', 'Save recovery image as', 'VHDX image (*.vhdx)|*.vhdx', 'filekeep-recovery.vhdx')">Browse…</button></span>
+                  <span class="folder-row" style="flex:1"><input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-src-img', 'Select source folder')">Browse…</button></span>
                   <button onclick="startWinReBuild()">Build image</button>
                 </div>
                 <div class="row" style="margin-top:8px">
@@ -2482,6 +2696,15 @@ public static class DashboardHtml
               </div>
               <div class="card" id="jobFormCard" style="display:none">
                 <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
+                <div class="row" id="jf-type-row" style="margin-bottom:12px">
+                  <label style="display:flex;align-items:center;gap:6px" title="Back up files and folders on a schedule."><input type="radio" name="jf-type" value="files" checked onchange="jobTypeChanged()"> Files &amp; folders</label>
+                  <label style="display:flex;align-items:center;gap:6px" title="Image an entire disk bit-for-bit on a schedule. Always a full capture."><input type="radio" name="jf-type" value="disk" onchange="jobTypeChanged()"> Whole disk image</label>
+                </div>
+                <div id="jf-disk-row" style="display:none;margin-bottom:12px">
+                  <div class="meta" style="margin-bottom:6px">Disk to image on schedule:</div>
+                  <div class="row"><select id="jf-disk" style="flex:1"><option value="">Select a disk…</option></select>
+                  <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button></div>
+                </div>
                 <!-- Quick pick from Windows user folders -->
                 <div id="jf-quickpick" style="margin-bottom:12px">
                   <div class="meta" style="margin-bottom:6px">Quick pick a folder to back up:</div>
@@ -2489,7 +2712,7 @@ public static class DashboardHtml
                 </div>
                 <div class="form-grid">
                   <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
-                  <label title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+                  <label id="jf-source-label" title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
                   <label title="How often to run this backup. Daily runs once per day at the specified time; Interval runs every N hours.">Schedule<select id="jf-schedType">
                     <option value="daily">Daily at…</option>
                     <option value="interval">Every N minutes</option>
@@ -2502,12 +2725,12 @@ public static class DashboardHtml
                 </div>
                 <div class="form-grid" id="jf-advanced" style="display:none">
                   <label title="Where FileKeep stores its internal backup data (encrypted). Leave empty to use the default in ProgramData. You don't need to change this.">Repository folder (optional, defaults to ProgramData)<span class="folder-row"><input id="jf-repo" type="text" placeholder="Leave empty for default"><button type="button" class="browse-btn" onclick="browseFolder('jf-repo', 'Select repository folder')">Browse…</button></span></label>
-                  <label title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
+                  <label id="jf-mode-label" title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
                     <option value="incremental">Incremental</option>
                     <option value="full">Full</option>
                   </select></label>
-                  <label class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
-                  <label class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
+                  <label id="jf-priv-label" class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
+                  <label id="jf-vss-label" class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
                   <div id="jf-targets" style="margin:4px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
                     <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine; manage locations in Backup locations below)</span></div>
                     <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
@@ -2563,7 +2786,11 @@ public static class DashboardHtml
                   <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
                 </div>
                 <div class="row" style="margin-top:8px">
-                  <label class="check" title="YubiKey support coming soon"><input id="pp-yubikey" type="checkbox" disabled> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(coming soon)</span></label>
+                  <label class="check" title="When enabled, opening a restore session requires touching your YubiKey. Scheduled backups still run unattended."><input id="pp-yubikey" type="checkbox"> Unlock with YubiKey <span style="color:var(--text-2);font-size:12px">(touch to open restore sessions; backups stay automatic)</span></label>
+                </div>
+                <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:4px"></div>
+                <div id="pp-touch" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:6px;background:#eef5fc">
+                  <strong>Touch your YubiKey</strong><span id="pp-touch-detail" style="color:var(--text-2)"> — press the button when it flashes.</span>
                 </div>
                 <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
                 <div style="margin-top:12px;display:flex;gap:8px">
@@ -2622,6 +2849,14 @@ public static class DashboardHtml
             } catch (e) { /* dialog unavailable; leave the typed value */ }
           }
         }
+        async function browseSaveFile(inputId, title, filter, defaultName) {
+          if (typeof window.fileKeepPickSaveFile === 'function') {
+            try {
+              const path = await window.fileKeepPickSaveFile(title || 'Save as', filter || '', defaultName || '');
+              if (path) document.getElementById(inputId).value = path;
+            } catch (e) { /* dialog unavailable; leave the typed value */ }
+          }
+        }
         // NNTP provider presets: fill host/port/SSL from a known provider.
         const nntpPresets = {
           frugal: { host: 'news.frugalusenet.com', port: 563, ssl: true },
@@ -2643,6 +2878,18 @@ public static class DashboardHtml
             const label = document.querySelector('#lf-preset option:checked').textContent;
             nameEl.value = label;
           }
+        }
+        // Whole-disk image jobs: pick a disk from the dropdown; folder
+        // quick-pick, file-only mode and snapshot options do not apply.
+        function jobTypeChanged() {
+          const isDisk = document.querySelector('input[name="jf-type"]:checked').value === 'disk';
+          document.getElementById('jf-quickpick').style.display = isDisk ? 'none' : '';
+          document.getElementById('jf-source-label').style.display = isDisk ? 'none' : '';
+          document.getElementById('jf-disk-row').style.display = isDisk ? '' : 'none';
+          document.getElementById('jf-mode-label').style.display = isDisk ? 'none' : '';
+          document.getElementById('jf-priv-label').style.display = isDisk ? 'none' : '';
+          document.getElementById('jf-vss-label').style.display = isDisk ? 'none' : '';
+          if (isDisk) refreshDiskList();
         }
         // Toggle advanced job settings.
         function toggleAdvancedJob() {
@@ -2811,9 +3058,6 @@ public static class DashboardHtml
           const sel = document.getElementById('repo');
           if (!sel.options.length)
             s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
-          const toolSel = document.getElementById('tool-repo');
-          if (toolSel && !toolSel.options.length)
-            s.jobs.forEach(j => toolSel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
           loadRepo();
           loadLog();
         }
@@ -2925,6 +3169,7 @@ public static class DashboardHtml
         async function loadRepo() {
           const repo = document.getElementById('repo').value;
           if (!repo) return;
+          refreshRestoreSession();
           const q = '?repo=' + encodeURIComponent(repo);
           let bs = [];
           try {
@@ -2964,19 +3209,16 @@ public static class DashboardHtml
           toast('Backup started in the background. Watch the Operations log.');
         }
         async function startSmbSync() {
-          const repo = document.getElementById('tool-repo').value;
           const share = document.getElementById('smb-share').value.trim();
           const user = document.getElementById('smb-user').value.trim();
           if (!share) { toast('Enter the SMB share path.', 'err'); return; }
-          await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ repo, share, user }) });
+          await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ share, user }) });
           toast('SMB sync started in the background. Watch the Operations log.');
         }
         async function uploadNzb() {
-          const repo = document.getElementById('tool-repo').value;
           const input = document.getElementById('nzb-file');
           if (!input.files.length) { toast('Choose an NZB file.', 'err'); return; }
           const form = new FormData();
-          form.append('repo', repo);
           form.append('nzb', input.files[0]);
           const res = await fetch('/api/operations/download-nzb', {
             method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: form
@@ -2986,9 +3228,12 @@ public static class DashboardHtml
         }
         async function startDiskBackup() {
           const repo = document.getElementById('repo').value;
-          const device = document.getElementById('disk-device').value.trim();
-          const imageName = document.getElementById('disk-imagename').value.trim() || 'disk.img';
-          if (!device) { toast('Enter a device path.', 'err'); return; }
+          const device = document.getElementById('disk-device').value;
+          if (!device) { toast('Select a disk.', 'err'); return; }
+          // Image name is generated: disk<N>-<timestamp>.img — no typing needed.
+          const n = device.match(/(\d+)\s*$/)?.[1] ?? 'x';
+          const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+          const imageName = `disk${n}-${stamp}.img`;
           await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
           toast('Disk backup started in the background. Watch the Operations log.');
         }
@@ -2997,10 +3242,65 @@ public static class DashboardHtml
           document.getElementById('backupnow-files-row').style.display = isDisk ? 'none' : '';
           document.getElementById('backupnow-disk-row').style.display = isDisk ? '' : 'none';
         }
+        // Populate every disk picker from /api/operations/drives (no typing).
+        // The restore-target picker never lists the running system disk.
+        async function refreshDiskList() {
+          let drives = [];
+          try { drives = await api('/api/operations/drives'); }
+          catch (e) { toast('Could not list disks: ' + e.message, 'err'); return; }
+          const fmtSize = b => b >= 1073741824 ? (b / 1073741824).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB';
+          const fill = (id, excludeSystem) => {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            const cur = sel.value;
+            sel.innerHTML = '<option value="">Select a disk…</option>';
+            drives.filter(d => !excludeSystem || !d.isSystemDrive).forEach(d => {
+              const label = d.number + ': ' + d.model + ' (' + fmtSize(d.sizeBytes) + ')' +
+                (d.isSystemDrive ? ' — \u26a0 SYSTEM DISK' : '');
+              sel.add(new Option(label, d.devicePath));
+            });
+            if ([...sel.options].some(o => o.value === cur && cur)) sel.value = cur;
+          };
+          fill('disk-device', false);
+          fill('m-disk-target', true);
+          fill('jf-disk', false);
+        }
         // Restore is an action on a backup: the Restore button on each row opens
         // this modal, pre-set for file or disk-image restores.
         let restoreTarget = null;
-        function openRestoreModal(backupId, type) {
+        async function lockRestoreSession() {
+          try { await api('/api/restore/lock', { method: 'POST' }); } catch (e) { /* ignore */ }
+          refreshRestoreSession();
+        }
+        async function refreshRestoreSession() {
+          const row = document.getElementById('restore-session-row');
+          const st = document.getElementById('restore-session-status');
+          if (!row || !st) return;
+          try {
+            const s = await api('/api/restore/session');
+            if (!s.yubikey) { row.style.display = 'none'; return; }
+            row.style.display = '';
+            st.textContent = s.unlocked ? 'Restore session: unlocked ✓' : 'Restore session: locked — touch your YubiKey to restore';
+            st.style.color = s.unlocked ? 'var(--good)' : 'var(--text-2)';
+          } catch (e) { row.style.display = 'none'; }
+        }
+        async function ensureRestoreSession() {
+          // Returns true when restores may proceed. In YubiKey mode this
+          // touches the key to unlock the session first.
+          let s;
+          try { s = await api('/api/restore/session'); }
+          catch (e) { toast('Could not check restore session: ' + e.message, 'err'); return false; }
+          if (!s.yubikey || s.unlocked) return true;
+          if (!confirm('Restores require your YubiKey. Touch the key when it flashes. Continue?')) return false;
+          toast('Touch your YubiKey…');
+          try {
+            await api('/api/restore/unlock', { method: 'POST' });
+            toast('Restore session unlocked.', 'ok');
+            return true;
+          } catch (e) { toast('Unlock failed: ' + e.message, 'err'); return false; }
+        }
+        async function openRestoreModal(backupId, type) {
+          if (!await ensureRestoreSession()) return;
           restoreTarget = { backupId, type };
           const isDisk = type === 'disk-image';
           document.getElementById('restoreModalTitle').textContent = isDisk ? 'Restore disk image' : 'Restore backup';
@@ -3011,6 +3311,7 @@ public static class DashboardHtml
           go.className = isDisk ? 'danger' : 'accent';
           go.textContent = isDisk ? 'Restore image to disk' : 'Restore';
           document.getElementById('restoreModal').style.display = '';
+          if (isDisk) refreshDiskList();
         }
         function closeRestoreModal() {
           document.getElementById('restoreModal').style.display = 'none';
@@ -3020,12 +3321,13 @@ public static class DashboardHtml
           const repo = document.getElementById('repo').value;
           if (!restoreTarget) return;
           if (restoreTarget.type === 'disk-image') {
-            const device = document.getElementById('m-disk-target').value.trim();
-            const confirmText = document.getElementById('m-disk-confirm').value;
-            if (!device) { toast('Enter the target device.', 'err'); return; }
-            if (confirmText.trim() !== device) { toast('Confirmation does not match the device. Aborted.', 'err'); return; }
-            if (!window.confirm('This will DESTROY all data on ' + device + '. Continue?')) return;
-            await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, device, confirm: confirmText }) });
+            const device = document.getElementById('m-disk-target').value;
+            const ack = document.getElementById('m-disk-ack').checked;
+            if (!device) { toast('Select the target disk.', 'err'); return; }
+            if (!ack) { toast('Check the box to acknowledge the destructive restore.', 'err'); return; }
+            const label = document.querySelector('#m-disk-target option:checked')?.textContent || device;
+            if (!window.confirm('This will DESTROY all data on ' + label + '. Continue?')) return;
+            await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, device, confirmed: true }) });
             toast('Disk restore started in the background. Watch the Operations log.');
           } else {
             const destDir = document.getElementById('m-restore-dest').value.trim();
@@ -3038,12 +3340,6 @@ public static class DashboardHtml
           }
           closeRestoreModal();
         }
-        async function initRepo() {
-          const path = document.getElementById('init-path').value.trim();
-          if (!path) { toast('Enter a path.', 'err'); return; }
-          const r = await api('/api/operations/init-repo', { method: 'POST', body: JSON.stringify({ path }) });
-          toast('Repository initialized at ' + r.path + '. Add it as a job in Settings to schedule backups.');
-        }
         async function refreshLanStatus() {
           try {
             const s = await api('/api/operations/lan-server');
@@ -3052,10 +3348,9 @@ public static class DashboardHtml
           } catch (e) { /* ignore */ }
         }
         async function startLanServer() {
-          const repo = document.getElementById('tool-repo').value;
           const port = parseInt(document.getElementById('lan-port').value, 10) || 8477;
-          if (!confirm(`Start the LAN server on port ${port}? Anyone on your network can read this repo's (encrypted) chunks.`)) return;
-          await api('/api/operations/lan-server/start', { method: 'POST', body: JSON.stringify({ repo, port }) });
+          if (!confirm(`Start the LAN server on port ${port}? Anyone on your network can read these repos' (encrypted) chunks.`)) return;
+          await api('/api/operations/lan-server/start', { method: 'POST', body: JSON.stringify({ port }) });
           refreshLanStatus();
         }
         async function stopLanServer() {
@@ -3086,11 +3381,9 @@ public static class DashboardHtml
         }
         // ---- Operations ----
         async function runRetentionCheck() {
-          const repo = document.getElementById('tool-repo').value;
           const dryRun = document.getElementById('op-dryrun').checked;
-          if (!repo) { toast('Select a repository.', 'err'); return; }
           if (!dryRun && !confirm('Run a live retention check (may repost articles)?')) return;
-          await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ repo, dryRun }) });
+          await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ dryRun }) });
           toast('Retention check started in the background. Watch the Operations log.', 'ok');
         }
         async function runDiagnose() {
@@ -3140,7 +3433,7 @@ public static class DashboardHtml
             body = { diskNumber: parseInt(diskNum, 10), sourceDir: sourceDir || null, bootMode };
           } else {
             const imagePath = document.getElementById('winre-image').value.trim();
-            if (!imagePath) { toast('Enter an image path (e.g. C:\\winre\\filekeep-recovery.vhdx).', 'err'); return; }
+            if (!imagePath) { toast('Choose where to save the recovery image (Browse…).', 'err'); return; }
             confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
             body = { imagePath, sourceDir: sourceDir || null, bootMode };
           }
@@ -3212,6 +3505,7 @@ public static class DashboardHtml
         }
         // Populate the USB dropdown when the Recovery view is opened.
         document.querySelector('[data-view="recovery"]')?.addEventListener('click', refreshWinReDrives);
+        document.querySelector('[data-view="backups"]')?.addEventListener('click', refreshDiskList);
         // Human-readable summary of the operations log.
         // Raw lines look like: 2026-10-13T12:34:56.789Z [backup] type=full id=abc files=5 ...
         const opLabels = {
@@ -3349,7 +3643,7 @@ public static class DashboardHtml
             <div class="row">
               <div class="grow">
                 <div class="name">${esc(j.name)}</div>
-                <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join(', ') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
+                <div class="meta">${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join(', ') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
                 ${esc(j.source)} → ${esc(j.repo)}</div>
               </div>
               <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
@@ -3370,20 +3664,36 @@ public static class DashboardHtml
               : '✗ No passphrase configured — scheduled jobs will fail.';
             el.style.color = s.configured ? 'var(--good)' : 'var(--bad)';
           } catch (e) { el.textContent = 'Could not check passphrase status.'; }
+          loadYubiKeyStatus();
+        }
+        async function loadYubiKeyStatus() {
+          const el = document.getElementById('pp-yubikey-status');
+          if (!el) return;
+          try {
+            const s = await api('/api/yubikey/status');
+            el.textContent = s.detected ? '✓ YubiKey detected: ' + s.devices.join(', ') : 'No YubiKey detected.';
+          } catch (e) { el.textContent = ''; }
         }
         async function savePassphrase() {
           const err = document.getElementById('pp-error');
           err.style.display = 'none';
           const p1 = document.getElementById('pp-pass').value;
           const p2 = document.getElementById('pp-confirm').value;
+          const yk = document.getElementById('pp-yubikey').checked;
           if (!p1) { err.textContent = 'Enter a passphrase.'; err.style.display = ''; return; }
           if (p1 !== p2) { err.textContent = 'Passphrases do not match.'; err.style.display = ''; return; }
+          if (yk && !confirm('This will program YubiKey slot 2 for FileKeep challenge-response (overwriting anything in that slot). You will touch the key twice: once to program it, once to wrap the passphrase. Continue?')) return;
+          const touch = document.getElementById('pp-touch');
           try {
-            await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: p1 }) });
+            if (yk) { touch.style.display = ''; document.getElementById('pp-touch-detail').textContent = ' — programming slot 2, touch the key when it flashes.'; }
+            await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: p1, yubikey: yk }) });
             document.getElementById('pp-pass').value = '';
             document.getElementById('pp-confirm').value = '';
+            document.getElementById('pp-yubikey').checked = false;
+            toast(yk ? 'Passphrase saved — YubiKey setup complete. Restores will ask for a touch.' : 'Passphrase saved.', 'ok');
             loadPassphraseStatus();
           } catch (e) { err.textContent = e.message; err.style.display = ''; }
+          finally { touch.style.display = 'none'; }
         }
         async function clearPassphrase() {
           if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
@@ -3578,7 +3888,7 @@ public static class DashboardHtml
             box.innerHTML = '<p style="color:var(--bad)">Could not load locations.</p>';
           }
         }
-        function showJobForm(job) {
+        async function showJobForm(job) {
           editingJob = job ? job.name : null;
           document.getElementById('jobFormTitle').textContent = job ? 'Edit backup job' : 'Add backup job';
           // Reset advanced section to collapsed for a clean simple view.
@@ -3588,7 +3898,16 @@ public static class DashboardHtml
           loadUserFolders();
           document.getElementById('jf-name').value = job ? job.name : '';
           document.getElementById('jf-name').disabled = !!job;
-          document.getElementById('jf-source').value = job ? job.source : '';
+          // Backup type: files & folders, or whole disk image.
+          const jobType = job && job.jobType ? job.jobType : 'files';
+          document.querySelector('input[name="jf-type"][value="' + jobType + '"]').checked = true;
+          jobTypeChanged();
+          if (jobType === 'disk') {
+            await refreshDiskList();
+            document.getElementById('jf-disk').value = job ? job.source : '';
+          } else {
+            document.getElementById('jf-source').value = job ? job.source : '';
+          }
           document.getElementById('jf-repo').value = job ? job.repo : '';
           document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
           document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
@@ -3640,9 +3959,12 @@ public static class DashboardHtml
           let valid = true;
           const markInvalid = id => { document.getElementById(id).classList.add('invalid'); valid = false; };
           const name = document.getElementById('jf-name').value.trim();
-          const source = document.getElementById('jf-source').value.trim();
+          const isDiskJob = document.querySelector('input[name="jf-type"]:checked').value === 'disk';
+          const source = isDiskJob
+            ? document.getElementById('jf-disk').value
+            : document.getElementById('jf-source').value.trim();
           if (!name) markInvalid('jf-name');
-          if (!source) markInvalid('jf-source');
+          if (!source) markInvalid(isDiskJob ? 'jf-disk' : 'jf-source');
           if (schedType === 'daily') {
             if (!dailyTime) markInvalid('jf-daily');
           } else if (!intervalMin || intervalMin < 5) {
@@ -3666,9 +3988,10 @@ public static class DashboardHtml
           const job = {
             name,
             source,
+            jobType: isDiskJob ? 'disk' : 'files',
             repo: document.getElementById('jf-repo').value.trim(),
             schedule,
-            mode: document.getElementById('jf-mode').value,
+            mode: isDiskJob ? 'full' : document.getElementById('jf-mode').value,
             backupPrivilege: document.getElementById('jf-priv').checked,
             vss: document.getElementById('jf-vss').checked,
             targets: checkedLocations,

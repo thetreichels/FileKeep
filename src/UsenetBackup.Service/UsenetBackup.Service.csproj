@@ -24,5 +24,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Yubico.YubiKey" Version="1.18.0" />
+  </ItemGroup>
 
 </Project>
