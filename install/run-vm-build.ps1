@@ -55,7 +55,9 @@ function Invoke-CodeSigning {
         $args = @("sign", "/tr", $timestampUrl, "/td", "sha256", "/fd", "sha256")
 
         if ($env:UB_SIGN_THUMBPRINT) {
-            $args += @("/sha1", $env:UB_SIGN_THUMBPRINT)
+            # /sm: the cert lives in LocalMachine\My; without it signtool
+            # only searches the current user store and finds nothing.
+            $args += @("/sm", "/sha1", $env:UB_SIGN_THUMBPRINT)
             Write-Host "  Signing $f with cert thumbprint $($env:UB_SIGN_THUMBPRINT.Substring(0,8))..."
         } elseif ($env:UB_SIGN_PFX) {
             $args += @("/f", $env:UB_SIGN_PFX)
