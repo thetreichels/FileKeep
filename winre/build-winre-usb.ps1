@@ -18,7 +18,12 @@
 #      .\winre\build-winre-usb.ps1 -DriveLetter E -SourceDir C:\ub\src
 #   2. Binary mode (installed): uses pre-published binaries, e.g. from
 #      C:\Program Files\FileKeep. The dashboard's WinRE GUI uses this mode.
-#      .\winre\build-winre-usb.ps1 -DriveLetter E -BinaryDir "C:\Program Files\FileKeep"
+#      .\winre\build-winre-usb.ps1 -DiskNumber 2 -BinaryDir "C:\Program Files\FileKeep"
+#
+# The USB target is named with -DiskNumber (dashboard) or -DriveLetter
+# (manual). -Force skips the "not marked Removable" refusal; the dashboard
+# always passes it because it already confirmed the destructive format with
+# the user. The script never prompts: it may run headless under the service.
 #
 # In binary mode the layout is expected to be:
 #   <BinaryDir>\cli\FileKeep.exe
@@ -42,7 +47,8 @@ param(
     [string]$SourceDir = "C:\ub\src",
     [string]$BinaryDir = "",
     [string]$MountDir = "C:\winre-mount",
-    [switch]$SkipReenable
+    [switch]$SkipReenable,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -131,24 +137,51 @@ if ($script:ImageMode) {
     Write-Host "Target image: $ImagePath ($ImageSizeMB MB expandable VHDX)"
 } else {
     # --- USB mode: validate drive ---
-    # Normalize drive letter (accept "E", "E:", "E:\")
-    $DriveLetter = $DriveLetter.TrimEnd(':', '\')
-    if ($DriveLetter.Length -ne 1) { Fail "DriveLetter must be a single letter (e.g. E)." }
-    $usbRoot = "$DriveLetter`:\"
-    if (-not (Test-Path $usbRoot)) { Fail "Drive $usbRoot not found." }
+    # Two ways to name the target: -DiskNumber (dashboard) or -DriveLetter (manual).
+    if ($DiskNumber -ge 0) {
+        $udisk = Get-Disk -Number $DiskNumber -ErrorAction SilentlyContinue
+        if (-not $udisk) { Fail "Disk $DiskNumber not found." }
+        if ($udisk.IsSystem -or $udisk.IsBoot) { Fail "Refusing to target the system/boot disk (Disk $DiskNumber)." }
+        if (-not $Force -and $udisk.BusType -ne 'USB') {
+            Fail "Disk $DiskNumber is not a USB disk (BusType: $($udisk.BusType)). Pass -Force to override."
+        }
+        $script:UsbDiskNumber = $DiskNumber
+        $script:UsbLetter = ""
+        Write-Host "=== FileKeep WinRE USB builder ==="
+        Write-Host "Target USB: Disk $DiskNumber ($($udisk.FriendlyName))"
+    } else {
+        # Normalize drive letter (accept "E", "E:", "E:\")
+        $DriveLetter = $DriveLetter.TrimEnd(':', '\')
+        if ($DriveLetter.Length -ne 1) { Fail "DriveLetter must be a single letter (e.g. E)." }
+        $usbRoot = "$DriveLetter`:\"
+        if (-not (Test-Path $usbRoot)) { Fail "Drive $usbRoot not found." }
 
-    # Refuse to run against the system drive or a fixed internal drive.
-    $vol = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
-    if ($vol -and $vol.DriveType -ne 'Removable') {
-        Write-Warning "Drive $DriveLetter is not marked Removable (type: $($vol.DriveType))."
-        $confirm = Read-Host "Type YES to continue anyway"
-        if ($confirm -ne "YES") { Fail "Aborted." }
+        # Refuse to run against the system/boot disk even when named by letter.
+        $dnum = (Get-Partition -DriveLetter $DriveLetter -ErrorAction SilentlyContinue |
+                 Get-Disk -ErrorAction SilentlyContinue | Select-Object -First 1).Number
+        if ($null -ne $dnum) {
+            $dchk = Get-Disk -Number $dnum -ErrorAction SilentlyContinue
+            if ($dchk -and ($dchk.IsSystem -or $dchk.IsBoot)) { Fail "Refusing to target the system/boot disk (drive $DriveLetter)." }
+        }
+        # Never prompt: the script may run headless (service). -Force overrides.
+        $vol = Get-Volume -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+        if ($vol -and $vol.DriveType -ne 'Removable' -and -not $Force) {
+            Fail "Drive $DriveLetter is not marked Removable (type: $($vol.DriveType)). Pass -Force to continue anyway."
+        }
+
+        $script:UsbDiskNumber = $dnum
+        $script:UsbLetter = $DriveLetter
+        Write-Host "=== FileKeep WinRE USB builder ==="
+        Write-Host "Target USB: $usbRoot"
     }
-
-    Write-Host "=== FileKeep WinRE USB builder ==="
-    Write-Host "Target USB: $usbRoot"
 }
 
+# From here on, every failure path runs the cleanup in the finally block:
+# WinRE re-enable (if we disabled it), partial-image removal, temp cleanup.
+$winreReenabled = $false
+$wasEnabled = $false
+$script:BuildSucceeded = $false
+try {
 # --- Locate WinRE and copy the WIM ---
 # The copy happens here, BEFORE reagentc /disable, while all paths are valid.
 # reagentc often reports a \\?\GLOBALROOT\... location; for that we mount the
@@ -263,8 +296,6 @@ if ($wasEnabled) {
 }
 Step-Done 4
 
-$winreReenabled = $false
-try {
     # --- Mount the WIM (already copied to temp in step 2) ---
     Step-Start 5
     Write-Host "Mounting winre.wim..."
@@ -332,12 +363,18 @@ assign
 "@
         $dpCreate | diskpart | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail "diskpart create/attach failed." }
-        # Find the newly assigned drive letter (retry: volume may take a moment).
+        # Find the newly assigned drive letter through the attached disk image
+        # itself (retry: the volume may take a moment). Never search by global
+        # label: another FILEKEEP-labeled volume may be plugged in.
         $vhdVol = $null
         for ($i = 0; $i -lt 15 -and -not $vhdVol; $i++) {
             Start-Sleep 2
-            $vhdVol = Get-Volume | Where-Object { $_.FileSystemLabel -eq "FILEKEEP" -and $_.DriveLetter } |
-                      Sort-Object -Property DriveLetter -Descending | Select-Object -First 1
+            $vhdVol = Get-DiskImage -ImagePath $ImagePath -ErrorAction SilentlyContinue |
+                      Get-Disk -ErrorAction SilentlyContinue |
+                      Get-Partition -ErrorAction SilentlyContinue |
+                      Get-Volume -ErrorAction SilentlyContinue |
+                      Where-Object { $_.DriveLetter -and $_.FileSystemLabel -eq 'FILEKEEP' } |
+                      Select-Object -First 1
         }
         if (-not $vhdVol) { Fail "Could not find the attached VHDX volume." }
         $targetRoot = "$($vhdVol.DriveLetter):\"
@@ -371,50 +408,86 @@ detach vdisk
     } else {
         # --- USB mode: prepare the physical drive ---
         Step-Start 8
-        if ($script:UseMbr) {
-            Write-Host "Preparing USB drive $usbRoot (MBR, active FAT32 for BIOS+UEFI)..."
-            $diskNumber = if ($DiskNumber -ge 0) { $DiskNumber } else { (Get-Partition -DriveLetter $DriveLetter | Get-Disk).Number }
-            $dpUsb = @"
-select disk $diskNumber
+        if ($script:UsbLetter -ne "") {
+            # Manual drive-letter path: keep the historic behavior.
+            $usbRoot = "$($script:UsbLetter):\"
+            if ($script:UseMbr) {
+                Write-Host "Preparing USB drive $usbRoot (MBR, active FAT32 for BIOS+UEFI)..."
+                $dpUsb = @"
+select disk $($script:UsbDiskNumber)
 clean
 convert mbr
 create partition primary
 select partition 1
 active
 format fs=fat32 quick label="FILEKEEP"
-assign letter=$DriveLetter
+assign letter=$($script:UsbLetter)
+"@
+                $dpUsb | diskpart | Out-Null
+                if ($LASTEXITCODE -ne 0) { Fail "diskpart USB preparation failed." }
+            } else {
+                Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
+                Format-Volume -DriveLetter $script:UsbLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
+                if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+            }
+        } else {
+            # Disk-number path (dashboard): repartition via diskpart, let it
+            # pick the letter, then resolve the volume on OUR disk (never by
+            # global label — another FILEKEEP volume may be plugged in).
+            Write-Host "Preparing USB disk $($script:UsbDiskNumber) (MBR, active FAT32 for BIOS+UEFI)..."
+            $dpUsb = @"
+select disk $($script:UsbDiskNumber)
+clean
+convert mbr
+create partition primary
+select partition 1
+active
+format fs=fat32 quick label="FILEKEEP"
+assign
 "@
             $dpUsb | diskpart | Out-Null
             if ($LASTEXITCODE -ne 0) { Fail "diskpart USB preparation failed." }
-        } else {
-            Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
-            Format-Volume -DriveLetter $DriveLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
-            if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+            $usbVol = $null
+            for ($i = 0; $i -lt 15 -and -not $usbVol; $i++) {
+                Start-Sleep 2
+                $usbVol = Get-Disk -Number $script:UsbDiskNumber -ErrorAction SilentlyContinue |
+                          Get-Partition -ErrorAction SilentlyContinue |
+                          Get-Volume -ErrorAction SilentlyContinue |
+                          Where-Object { $_.DriveLetter -and $_.FileSystemLabel -eq 'FILEKEEP' } |
+                          Select-Object -First 1
+            }
+            if (-not $usbVol) { Fail "Could not find the prepared USB volume." }
+            $script:UsbLetter = $usbVol.DriveLetter
+            Write-Host "USB prepared as $($script:UsbLetter):\"
         }
+        $script:UsbRoot = "$($script:UsbLetter):\"
         Step-Done 8
 
         Step-Start 9
         Write-Host "Copying boot files..."
-        bcdboot C:\Windows /s "$DriveLetter`:" /f $script:BcdBootFlag
+        bcdboot C:\Windows /s "$($script:UsbLetter):" /f $script:BcdBootFlag
         if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
 
         Write-Host "Copying customized WinRE image to USB..."
-        $usbSources = Join-Path $usbRoot "sources"
+        $usbSources = Join-Path $script:UsbRoot "sources"
         New-Item -ItemType Directory -Force -Path $usbSources | Out-Null
         # Boot expects boot.wim; place our customized image there.
         Copy-Item $wimCopy (Join-Path $usbSources "boot.wim") -Force
 
         # Also copy the FileKeep tools to the USB root for easy access.
-        $usbFk = Join-Path $usbRoot "FileKeep"
+        $usbFk = Join-Path $script:UsbRoot "FileKeep"
         New-Item -ItemType Directory -Force -Path $usbFk | Out-Null
         Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
 
         Write-Host "USB build complete."
         Step-Done 9
     }
+    $script:BuildSucceeded = $true
 } finally {
     # --- Re-enable WinRE on the host ---
-    Step-Start 10
+    # (Only meaningful if the build got past step 4; the progress marker is
+    # skipped on early failures so the step list doesn't lie.)
+    if ($script:CurrentStep -ge 4) { Step-Start 10 }
     if (-not $SkipReenable -and $wasEnabled) {
         Write-Host "Re-enabling WinRE..."
         reagentc /enable | Out-Null
@@ -425,9 +498,20 @@ assign letter=$DriveLetter
             Write-Warning "reagentc /enable failed. Run 'reagentc /enable' manually."
         }
     }
-    Step-Done 10
+    if ($script:CurrentStep -ge 4) { Step-Done 10 }
+    # Remove a partial disk image on failure. Safe: the pre-check refuses to
+    # start when the file already exists, so anything here is from this run.
+    # (Without this, the next attempt fails with "Image already exists".)
+    if ($script:ImageMode -and -not $script:BuildSucceeded -and (Test-Path $ImagePath)) {
+        Write-Host "Removing partial disk image..."
+        @"
+select vdisk file="$ImagePath"
+detach vdisk
+"@ | diskpart | Out-Null
+        Remove-Item $ImagePath -Force -ErrorAction SilentlyContinue
+    }
     # Cleanup temp files
-    Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($stageDir) { Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
     $wimCopy = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre.wim"
     Remove-Item $wimCopy -Force -ErrorAction SilentlyContinue
 }

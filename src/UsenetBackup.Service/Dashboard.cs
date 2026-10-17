@@ -304,8 +304,17 @@ public static class Dashboard
             string imagePath = body.TryGetProperty("imagePath", out var ip) ? ip.GetString() ?? "" : "";
             string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
             string bootMode = body.TryGetProperty("bootMode", out var bm) ? bm.GetString() ?? "Both" : "Both";
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode);
+            int imageSizeMB = body.TryGetProperty("imageSizeMB", out var ism) && ism.ValueKind == JsonValueKind.Number ? ism.GetInt32() : 4096;
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/operations/winre-build/cancel", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.CancelWinReBuild();
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
         app.MapPost("/api/operations/lan-server/start", async (HttpRequest request) =>
@@ -1241,6 +1250,10 @@ public static class DashboardApi
     private static string? _winReBuildError;
     private static string? _winReBuildDrive;
 
+    /// <summary>Handle of the PowerShell build process while a build runs (for cancel/timeout).</summary>
+    private static System.Diagnostics.Process? _winReBuildProcess;
+    private static volatile bool _winReBuildCancelRequested;
+
     /// <summary>Per-step progress for the running WinRE USB build.</summary>
     private static readonly List<Dictionary<string, object>> _winReBuildSteps = new();
     private static readonly object _winReBuildStepsLock = new();
@@ -1369,9 +1382,21 @@ public static class DashboardApi
     /// <summary>Current WinRE USB build status for the dashboard, with per-step progress.</summary>
     public static object GetWinReBuildStatus()
     {
+        // Snapshot everything under the lock so the status, error, target,
+        // and steps are always mutually consistent.
         List<Dictionary<string, object>> steps;
+        string? status;
+        string? error;
+        string? drive;
+        DateTime startedAt;
         lock (_winReBuildStepsLock)
+        {
             steps = _winReBuildSteps.Select(s => new Dictionary<string, object>(s)).ToList();
+            status = _winReBuildStatus;
+            error = _winReBuildError;
+            drive = _winReBuildDrive;
+            startedAt = _winReBuildStartedAt;
+        }
 
         int percent = 0;
         int etaSec = 0;
@@ -1385,17 +1410,17 @@ public static class DashboardApi
                 if (s.TryGetValue("estimatedRemainingSec", out var ev) && ev is int ei) etaSec = ei;
             }
         }
-        if ((_winReBuildStatus == "complete")) percent = 100;
+        if (status == "complete") percent = 100;
 
-        double elapsedSec = _winReBuildStatus == "running"
-            ? (DateTime.UtcNow - _winReBuildStartedAt).TotalSeconds
+        double elapsedSec = status == "running"
+            ? (DateTime.UtcNow - startedAt).TotalSeconds
             : 0;
 
         return new
         {
-            status = _winReBuildStatus ?? "idle",
-            error = _winReBuildError ?? "",
-            drive = _winReBuildDrive ?? "",
+            status = status ?? "idle",
+            error = error ?? "",
+            drive = drive ?? "",
             percent,
             currentStep = currentStepName,
             estimatedRemainingSec = etaSec,
@@ -1406,10 +1431,10 @@ public static class DashboardApi
 
     /// <summary>
     /// Starts a WinRE recovery media build in the background. Returns 202 if accepted.
-    /// USB mode (driveLetter): destructive, the target USB drive is formatted.
+    /// USB mode (driveLetter or diskNumber): destructive, the target USB drive is formatted.
     /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
-    public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode)
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode, int imageSizeMB)
     {
         if (!OperatingSystem.IsWindows())
             return (400, new { error = "WinRE recovery media creation requires Windows." });
@@ -1433,6 +1458,23 @@ public static class DashboardApi
                 return (400, new { error = "Select a USB drive." });
             if (hasLetter && hasDisk)
                 return (400, new { error = "Specify either a drive letter or a disk number, not both." });
+            if (hasDisk)
+            {
+                // The dashboard only offers USB-bus disks; refuse anything else
+                // even if the request was crafted by hand. This is checked here
+                // (before the flag) rather than only in the script.
+                bool knownUsb;
+                try
+                {
+                    knownUsb = UsenetBackup.Core.Recovery.UsbDrives.List().Any(d => d.Number == diskNumber);
+                }
+                catch
+                {
+                    knownUsb = false;
+                }
+                if (!knownUsb)
+                    return (400, new { error = $"Disk {diskNumber} is not a USB-attached drive." });
+            }
         }
         else
         {
@@ -1440,6 +1482,8 @@ public static class DashboardApi
             if (pathError is not null)
                 return (400, new { error = pathError });
             imagePath = normalizedPath!;
+            if (imageSizeMB < 1024)
+                return (400, new { error = "Image size must be at least 1024 MB." });
         }
 
         var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
@@ -1456,9 +1500,12 @@ public static class DashboardApi
             _winReBuildStatus = "running";
             _winReBuildSteps.Clear();
             _winReBuildStartedAt = DateTime.UtcNow;
+            _winReBuildProcess = null;
+            _winReBuildCancelRequested = false;
+            _winReBuildError = null;
+            _winReBuildDrive = imageMode ? imagePath
+                : diskNumber >= 0 ? $"Disk {diskNumber}" : driveLetter.ToUpperInvariant() + ":";
         }
-        _winReBuildError = null;
-        _winReBuildDrive = imageMode ? imagePath : driveLetter.ToUpperInvariant();
 
         Task.Run(() =>
         {
@@ -1509,6 +1556,19 @@ public static class DashboardApi
                     psi.ArgumentList.Add("-DriveLetter");
                     psi.ArgumentList.Add(driveLetter);
                 }
+                if (!imageMode)
+                {
+                    // The dashboard already confirmed the destructive format
+                    // with the user, so the script must not prompt (it runs
+                    // headless under the service, where a prompt can only fail
+                    // or hang).
+                    psi.ArgumentList.Add("-Force");
+                }
+                else
+                {
+                    psi.ArgumentList.Add("-ImageSizeMB");
+                    psi.ArgumentList.Add(imageSizeMB.ToString());
+                }
                 psi.ArgumentList.Add("-BootMode");
                 psi.ArgumentList.Add(bootMode);
                 if (isInstalledLayout && scriptGrandparent is not null)
@@ -1522,28 +1582,53 @@ public static class DashboardApi
                     psi.ArgumentList.Add(sourceDir);
                 }
                 using var proc = System.Diagnostics.Process.Start(psi)!;
-                // Read stdout line-by-line so FKPROGRESS markers update the
-                // dashboard in real time instead of only at the end.
-                var outputLines = new System.Text.StringBuilder();
-                string? line;
-                while ((line = proc.StandardOutput.ReadLine()) is not null)
+                lock (_winReBuildStepsLock) { _winReBuildProcess = proc; }
+                try
                 {
-                    outputLines.AppendLine(line);
-                    if (line.StartsWith("FKPROGRESS:", StringComparison.Ordinal))
-                        ParseWinReProgress(line.Substring("FKPROGRESS:".Length).Trim());
+                    // Read stdout line-by-line so FKPROGRESS markers update the
+                    // dashboard in real time instead of only at the end.
+                    var outputLines = new System.Text.StringBuilder();
+                    string? line;
+                    while ((line = proc.StandardOutput.ReadLine()) is not null)
+                    {
+                        outputLines.AppendLine(line);
+                        if (line.StartsWith("FKPROGRESS:", StringComparison.Ordinal))
+                            ParseWinReProgress(line.Substring("FKPROGRESS:".Length).Trim());
+                    }
+                    string err = proc.StandardError.ReadToEnd();
+                    if (_winReBuildCancelRequested)
+                        throw new OperationCanceledException("WinRE build cancelled.");
+                    if (!proc.WaitForExit(TimeSpan.FromMinutes(60)))
+                    {
+                        // Backstop against a hung script: a stuck DISM/diskpart
+                        // would otherwise wedge the status as "running" until
+                        // the service restarts. The dashboard also offers
+                        // Cancel for user-initiated stops.
+                        try { proc.Kill(entireProcessTree: true); } catch { }
+                        throw new TimeoutException("WinRE build timed out after 60 minutes and was stopped.");
+                    }
+                    if (proc.ExitCode != 0)
+                        throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{outputLines}");
+                    _winReBuildStatus = "complete";
+                    LogWinReBuild($"target={_winReBuildDrive}: complete");
                 }
-                string err = proc.StandardError.ReadToEnd();
-                proc.WaitForExit();
-                if (proc.ExitCode != 0)
-                    throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{outputLines}");
-                _winReBuildStatus = "complete";
-                OperationLog.Append("", "winre-build", $"target={_winReBuildDrive}: complete");
+                finally
+                {
+                    lock (_winReBuildStepsLock)
+                    {
+                        if (_winReBuildProcess == proc) _winReBuildProcess = null;
+                    }
+                }
             }
             catch (Exception ex)
             {
+                // Set the terminal state BEFORE logging so a logging failure
+                // can never wedge the builder as "running".
                 _winReBuildStatus = "failed";
-                _winReBuildError = ex.Message;
-                OperationLog.Append("", "winre-build", $"target={_winReBuildDrive}: FAILED: {ex.Message}");
+                // Cap the message: a failed build can dump megabytes of
+                // DISM/diskpart output; the tail is where the error is.
+                _winReBuildError = TruncateTail(ex.Message, 4096);
+                LogWinReBuild($"target={_winReBuildDrive}: FAILED: {_winReBuildError}");
             }
         });
         return (202, new { accepted = true });
@@ -1567,6 +1652,52 @@ public static class DashboardApi
         else if (!p.EndsWith(".vhdx", StringComparison.OrdinalIgnoreCase))
             return (null, $"The image path must end with .vhdx (got \"{p}\").");
         return (p, null);
+    }
+
+    /// <summary>FileKeep's machine-wide data dir (service config and logs live here).</summary>
+    private static string FileKeepDataDir()
+    {
+        string dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "FileKeep");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    /// <summary>Appends a winre-build line to the data-dir operations log. Never throws.</summary>
+    private static void LogWinReBuild(string details)
+    {
+        try
+        {
+            string line = $"{DateTime.UtcNow:O} [winre-build] {details}{Environment.NewLine}";
+            File.AppendAllText(Path.Combine(FileKeepDataDir(), OperationLog.FileName), line);
+        }
+        catch
+        {
+            // Logging must never fail or wedge a build.
+        }
+    }
+
+    /// <summary>Keeps only the tail of a long message (a failed build can dump MBs of tool output).</summary>
+    private static string TruncateTail(string s, int maxLen)
+    {
+        if (s.Length <= maxLen) return s;
+        return "[…truncated…]" + s.Substring(s.Length - maxLen);
+    }
+
+    /// <summary>
+    /// Requests cancellation of the running WinRE build by killing its process
+    /// tree. The build task observes the kill and reports "failed: cancelled".
+    /// </summary>
+    public static (int Status, object Payload) CancelWinReBuild()
+    {
+        lock (_winReBuildStepsLock)
+        {
+            if (_winReBuildStatus != "running")
+                return (400, new { error = "No WinRE build is running." });
+            _winReBuildCancelRequested = true;
+            try { _winReBuildProcess?.Kill(entireProcessTree: true); } catch { }
+            return (200, new { cancelled = true });
+        }
     }
 
     /// <summary>Parses one FKPROGRESS JSON line from build-winre-usb.ps1.</summary>
@@ -2654,6 +2785,7 @@ public static class DashboardHtml
                 </div>
                 <div class="row" style="margin-top:8px;display:none" id="winre-image-row">
                   <span class="folder-row" style="flex:1"><input id="winre-image" placeholder="Full path to the .vhdx file, e.g. D:\images\filekeep-recovery.vhdx" title="Type the full file path including the file name, or pick one with Browse… A folder alone also works — the file is saved there as filekeep-recovery.vhdx." style="flex:1"><button type="button" class="browse-btn" onclick="browseSaveFile('winre-image', 'Save recovery image as', 'VHDX image (*.vhdx)|*.vhdx', 'filekeep-recovery.vhdx')">Browse…</button></span>
+                  <label title="Maximum size of the expandable .vhdx image, in megabytes.">Size (MB): <input id="winre-imgsize" type="number" value="4096" min="1024" step="1024" style="width:90px"></label>
                   <span class="folder-row" style="flex:1"><input id="winre-src-img" placeholder="Source dir (optional)" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-src-img', 'Select source folder')">Browse…</button></span>
                   <button onclick="startWinReBuild()">Build image</button>
                 </div>
@@ -2669,6 +2801,7 @@ public static class DashboardHtml
                 <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
                 <div class="row" style="margin-top:8px">
                   <button onclick="checkWinReStatus()">Check build status</button>
+                  <button id="winre-cancel" onclick="cancelWinReBuild()" style="display:none;margin-left:8px">Cancel build</button>
                   <span id="winre-status" style="margin-left:8px"></span>
                 </div>
               </div>
@@ -3434,8 +3567,10 @@ public static class DashboardHtml
           } else {
             const imagePath = document.getElementById('winre-image').value.trim();
             if (!imagePath) { toast('Choose where to save the recovery image (Browse…).', 'err'); return; }
-            confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
-            body = { imagePath, sourceDir: sourceDir || null, bootMode };
+            const imageSizeMB = Math.max(1024, parseInt(document.getElementById('winre-imgsize').value, 10) || 4096);
+            confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.'
+              + (/\.[^\\/]+$/.test(imagePath) ? '' : ' (A folder saves as filekeep-recovery.vhdx inside it; otherwise .vhdx is appended.)');
+            body = { imagePath, sourceDir: sourceDir || null, bootMode, imageSizeMB };
           }
           if (!window.confirm(confirmText)) return;
           try {
@@ -3455,7 +3590,9 @@ public static class DashboardHtml
           try {
             const s = await api('/api/operations/winre-build-status');
             let html = 'Status: <b>' + esc(s.status) + '</b>';
-            if (s.drive) html += ' — drive ' + esc(s.drive) + ':';
+            if (s.drive) html += ' — target ' + esc(s.drive);
+            const cancelBtn = document.getElementById('winre-cancel');
+            if (cancelBtn) cancelBtn.style.display = s.status === 'running' ? '' : 'none';
             if (s.error) html += ' <span style="color:red">' + esc(s.error) + '</span>';
             if (s.status === 'running') {
               const pct = s.percent || 0;
@@ -3485,6 +3622,13 @@ public static class DashboardHtml
             }
             el.innerHTML = html;
           } catch (e) { el.textContent = e.message; }
+        }
+        async function cancelWinReBuild() {
+          if (!window.confirm('Cancel the running WinRE build? The target may be left partially written; you can start a new build afterwards.')) return;
+          try {
+            await api('/api/operations/winre-build/cancel', { method: 'POST' });
+            checkWinReStatus();
+          } catch (e) { toast('Failed: ' + e.message, 'err'); }
         }
         async function refreshWinReDrives() {
           const sel = document.getElementById('winre-drive');
