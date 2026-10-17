@@ -85,7 +85,10 @@
     <ComponentGroup Id="GuiFiles" Directory="GUIDIR">
       <Component Id="GuiExe" Guid="*">
         <File Id="GuiExeFile" Source="$(var.GuiBin)\FileKeepGui.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="GuiDirCleanup" Guid="*">
         <RemoveFolder Id="RemoveGuiDir" Directory="GUIDIR" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\FileKeep" Name="GuiDirCleanup" Value="1" Type="integer" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
