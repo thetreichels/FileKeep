@@ -10,7 +10,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
   <Bundle Name="FileKeep"
-          Version="0.8.5.1"
+          Version="0.8.6"
           Manufacturer="J. Treichel"
           UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
           IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
