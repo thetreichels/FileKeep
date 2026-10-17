@@ -327,4 +327,48 @@ public sealed class SnapshotAndImageTests : IDisposable
             Assert.Equal("disk-image", loaded.Kind);
         }
     }
+
+    [Fact]
+    public void BackupDiskImageSparse_SkipsZeroChunks_RestoresCorrectly()
+    {
+        // Sparse backup: a disk with zero regions only stores non-zero chunks.
+        // Restore reconstructs the full image with zeros for skipped positions.
+        byte[] diskBytes = new byte[2 * ChunkSize + 1000];
+        // First chunk: data. Second chunk: zeros (skipped). Third: partial data.
+        Random.Shared.NextBytes(diskBytes.AsSpan(0, ChunkSize));
+        Random.Shared.NextBytes(diskBytes.AsSpan(2 * ChunkSize, 1000));
+        // Middle chunk stays zeros.
+
+        string disk = Path.Combine(_workDir, "sparse-disk.bin");
+        File.WriteAllBytes(disk, diskBytes);
+
+        string shareDir = Path.Combine(_workDir, "sparse-share");
+        Directory.CreateDirectory(shareDir);
+        var share = SmbShare.Connect(shareDir, null, null);
+        var smbStore = new SmbBlobStore(share);
+
+        string backupId;
+        using (var repo = InitRepo())
+        {
+            // Sparse with no volume letter -> zero-detection fallback.
+            var manifest = repo.BackupDiskImageStreaming(disk, smbStore, "disk.img", sparse: true, volumeLetter: null);
+            backupId = manifest.BackupId;
+            var entry = manifest.Files[0];
+            Assert.Equal(3, entry.Chunks.Count);
+            // Chunk 0: data (stored). Chunk 1: zeros (skipped). Chunk 2: data (stored).
+            Assert.NotEqual("", entry.Chunks[0]);
+            Assert.Equal("", entry.Chunks[1]);
+            Assert.NotEqual("", entry.Chunks[2]);
+        }
+
+        // Restore from the SMB store and verify byte-identical.
+        string restored = Path.Combine(_workDir, "restored.bin");
+        File.WriteAllBytes(restored, new byte[diskBytes.Length]); // pre-size
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            repo.RestoreDiskImage(backupId, restored, smbStore);
+        }
+        byte[] restoredBytes = File.ReadAllBytes(restored);
+        Assert.Equal(diskBytes, restoredBytes);
+    }
 }

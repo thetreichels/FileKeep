@@ -587,6 +587,21 @@ public sealed class BackupRepository : IDisposable
     /// </summary>
     public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName = "disk.img")
     {
+        return BackupDiskImageStreaming(devicePath, destination, imageName, sparse: false, volumeLetter: null);
+    }
+
+    /// <summary>
+    /// Streaming disk-image backup with used-space-only optimization.
+    /// When <paramref name="sparse"/> is true, only allocated/non-zero chunks
+    /// are stored; skipped chunk positions are marked with an empty string
+    /// in the manifest and restored as zeros. If <paramref name="volumeLetter"/>
+    /// is given (e.g. "C:"), the NTFS volume bitmap is used to identify
+    /// allocated clusters; otherwise (or if the bitmap is unavailable),
+    /// chunks that are all zeros are skipped.
+    /// </summary>
+    public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName,
+        bool sparse, string? volumeLetter)
+    {
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
             throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
         ArgumentNullException.ThrowIfNull(destination);
@@ -595,7 +610,11 @@ public sealed class BackupRepository : IDisposable
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
         {
-            var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer, destination);
+            FileEntry entry;
+            if (sparse)
+                entry = BackupStreamSparse(stream, imageName, DateTime.UtcNow, buffer, destination, volumeLetter);
+            else
+                entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer, destination);
             var manifest = new BackupManifest
             {
                 BackupId = Guid.NewGuid().ToString("N"),
@@ -615,6 +634,131 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
+    /// Sparse variant of <see cref="BackupStream"/>: only backs up chunks that
+    /// are allocated (per NTFS bitmap) or non-zero. Skipped positions are
+    /// recorded as empty strings in <c>entry.Chunks</c>; the SHA-256 is computed
+    /// over the full image with zeros for skipped chunks.
+    /// </summary>
+    private FileEntry BackupStreamSparse(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
+        IBlobStore destination, string? volumeLetter)
+    {
+        var entry = new FileEntry
+        {
+            Path = relPath,
+            MtimeUtc = mtimeUtc,
+        };
+
+        // Try the NTFS volume bitmap for precise allocation info.
+        List<(long StartCluster, long ClusterCount)>? ranges = null;
+        int bytesPerCluster = 4096; // NTFS default; refined below if we get the bitmap
+        if (!string.IsNullOrWhiteSpace(volumeLetter) && OperatingSystem.IsWindows())
+        {
+            try
+            {
+                ranges = VolumeBitmapReader.GetAllocatedRanges(volumeLetter);
+                bytesPerCluster = GetBytesPerCluster(volumeLetter);
+            }
+            catch
+            {
+                // Fall back to zero-detection below.
+                ranges = null;
+            }
+        }
+
+        long size;
+        try { size = stream.Length; }
+        catch (NotSupportedException) { size = -1; }
+        catch (IOException) { size = -1; }
+
+        using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
+            _config.ChunkSize + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+        byte[] zeroBuf = new byte[_config.ChunkSize]; // for hash of skipped chunks
+        try
+        {
+            long total = 0;
+            int read;
+            while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
+            {
+                var span = buffer.AsSpan(0, read);
+                bool shouldBackup;
+
+                if (ranges != null)
+                {
+                    // Bitmap: back up if any part of this chunk is allocated.
+                    shouldBackup = VolumeBitmapReader.IsRangeAllocated(ranges, total, read, bytesPerCluster);
+                }
+                else
+                {
+                    // Fallback: back up if the chunk is not all zeros.
+                    shouldBackup = !IsAllZeros(span);
+                }
+
+                if (shouldBackup)
+                {
+                    string chunkId = Hashing.Sha256Hex(span);
+                    if (!destination.Exists(chunkId))
+                    {
+                        var blobSpan = blobBuf.AsSpan(0, read + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+                        ChunkCrypto.EncryptInto(span, _key, Hashing.HexToBytes(chunkId), blobSpan);
+                        destination.Put(chunkId, blobSpan);
+                    }
+                    _catalog.RecordChunk(chunkId, read);
+                    entry.Chunks.Add(chunkId);
+                    fileHash.AppendData(span);
+                }
+                else
+                {
+                    // Sparse: mark position, hash zeros.
+                    entry.Chunks.Add("");
+                    fileHash.AppendData(zeroBuf.AsSpan(0, read));
+                }
+                total += read;
+            }
+            entry.Size = size >= 0 ? size : total;
+            if (size >= 0 && size != total)
+                throw new IOException(
+                    $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
+            entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(blobBuf);
+        }
+        return entry;
+    }
+
+    private static bool IsAllZeros(ReadOnlySpan<byte> span)
+    {
+        foreach (byte b in span)
+            if (b != 0) return false;
+        return true;
+    }
+
+    private static int GetBytesPerCluster(string volumeLetter)
+    {
+        // Use GetDiskFreeSpace to get bytes per cluster. Default to 4096 on failure.
+        try
+        {
+            string root = volumeLetter.Trim().TrimEnd('\\');
+            if (!root.EndsWith(":")) root += ":";
+            root += "\\";
+            if (GetDiskFreeSpace(root, out uint sectorsPerCluster, out uint bytesPerSector,
+                out _, out _))
+            {
+                return (int)(sectorsPerCluster * bytesPerSector);
+            }
+        }
+        catch { /* use default */ }
+        return 4096;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool GetDiskFreeSpace(string lpRootPathName,
+        out uint lpSectorsPerCluster, out uint lpBytesPerSector,
+        out uint lpNumberOfFreeClusters, out uint lpTotalNumberOfClusters);
+
+    /// <summary>
     /// Restores a disk-image backup (see <see cref="BackupDiskImage"/>) by
     /// writing the decrypted image back to a block device. Fails closed:
     /// every chunk is AES-GCM authenticated on decrypt, its SHA-256 is
@@ -622,6 +766,16 @@ public sealed class BackupRepository : IDisposable
     /// the manifest — any mismatch aborts the restore with an exception.
     /// </summary>
     public void RestoreDiskImage(string backupId, string devicePath)
+    {
+        RestoreDiskImage(backupId, devicePath, _blobs);
+    }
+
+    /// <summary>
+    /// Restores a disk-image backup from the given blob source (local repo by
+    /// default, or a remote store for streaming backups). Sparse images
+    /// (empty-string chunk IDs) are restored with zeros for skipped positions.
+    /// </summary>
+    public void RestoreDiskImage(string backupId, string devicePath, IBlobStore source)
     {
         var manifest = LoadManifest(backupId); // validates root hash
         if (!manifest.IsDiskImage || manifest.Files.Count != 1)
@@ -644,24 +798,39 @@ public sealed class BackupRepository : IDisposable
         using var imageHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         // One pooled buffer reused for every decrypted chunk: zero per-chunk
         // allocation on the plaintext side. (The encrypted blob still comes
-        // from _blobs.Get; a pooled read path would be a separate change.)
+        // from source.Get; a pooled read path would be a separate change.)
         byte[] plainBuf = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        byte[] zeroBuf = new byte[_config.ChunkSize];
         try
         {
+            long position = 0;
             foreach (string chunkId in entry.Chunks)
             {
-                byte[] blob = _blobs.Get(chunkId); // throws if missing
-                int ctLen = blob.Length - ChunkCrypto.NonceSizeBytes - ChunkCrypto.TagSizeBytes;
-                if (ctLen < 0 || ctLen > plainBuf.Length)
-                    throw new InvalidDataException(
-                        $"Chunk {chunkId} has an invalid blob size ({blob.Length} bytes); restore aborted.");
-                var plainSpan = plainBuf.AsSpan(0, ctLen);
-                ChunkCrypto.DecryptInto(blob, _key, Hashing.HexToBytes(chunkId), plainSpan); // AES-GCM authenticates
-                if (!string.Equals(Hashing.Sha256Hex(plainSpan), chunkId, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException($"Chunk {chunkId} failed hash verification; restore aborted.");
-                device.Write(plainBuf, 0, ctLen);
-                imageHash.AppendData(plainSpan);
-                CryptographicOperations.ZeroMemory(plainSpan);
+                int chunkLen;
+                if (string.IsNullOrEmpty(chunkId))
+                {
+                    // Sparse: skipped chunk position — write zeros.
+                    chunkLen = (int)Math.Min(_config.ChunkSize, entry.Size - position);
+                    device.Write(zeroBuf, 0, chunkLen);
+                    imageHash.AppendData(zeroBuf.AsSpan(0, chunkLen));
+                }
+                else
+                {
+                    byte[] blob = source.Get(chunkId); // throws if missing
+                    int ctLen = blob.Length - ChunkCrypto.NonceSizeBytes - ChunkCrypto.TagSizeBytes;
+                    if (ctLen < 0 || ctLen > plainBuf.Length)
+                        throw new InvalidDataException(
+                            $"Chunk {chunkId} has an invalid blob size ({blob.Length} bytes); restore aborted.");
+                    var plainSpan = plainBuf.AsSpan(0, ctLen);
+                    ChunkCrypto.DecryptInto(blob, _key, Hashing.HexToBytes(chunkId), plainSpan); // AES-GCM authenticates
+                    if (!string.Equals(Hashing.Sha256Hex(plainSpan), chunkId, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException($"Chunk {chunkId} failed hash verification; restore aborted.");
+                    device.Write(plainBuf, 0, ctLen);
+                    imageHash.AppendData(plainSpan);
+                    CryptographicOperations.ZeroMemory(plainSpan);
+                    chunkLen = ctLen;
+                }
+                position += chunkLen;
             }
             device.Flush(flushToDisk: true);
         }
