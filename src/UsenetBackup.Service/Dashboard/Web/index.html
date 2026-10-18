@@ -1805,8 +1805,6 @@ async function submitAddNzb() {
 function checkForUpdates() {
   toast('You are on the latest version.', 'ok');
 }
-  restoreTarget = null;
-}
 async function submitRestore() {
   const repo = document.getElementById('repo').value;
   if (!restoreTarget) return;
@@ -2634,32 +2632,9 @@ async function secToggleMethod(method, enabled) {
   secProfile = p;
   secUpdateLinkBand();
   secUpdateInsight();
+  secCurrentStep = 1;
+  secGoStep(1);
   await secSaveProfile();
-}
-
-function secUpdateLinkBand() {
-  const band = document.getElementById('sec-link-band');
-  const orTag = document.getElementById('sec-link-or-tag');
-  const text = document.getElementById('sec-link-text');
-  const linked = secProfile.linkMode === 'and';
-
-  if (linked) {
-    band.style.background = 'var(--accent)';
-    band.style.borderColor = 'var(--accent)';
-    orTag.style.display = 'none';
-    text.textContent = 'LINKED — AND';
-    text.style.color = '#fff';
-  } else {
-    band.style.background = 'transparent';
-    band.style.borderColor = 'var(--accent)';
-    orTag.style.display = '';
-    text.textContent = 'Link';
-    text.style.color = 'var(--accent)';
-  }
-
-  // Hide link band if phone-only or single method
-  const canLink = secProfile.passphraseEnabled && secProfile.yubiKeyEnabled;
-  band.style.display = canLink ? '' : 'none';
 }
 
 function secToggleLink() {
@@ -2667,24 +2642,6 @@ function secToggleLink() {
   secUpdateLinkBand();
   secUpdateInsight();
   secSaveProfile();
-}
-
-function secUpdateInsight() {
-  // Security meter: based on methods enabled and link mode
-  let security = 0;
-  if (secProfile.passphraseEnabled) security += 40;
-  if (secProfile.yubiKeyEnabled) security += 40;
-  if (secProfile.phoneEnabled) security += 10;
-  if (secProfile.linkMode === 'and' && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) security += 10;
-  security = Math.min(100, security);
-
-  // Redundancy meter: based on job redundancy settings (simplified)
-  let redundancy = 50; // Default
-
-  document.getElementById('sec-meter-security').style.width = security + '%';
-  document.getElementById('sec-meter-security-val').textContent = security + '%';
-  document.getElementById('sec-meter-redundancy').style.width = redundancy + '%';
-  document.getElementById('sec-meter-redundancy-val').textContent = redundancy + '%';
 }
 
 async function secSaveProfile() {
