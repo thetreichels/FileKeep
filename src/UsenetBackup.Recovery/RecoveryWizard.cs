@@ -24,8 +24,8 @@ public sealed class RecoveryWizard : Form
     private static readonly (string Title, string Desc)[] PageHeaders = new[]
     {
         ("Where is the backup data?",
-         "Select the folder with repo.json, manifests, and catalog.db — usually on this USB stick."),
-        ("Unlock the repository",
+         "Pick the backup from the list — we scanned every attached drive. Or browse to its folder."),
+        ("Unlock the backup",
          "Enter your passphrase and Usenet credentials. They stay in memory and are never saved."),
         ("Choose a backup",
          "Pick the backup to restore. You can check Usenet for backups newer than this stick."),
@@ -37,9 +37,12 @@ public sealed class RecoveryWizard : Form
          "Restore files to a folder, or write a disk image to a drive."),
     };
 
-    // Page 1: repo
+    // Page 1: backups
     private readonly TextBox _repoPath = new();
     private readonly Label _repoError = new();
+    private readonly ListBox _foundList = new();
+    private readonly Button _rescanButton = new();
+    private List<FoundBackup> _foundBackups = new();
 
     // Page 2: credentials
     private readonly TextBox _passphrase = new();
@@ -359,35 +362,227 @@ public sealed class RecoveryWizard : Form
         _status.ForeColor = isError ? Color.DarkRed : SystemColors.ControlText;
     }
 
-    // ---------- Page 1: repo location ----------
+    // ---------- Page 1: backup location ----------
+
+    /// <summary>A backup folder found by scanning attached drives.</summary>
+    private sealed record FoundBackup(string Folder, string Display);
 
     private void BuildRepoPage()
     {
-        var p = AddPage("Repository");
+        var p = AddPage("Backups");
         var lbl = new Label
         {
-            Text = "Where is the repo metadata?\n(repo.json, manifests/, catalog.db — from your USB stick or a network share)",
+            Text = "Where are your backups?\nWe checked every attached drive — pick one, or browse to a folder.",
             AutoSize = true, Location = new Point(16, 16)
         };
         p.Controls.Add(lbl);
 
-        _repoPath.Location = new Point(16, 64);
+        _foundList.Location = new Point(16, 64);
+        _foundList.Size = new Size(440, 110);
+        _foundList.SelectedIndexChanged += (_, _) =>
+        {
+            if (_foundList.SelectedIndex >= 0 && _foundList.SelectedIndex < _foundBackups.Count)
+            {
+                _repoPath.Text = _foundBackups[_foundList.SelectedIndex].Folder;
+                _repoError.Text = "";
+            }
+        };
+        p.Controls.Add(_foundList);
+
+        _rescanButton.Text = "Rescan";
+        _rescanButton.Location = new Point(464, 64);
+        _rescanButton.Size = new Size(90, 30);
+        _rescanButton.Click += (_, _) => RescanBackups();
+        p.Controls.Add(_rescanButton);
+
+        var manualLbl = new Label
+        {
+            Text = "Or pick a folder directly:",
+            AutoSize = true, Location = new Point(16, 184)
+        };
+        p.Controls.Add(manualLbl);
+
+        _repoPath.Location = new Point(16, 204);
         _repoPath.Size = new Size(440, 28);
         p.Controls.Add(_repoPath);
 
-        var browse = new Button { Text = "Browse…", Location = new Point(464, 62), Size = new Size(90, 30) };
+        var browse = new Button { Text = "Browse…", Location = new Point(464, 202), Size = new Size(90, 30) };
         browse.Click += (_, _) =>
         {
-            using var d = new FolderBrowserDialog { Description = "Select the folder containing repo.json" };
+            using var d = new FolderBrowserDialog { Description = "Select the folder containing the backup" };
             if (d.ShowDialog() == DialogResult.OK)
                 _repoPath.Text = d.SelectedPath;
         };
         p.Controls.Add(browse);
 
-        _repoError.Location = new Point(16, 104);
+        _repoError.Location = new Point(16, 240);
         _repoError.AutoSize = true;
         _repoError.ForeColor = Color.DarkRed;
         p.Controls.Add(_repoError);
+
+        RescanBackups();
+    }
+
+    private void RescanBackups()
+    {
+        _foundBackups = ScanForBackupFolders();
+        _foundList.BeginUpdate();
+        _foundList.Items.Clear();
+        foreach (var f in _foundBackups)
+            _foundList.Items.Add(f.Display);
+        _foundList.EndUpdate();
+        // Exactly one backup found: select it so the user can just continue.
+        _foundList.SelectedIndex = _foundBackups.Count == 1 ? 0 : -1;
+    }
+
+    /// <summary>
+    /// Scans every ready drive for folders that look like a FileKeep backup
+    /// (a directory containing repo.json), checking the drive root and one
+    /// level down. The WinRE RAM disk is skipped.
+    /// </summary>
+    private static List<FoundBackup> ScanForBackupFolders()
+    {
+        var found = new List<FoundBackup>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        DriveInfo[] drives;
+        try
+        {
+            drives = DriveInfo.GetDrives();
+        }
+        catch
+        {
+            return found;
+        }
+        foreach (var drive in drives)
+        {
+            bool ready;
+            DriveType kind;
+            string root;
+            try
+            {
+                ready = drive.IsReady;
+                kind = drive.DriveType;
+                root = drive.RootDirectory.FullName;
+            }
+            catch
+            {
+                continue;
+            }
+            if (!ready || kind == DriveType.Ram)
+                continue;
+            var candidates = new List<string> { root };
+            try
+            {
+                candidates.AddRange(Directory.GetDirectories(root));
+            }
+            catch
+            {
+                // Unreadable root: the root check below still runs.
+            }
+            foreach (string dir in candidates)
+            {
+                string key;
+                try
+                {
+                    key = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!seen.Add(key))
+                    continue;
+                bool hasMarker;
+                try
+                {
+                    hasMarker = File.Exists(Path.Combine(dir, "repo.json"));
+                }
+                catch
+                {
+                    continue;
+                }
+                if (hasMarker)
+                    found.Add(new FoundBackup(dir, FriendlyBackupLabel(drive, dir)));
+            }
+        }
+        return found;
+    }
+
+    /// <summary>Human-readable label: drive, volume name, folder, newest backup date.</summary>
+    private static string FriendlyBackupLabel(DriveInfo drive, string dir)
+    {
+        string letter;
+        try
+        {
+            letter = drive.Name.TrimEnd('\\', '/');
+        }
+        catch
+        {
+            letter = "?";
+        }
+        string vol;
+        try
+        {
+            vol = drive.VolumeLabel;
+        }
+        catch
+        {
+            vol = "";
+        }
+        string folder;
+        try
+        {
+            string root = drive.RootDirectory.FullName.TrimEnd('\\', '/');
+            string full = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            folder = full.Equals(root, StringComparison.OrdinalIgnoreCase) ? "drive root" : Path.GetFileName(full);
+        }
+        catch
+        {
+            folder = "";
+        }
+        var parts = new List<string> { letter };
+        if (!string.IsNullOrWhiteSpace(vol))
+            parts.Add(vol);
+        if (!string.IsNullOrWhiteSpace(folder))
+            parts.Add(folder);
+        if (NewestManifestDate(dir) is DateTime d)
+            parts.Add($"backup from {d:d}");
+        return string.Join(" — ", parts);
+    }
+
+    /// <summary>Newest manifest write time in a backup folder, if any.</summary>
+    private static DateTime? NewestManifestDate(string dir)
+    {
+        try
+        {
+            string manifests = Path.Combine(dir, "manifests");
+            if (!Directory.Exists(manifests))
+                return null;
+            DateTime latest = DateTime.MinValue;
+            bool any = false;
+            foreach (string f in Directory.EnumerateFiles(manifests, "*", SearchOption.AllDirectories))
+            {
+                DateTime w;
+                try
+                {
+                    w = File.GetLastWriteTime(f);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (!any || w > latest)
+                {
+                    latest = w;
+                    any = true;
+                }
+            }
+            return any ? latest : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // ---------- Page 2: credentials ----------
@@ -1104,9 +1299,12 @@ public sealed class RecoveryWizard : Form
                 _state.NntpSsl = _nntpSsl.Checked;
                 if (string.IsNullOrEmpty(_state.Passphrase))
                 {
-                    SetStatus("Passphrase is required.", isError: true);
-                    return false;
+                    // Empty is allowed: the user may unlock with a YubiKey
+                    // after picking a backup (checked on the next page).
+                    SetStatus("No passphrase typed — you can use a YubiKey instead if the backup supports it.");
                 }
+                else
+                    SetStatus("");
                 if (string.IsNullOrEmpty(_state.NntpHost))
                 {
                     SetStatus("Usenet host is required.", isError: true);
@@ -1115,16 +1313,21 @@ public sealed class RecoveryWizard : Form
                 try
                 {
                     _state.OpenRepo(); // validates repo format
-                    var (pwOk, note) = _state.ValidatePassphrase();
-                    if (!pwOk)
+                    if (!string.IsNullOrEmpty(_state.Passphrase))
                     {
-                        SetStatus(note, isError: true);
-                        return false;
+                        var (pwOk, note) = _state.ValidatePassphrase();
+                        if (!pwOk)
+                        {
+                            SetStatus(note, isError: true);
+                            return false;
+                        }
+                        if (note == "unverified")
+                            SetStatus("Note: passphrase will be verified when chunks download (no local chunks to check).");
+                        else
+                            SetStatus("");
                     }
-                    if (note == "unverified")
-                        SetStatus("Note: passphrase will be verified when chunks download (no local chunks to check).");
-                    else
-                        SetStatus("");
+                    // Empty passphrase: validated via YubiKey on the next page,
+                    // or rejected there if the backup has no YubiKey challenge.
                 }
                 catch (Exception ex)
                 {
@@ -1138,6 +1341,19 @@ public sealed class RecoveryWizard : Form
                 if (_state.SelectedBackupId is null)
                 {
                     SetStatus("Select a backup.", isError: true);
+                    return false;
+                }
+                // YubiKey unlock (if needed): prompts for a touch when the
+                // backup is YubiKey-protected and no passphrase was typed.
+                if (!TryYubiKeyUnlock())
+                    return false;
+                // Still no credential (no passphrase, no YubiKey success,
+                // backup has no YubiKey challenge)? Require the passphrase.
+                if (string.IsNullOrEmpty(_state.Passphrase))
+                {
+                    SetStatus("This backup needs your passphrase. Go back and type it, " +
+                        "or pick a YubiKey-protected backup and touch your key.",
+                        isError: true);
                     return false;
                 }
                 SetStatus("");
@@ -1174,5 +1390,157 @@ public sealed class RecoveryWizard : Form
                 SetStatus("Cannot list backups: " + ex.Message, isError: true);
             }
         }
+    }
+
+    /// <summary>
+    /// If the selected backup carries a YubiKey challenge and the user did
+    /// not type a passphrase, prompts for a YubiKey touch and unwraps the
+    /// passphrase. Returns true if the credentials are ready to proceed
+    /// (typed passphrase OR successful YubiKey touch).
+    /// </summary>
+    private bool TryYubiKeyUnlock()
+    {
+        // Typed passphrase takes precedence — nothing to do.
+        if (!string.IsNullOrEmpty(_state.Passphrase))
+            return true;
+
+        if (!_state.LoadYubiKeyChallenge())
+            return true; // no YubiKey on this backup; typed flow already validated
+
+        // This backup wants a YubiKey and the user didn't type a passphrase.
+        var keys = YubiKeyRecovery.DetectKeys();
+        if (keys.Count == 0)
+        {
+            SetStatus("This backup is YubiKey-protected but no YubiKey was found. " +
+                "Plug in your YubiKey, or go back and type your passphrase instead.",
+                isError: true);
+            return false;
+        }
+
+        using var dlg = new YubiKeyTouchDialog(_state.YubiKeyChallenge!);
+        if (dlg.ShowDialog(this) != DialogResult.OK || dlg.HmacResponse is null)
+        {
+            SetStatus("YubiKey unlock cancelled. Type your passphrase or try again.",
+                isError: true);
+            return false;
+        }
+
+        try
+        {
+            _state.UnlockWithYubiKey(dlg.HmacResponse);
+            SetStatus("YubiKey accepted.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SetStatus("YubiKey unlock failed: " + ex.Message +
+                " Type your passphrase instead.", isError: true);
+            return false;
+        }
+    }
+}
+
+/// <summary>
+/// Modal "touch your YubiKey" prompt. Runs the HID challenge-response on a
+/// worker thread with a 30-second countdown; OK only on a valid response.
+/// </summary>
+internal sealed class YubiKeyTouchDialog : Form
+{
+    private readonly string _challengeB64;
+    private readonly Label _label = new();
+    private readonly Label _countdown = new();
+    private readonly Button _cancel = new();
+    private System.Windows.Forms.Timer? _timer;
+    private DateTime _deadline;
+    private bool _done;
+
+    public byte[]? HmacResponse { get; private set; }
+
+    public YubiKeyTouchDialog(string challengeB64)
+    {
+        _challengeB64 = challengeB64;
+        Text = "YubiKey required";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        StartPosition = FormStartPosition.CenterParent;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ClientSize = new Size(380, 150);
+
+        _label.Text = "Touch your YubiKey now.\nThis backup is protected by your security key.";
+        _label.Location = new Point(16, 16);
+        _label.Size = new Size(348, 50);
+        Controls.Add(_label);
+
+        _countdown.Location = new Point(16, 70);
+        _countdown.Size = new Size(348, 24);
+        _countdown.ForeColor = Color.DarkBlue;
+        Controls.Add(_countdown);
+
+        _cancel.Text = "Cancel";
+        _cancel.Location = new Point(290, 110);
+        _cancel.Size = new Size(74, 28);
+        _cancel.DialogResult = DialogResult.Cancel;
+        Controls.Add(_cancel);
+        CancelButton = _cancel;
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        _deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        _timer = new System.Windows.Forms.Timer { Interval = 250 };
+        _timer.Tick += (_, _) =>
+        {
+            var left = _deadline - DateTime.UtcNow;
+            if (left <= TimeSpan.Zero || _done)
+            {
+                _timer.Stop();
+                if (!_done)
+                {
+                    DialogResult = DialogResult.Cancel;
+                    Close();
+                }
+                return;
+            }
+            _countdown.Text = $"Waiting for touch… {left.TotalSeconds:F0}s";
+        };
+        _timer.Start();
+
+        // Run the blocking HID touch off the UI thread.
+        Task.Run(() =>
+        {
+            byte[]? response = null;
+            try
+            {
+                byte[] challenge = Convert.FromBase64String(_challengeB64);
+                response = YubiKeyRecovery.ChallengeResponse(
+                    challenge, slot: 1, timeout: TimeSpan.FromSeconds(28));
+            }
+            catch { /* surfaced as cancel */ }
+
+            if (_done) // user cancelled or timed out while we were waiting
+            {
+                if (response is not null)
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(response);
+                return;
+            }
+            _done = true;
+            BeginInvoke(() =>
+            {
+                _timer?.Stop();
+                HmacResponse = response;
+                DialogResult = response is not null
+                    ? DialogResult.OK : DialogResult.Cancel;
+                Close();
+            });
+        });
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        _done = true;
+        _timer?.Stop();
+        _timer?.Dispose();
+        base.OnFormClosing(e);
     }
 }

@@ -80,6 +80,7 @@ $script:Steps = @(
     @{ Name = "Disabling WinRE temporarily";   EstimateSec = 15  },
     @{ Name = "Mounting winre.wim";            EstimateSec = 60  },
     @{ Name = "Injecting FileKeep tools";      EstimateSec = 30  },
+    @{ Name = "Verifying HID drivers";         EstimateSec = 5   },
     @{ Name = "Committing and unmounting";     EstimateSec = 90  },
     @{ Name = $step8Name;                       EstimateSec = 60  },
     @{ Name = "Copying boot files and image";  EstimateSec = 120 },
@@ -328,9 +329,26 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
             Write-Host "winpeshl.ini already exists; leaving it alone."
         }
         Step-Done 6
+
+        # --- Verify HID stack for YubiKey challenge-response ---
+        Step-Start 7
+        Write-Host "Verifying HID drivers for YubiKey support..."
+        $hidDrivers = @("hidclass.sys", "hidparse.sys", "hidusb.sys")
+        $driversDir = Join-Path $MountDir "Windows\System32\drivers"
+        $missing = @()
+        foreach ($d in $hidDrivers) {
+            if (-not (Test-Path (Join-Path $driversDir $d))) { $missing += $d }
+        }
+        if ($missing.Count -gt 0) {
+            Write-Warning ("HID driver(s) missing from WinRE image: " + ($missing -join ", ") +
+                ". YubiKey touch-unlock will not work in the recovery environment.")
+        } else {
+            Write-Host "HID drivers present (YubiKey touch-unlock supported)."
+        }
+        Step-Done 7
     } finally {
         # --- Commit and unmount ---
-        Step-Start 7
+        Step-Start 8
         Write-Host "Committing and unmounting..."
         dism /Unmount-Wim /MountDir:$MountDir /Commit
         if ($LASTEXITCODE -ne 0) {
@@ -338,12 +356,12 @@ X:\FileKeep\recovery\FileKeepRecovery.exe
             dism /Unmount-Wim /MountDir:$MountDir /Discard | Out-Null
             Fail "DISM unmount /commit failed."
         }
-        Step-Done 7
+        Step-Done 8
     }
 
     if ($script:ImageMode) {
         # --- Image mode: create and attach a VHDX, then treat it like the USB ---
-        Step-Start 8
+        Step-Start 9
         Write-Host "Creating disk image $ImagePath (BootMode: $BootMode)..."
         $mbrPart = if ($script:UseMbr) {
             @"
@@ -379,10 +397,10 @@ assign
         if (-not $vhdVol) { Fail "Could not find the attached VHDX volume." }
         $targetRoot = "$($vhdVol.DriveLetter):\"
         Write-Host "VHDX attached as $($vhdVol.DriveLetter):"
-        Step-Done 8
+        Step-Done 9
 
         try {
-            Step-Start 9
+            Step-Start 10
             Write-Host "Copying boot files..."
             bcdboot C:\Windows /s $targetRoot /f $script:BcdBootFlag
             if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
@@ -397,7 +415,7 @@ assign
             Copy-Item (Join-Path $stageDir "*") $imgFk -Recurse -Force
 
             Write-Host "Disk image build complete."
-            Step-Done 9
+            Step-Done 10
         } finally {
             Write-Host "Detaching disk image..."
             @"
@@ -407,7 +425,7 @@ detach vdisk
         }
     } else {
         # --- USB mode: prepare the physical drive ---
-        Step-Start 8
+        Step-Start 9
         if ($script:UsbLetter -ne "") {
             # Manual drive-letter path: keep the historic behavior.
             $usbRoot = "$($script:UsbLetter):\"
@@ -461,9 +479,9 @@ assign
             Write-Host "USB prepared as $($script:UsbLetter):\"
         }
         $script:UsbRoot = "$($script:UsbLetter):\"
-        Step-Done 8
+        Step-Done 9
 
-        Step-Start 9
+        Step-Start 10
         Write-Host "Copying boot files..."
         bcdboot C:\Windows /s "$($script:UsbLetter):" /f $script:BcdBootFlag
         if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
@@ -480,14 +498,14 @@ assign
         Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
 
         Write-Host "USB build complete."
-        Step-Done 9
+        Step-Done 10
     }
     $script:BuildSucceeded = $true
 } finally {
     # --- Re-enable WinRE on the host ---
     # (Only meaningful if the build got past step 4; the progress marker is
     # skipped on early failures so the step list doesn't lie.)
-    if ($script:CurrentStep -ge 4) { Step-Start 10 }
+    if ($script:CurrentStep -ge 4) { Step-Start 11 }
     if (-not $SkipReenable -and $wasEnabled) {
         Write-Host "Re-enabling WinRE..."
         reagentc /enable | Out-Null
@@ -498,7 +516,7 @@ assign
             Write-Warning "reagentc /enable failed. Run 'reagentc /enable' manually."
         }
     }
-    if ($script:CurrentStep -ge 4) { Step-Done 10 }
+    if ($script:CurrentStep -ge 4) { Step-Done 11 }
     # Remove a partial disk image on failure. Safe: the pre-check refuses to
     # start when the file already exists, so anything here is from this run.
     # (Without this, the next attempt fails with "Image already exists".)

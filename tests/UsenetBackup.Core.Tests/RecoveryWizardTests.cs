@@ -56,7 +56,7 @@ public sealed class RecoveryWizardTests : IDisposable
         using var s = new WizardState { RepoPath = other };
         var (ok, error) = s.ValidateRepoPath();
         Assert.False(ok);
-        Assert.Contains("repo.json", error);
+        Assert.Contains("doesn't look like a FileKeep backup", error);
     }
 
     [Fact]

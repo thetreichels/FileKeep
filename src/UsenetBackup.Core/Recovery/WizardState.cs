@@ -20,6 +20,99 @@ public sealed class WizardState : IDisposable
     /// <summary>Repository passphrase. Held in memory only; never written to disk.</summary>
     public string Passphrase { get; set; } = "";
 
+    /// <summary>
+    /// YubiKey challenge (base64) from the backup manifest, if the backup
+    /// uses YubiKey protection. The challenge is public; security comes
+    /// from the key's secret, which never leaves the hardware.
+    /// </summary>
+    public string? YubiKeyChallenge { get; set; }
+
+    /// <summary>
+    /// Raw HMAC-SHA1 response from the YubiKey touch, if the user unlocked
+    /// via YubiKey. Held in memory only; wiped on dispose.
+    /// </summary>
+    public byte[]? YubiKeyHmacResponse { get; set; }
+
+    /// <summary>
+    /// True if the selected backup's manifest carries a YubiKey challenge
+    /// (i.e. YubiKey unlock is available for this backup).
+    /// </summary>
+    public bool SelectedBackupHasYubiKeyChallenge()
+    {
+        if (SelectedBackupId is null)
+            return false;
+        try
+        {
+            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
+            return !string.IsNullOrEmpty(manifest.YubiKeyChallenge);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Loads the YubiKey challenge from the selected backup's manifest into
+    /// <see cref="YubiKeyChallenge"/>. Returns false if none is present.
+    /// </summary>
+    public bool LoadYubiKeyChallenge()
+    {
+        if (SelectedBackupId is null)
+            return false;
+        try
+        {
+            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
+            YubiKeyChallenge = string.IsNullOrEmpty(manifest.YubiKeyChallenge)
+                ? null : manifest.YubiKeyChallenge;
+            return YubiKeyChallenge is not null;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Unlocks the repo using a YubiKey HMAC-SHA1 response (from a physical
+    /// touch). Derives the KEK, unwraps the passphrase from the manifest,
+    /// and opens the repo — no passphrase typing required.
+    /// The HMAC response is wiped after use.
+    /// </summary>
+    public void UnlockWithYubiKey(byte[] hmacResponse)
+    {
+        if (SelectedBackupId is null)
+            throw new InvalidOperationException("Select a backup first.");
+        if (hmacResponse is null || hmacResponse.Length == 0)
+            throw new ArgumentException("HMAC response must not be empty.", nameof(hmacResponse));
+
+        try
+        {
+            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
+            if (string.IsNullOrEmpty(manifest.YubiKeyWrappedPassphrase))
+                throw new InvalidOperationException(
+                    "This backup has no YubiKey-wrapped passphrase. Type your passphrase instead.");
+
+            byte[] kek = UsenetBackup.Core.Security.YubiKeyCrypto.DeriveKek(hmacResponse);
+            try
+            {
+                // CryptographicException here = wrong key (or tampered blob).
+                Passphrase = UsenetBackup.Core.Security.YubiKeyCrypto.Unwrap(
+                    manifest.YubiKeyWrappedPassphrase, kek);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(kek);
+            }
+            // Store the HMAC for the session; wiped on Dispose.
+            YubiKeyHmacResponse = (byte[])hmacResponse.Clone();
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(hmacResponse);
+        }
+    }
+
+    /// <summary>
+    /// Generalizes <see cref="ValidatePassphrase"/>: validates whichever
+    /// credential is set (typed passphrase or YubiKey-unwrapped passphrase).
+    /// </summary>
+    public (bool ok, string note) ValidateCredentials() => ValidatePassphrase();
+
     public string NntpHost { get; set; } = "";
     public int NntpPort { get; set; } = 119;
     public bool NntpSsl { get; set; }
@@ -48,7 +141,15 @@ public sealed class WizardState : IDisposable
     /// <summary>Parsed NZB for the selected backup's chunks.</summary>
     public NzbDocument? Nzb { get; set; }
 
-    public void Dispose() => _repo?.Dispose();
+    public void Dispose()
+    {
+        if (YubiKeyHmacResponse is not null)
+        {
+            CryptographicOperations.ZeroMemory(YubiKeyHmacResponse);
+            YubiKeyHmacResponse = null;
+        }
+        _repo?.Dispose();
+    }
 
     /// <summary>
     /// Validates that <see cref="RepoPath"/> looks like repo metadata
@@ -57,13 +158,13 @@ public sealed class WizardState : IDisposable
     public (bool ok, string error) ValidateRepoPath()
     {
         if (string.IsNullOrWhiteSpace(RepoPath))
-            return (false, "Choose the folder containing the repo metadata.");
+            return (false, "Pick a backup from the list, or browse to the folder it's in.");
         if (!Directory.Exists(RepoPath))
             return (false, "Folder does not exist.");
         if (!File.Exists(Path.Combine(RepoPath, "repo.json")))
-            return (false, "repo.json not found. This folder is not repo metadata.");
+            return (false, "That folder doesn't look like a FileKeep backup (no backup catalog found).");
         if (!Directory.Exists(Path.Combine(RepoPath, "manifests")))
-            return (false, "manifests/ not found. This folder is not repo metadata.");
+            return (false, "That folder doesn't look like a FileKeep backup (no backup data found).");
         return (true, "");
     }
 
