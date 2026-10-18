@@ -110,6 +110,144 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// All backup IDs known to FileKeep across every configured job's local
+    /// repo. Uses BackupDiscovery.ScanPath (manifests are plain JSON at rest,
+    /// no passphrase needed) so this works even when the restore session is
+    /// locked.
+    /// </summary>
+    private static HashSet<string> GetKnownBackupIds(ServiceConfig config, Action<string>? log = null)
+    {
+        var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string repo in AllJobRepos(config))
+        {
+            try
+            {
+                foreach (var b in UsenetBackup.Core.BackupDiscovery.ScanPath(repo, log))
+                    known.Add(b.BackupId);
+            }
+            catch (Exception ex)
+            {
+                log?.Invoke($"dashboard: cannot scan local repo {repo} for known backups: {ex.Message}");
+            }
+        }
+        return known;
+    }
+
+    /// <summary>
+    /// Scans a configured backup location for FileKeep backups not already
+    /// known locally. For SMB locations, connects to the share and scans its
+    /// manifests/ directory. Returns only the unknown backups (not already
+    /// shown in the Banked Vault).
+    /// </summary>
+    public static (int Status, object Payload) ScanLocationForBackups(
+        ServiceConfig config, string name, Action<string>? log = null)
+    {
+        var loc = config.Locations.FirstOrDefault(l =>
+            l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (loc is null)
+            return (400, new ErrorDto($"Unknown location '{name}'."));
+
+        IReadOnlyList<UsenetBackup.Core.BackupDiscovery.DiscoveredBackup> found;
+        string scannedPath;
+        if (loc.Type == "smb")
+        {
+            string? smbPassword = null;
+            if (!string.IsNullOrEmpty(loc.SmbPasswordProtected))
+            {
+                try { smbPassword = UsenetBackup.Core.Dpapi.Unprotect(loc.SmbPasswordProtected); }
+                catch { /* use no password */ }
+            }
+            scannedPath = loc.Share;
+            found = UsenetBackup.Core.BackupDiscovery.ScanSmbShare(
+                loc.Share, loc.SmbUser, smbPassword, log);
+        }
+        else
+        {
+            return (400, new ErrorDto(
+                $"Location '{name}' is type '{loc.Type}' — backup scanning is only supported for SMB locations. " +
+                "Use /api/backups/remote to discover Usenet backups."));
+        }
+
+        var known = GetKnownBackupIds(config, log);
+        var unknown = found
+            .Where(b => !known.Contains(b.BackupId))
+            .Select(b => new DiscoveredBackupDto(b.BackupId, b.Type, b.CreatedUtc, b.Source, b.LocationPath))
+            .ToList();
+
+        log?.Invoke($"dashboard: scanned location '{name}' ({scannedPath}): {found.Count} found, {unknown.Count} unknown.");
+        return (200, new ScanBackupsResultDto(scannedPath, found.Count, unknown));
+    }
+
+    /// <summary>
+    /// Scans a USB drive path (e.g. "E:\\" or "E:\\backups") for FileKeep
+    /// backups not already known locally. Returns only the unknown ones.
+    /// </summary>
+    public static (int Status, object Payload) ScanUsbForBackups(
+        ServiceConfig config, string drivePath, Action<string>? log = null)
+    {
+        if (string.IsNullOrWhiteSpace(drivePath))
+            return (400, new ErrorDto("Drive path is required."));
+
+        // Basic guard: only allow scanning local drive paths, not UNC or
+        // arbitrary network locations, to avoid path confusion.
+        string full = Path.GetFullPath(drivePath);
+        if (full.StartsWith(@"\\", StringComparison.Ordinal))
+            return (400, new ErrorDto("Use the SMB location scan for network shares."));
+
+        var found = UsenetBackup.Core.BackupDiscovery.ScanPath(full, log);
+        var known = GetKnownBackupIds(config, log);
+        var unknown = found
+            .Where(b => !known.Contains(b.BackupId))
+            .Select(b => new DiscoveredBackupDto(b.BackupId, b.Type, b.CreatedUtc, b.Source, b.LocationPath))
+            .ToList();
+
+        log?.Invoke($"dashboard: scanned USB path '{full}': {found.Count} found, {unknown.Count} unknown.");
+        return (200, new ScanBackupsResultDto(full, found.Count, unknown));
+    }
+
+    /// <summary>
+    /// Imports a discovered backup manifest from an SMB share or USB drive
+    /// into the local repo's manifests directory, so it appears in the
+    /// Banked Vault list. The manifest file is copied from
+    /// &lt;sourcePath&gt;/manifests/&lt;backupId&gt;.json to
+    /// &lt;repo&gt;/manifests/&lt;backupId&gt;.json.
+    /// Returns (200, {}) or (400/500, error).
+    /// </summary>
+    public static (int Status, object Payload) ImportDiscoveredBackup(
+        ServiceConfig config, string repo, string backupId, string sourcePath, Action<string>? log = null)
+    {
+        if (!IsKnownRepo(config, repo))
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
+        if (string.IsNullOrWhiteSpace(backupId))
+            return (400, new ErrorDto("Backup ID is required."));
+        if (string.IsNullOrWhiteSpace(sourcePath))
+            return (400, new ErrorDto("Source path is required."));
+
+        // Sanitize backupId to prevent path traversal
+        if (backupId.Contains("..") || backupId.Contains("/") || backupId.Contains("\\"))
+            return (400, new ErrorDto("Invalid backup ID."));
+
+        string sourceManifest = Path.Combine(sourcePath, "manifests", backupId + ".json");
+        if (!File.Exists(sourceManifest))
+            return (400, new ErrorDto($"Manifest not found at {sourceManifest}."));
+
+        string destDir = Path.Combine(repo, "manifests");
+        string destManifest = Path.Combine(destDir, backupId + ".json");
+
+        try
+        {
+            Directory.CreateDirectory(destDir);
+            File.Copy(sourceManifest, destManifest, overwrite: true);
+            log?.Invoke($"dashboard: imported discovered backup '{backupId}' from '{sourcePath}' into repo '{repo}'.");
+            return (200, new EmptyDto());
+        }
+        catch (Exception ex)
+        {
+            return (500, new ErrorDto($"Failed to import backup: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
     /// Discovers backup manifests posted to Usenet (the encrypted manifest
     /// index). Returns manifests not present locally — "all backups FileKeep
     /// is aware of" beyond the local repo. Uses the first configured provider.

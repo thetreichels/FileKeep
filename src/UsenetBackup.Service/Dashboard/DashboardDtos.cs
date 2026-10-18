@@ -196,3 +196,22 @@ public sealed record ExpiringBackupDto(
     [property: JsonPropertyName("expiresUtc")] DateTime ExpiresUtc,
     [property: JsonPropertyName("daysLeft")] int DaysLeft,
     [property: JsonPropertyName("retentionDays")] int RetentionDays);
+
+/// <summary>A backup discovered on an SMB share or USB drive.</summary>
+public sealed record DiscoveredBackupDto(
+    [property: JsonPropertyName("backupId")] string BackupId,
+    [property: JsonPropertyName("type")] string? Type,
+    [property: JsonPropertyName("createdUtc")] DateTime? CreatedUtc,
+    [property: JsonPropertyName("source")] string? Source,
+    [property: JsonPropertyName("locationPath")] string LocationPath);
+
+/// <summary>Response for POST /api/locations/{name}/scan and /api/locations/scan-usb.</summary>
+public sealed record ScanBackupsResultDto(
+    [property: JsonPropertyName("scannedPath")] string ScannedPath,
+    [property: JsonPropertyName("found")] int Found,
+    [property: JsonPropertyName("unknown")] List<DiscoveredBackupDto> Unknown);
+
+/// <summary>A removable logical drive (USB stick, SD card) for the backup-scan picker.</summary>
+public sealed record RemovableDriveDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("label")] string Label);

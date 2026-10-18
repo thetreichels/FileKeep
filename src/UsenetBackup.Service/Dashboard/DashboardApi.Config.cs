@@ -125,6 +125,32 @@ public static partial class DashboardApi
         }
     }
 
+    /// <summary>
+    /// Lists removable logical drives (USB sticks, SD cards) with their
+    /// drive letters. Used by the dashboard to decide whether the
+    /// "Check USB for backups" button should be shown.
+    /// </summary>
+    public static (int Status, object Payload) ListRemovableDrives()
+    {
+        try
+        {
+            var drives = DriveInfo.GetDrives()
+                .Where(d => d.DriveType == DriveType.Removable && d.IsReady)
+                .Select(d =>
+                {
+                    string label;
+                    try { label = d.VolumeLabel; } catch { label = ""; }
+                    return new RemovableDriveDto(d.Name, label ?? "");
+                })
+                .ToArray();
+            return (200, drives);
+        }
+        catch (Exception ex)
+        {
+            return (500, new ErrorDto(ex.Message));
+        }
+    }
+
     /// <summary>Returns (200, log lines) or (400, error payload).</summary>
     public static (int Status, object Payload) GetLog(ServiceConfig config, string repo, int lines = 100)
     {
@@ -299,6 +325,21 @@ public static partial class DashboardApi
         {
             config.Save(configPath);
             log?.Invoke($"dashboard: location '{loc.Name}' saved");
+
+            // Auto-scan new SMB locations for unknown backups
+            if (existing is null && loc.Type == "smb")
+            {
+                try
+                {
+                    var (scanStatus, scanPayload) = ScanLocationForBackups(config, loc.Name, log);
+                    // ScanLocationForBackups already logs the results
+                }
+                catch (Exception ex)
+                {
+                    log?.Invoke($"dashboard: auto-scan of new location '{loc.Name}' failed: {ex.Message}");
+                }
+            }
+
             return (200, loc);
         }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }

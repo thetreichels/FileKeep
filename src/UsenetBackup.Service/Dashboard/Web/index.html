@@ -339,16 +339,12 @@
           <div class="meta">Next scheduled backup</div>
         </div>
       </div>
-      <div class="card">
-        <div id="ov-jobs"><p style="color:var(--text-2)">Loading…</p></div>
-      </div>
       <div class="card hero" style="display:none" id="ov-hero">
         <div class="hero-icon" id="heroIcon">✓</div>
         <div>
           <div class="hero-title" id="heroTitle">Checking…</div>
           <div class="hero-sub" id="heroSub"></div>
         </div>
-        <button class="accent" id="backupNow" onclick="runAll()">Back up now</button>
       </div>
       <div class="card" id="setupCard" style="display:none">
         <div class="name" style="font-size:16px;font-weight:600">Get set up</div>
@@ -370,8 +366,6 @@
         </div>
         <div class="meta" id="upEta" style="margin-top:4px"></div>
       </div>
-      <h2>Usenet expiration warnings</h2>
-      <div class="card" id="expiration" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
     </div>
     <div class="view" id="view-vault">
       <h1>Banked Vault</h1>
@@ -395,18 +389,19 @@
           <div class="grow">
             <div class="name">Storage locations</div>
           </div>
-          <button class="accent" onclick="showAddNzbModal()">Add NZB</button>
+          <button class="accent" onclick="pickNzbFileDirect()">Add Vault from file...</button>
+          <input type="file" id="nzb-direct-picker" accept=".nzb" style="display:none" onchange="submitAddNzbDirect()">
+          <button id="check-smb-backups-btn" class="accent" data-tooltip="Scans your configured SMB/network locations for backup vaults not already registered in the Banked Vault." onclick="scanSmbForBackups()" style="display:none">Check SMB</button>
+          <button id="check-usb-backups-btn" class="accent" data-tooltip="Scans connected USB devices for backup vaults not already registered in the Banked Vault." onclick="scanUsbForBackups()" style="display:none">Check USB</button>
         </div>
         <div id="vault-locations-list" style="margin-top:12px"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
       <div class="card">
-        <div class="row">
-          <div class="grow">
-            <div class="name">Repository</div>
-            <div class="meta">Only repos from configured backup jobs are listed.</div>
-          </div>
-          <select id="repo"></select>
-          <button onclick="loadRepo()">Refresh</button>
+        <div class="name">Check backup health</div>
+        <div class="meta">Verify that your backups are still retrievable from Usenet. Samples articles from your provider and re-posts any that are aging out, keeping your backups healthy.</div>
+        <div class="row" style="margin-top:8px">
+          <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run (check only, don't re-post)</label>
+          <button onclick="runRetentionCheck()">Check now</button>
         </div>
       </div>
       <div class="card" style="padding:8px 20px">
@@ -416,30 +411,6 @@
           <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto">Lock</button>
         </div>
         <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
-      </div>
-      <div class="card">
-        <div class="name">Back up now</div>
-        <div class="meta">Run a backup immediately to your configured destinations, outside the schedule.</div>
-        <div class="row" style="margin-top:8px">
-          <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="backupnow-type" value="files" checked onchange="backupNowTypeChanged()"> Files &amp; folders
-          </label>
-          <label style="display:flex;align-items:center;gap:6px">
-            <input type="radio" name="backupnow-type" value="disk" onchange="backupNowTypeChanged()"> Whole disk
-          </label>
-        </div>
-        <div class="row" style="margin-top:8px" id="backupnow-files-row">
-          <span class="folder-row" style="flex:1"><input id="adhoc-source" placeholder="C:\Users\You\Documents" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('adhoc-source', 'Select source folder')">Browse…</button></span>
-          <button onclick="startAdhocBackup()">Back up now</button>
-        </div>
-        <div id="backupnow-disk-row" style="display:none">
-          <div class="row" style="margin-top:8px">
-            <select id="disk-device" style="flex:1"><option value="">Select a disk…</option></select>
-            <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button>
-            <button onclick="startDiskBackup()">Back up disk</button>
-          </div>
-          <div class="meta">Images the entire disk bit-for-bit. The image name is generated automatically. Use the Restore button on the disk-image backup above to write it back.</div>
-        </div>
       </div>
       <div id="restoreModal" class="modal" style="display:none">
         <div class="modal-box">
@@ -482,34 +453,15 @@
           </div>
         </div>
       </div>
-      <div id="addNzbModal" class="modal" style="display:none">
+      <div id="scanResultsModal" class="modal" style="display:none">
         <div class="modal-box">
-          <h2 style="margin-top:0">Add NZB</h2>
-          <p class="meta">Add a backup to the Banked Vault list from its NZB file. The NZB points at the backup's encrypted volumes on Usenet, so the backup can be recovered from here even if it wasn't banked on this PC.</p>
-          <div class="form-grid" style="margin-top:16px">
-            <label>Backup name
-              <input id="nzb-name" type="text" placeholder="e.g. Photos archive">
-              <span class="meta">What to call this backup in the list. Leave it blank to use the NZB file's name.</span>
-            </label>
-            <label>NZB file
-              <span class="folder-row"><input id="nzb-file-input" type="text" placeholder="e.g. filekeep-photos.nzb" style="flex:1"><button type="button" class="browse-btn" onclick="browseSaveFile('nzb-file-input', 'Select NZB file', '.nzb', '')">Browse…</button></span>
-              <span class="meta">The .nzb file for this backup — the index of its volumes on Usenet.</span>
-            </label>
-            <label>Newsgroup
-              <input id="nzb-group" type="text" placeholder="e.g. alt.binaries.usenet">
-              <span class="meta">The group the backup's volumes were posted to.</span>
-            </label>
-          </div>
-          <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
-            <button onclick="closeAddNzbModal()">Cancel</button>
-            <button class="accent" onclick="submitAddNzb()">Add backup</button>
+          <h2 style="margin-top:0" id="scanResultsTitle">Scan results</h2>
+          <p class="meta">Backup vaults found that are not already registered in the Banked Vault.</p>
+          <div id="scanResultsBody" style="margin-top:12px"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+            <button onclick="closeScanResultsModal()">Close</button>
           </div>
         </div>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">Backup destinations</h2>
-        <p style="color:var(--text-2);margin-top:0">Where your backups are stored — all configured Usenet providers and network shares.</p>
-        <div id="destinations-list"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
     </div>
     <div class="view" id="view-jobs">
@@ -519,6 +471,92 @@
         <button class="accent" onclick="showJobForm()">New backup job</button>
       </div>
       <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
+          <div class="card" id="jobFormCard" style="display:none">
+        <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
+        <div class="row" id="jf-type-row" style="margin-bottom:12px">
+          <label style="display:flex;align-items:center;gap:6px" title="Back up files and folders on a schedule."><input type="radio" name="jf-type" value="files" checked onchange="jobTypeChanged()"> Files &amp; folders</label>
+          <label style="display:flex;align-items:center;gap:6px" title="Image an entire disk bit-for-bit on a schedule. Always a full capture."><input type="radio" name="jf-type" value="disk" onchange="jobTypeChanged()"> Whole disk image</label>
+        </div>
+        <div id="jf-disk-row" style="display:none;margin-bottom:12px">
+          <div class="meta" style="margin-bottom:6px">Disk to image on schedule:</div>
+          <div class="row"><select id="jf-disk" style="flex:1"><option value="">Select a disk…</option></select>
+          <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button></div>
+        </div>
+        <!-- Quick pick from Windows user folders -->
+        <div id="jf-quickpick" style="margin-bottom:12px">
+          <div class="meta" style="margin-bottom:6px">Quick pick a folder to back up:</div>
+          <div id="jf-userfolders" style="display:flex;flex-wrap:wrap;gap:8px"><p style="color:var(--text-2)">Loading…</p></div>
+        </div>
+        <div class="form-grid">
+          <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
+          <label id="jf-source-label" title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+          <label title="How often to run this backup.">Schedule<select id="jf-schedType">
+            <option value="daily">Daily at…</option>
+            <option value="interval">Every N minutes</option>
+            <option value="weekly">Weekly on…</option>
+            <option value="monthly">Monthly on day…</option>
+            <option value="yearly">Yearly on…</option>
+          </select></label>
+          <label id="jf-dailyWrap" title="The time of day to run the backup, in 24-hour format.">Time (HH:mm)<input id="jf-daily" type="time" value="02:00"></label>
+          <label id="jf-intervalWrap" style="display:none" title="How often to run the backup, in minutes. Minimum 5.">Minutes<input id="jf-interval" type="number" min="5" value="60"></label>
+          <div id="jf-weeklyWrap" style="display:none">
+            <label title="Day of the week to run the backup.">Day<select id="jf-weekly-day">
+              <option value="Sunday">Sunday</option><option value="Monday">Monday</option><option value="Tuesday">Tuesday</option>
+              <option value="Wednesday">Wednesday</option><option value="Thursday">Thursday</option><option value="Friday">Friday</option>
+              <option value="Saturday">Saturday</option>
+            </select></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-weekly-time" type="time" value="02:00"></label>
+          </div>
+          <div id="jf-monthlyWrap" style="display:none">
+            <label title="Day of the month (1-31). If the month is shorter, runs on the last day.">Day of month<input id="jf-monthly-day" type="number" min="1" max="31" value="1"></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-monthly-time" type="time" value="02:00"></label>
+          </div>
+          <div id="jf-yearlyWrap" style="display:none">
+            <label title="Month and day to run the backup each year.">Date<input id="jf-yearly-date" type="date"></label>
+            <label title="Time of day to run the backup.">Time<input id="jf-yearly-time" type="time" value="02:00"></label>
+          </div>
+        </div>
+        <div style="margin:12px 0">
+          <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle" title="Show settings most people can leave alone: backup mode, privilege, and shadow copy options.">Show advanced settings ▸</button>
+        </div>
+          <div id="jf-targets" style="margin:12px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
+            <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine)</span></div>
+            <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
+          </div>
+        <div class="form-grid" id="jf-advanced" style="display:none">
+          <label id="jf-mode-label" title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
+            <option value="incremental">Incremental</option>
+            <option value="full">Full</option>
+          </select></label>
+          <label id="jf-priv-label" class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
+          <label id="jf-vss-label" class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
+          <label class="check" title="Checks the backup's integrity automatically after it finishes. Recommended — catches problems early."><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
+          <label title="Extra recovery data posted alongside uploads, in case some Usenet articles are lost before you download.">Usenet redundancy:
+            <select id="jf-redundancy" onchange="toggleParityGroup()">
+              <option value="none">None</option>
+              <option value="xor">XOR parity (recovers 1 missing chunk)</option>
+              <option value="par2">PAR2 (recovers up to 3 missing)</option>
+            </select>
+          </label>
+          <label id="jf-parity-group-label" style="display:none" title="How many data chunks share one parity chunk. Higher = fewer parity files but less protection: only 1 missing chunk recoverable per group. 10 is ~10% overhead; 50 is ~2% overhead.">Parity group size:
+            <input id="jf-parity-group" type="number" min="2" max="100" value="10" style="width:80px">
+            <div class="meta" style="margin-top:4px">Chunks per parity block. Lower protects better (more parity files); higher means fewer files but only 1 recovery per group.</div>
+          </label>
+          <label>Incremental verification:
+            <select id="jf-verification">
+              <option value="fast">Fast — trust file size and date (quickest)</option>
+              <option value="verify">Verify — re-hash files that look unchanged (catches silent corruption)</option>
+              <option value="paranoid">Paranoid — hash every file, every time (slowest, most thorough)</option>
+            </select>
+            <div class="meta" style="margin-top:4px">Controls how carefully incremental backups check files that appear unchanged. Fast is fine for most use; Verify catches bit-rot; Paranoid is for critical data where you want absolute certainty.</div>
+          </label>
+        </div>
+        <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="accent" onclick="saveJob()">Save</button>
+          <button onclick="hideJobForm()">Cancel</button>
+        </div>
+      </div>
     </div>
     <div class="view" id="view-about">
       <h1>About FileKeep</h1>
@@ -628,7 +666,7 @@
                   <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
                 </div>
                 <div id="sec-redundancy-label" style="font-size:12px;color:var(--text-2)">Low</div>
-                <div id="sec-redundancy-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">One way in</div>
+                <div id="sec-redundancy-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">No other way in if a member is lost</div>
               </div>
             </div>
           </div>
@@ -903,16 +941,6 @@
         </div>
       </div>
       <div class="card">
-        <div class="name">Check backup health</div>
-        <div class="meta">Verify that your backups are still retrievable from Usenet. Samples articles from your provider and re-posts any that are aging out, keeping your backups healthy.</div>
-        <div class="row" style="margin-top:8px">
-          <label class="check"><input id="op-dryrun" type="checkbox" checked> Dry run (check only, don't re-post)</label>
-          <button onclick="runRetentionCheck()">Check now</button>
-        </div>
-      </div>
-      <div class="card" id="smb-sync-card" style="display:none">
-        <div class="name">Sync to SMB share</div>
-      <div class="card">
         <div class="name">Backup locations</div>
         <div class="meta">The places backups are sent. Scheduled jobs and one-time backups pick from this list.</div>
         <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
@@ -957,13 +985,6 @@
         </div>
       </div>
       </div>
-        <div class="meta">Copy backup data to your network share. Only shown because you have an SMB destination configured.</div>
-        <div class="row" style="margin-top:8px">
-          <select id="smb-sync-dest" style="flex:1"></select>
-          <button onclick="startSmbSync()">Sync now</button>
-        </div>
-      </div>
-    </div>
       <div class="card">
         <div class="name">Recovery USB</div>
         <div class="meta">Create bootable recovery media. If this PC won't start, boot it from the USB stick and restore a banked backup over the network (SMB) — no Windows install needed on the dead machine.</div>
@@ -983,190 +1004,9 @@
           <span id="winre-status" style="margin-left:8px"></span>
         </div>
       </div>
-                <div class="view" id="view-recovery">
-      <h1>Recovery</h1>
-      <div class="card">
-        <div class="row">
-          <div class="grow">
-            <div class="name">Discover from Usenet</div>
-            <div class="meta">Find backup manifests posted to Usenet that aren't in this repo yet.</div>
-          </div>
-          <button onclick="discoverRemote()">Discover</button>
-        </div>
-        <div id="remoteBackups" style="margin-top:8px"></div>
-      </div>
-      <div class="card">
-        <div class="name">Download from NZB</div>
-        <div class="meta">Fetch backup data referenced by an NZB file from Usenet.</div>
-        <div class="row" style="margin-top:8px">
-          <input id="nzb-file" type="file" accept=".nzb">
-          <button onclick="uploadNzb()">Download</button>
-        </div>
-      </div>
     </div>
-    <div class="view" id="view-settings">
-      <h1>Settings</h1>
-      <div class="card">
-        <h2 style="margin-top:0">Backup jobs</h2>
-        <div id="settingsJobs"><p style="color:var(--text-2)">Loading…</p></div>
-        <div style="margin-top:16px">
-          <button class="accent" onclick="showJobForm()">Add job</button>
-        </div>
-      </div>
-      <div class="card" id="jobFormCard" style="display:none">
-        <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
-        <div class="row" id="jf-type-row" style="margin-bottom:12px">
-          <label style="display:flex;align-items:center;gap:6px" title="Back up files and folders on a schedule."><input type="radio" name="jf-type" value="files" checked onchange="jobTypeChanged()"> Files &amp; folders</label>
-          <label style="display:flex;align-items:center;gap:6px" title="Image an entire disk bit-for-bit on a schedule. Always a full capture."><input type="radio" name="jf-type" value="disk" onchange="jobTypeChanged()"> Whole disk image</label>
-        </div>
-        <div id="jf-disk-row" style="display:none;margin-bottom:12px">
-          <div class="meta" style="margin-bottom:6px">Disk to image on schedule:</div>
-          <div class="row"><select id="jf-disk" style="flex:1"><option value="">Select a disk…</option></select>
-          <button type="button" onclick="refreshDiskList()" title="Rescan disks">↻</button></div>
-        </div>
-        <!-- Quick pick from Windows user folders -->
-        <div id="jf-quickpick" style="margin-bottom:12px">
-          <div class="meta" style="margin-bottom:6px">Quick pick a folder to back up:</div>
-          <div id="jf-userfolders" style="display:flex;flex-wrap:wrap;gap:8px"><p style="color:var(--text-2)">Loading…</p></div>
-        </div>
-        <div class="form-grid">
-          <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
-          <label id="jf-source-label" title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
-          <label title="How often to run this backup.">Schedule<select id="jf-schedType">
-            <option value="daily">Daily at…</option>
-            <option value="interval">Every N minutes</option>
-            <option value="weekly">Weekly on…</option>
-            <option value="monthly">Monthly on day…</option>
-            <option value="yearly">Yearly on…</option>
-          </select></label>
-          <label id="jf-dailyWrap" title="The time of day to run the backup, in 24-hour format.">Time (HH:mm)<input id="jf-daily" type="time" value="02:00"></label>
-          <label id="jf-intervalWrap" style="display:none" title="How often to run the backup, in minutes. Minimum 5.">Minutes<input id="jf-interval" type="number" min="5" value="60"></label>
-          <div id="jf-weeklyWrap" style="display:none">
-            <label title="Day of the week to run the backup.">Day<select id="jf-weekly-day">
-              <option value="Sunday">Sunday</option><option value="Monday">Monday</option><option value="Tuesday">Tuesday</option>
-              <option value="Wednesday">Wednesday</option><option value="Thursday">Thursday</option><option value="Friday">Friday</option>
-              <option value="Saturday">Saturday</option>
-            </select></label>
-            <label title="Time of day to run the backup.">Time<input id="jf-weekly-time" type="time" value="02:00"></label>
-          </div>
-          <div id="jf-monthlyWrap" style="display:none">
-            <label title="Day of the month (1-31). If the month is shorter, runs on the last day.">Day of month<input id="jf-monthly-day" type="number" min="1" max="31" value="1"></label>
-            <label title="Time of day to run the backup.">Time<input id="jf-monthly-time" type="time" value="02:00"></label>
-          </div>
-          <div id="jf-yearlyWrap" style="display:none">
-            <label title="Month and day to run the backup each year.">Date<input id="jf-yearly-date" type="date"></label>
-            <label title="Time of day to run the backup.">Time<input id="jf-yearly-time" type="time" value="02:00"></label>
-          </div>
-        </div>
-        <div style="margin:12px 0">
-          <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle" title="Show settings most people can leave alone: backup mode, privilege, and shadow copy options.">Show advanced settings ▸</button>
-        </div>
-          <div id="jf-targets" style="margin:12px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
-            <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine)</span></div>
-            <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
-          </div>
-        <div class="form-grid" id="jf-advanced" style="display:none">
-          <label id="jf-mode-label" title="Full backup copies everything; Incremental only copies what changed since the last backup (faster).">Mode<select id="jf-mode">
-            <option value="incremental">Incremental</option>
-            <option value="full">Full</option>
-          </select></label>
-          <label id="jf-priv-label" class="check" title="Lets the service read files that are open or locked by other programs. Requires the service to run as Administrator."><input id="jf-priv" type="checkbox"> Use backup privilege (bypass file locks, admin required)</label>
-          <label id="jf-vss-label" class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
-          <label class="check" title="Checks the backup's integrity automatically after it finishes. Recommended — catches problems early."><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
-          <label title="Extra recovery data posted alongside uploads, in case some Usenet articles are lost before you download.">Usenet redundancy:
-            <select id="jf-redundancy" onchange="toggleParityGroup()">
-              <option value="none">None</option>
-              <option value="xor">XOR parity (recovers 1 missing chunk)</option>
-              <option value="par2">PAR2 (recovers up to 3 missing)</option>
-            </select>
-          </label>
-          <label id="jf-parity-group-label" style="display:none" title="How many data chunks share one parity chunk. Higher = fewer parity files but less protection: only 1 missing chunk recoverable per group. 10 is ~10% overhead; 50 is ~2% overhead.">Parity group size:
-            <input id="jf-parity-group" type="number" min="2" max="100" value="10" style="width:80px">
-            <div class="meta" style="margin-top:4px">Chunks per parity block. Lower protects better (more parity files); higher means fewer files but only 1 recovery per group.</div>
-          </label>
-          <label>Incremental verification:
-            <select id="jf-verification">
-              <option value="fast">Fast — trust file size and date (quickest)</option>
-              <option value="verify">Verify — re-hash files that look unchanged (catches silent corruption)</option>
-              <option value="paranoid">Paranoid — hash every file, every time (slowest, most thorough)</option>
-            </select>
-            <div class="meta" style="margin-top:4px">Controls how carefully incremental backups check files that appear unchanged. Fast is fine for most use; Verify catches bit-rot; Paranoid is for critical data where you want absolute certainty.</div>
-          </label>
-        </div>
-        <div id="jf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="saveJob()">Save</button>
-          <button onclick="hideJobForm()">Cancel</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="name">Test Usenet connectivity</div>
-        <div class="meta">Check if your network can reach Usenet servers. Tests free public servers to verify basic connectivity.</div>
-        <div class="row" style="margin-top:8px">
-          <button onclick="testFreeServers()">Test free servers</button>
-        </div>
-        <div id="freeServerResult" style="margin-top:8px"></div>
-        <div class="row" style="margin-top:12px">
-          <input id="op-host" placeholder="news.example.com (optional - test a specific server)" style="flex:1">
-          <button onclick="runDiagnose()">Diagnose server</button>
-        </div>
-        <div id="diagnoseResult" style="margin-top:8px"></div>
-      </div>
-      <div class="card">
-        <h2 style="margin-top:0">Security</h2>
-        <p style="color:var(--text-2);margin-top:0">Your passphrase encrypts everything you back up. Save it here so scheduled backups run automatically — it's stored encrypted, never in plaintext.</p>
-        <div class="row" style="margin-top:8px">
-          <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
-        </div>
-        <div id="pp-form" class="form-grid" style="margin-top:8px">
-          <label>New passphrase<input id="pp-pass" type="password" placeholder="Enter passphrase" autocomplete="new-password"></label>
-          <label>Confirm passphrase<input id="pp-confirm" type="password" placeholder="Repeat passphrase" autocomplete="new-password"></label>
-        </div>
-        <div id="pp-configured" style="display:none;margin-top:12px">
-          <div class="yk-card" style="margin-top:0">
-            <div class="yk-icon" style="background:linear-gradient(135deg, var(--ok), #0a5c0a)">&#10003;</div>
-            <div class="yk-body">
-              <div class="yk-title">Passphrase saved</div>
-              <div class="yk-desc" id="pp-configured-detail">Your passphrase is stored securely.</div>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <button onclick="showPassphraseForm()">Change passphrase</button>
-                <button class="danger" onclick="clearPassphrase()">Clear stored passphrase</button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="yk-card">
-          <div class="yk-icon">&#128273;</div>
-          <div class="yk-body">
-            <div class="yk-title">YubiKey unlock</div>
-            <div class="yk-desc">Touch your YubiKey to open restore sessions. Scheduled backups keep running unattended — the key is only needed when you restore.</div>
-            <div class="yk-toggle-row">
-              <label class="toggle" title="When enabled, opening a restore session requires touching your YubiKey.">
-                <input id="pp-yubikey" type="checkbox">
-                <span class="track"></span>
-              </label>
-              <span style="font-size:14px">Require YubiKey touch to restore</span>
-            </div>
-            <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:8px"></div>
-            <div style="margin-top:8px">
-              <button onclick="programSpareKey()" title="Program another YubiKey with the same secret so it works as a backup. One key is enough; this is optional.">Program spare key</button>
-            </div>
-          </div>
-        </div>
-        <div id="pp-touch" class="yk-touch">
-          <div class="yk-dot"></div>
-          <div class="yk-touch-text">
-            <strong>Touch your YubiKey</strong>
-            <span id="pp-touch-detail" style="color:var(--text-2)">Press the button when it flashes.</span>
-          </div>
-        </div>
-        <div id="pp-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div id="pp-actions" style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="savePassphrase()">Save passphrase</button>
-        </div>
-      </div>
-    </div>
-  </main>
+
+              </main>
 </div>
 <script>
 // Native folder picker: uses the FileKeep GUI's native dialog when available,
@@ -1308,20 +1148,20 @@ function fmtLast(j) {
 // location and one job exist. Buttons link into the existing forms.
 let lastSetupSig = '';
 function gotoSettingsLocation() {
-  document.querySelector('[data-view="settings"]').click();
+  document.querySelector('[data-view="tools"]').click();
   showLocationForm('nntp');
   setTimeout(() => document.getElementById('locationFormCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 60);
 }
 function gotoSettingsJob() {
-  document.querySelector('[data-view="settings"]').click();
+  document.querySelector('[data-view="jobs"]').click();
   showJobForm();
 }
 function gotoSettingsSecurity() {
-  document.querySelector('[data-view="settings"]').click();
-  setTimeout(() => {
-    const el = document.getElementById('pp-form') || document.querySelector('[id*="passphrase"]');
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, 100);
+  document.querySelector('[data-view="security"]').click();
+}
+async function runAll() {
+  for (const n of jobNames) await runJob(n);
+  setTimeout(load, 2000);
 }
 async function renderSetupCard(jobs, locations) {
   const sig = jobs.length + ':' + locations.length + ':' + jobs.some(j => j.lastResult);
@@ -1351,10 +1191,10 @@ async function renderSetupCard(jobs, locations) {
       '<button class="accent" onclick="gotoSettingsSecurity()">Set passphrase</button>') +
     step(locations.length > 0, 2, 'Add a backup location',
       'Where backups go — a Usenet provider or a network share.',
-      '<button class="accent" onclick="gotoSettingsLocation()" title="Open the add-location form in Settings">Add location</button>') +
+      '<button class="accent" onclick="gotoSettingsLocation()" title="Open the add-location form in Tools & Settings">Add location</button>') +
     step(jobs.length > 0, 3, 'Create a backup job',
       'Pick a folder and a schedule.',
-      '<button class="accent" onclick="gotoSettingsJob()" title="Open the add-job form in Settings">Add job</button>') +
+      '<button class="accent" onclick="gotoSettingsJob()" title="Open the add-job form in Backup jobs">Add job</button>') +
     step(hasRun, 4, 'Run your first backup',
       'Back up now, or wait for the schedule.',
       `<button onclick="runAll()" ${jobs.length ? '' : 'disabled'} title="Run all backup jobs now">Back up now</button>`);
@@ -1396,8 +1236,6 @@ async function load() {
       </div>
       <button onclick="runJob('${esc(j.name)}')">Run now</button>
     </div>`).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
-  // Load expiration warnings for each job's repo
-  loadExpiration(s.jobs);
   // First-run setup card (Overview).
   try {
     const cfg = await api('/api/config');
@@ -1410,33 +1248,6 @@ async function load() {
     s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
   loadRepo();
   loadLog();
-}
-async function loadExpiration(jobs) {
-  const box = document.getElementById('expiration');
-  try {
-    // Fetch all jobs in parallel, not sequentially
-    const results = await Promise.all(jobs.map(j =>
-      api('/api/expiration?repo=' + encodeURIComponent(j.repo) + '&warnDays=90')
-        .then(items => items.map(x => ({ ...x, jobName: j.name })))
-        .catch(() => []) // Skip failed jobs, don't break the whole list
-    ));
-    const all = results.flat();
-    if (!all.length) {
-      box.innerHTML = '<p style="color:var(--text-2)">No uploads expiring within 90 days.</p>';
-      return;
-    }
-    all.sort((a, b) => a.daysLeft - b.daysLeft);
-    box.innerHTML = all.map(x => `
-      <div class="row">
-        <div class="grow">
-          <div class="name">${esc(x.backupId.substring(0, 8))}… <span style="color:${x.daysLeft < 0 ? 'var(--bad)' : 'var(--warn)'}">${x.daysLeft < 0 ? 'EXPIRED' : x.daysLeft + 'd left'}</span></div>
-          <div class="meta">${esc(x.jobName)} · ${esc(x.providerHost)} · retention ${x.retentionDays}d<br>
-          Uploaded: ${esc(x.uploadedUtc)} · Expires: ${esc(x.expiresUtc)}</div>
-        </div>
-      </div>`).join('');
-  } catch (e) {
-    box.innerHTML = '<p style="color:var(--bad)">Could not load expiration data: ' + esc(e.message) + '</p>';
-  }
 }
 let uploadPollTimer = null;
 function startUploadPolling() {
@@ -1471,12 +1282,6 @@ async function runJob(name) {
     { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
   setTimeout(load, 2000);
 }
-async function runAll() {
-  const btn = document.getElementById('backupNow');
-  btn.disabled = true;
-  try { for (const n of jobNames) await runJob(n); }
-  finally { btn.disabled = false; setTimeout(load, 2000); }
-}
 async function loadRepo() {
   const repo = document.getElementById('repo').value;
   if (!repo) return;
@@ -1493,10 +1298,10 @@ async function loadRepo() {
       `<button onclick="downloadNzb('${esc(b.backupId)}')">NZB</button> ` +
       `<button onclick="openRestoreModal('${esc(b.backupId)}','${esc(b.type)}')">Restore</button></td></tr>`).join('')
       || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
+  const vcEl = document.getElementById('vault-count');
+  if (vcEl) vcEl.textContent = backups.length;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
   document.getElementById('remoteBackups').innerHTML = '';
-  // Refresh the destinations card with the current repo path.
-  if (typeof renderDestinations === 'function') renderDestinations(cachedLocations);
 }
 async function uploadBackup(backupId) {
   const repo = document.getElementById('repo').value;
@@ -1519,25 +1324,6 @@ async function startAdhocBackup() {
   if (!sourceDir) { toast('Enter a source folder.', 'err'); return; }
   await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
   toast('Backup started in the background. Watch the Operations log.');
-}
-async function startSmbSync() {
-  const dest = document.getElementById('smb-sync-dest').value;
-  if (!dest) { toast('Select a destination.', 'err'); return; }
-  await api('/api/operations/smb-sync', { method: 'POST', body: JSON.stringify({ share: dest }) });
-  toast('SMB sync started in the background. Watch the Operations log.');
-}
-// Show SMB sync card only if SMB locations exist
-async function updateSmbSyncVisibility() {
-  try {
-    const cfg = await api('/api/config');
-    const smbLocs = (cfg.locations || []).filter(l => l.type === 'smb');
-    const card = document.getElementById('smb-sync-card');
-    if (card) {
-      card.style.display = smbLocs.length ? '' : 'none';
-      const sel = document.getElementById('smb-sync-dest');
-      if (sel) sel.innerHTML = smbLocs.map(l => `<option value="${esc(l.share)}">${esc(l.name)} (${esc(l.share)})</option>`).join('');
-    }
-  } catch (e) { }
 }
 // Tray icon setting (only available in the desktop GUI via NativeBridge)
 async function updateTrayVisibility() {
@@ -1680,20 +1466,8 @@ async function startOneTimeBackup() {
 // Load destinations when Tools view is opened
 document.querySelector('[data-view="tools"]')?.addEventListener('click', () => {
   loadOneTimeDestinations();
-  updateSmbSyncVisibility();
   updateTrayVisibility();
 });
-async function uploadNzb() {
-  const input = document.getElementById('nzb-file');
-  if (!input.files.length) { toast('Choose an NZB file.', 'err'); return; }
-  const form = new FormData();
-  form.append('nzb', input.files[0]);
-  const res = await fetch('/api/operations/download-nzb', {
-    method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: form
-  });
-  if (!res.ok) { toast('Failed: ' + (await res.text()), 'err'); return; }
-  toast('NZB download started in the background. Watch the Operations log.');
-}
 async function startDiskBackup() {
   const repo = document.getElementById('repo').value;
   const device = document.getElementById('disk-device').value;
@@ -1704,11 +1478,6 @@ async function startDiskBackup() {
   const imageName = `disk${n}-${stamp}.img`;
   await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
   toast('Disk backup started in the background. Watch the Operations log.');
-}
-function backupNowTypeChanged() {
-  const isDisk = document.querySelector('input[name="backupnow-type"]:checked').value === 'disk';
-  document.getElementById('backupnow-files-row').style.display = isDisk ? 'none' : '';
-  document.getElementById('backupnow-disk-row').style.display = isDisk ? '' : 'none';
 }
 // Populate every disk picker from /api/operations/drives (no typing).
 // The restore-target picker never lists the running system disk.
@@ -1785,20 +1554,16 @@ async function openRestoreModal(backupId, type) {
 function closeRestoreModal() {
   document.getElementById('restoreModal').style.display = 'none';
 }
-function showAddNzbModal() {
-  document.getElementById('addNzbModal').style.display = 'flex';
+function pickNzbFileDirect() {
+  document.getElementById('nzb-direct-picker').click();
 }
-function closeAddNzbModal() {
-  document.getElementById('addNzbModal').style.display = 'none';
-}
-async function submitAddNzb() {
-  const name = document.getElementById('nzb-name').value;
-  const file = document.getElementById('nzb-file-input').value;
-  const group = document.getElementById('nzb-group').value;
-  if (!file) { toast('Select an NZB file.', 'err'); return; }
+async function submitAddNzbDirect() {
+  const picker = document.getElementById('nzb-direct-picker');
+  const f = picker.files && picker.files[0];
+  if (!f) return; // user cancelled the picker
   try {
     toast('Adding backup from NZB…', '');
-    closeAddNzbModal();
+    picker.value = ''; // reset so the same file can be picked again
     loadRepo();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -1827,19 +1592,6 @@ async function submitRestore() {
     toast('Restore started in the background. Watch the Operations log.');
   }
   closeRestoreModal();
-}
-async function discoverRemote() {
-  const repo = document.getElementById('repo').value;
-  const box = document.getElementById('remoteBackups');
-  box.innerHTML = '<p style="color:var(--text-2)">Discovering…</p>';
-  try {
-    const rs = await api('/api/backups/remote?repo=' + encodeURIComponent(repo));
-    if (!rs.length) { box.innerHTML = '<p style="color:var(--text-2)">No remote-only backups found.</p>'; return; }
-    box.innerHTML = '<table><thead><tr><th></th><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Files</th></tr></thead><tbody>' +
-      rs.map(r => `<tr><td><input type="checkbox" class="remote-check" value="${esc(r.backupId)}"></td>` +
-        `<td><code>${esc(r.backupId)}</code></td><td>${esc(r.type)}</td><td>${esc(r.createdUtc)}</td><td>${r.fileCount}</td></tr>`).join('') +
-      '</tbody></table><button onclick="importRemote()">Import selected</button>';
-  } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
 }
 async function importRemote() {
   const repo = document.getElementById('repo').value;
@@ -2065,8 +1817,9 @@ async function loadSettings() {
     </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
   // Load backup locations
   renderLocations(cfg.locations || []);
-  renderDestinations(cfg.locations || []);
+  renderVaultLocations(cfg.locations || []);
   loadPassphraseStatus();
+  updateUsbScanButtonVisibility();
 }
 async function loadPassphraseStatus() {
   const el = document.getElementById('passphrase-status');
@@ -2152,49 +1905,143 @@ async function clearPassphrase() {
     loadPassphraseStatus();
   } catch (e) { toast(e.message, 'err'); }
 }
-// ---- Backup destinations: everywhere backup data is kept ----
-let cachedLocations = [];
-function renderDestinations(locations) {
-  cachedLocations = locations;
-  const box = document.getElementById('destinations-list');
+// ---- Vault storage locations (simplified list for Banked Vault tab) ----
+function renderVaultLocations(locations) {
+  const box = document.getElementById('vault-locations-list');
+  const statEl = document.getElementById('vault-locations');
+  if (statEl) statEl.textContent = locations.length;
   if (!box) return;
-  const repoSel = document.getElementById('repo');
-  const repoPath = repoSel && repoSel.value ? repoSel.value : '';
-  const nntp = locations.filter(l => l.type === 'nntp');
-  const smb = locations.filter(l => l.type === 'smb');
-  let html = '';
-  // Local repository
-  html += `<div class="row">
-    <div style="font-size:20px">🖥️</div>
-    <div class="grow">
-      <div class="name">Local repository <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">local</span></div>
-      <div class="meta" style="font-family:monospace">${repoPath ? esc(repoPath) : 'Select a repository above'}</div>
-    </div>
-  </div>`;
-  // Usenet providers
-  nntp.forEach(l => {
-    html += `<div class="row">
-      <div style="font-size:20px">📡</div>
-      <div class="grow">
-        <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">usenet</span></div>
-        <div class="meta" style="font-family:monospace">${esc(l.host)}:${l.port}${l.ssl ? ' · SSL' : ''} · ${esc(l.newsgroup)}</div>
-      </div>
-    </div>`;
-  });
-  // Network shares
-  smb.forEach(l => {
-    html += `<div class="row">
-      <div style="font-size:20px">💾</div>
-      <div class="grow">
-        <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">network</span></div>
-        <div class="meta" style="font-family:monospace">${esc(l.share)}</div>
-      </div>
-    </div>`;
-  });
-  if (!nntp.length && !smb.length) {
-    html += '<p style="color:var(--text-2)">No Usenet providers or network shares configured. Add them in <b>Backup locations</b> below.</p>';
+  if (!locations.length) {
+    box.innerHTML = '<p style="color:var(--text-2)">No storage locations configured. Add them in Tools &amp; Settings → Backup locations.</p>';
+    return;
   }
-  box.innerHTML = html;
+  box.innerHTML = locations.map(l => {
+    const icon = l.type === 'nntp' ? '📡' : '💾';
+    const label = l.type === 'nntp' ? 'Usenet' : esc(l.name);
+    const detail = l.type === 'nntp'
+      ? 'Volumes posted and confirmed'
+      : 'SMB share on your home network';
+    return `<div class="row" style="padding:8px 0">
+      <div style="font-size:20px">${icon}</div>
+      <div class="grow">
+        <div class="name">${label}</div>
+        <div class="meta">${detail}</div>
+      </div>
+      <span class="pill">Connected</span>
+    </div>`;
+  }).join('');
+  updateSmbScanButtonVisibility(locations);
+}
+// ---- Backup-scan button visibility ----
+// "Check SMB for backups" is only shown when at least one SMB location is
+// configured; "Check USB for backups" only when a removable drive is
+// connected. Both are no-ops until the buttons exist in the vault tab.
+function updateSmbScanButtonVisibility(locations) {
+  const btn = document.getElementById('check-smb-backups-btn');
+  if (!btn) return;
+  const hasSmb = (locations || []).some(l => l.type === 'smb');
+  btn.style.display = hasSmb ? '' : 'none';
+}
+async function updateUsbScanButtonVisibility() {
+  const btn = document.getElementById('check-usb-backups-btn');
+  if (!btn) return;
+  try {
+    const drives = await api('/api/operations/removable-drives');
+    btn.style.display = (drives && drives.length) ? '' : 'none';
+  } catch (e) {
+    btn.style.display = 'none';
+  }
+}
+// ---- Backup discovery scans ----
+async function scanSmbForBackups() {
+  let locations = [];
+  try {
+    const cfg = await api('/api/config');
+    locations = (cfg.locations || []).filter(l => l.type === 'smb');
+  } catch (e) { toast('Could not load locations: ' + e.message, 'err'); return; }
+  if (!locations.length) { toast('No SMB locations configured.', 'err'); return; }
+  let allUnknown = [];
+  for (const loc of locations) {
+    try {
+      toast('Scanning ' + loc.name + '...', '');
+      const result = await api('/api/locations/' + encodeURIComponent(loc.name) + '/scan', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken }
+      });
+      if (result.unknown && result.unknown.length) {
+        allUnknown.push(...result.unknown.map(u => Object.assign({}, u, { locationName: loc.name })));
+      }
+    } catch (e) {
+      toast('Scan of ' + loc.name + ' failed: ' + e.message, 'err');
+    }
+  }
+  showScanResults(allUnknown, 'SMB');
+}
+async function scanUsbForBackups() {
+  let drives = [];
+  try {
+    drives = await api('/api/operations/removable-drives');
+  } catch (e) { toast('Could not list USB drives: ' + e.message, 'err'); return; }
+  if (!drives || !drives.length) { toast('No USB drives connected.', 'err'); return; }
+  let allUnknown = [];
+  for (const d of drives) {
+    try {
+      toast('Scanning ' + d.name + '...', '');
+      const result = await api('/api/vault/scan-usb', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ drivePath: d.name })
+      });
+      if (result.unknown && result.unknown.length) {
+        allUnknown.push(...result.unknown.map(u => Object.assign({}, u, { locationName: d.name })));
+      }
+    } catch (e) {
+      toast('Scan of ' + d.name + ' failed: ' + e.message, 'err');
+    }
+  }
+  showScanResults(allUnknown, 'USB');
+}
+function showScanResults(unknown, source) {
+  const modal = document.getElementById('scanResultsModal');
+  const title = document.getElementById('scanResultsTitle');
+  const body = document.getElementById('scanResultsBody');
+  title.textContent = 'Scan results (' + source + ')';
+  if (!unknown.length) {
+    body.innerHTML = '<p class="meta">No unknown backup vaults found. All discovered backups are already registered in the Banked Vault.</p>';
+  } else {
+    body.innerHTML = unknown.map((u, i) =>
+      '<div class="row" style="align-items:center;margin-bottom:8px">' +
+      '<div class="grow"><div class="name"><code>' + esc(u.backupId) + '</code></div>' +
+      '<div class="meta">' + esc(u.type || 'backup') + (u.createdUtc ? ' &middot; ' + esc(u.createdUtc) : '') +
+      '<br>Found at: ' + esc(u.locationPath || u.locationName || '') + '</div></div>' +
+      '<button class="accent" onclick="importDiscoveredBackup(' + i + ')">Add to Vault</button></div>'
+    ).join('');
+    window._scanResults = unknown;
+  }
+  modal.style.display = 'flex';
+}
+function closeScanResultsModal() {
+  document.getElementById('scanResultsModal').style.display = 'none';
+  window._scanResults = null;
+}
+async function importDiscoveredBackup(index) {
+  const u = (window._scanResults || [])[index];
+  if (!u) return;
+  const repo = document.getElementById('repo').value;
+  if (!repo) { toast('Select a repository first.', 'err'); return; }
+  try {
+    toast('Adding ' + u.backupId + ' to vault...', '');
+    await api('/api/vault/import-discovered', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ repo: repo, backupId: u.backupId, sourcePath: u.locationPath })
+    });
+    toast('Added to vault.', 'ok');
+    closeScanResultsModal();
+    loadRepo();
+  } catch (e) {
+    toast('Import failed: ' + e.message, 'err');
+  }
 }
 // ---- Backup locations ----
 let editingLocation = null;
@@ -3048,37 +2895,45 @@ function secUpdateLinkBand() {
 // Update insight meters (5-seg security, 3-seg redundancy)
 function secUpdateInsight() {
   const p = secProfile;
-  let level = 0; // 0-4 (Low to Maximum)
-  let label = '';
-  let desc = '';
-  
+  // Security rating uses the weakest-group principle: an attacker only needs
+  // ONE way in, so the rating is set by the weakest enabled group.
+  // Method strength (weakest to strongest): Phone (Low) < Passphrase (Medium) < YubiKey (High).
+  // A linked Passphrase+YubiKey pair (AND mode) requires both, so it rates Maximum.
+  let level = 0; // 0-4: Low, Medium, High, Very High, Maximum
+  let label = 'Low';
+  let desc = 'No protection method enabled';
+
   if (p.passphraseEnabled && p.yubiKeyEnabled && p.linkMode === 'and') {
     level = 4; label = 'Maximum'; desc = 'Easiest way in: Passphrase and YubiKey together';
-  } else if (p.yubiKeyEnabled) {
-    level = 3; label = 'Very High'; desc = 'Easiest way in: YubiKey touch';
-  } else if (p.passphraseEnabled && p.yubiKeyEnabled) {
-    level = 3; label = 'High'; desc = 'Easiest way in: Passphrase or YubiKey';
-  } else if (p.passphraseEnabled) {
-    level = 2; label = 'Medium'; desc = 'Easiest way in: Passphrase';
   } else if (p.phoneEnabled) {
-    level = 1; label = 'Low'; desc = 'Easiest way in: Phone code';
+    // Phone is the weakest method — in OR mode the attacker takes the easiest path.
+    level = 0; label = 'Low'; desc = 'Easiest way in: Phone code';
+  } else if (p.passphraseEnabled) {
+    level = 1; label = 'Medium'; desc = 'Easiest way in: Passphrase';
+  } else if (p.yubiKeyEnabled) {
+    level = 2; label = 'High'; desc = 'Easiest way in: YubiKey touch';
   }
-  
+
   const segs = document.querySelectorAll('#sec-meter-security-segs .seg');
   segs.forEach((s, i) => {
     s.style.background = i <= level ? 'var(--accent)' : 'var(--bg-2)';
   });
   document.getElementById('sec-security-label').textContent = label;
   document.getElementById('sec-security-desc').textContent = desc;
-  
-  // Redundancy: count ways in
-  let ways = 0;
-  if (p.passphraseEnabled) ways++;
-  if (p.yubiKeyEnabled) ways++;
-  if (p.phoneEnabled) ways++;
-  const rLevel = ways >= 3 ? 2 : ways >= 2 ? 1 : 0;
+
+  // Redundancy counts groups, not methods. A group is a standalone method or a
+  // linked Passphrase+YubiKey pair. A single group means no other way in if a member is lost.
+  let groups = 0;
+  if (p.passphraseEnabled && p.yubiKeyEnabled && p.linkMode === 'and') {
+    groups++; // linked pair counts as one group
+  } else {
+    if (p.passphraseEnabled) groups++;
+    if (p.yubiKeyEnabled) groups++;
+  }
+  if (p.phoneEnabled) groups++;
+  const rLevel = groups >= 3 ? 2 : groups >= 2 ? 1 : 0;
   const rLabels = ['Low', 'Good', 'Best'];
-  const rDescs = ['One way in', 'Two ways in', 'Three ways in'];
+  const rDescs = ['No other way in if a member is lost', 'Two ways in', 'Three ways in'];
   
   const rSegs = document.querySelectorAll('#sec-meter-redundancy-segs .seg');
   rSegs.forEach((s, i) => {

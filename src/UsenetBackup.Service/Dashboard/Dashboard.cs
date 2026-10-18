@@ -253,6 +253,12 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapGet("/api/operations/removable-drives", () =>
+        {
+            var (status, payload) = DashboardApi.ListRemovableDrives();
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapGet("/api/operations/drives", () =>
         {
             var (status, payload) = DashboardApi.ListPhysicalDrives();
@@ -516,6 +522,44 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.TestLocation(config, name);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/locations/{name}/scan", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.ScanLocationForBackups(config, name, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/vault/scan-usb", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string drivePath = body.TryGetProperty("drivePath", out var el) && el.ValueKind == JsonValueKind.String
+                ? el.GetString() ?? ""
+                : "";
+            var (status, payload) = DashboardApi.ScanUsbForBackups(config, drivePath, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/vault/import-discovered", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = body.TryGetProperty("repo", out var rEl) && rEl.ValueKind == JsonValueKind.String
+                ? rEl.GetString() ?? ""
+                : "";
+            string backupId = body.TryGetProperty("backupId", out var bEl) && bEl.ValueKind == JsonValueKind.String
+                ? bEl.GetString() ?? ""
+                : "";
+            string sourcePath = body.TryGetProperty("sourcePath", out var sEl) && sEl.ValueKind == JsonValueKind.String
+                ? sEl.GetString() ?? ""
+                : "";
+            var (status, payload) = DashboardApi.ImportDiscoveredBackup(config, repo, backupId, sourcePath, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
