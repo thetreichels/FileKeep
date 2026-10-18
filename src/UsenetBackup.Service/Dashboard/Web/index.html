@@ -1977,7 +1977,6 @@ async function showJobForm(job) {
   } else {
     document.getElementById('jf-source').value = job ? job.source : '';
   }
-  document.getElementById('jf-repo').value = job ? job.repo : '';
   document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
   document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
   document.getElementById('jf-vss').checked = job ? !!job.vss : false;
@@ -2100,7 +2099,6 @@ async function saveJob() {
     name,
     source,
     jobType: isDiskJob ? 'disk' : 'files',
-    repo: document.getElementById('jf-repo').value.trim(),
     schedule,
     mode: isDiskJob ? 'full' : document.getElementById('jf-mode').value,
     backupPrivilege: document.getElementById('jf-priv').checked,
