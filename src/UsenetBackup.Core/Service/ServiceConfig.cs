@@ -79,7 +79,7 @@ public sealed class BackupLocation
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
-    /// <summary><c>"nntp"</c> or <c>"smb"</c>.</summary>
+    /// <summary><c>"nntp"</c>, <c>"smb"</c> or <c>"usb"</c>.</summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "";
 
@@ -129,6 +129,20 @@ public sealed class BackupLocation
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SmbPasswordPlaintext { get; set; }
 
+    // ---- USB fields (type == "usb") ----
+
+    /// <summary>Volume serial number (hex), used to identify the drive reliably across letter changes.</summary>
+    [JsonPropertyName("volumeSerial")]
+    public string VolumeSerial { get; set; } = "";
+
+    /// <summary>Volume label at the time the location was added, for display.</summary>
+    [JsonPropertyName("volumeLabel")]
+    public string VolumeLabel { get; set; } = "";
+
+    /// <summary>Subfolder on the drive where backups are stored, e.g. "FileKeep".</summary>
+    [JsonPropertyName("usbFolder")]
+    public string UsbFolder { get; set; } = "FileKeep";
+
     /// <summary>
     /// Parity/redundancy mode for this location ("none", "xor", "par2").
     /// If empty, falls back to the job's RedundancyMode.
@@ -141,8 +155,10 @@ public sealed class BackupLocation
         Type == "nntp"
             ? !string.IsNullOrEmpty(PasswordProtected) ||
               !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_NNTP_PASSWORD"))
-            : !string.IsNullOrEmpty(SmbPasswordProtected) ||
-              !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_SMB_PASSWORD"));
+            : Type == "smb"
+                ? !string.IsNullOrEmpty(SmbPasswordProtected) ||
+                  !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("USENETBACKUP_SMB_PASSWORD"))
+                : true; // usb: no password needed
 }
 
 /// <summary>

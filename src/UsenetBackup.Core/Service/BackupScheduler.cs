@@ -1096,6 +1096,8 @@ public sealed class BackupScheduler
                     UploadToNntpLocation(job, backupId, passphrase, loc);
                 else if (type == "smb")
                     SyncToSmbLocation(job, backupId, loc);
+                else if (type == "usb")
+                    SyncToUsbLocation(job, backupId, loc);
                 else
                     throw new InvalidOperationException(
                         $"Unknown backup location '{targetName}'.");
@@ -1302,6 +1304,99 @@ public sealed class BackupScheduler
         var result = sync.Sync(job.Repo, smb);
         Log($"job '{job.Name}': SMB sync to '{locName}' complete — {result.ChunksCopied} chunks, " +
             $"{result.ManifestsCopied} manifests copied.");
+    }
+
+    /// <summary>
+    /// Syncs a backup to a USB removable drive location. The drive is
+    /// identified by volume serial (stable across letter changes). If the
+    /// drive isn't plugged in, this logs and returns gracefully — it does
+    /// NOT throw, so a missing drive is a skip, not a failure.
+    /// </summary>
+    private void SyncToUsbLocation(BackupJobConfig job, string backupId, BackupLocation? loc)
+    {
+        string locName = loc?.Name ?? "usb";
+        string serial = loc?.VolumeSerial ?? "";
+        string folder = loc?.UsbFolder ?? "FileKeep";
+        if (string.IsNullOrWhiteSpace(serial))
+            throw new InvalidOperationException(
+                $"Job '{job.Name}' targets USB location '{locName}' but no volume serial is configured.");
+
+        string? targetDir = UsbDriveResolver.ResolveBackupPath(serial, folder);
+        if (targetDir is null)
+        {
+            // Graceful skip: drive not present. Log it, don't fail the job.
+            Log($"job '{job.Name}': USB drive for '{locName}' (serial {serial}) not present — skipping USB sync.");
+            OperationLog.Append(job.Repo, "usb-sync-skipped",
+                $"job={job.Name} location={locName} reason=drive-not-present");
+            return;
+        }
+
+        // Guard: don't back up a drive to itself.
+        if (!string.IsNullOrWhiteSpace(job.Source))
+            StorageGuard.EnsureUsbDriveNotSource(targetDir, job.Source, job.Name);
+
+        Log($"job '{job.Name}': syncing backup {backupId} to USB '{locName}' ({targetDir})");
+        var result = SyncRepoToLocalFolder(job.Repo, targetDir);
+        Log($"job '{job.Name}': USB sync to '{locName}' complete — {result.ChunksCopied} chunks, " +
+            $"{result.ManifestsCopied} manifests copied.");
+        OperationLog.Append(job.Repo, "usb-sync",
+            $"job={job.Name} location={locName} path={targetDir} chunks={result.ChunksCopied}");
+    }
+
+    /// <summary>
+    /// Copies chunks, manifests, parity and repo.json from a local repo to a
+    /// local folder (e.g. on a USB drive). Idempotent: existing files with
+    /// matching sizes are skipped. Returns counts.
+    /// </summary>
+    private (int ChunksCopied, int ManifestsCopied) SyncRepoToLocalFolder(string repoRoot, string targetDir)
+    {
+        int chunksCopied = 0, manifestsCopied = 0;
+        string chunksDir = Path.Combine(repoRoot, "chunks");
+        string manifestsDir = Path.Combine(repoRoot, "manifests");
+
+        string targetChunks = Path.Combine(targetDir, "chunks");
+        string targetManifests = Path.Combine(targetDir, "manifests");
+        Directory.CreateDirectory(targetChunks);
+        Directory.CreateDirectory(targetManifests);
+
+        if (Directory.Exists(chunksDir))
+        {
+            foreach (string src in Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(chunksDir, src);
+                string dst = Path.Combine(targetChunks, rel);
+                if (CopyIfDifferent(src, dst))
+                    chunksCopied++;
+            }
+        }
+        if (Directory.Exists(manifestsDir))
+        {
+            foreach (string src in Directory.GetFiles(manifestsDir, "*", SearchOption.AllDirectories))
+            {
+                string rel = Path.GetRelativePath(manifestsDir, src);
+                string dst = Path.Combine(targetManifests, rel);
+                if (CopyIfDifferent(src, dst))
+                    manifestsCopied++;
+            }
+        }
+        // Copy repo.json so the USB drive is a self-contained recoverable repo.
+        string repoJson = Path.Combine(repoRoot, "repo.json");
+        if (File.Exists(repoJson))
+            CopyIfDifferent(repoJson, Path.Combine(targetDir, "repo.json"));
+
+        return (chunksCopied, manifestsCopied);
+    }
+
+    /// <summary>Copies src to dst if dst is missing or differs in size. Returns true if copied.</summary>
+    private static bool CopyIfDifferent(string src, string dst)
+    {
+        var srcInfo = new FileInfo(src);
+        var dstInfo = new FileInfo(dst);
+        if (dstInfo.Exists && dstInfo.Length == srcInfo.Length)
+            return false;
+        Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+        File.Copy(src, dst, overwrite: true);
+        return true;
     }
 
     private void AutoUploadToUsenet(BackupJobConfig job, string backupId, string passphrase)

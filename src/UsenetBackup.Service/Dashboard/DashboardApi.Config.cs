@@ -140,7 +140,8 @@ public static partial class DashboardApi
                 {
                     string label;
                     try { label = d.VolumeLabel; } catch { label = ""; }
-                    return new RemovableDriveDto(d.Name, label ?? "");
+                    string serial = UsenetBackup.Core.UsbDriveResolver.GetVolumeSerial(d.Name) ?? "";
+                    return new RemovableDriveDto(d.Name, label ?? "", serial);
                 })
                 .ToArray();
             return (200, drives);
@@ -286,12 +287,14 @@ public static partial class DashboardApi
     {
         if (string.IsNullOrWhiteSpace(loc.Name))
             return (400, new ErrorDto("Location name is required."));
-        if (loc.Type != "nntp" && loc.Type != "smb")
-            return (400, new ErrorDto("Location type must be 'nntp' or 'smb'."));
+        if (loc.Type != "nntp" && loc.Type != "smb" && loc.Type != "usb")
+            return (400, new ErrorDto("Location type must be 'nntp', 'smb' or 'usb'."));
         if (loc.Type == "nntp" && string.IsNullOrWhiteSpace(loc.Host))
             return (400, new ErrorDto("Host is required for Usenet locations."));
         if (loc.Type == "smb" && string.IsNullOrWhiteSpace(loc.Share))
             return (400, new ErrorDto("Share path is required for SMB locations."));
+        if (loc.Type == "usb" && string.IsNullOrWhiteSpace(loc.VolumeSerial))
+            return (400, new ErrorDto("Volume serial is required for USB locations."));
 
         var existing = config.Locations.FirstOrDefault(l =>
             l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
@@ -320,14 +323,17 @@ public static partial class DashboardApi
             existing.PasswordProtected = pwBlob;
             existing.Share = loc.Share; existing.SmbUser = loc.SmbUser;
             existing.SmbPasswordProtected = smbPwBlob;
+            existing.VolumeSerial = loc.VolumeSerial;
+            existing.VolumeLabel = loc.VolumeLabel;
+            existing.UsbFolder = loc.UsbFolder;
         }
         try
         {
             config.Save(configPath);
             log?.Invoke($"dashboard: location '{loc.Name}' saved");
 
-            // Auto-scan new SMB locations for unknown backups
-            if (existing is null && loc.Type == "smb")
+            // Auto-scan new SMB/USB locations for unknown backups
+            if (existing is null && (loc.Type == "smb" || loc.Type == "usb"))
             {
                 try
                 {
@@ -396,6 +402,16 @@ public static partial class DashboardApi
                 if (!string.IsNullOrEmpty(loc.Username))
                     client.Authenticate(loc.Username, pw ?? "");
                 return (200, new OkMessageDto(true, $"Connected to {loc.Host}:{loc.Port}." ));
+            }
+            else if (loc.Type == "usb")
+            {
+                string? path = UsenetBackup.Core.UsbDriveResolver.ResolveBackupPath(
+                    loc.VolumeSerial, loc.UsbFolder);
+                if (path is not null)
+                    return (200, new OkMessageDto(true, $"USB drive found at {path}." ));
+                else
+                    return (200, new OkMessageDto(false,
+                        $"USB drive (serial {loc.VolumeSerial}) is not currently connected." ));
             }
             else
             {

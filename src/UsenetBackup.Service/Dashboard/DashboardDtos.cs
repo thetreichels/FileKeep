@@ -214,4 +214,5 @@ public sealed record ScanBackupsResultDto(
 /// <summary>A removable logical drive (USB stick, SD card) for the backup-scan picker.</summary>
 public sealed record RemovableDriveDto(
     [property: JsonPropertyName("name")] string Name,
-    [property: JsonPropertyName("label")] string Label);
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("serial")] string Serial);

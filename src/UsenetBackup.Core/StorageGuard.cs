@@ -236,4 +236,29 @@ public static class StorageGuard
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint hObject);
+
+    /// <summary>
+    /// Throws if a USB backup location's resolved drive is the same volume as
+    /// the backup source. Called at sync time (drive letters change, so this
+    /// can't be validated at config time).
+    /// </summary>
+    public static void EnsureUsbDriveNotSource(string usbTargetDir, string sourcePath, string jobName)
+    {
+        if (string.IsNullOrWhiteSpace(usbTargetDir) || string.IsNullOrWhiteSpace(sourcePath))
+            return;
+        try
+        {
+            string targetRoot = Path.GetPathRoot(Path.GetFullPath(usbTargetDir)) ?? "";
+            string sourceRoot = Path.GetPathRoot(Path.GetFullPath(sourcePath)) ?? "";
+            if (!string.IsNullOrEmpty(targetRoot) &&
+                targetRoot.Equals(sourceRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Job '{jobName}' would back up {sourceRoot} to itself via USB. " +
+                    "The backup destination must be on a different drive than the source.");
+            }
+        }
+        catch (InvalidOperationException) { throw; }
+        catch { /* fail open on path weirdness */ }
+    }
 }

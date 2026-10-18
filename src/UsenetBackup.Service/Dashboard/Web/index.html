@@ -304,7 +304,18 @@
 <div class="app">
   <nav>
     <div class="nav-brand">
-      <div class="glyph">⛁</div>
+      <div class="glyph"><svg width="28" height="28" viewBox="0 0 56 56">
+<rect x="8" y="8" width="40" height="40" rx="10" fill="none" stroke="currentColor" stroke-width="3"/>
+<circle cx="28" cy="28" r="11" fill="none" stroke="currentColor" stroke-width="2.5"/>
+<g fill="currentColor">
+<circle cx="28" cy="25.5" r="4"/>
+<path d="M26 28.5 L30 28.5 L29.2 35 L26.8 35 Z"/>
+</g>
+<g fill="currentColor">
+<circle cx="15" cy="15" r="2.5"/><circle cx="41" cy="15" r="2.5"/>
+<circle cx="15" cy="41" r="2.5"/><circle cx="41" cy="41" r="2.5"/>
+</g>
+</svg></div>
       <div><div class="t1">FileKeep</div></div>
     </div>
     <a class="nav-item active" data-view="overview">Overview</a>
@@ -637,8 +648,8 @@
                     <span class="track"></span>
                   </label>
                   <div class="grow" style="margin-left:12px">
-                    <div class="name">Phone authenticator <span style="font-size:11px;border:1px dashed var(--text-2);border-radius:8px;padding:1px 6px;color:var(--text-2);font-weight:400">Fallback</span></div>
-                    <div class="meta">Authenticator app — type a 6-digit code.</div>
+                    <div class="name">Authenticator App <span style="font-size:11px;border:1px dashed var(--text-2);border-radius:8px;padding:1px 6px;color:var(--text-2);font-weight:400">Fallback</span></div>
+                    <div class="meta">6-digit codes from your phone. Won't work on the recovery USB.</div>
                   </div>
                 </div>
               </div>
@@ -947,6 +958,7 @@
         <div style="margin-top:12px;display:flex;gap:8px">
           <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
           <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
+          <button class="accent" onclick="showLocationForm('usb')" style="font-size:14px;padding:10px 18px">＋ Add USB drive</button>
         </div>
       <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
         <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
@@ -976,6 +988,12 @@
           <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
           <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
         </div>
+        <div class="form-grid" id="lf-usb-fields" style="display:none">
+          <label title="Pick a removable USB drive. The drive is identified by its volume serial, so it works even if the drive letter changes.">USB drive<select id="lf-usbdrive"><option>Loading drives…</option></select></label>
+          <label title="Folder on the USB drive where backups are stored.">Folder<input id="lf-usbfolder" type="text" value="FileKeep" placeholder="FileKeep"></label>
+          <input id="lf-usbserial" type="hidden">
+          <input id="lf-usblabel" type="hidden">
+        </div>
         <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
         <div id="lf-test-result" style="margin:8px 0;display:none"></div>
         <div style="margin-top:12px;display:flex;gap:8px">
@@ -994,7 +1012,7 @@
           </select>
           <button type="button" onclick="refreshWinReTargets()" title="Rescan for USB drives">↻ Rescan</button>
         </div>
-        <div class="meta" style="margin-top:4px">The drive is erased and made bootable. Use a stick you can spare — 8 GB or larger.</div>
+        <div class="meta" style="margin-top:4px">The drive is erased and made bootable. Use a stick you can spare — 2 GB or larger.</div>
         <div class="row" style="margin-top:8px">
           <button class="accent" onclick="startWinReBuild()">Create USB…</button>
         </div>
@@ -2048,14 +2066,16 @@ let editingLocation = null;
 function renderLocations(locations) {
   const box = document.getElementById('locations-list');
   if (!locations.length) {
-    box.innerHTML = '<p style="color:var(--text-2)">No locations yet. Add a Usenet provider or network share.</p>';
+    box.innerHTML = '<p style="color:var(--text-2)">No locations yet. Add a Usenet provider, network share, or USB drive.</p>';
     return;
   }
   box.innerHTML = locations.map(l => {
-    const icon = l.type === 'nntp' ? '📡' : '💾';
+    const icon = l.type === 'nntp' ? '📡' : l.type === 'usb' ? '🔌' : '💾';
     const detail = l.type === 'nntp'
       ? `${esc(l.host)}:${l.port}${l.ssl ? ' · SSL' : ''}`
-      : esc(l.share);
+      : l.type === 'usb'
+        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.usbFolder || 'FileKeep')}`
+        : esc(l.share);
     const usedBy = l.usedBy && l.usedBy.length
       ? `Used by ${l.usedBy.length} job${l.usedBy.length > 1 ? 's' : ''} · `
       : 'Not used by any job · ';
@@ -2073,16 +2093,50 @@ function renderLocations(locations) {
     </div>`;
   }).join('');
 }
+async function loadUsbDrivesForLocationForm(loc) {
+  const sel = document.getElementById('lf-usbdrive');
+  sel.innerHTML = '<option>Loading drives…</option>';
+  try {
+    const drives = await api('/api/operations/removable-drives');
+    if (!drives || drives.length === 0) {
+      sel.innerHTML = '<option value="">No removable drives found — plug one in</option>';
+      return;
+    }
+    sel.innerHTML = drives.map(d => {
+      const label = d.label ? ` (${esc(d.label)})` : '';
+      return `<option value="${esc(d.serial)}" data-label="${esc(d.label || '')}">${esc(d.name)}${label}</option>`;
+    }).join('');
+    // Preselect the saved drive if editing
+    if (loc && loc.volumeSerial) {
+      sel.value = loc.volumeSerial;
+    }
+    // Store serial+label in hidden fields on change
+    const syncHidden = () => {
+      const opt = sel.options[sel.selectedIndex];
+      document.getElementById('lf-usbserial').value = sel.value || '';
+      document.getElementById('lf-usblabel').value = opt ? (opt.getAttribute('data-label') || '') : '';
+    };
+    sel.onchange = syncHidden;
+    syncHidden();
+  } catch (e) {
+    sel.innerHTML = '<option value="">Could not list drives</option>';
+  }
+}
 function showLocationForm(type, loc) {
   editingLocation = loc ? loc.name : null;
   document.getElementById('locationFormTitle').textContent =
-    (loc ? 'Edit' : 'Add') + (type === 'nntp' ? ' Usenet provider' : ' network share');
+    (loc ? 'Edit' : 'Add') + (type === 'nntp' ? ' Usenet provider' : type === 'smb' ? ' network share' : ' USB drive');
   document.getElementById('locationFormCard').style.display = '';
   document.getElementById('lf-type').value = type;
   document.getElementById('lf-name').value = loc ? loc.name : '';
   document.getElementById('lf-name').disabled = !!loc;
   document.getElementById('lf-nntp-fields').style.display = type === 'nntp' ? '' : 'none';
   document.getElementById('lf-smb-fields').style.display = type === 'smb' ? '' : 'none';
+  document.getElementById('lf-usb-fields').style.display = type === 'usb' ? '' : 'none';
+  if (type === 'usb') {
+    loadUsbDrivesForLocationForm(loc);
+    document.getElementById('lf-usbfolder').value = loc ? (loc.usbFolder || 'FileKeep') : 'FileKeep';
+  }
   if (type === 'nntp') {
     document.getElementById('lf-host').value = loc ? loc.host : '';
     document.getElementById('lf-port').value = loc ? loc.port : 119;
@@ -2090,7 +2144,7 @@ function showLocationForm(type, loc) {
     document.getElementById('lf-pass').value = '';
     document.getElementById('lf-conn').value = loc ? loc.connections : 10;
     document.getElementById('lf-ssl').checked = loc ? !!loc.ssl : false;
-  } else {
+  } else if (type === 'smb') {
     document.getElementById('lf-share').value = loc ? loc.share : '';
     document.getElementById('lf-smbuser').value = loc ? loc.smbUser : '';
     document.getElementById('lf-smbpass').value = '';
@@ -2119,13 +2173,18 @@ async function testLocationConnection() {
         method: 'POST',
         body: JSON.stringify({ host, port, user: user || null, pass: pass || null, ssl })
       });
-    } else {
+    } else if (type === 'smb') {
       const share = document.getElementById('lf-share').value.trim();
       if (!share) { resultEl.innerHTML = '<span style="color:var(--bad)">Enter a share path first.</span>'; return; }
       result = await api('/api/operations/smb-test', {
         method: 'POST',
         body: JSON.stringify({ share })
       });
+    } else if (type === 'usb') {
+      const serial = document.getElementById('lf-usbserial').value.trim();
+      if (!serial) { resultEl.innerHTML = '<span style="color:var(--bad)">Select a USB drive first.</span>'; return; }
+      resultEl.innerHTML = '<span style="color:var(--good)">✓ Drive selected — it is currently connected.</span>';
+      return;
     }
     if (result.ok) {
       resultEl.innerHTML = '<span style="color:var(--good)">✓ Connection successful</span>' + (result.detail ? ' — ' + esc(result.detail) : '');
@@ -2183,7 +2242,7 @@ async function saveLocation() {
     loc.connections = parseInt(document.getElementById('lf-conn').value) || 10;
     loc.ssl = document.getElementById('lf-ssl').checked;
     if (!loc.host) markInvalid('lf-host');
-  } else {
+  } else if (type === 'smb') {
     loc.share = document.getElementById('lf-share').value.trim();
     loc.smbUser = document.getElementById('lf-smbuser').value.trim();
     loc.smbPassword = document.getElementById('lf-smbpass').value;
@@ -2191,6 +2250,14 @@ async function saveLocation() {
     else if (!isValidUnc(loc.share)) {
       markInvalid('lf-share');
       errMsg = 'Enter a valid network path like \\\\NAS\\backups (a server and a share name).';
+    }
+  } else if (type === 'usb') {
+    loc.volumeSerial = document.getElementById('lf-usbserial').value.trim();
+    loc.volumeLabel = document.getElementById('lf-usblabel').value.trim();
+    loc.usbFolder = document.getElementById('lf-usbfolder').value.trim() || 'FileKeep';
+    if (!loc.volumeSerial) {
+      markInvalid('lf-usbdrive');
+      errMsg = 'Select a USB drive from the list.';
     }
   }
   if (!valid) {
@@ -2234,7 +2301,7 @@ async function renderJobLocationChecklist(selected) {
     }
     box.innerHTML = locations.map(l => {
       const checked = selected.some(s => s.toLowerCase() === l.name.toLowerCase()) ? 'checked' : '';
-      const icon = l.type === 'nntp' ? '📡' : '💾';
+      const icon = l.type === 'nntp' ? '📡' : l.type === 'usb' ? '🔌' : '💾';
       return `<label class="check" style="display:block"><input type="checkbox" data-location="${esc(l.name)}" ${checked}> ${icon} ${esc(l.name)} <span style="color:var(--text-2);font-size:12px">(${l.type})</span></label>`;
     }).join('');
   } catch (e) {
