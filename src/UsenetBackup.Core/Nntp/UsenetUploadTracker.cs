@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using UsenetBackup.Core.Json;
 
 namespace UsenetBackup.Core.Nntp;
 
@@ -75,7 +76,7 @@ public sealed class UsenetUploadTracker
         try
         {
             string json = File.ReadAllText(_path);
-            var list = JsonSerializer.Deserialize<List<UploadRecord>>(json);
+            var list = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.ListUploadRecord);
             return list?.ToDictionary(r => $"{r.BackupId}@{r.ProviderHost}")
                 ?? new Dictionary<string, UploadRecord>();
         }
@@ -99,8 +100,8 @@ public sealed class UsenetUploadTracker
 
     private void Save()
     {
-        string json = JsonSerializer.Serialize(_records.Values.ToList(),
-            new JsonSerializerOptions { WriteIndented = true });
+        string json = FileKeepJsonOptions.Serialize(_records.Values.ToList(),
+            FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.ListUploadRecord);
         // Atomic write via temp file: a crash mid-write must not truncate
         // the tracker (Load no longer silently swallows corruption, but a
         // torn file still loses data).

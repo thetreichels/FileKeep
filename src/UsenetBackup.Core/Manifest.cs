@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using UsenetBackup.Core.Json;
 
 namespace UsenetBackup.Core;
 
@@ -133,6 +134,7 @@ public sealed class BackupManifest
     {
         WriteIndented = false,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        TypeInfoResolver = FileKeepJsonContext.Default,
     };
 
     /// <summary>
@@ -147,7 +149,8 @@ public sealed class BackupManifest
         try
         {
             RootSha256 = "";
-            string canonical = JsonSerializer.Serialize(this, CanonicalOptions);
+            string canonical = FileKeepJsonOptions.Serialize(this,
+                CanonicalOptions, FileKeepJsonContext.Default.BackupManifest);
             return Hashing.Sha256Hex(Encoding.UTF8.GetBytes(canonical));
         }
         finally
@@ -159,9 +162,11 @@ public sealed class BackupManifest
     public bool VerifyRootHash() =>
         string.Equals(ComputeRootHash(), RootSha256, StringComparison.OrdinalIgnoreCase);
 
-    public string ToJson() => JsonSerializer.Serialize(this, CanonicalOptions);
+    public string ToJson() => FileKeepJsonOptions.Serialize(this,
+        CanonicalOptions, FileKeepJsonContext.Default.BackupManifest);
 
     public static BackupManifest FromJson(string json) =>
-        JsonSerializer.Deserialize<BackupManifest>(json, CanonicalOptions)
+        FileKeepJsonOptions.Deserialize(json,
+            CanonicalOptions, FileKeepJsonContext.Default.BackupManifest)
         ?? throw new InvalidDataException("Manifest JSON deserialized to null.");
 }

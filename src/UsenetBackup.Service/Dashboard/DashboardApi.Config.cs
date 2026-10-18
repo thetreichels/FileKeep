@@ -15,6 +15,13 @@ namespace UsenetBackup.Service;
 public static partial class DashboardApi
 {
     /// <summary>
+    /// A single NNTP port probe result. Named record (not anonymous type) so
+    /// trimmed publishing doesn't need runtime reflection to read it.
+    /// Serialized by ASP.NET Core with camelCase: {"port":...,"result":...}.
+    /// </summary>
+    private sealed record NntpProbeResult(string Port, string Result);
+
+    /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
     public static (int Status, object Payload) TestNntpConnection(string host, int port, string user, string pass, bool ssl)
@@ -60,14 +67,13 @@ public static partial class DashboardApi
     {
         if (string.IsNullOrWhiteSpace(host))
             return (400, new { error = "host is required." });
-        var results = new List<object>();
+        var results = new List<NntpProbeResult>();
         foreach (var (port, ssl, label) in new (int, bool, string)[]
                  { (119, false, "119/plain"), (563, true, "563/TLS"), (443, false, "443/plain") })
         {
-            results.Add(new { port = label, result = ProbeNntp(host, port, ssl) });
+            results.Add(new NntpProbeResult(label, ProbeNntp(host, port, ssl)));
         }
-        bool anyOk = results.Any(r => ((string)r.GetType().GetProperty("result")!.GetValue(r)!)
-            .StartsWith("OK", StringComparison.Ordinal));
+        bool anyOk = results.Any(r => r.Result.StartsWith("OK", StringComparison.Ordinal));
         object? fallback = null;
         string diagnosis;
         if (anyOk)
@@ -238,12 +244,9 @@ public static partial class DashboardApi
         }
         try
         {
-            string json = System.Text.Json.JsonSerializer.Serialize(config,
-                new System.Text.Json.JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-                });
+            string json = UsenetBackup.Core.Json.FileKeepJsonOptions.Serialize(config,
+                UsenetBackup.Core.Json.FileKeepJsonOptions.ServiceConfigSave,
+                UsenetBackup.Core.Json.FileKeepJsonContext.Default.ServiceConfig);
             File.WriteAllText(configPath + ".tmp", json);
             File.Move(configPath + ".tmp", configPath, overwrite: true);
             scheduler.ReloadJobs(config);

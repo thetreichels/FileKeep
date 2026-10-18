@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using UsenetBackup.Core.Json;
 
 namespace UsenetBackup.Core.Nntp;
 
@@ -101,7 +102,7 @@ public sealed class ProviderLimits
             if (!File.Exists(path))
                 return new Dictionary<string, LimitEntry>(StringComparer.OrdinalIgnoreCase);
             string json = File.ReadAllText(path);
-            var entries = JsonSerializer.Deserialize<Dictionary<string, LimitEntry>>(json);
+            var entries = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringLimitEntry);
             return entries ?? new Dictionary<string, LimitEntry>(StringComparer.OrdinalIgnoreCase);
         }
         catch
@@ -113,15 +114,15 @@ public sealed class ProviderLimits
 
     private static void Save(string path, Dictionary<string, LimitEntry> entries)
     {
-        string json = JsonSerializer.Serialize(entries,
-            new JsonSerializerOptions { WriteIndented = true });
+        string json = FileKeepJsonOptions.Serialize(entries,
+            FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.DictionaryStringLimitEntry);
         // Atomic write: temp file + move, so a crash never leaves half a file.
         string tmp = path + ".tmp";
         File.WriteAllText(tmp, json);
         File.Move(tmp, path, overwrite: true);
     }
 
-    private sealed class LimitEntry
+    public sealed class LimitEntry
     {
         [JsonPropertyName("max_article_bytes")]
         public long MaxArticleBytes { get; set; }

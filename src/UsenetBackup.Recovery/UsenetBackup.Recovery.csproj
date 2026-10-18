@@ -16,6 +16,10 @@
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Installer size: drop ICU globalization data (app is English-only).
+         NOTE: PublishTrimmed is intentionally NOT enabled here — WinForms is
+         explicitly incompatible with trimming (Microsoft docs, NETSDK1175). -->
+    <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
 
   <ItemGroup>

@@ -13,6 +13,11 @@
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Installer size: trim unused framework code (partial = only trimmable
+         assemblies) and drop ICU globalization data (app is English-only). -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
 
   <ItemGroup>

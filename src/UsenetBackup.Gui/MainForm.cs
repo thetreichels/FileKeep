@@ -269,7 +269,7 @@ public class MainForm : Form
             var dir = Path.GetDirectoryName(GuiSettingsPath)!;
             Directory.CreateDirectory(dir);
             File.WriteAllText(GuiSettingsPath,
-                JsonSerializer.Serialize(new { trayIcon = enabled }));
+                JsonSerializer.Serialize(new GuiSettings(enabled), GuiJsonContext.Default.GuiSettings));
         }
         catch { /* settings are best-effort */ }
     }

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using UsenetBackup.Core.Json;
 using UsenetBackup.Core.Nntp;
 
 namespace UsenetBackup.Core;
@@ -68,7 +69,8 @@ public sealed class BackupRepository : IDisposable
         string repoJsonPath = Path.Combine(_root, "repo.json");
         string tmpPath = repoJsonPath + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmpPath,
-            JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
+            FileKeepJsonOptions.Serialize(_config,
+                FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.RepositoryConfig));
         File.Move(tmpPath, repoJsonPath, overwrite: true);
     }
 
@@ -126,7 +128,8 @@ public sealed class BackupRepository : IDisposable
         // (Open would reject it as corrupt while Init refuses to overwrite).
         string tmpPath = repoJsonPath + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmpPath,
-            JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+            FileKeepJsonOptions.Serialize(config,
+                FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.RepositoryConfig));
         try { File.Move(tmpPath, repoJsonPath); }
         catch (IOException)
         {
@@ -157,7 +160,7 @@ public sealed class BackupRepository : IDisposable
         if (!File.Exists(configPath))
             throw new InvalidOperationException($"No repository found at {repoPath} (missing repo.json).");
 
-        var config = JsonSerializer.Deserialize<RepositoryConfig>(File.ReadAllText(configPath))
+        var config = JsonSerializer.Deserialize(File.ReadAllText(configPath), FileKeepJsonContext.Default.RepositoryConfig)
             ?? throw new InvalidDataException("repo.json is corrupt.");
         if (config.FormatVersion != FormatVersion)
             throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
@@ -179,7 +182,7 @@ public sealed class BackupRepository : IDisposable
         if (!File.Exists(configPath))
             throw new InvalidOperationException($"No repository found at {repoPath} (missing repo.json).");
 
-        var config = JsonSerializer.Deserialize<RepositoryConfig>(File.ReadAllText(configPath))
+        var config = JsonSerializer.Deserialize(File.ReadAllText(configPath), FileKeepJsonContext.Default.RepositoryConfig)
             ?? throw new InvalidDataException("repo.json is corrupt.");
         if (config.FormatVersion != FormatVersion)
             throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
@@ -1469,7 +1472,7 @@ public sealed class BackupRepository : IDisposable
             try
             {
                 string json = System.Text.Encoding.UTF8.GetString(plaintext);
-                var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(json)
+                var manifest = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupManifest)
                     ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
                 if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
                     throw new InvalidDataException(
@@ -1532,7 +1535,7 @@ public sealed class BackupRepository : IDisposable
                 try
                 {
                     string json = System.Text.Encoding.UTF8.GetString(plaintext);
-                    var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(json)
+                    var manifest = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupManifest)
                         ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
                     if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
                         throw new InvalidDataException(

@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using UsenetBackup.Core.Json;
 
 namespace UsenetBackup.Core.Nntp;
 
@@ -116,7 +117,7 @@ public sealed class ChunkMessageIndex
     {
         lock (_mapLock)
         {
-            return JsonSerializer.Serialize(_map);
+            return JsonSerializer.Serialize(_map, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
         }
     }
 
@@ -129,7 +130,7 @@ public sealed class ChunkMessageIndex
     /// </summary>
     public void LoadFromJson(string json)
     {
-        var map = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json);
+        var map = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
         if (map is null)
             return;
         foreach (var byChunk in map.Values)
@@ -168,7 +169,7 @@ public sealed class ChunkMessageIndex
         {
             string json = File.ReadAllText(_path);
             // Try the current nested format first.
-            var nested = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json);
+            var nested = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
             if (nested is not null)
                 return nested;
         }
@@ -180,7 +181,7 @@ public sealed class ChunkMessageIndex
             // Migrate under a "legacy" provider key so old refresh records
             // are not silently dropped.
             string json = File.ReadAllText(_path);
-            var flat = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            var flat = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringString);
             if (flat is not null && flat.Count > 0)
                 return new Dictionary<string, Dictionary<string, string>>
                 {
@@ -199,7 +200,8 @@ public sealed class ChunkMessageIndex
         string json;
         lock (_mapLock)
         {
-            json = JsonSerializer.Serialize(_map, new JsonSerializerOptions { WriteIndented = true });
+            json = FileKeepJsonOptions.Serialize(_map,
+                FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
         }
         string tmp = _path + ".tmp-" + Guid.NewGuid().ToString("N");
         File.WriteAllText(tmp, json);

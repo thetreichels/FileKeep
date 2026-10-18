@@ -12,6 +12,11 @@
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Installer size: trim unused framework code (partial = only trimmable
+         assemblies) and drop ICU globalization data (app is English-only). -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +36,12 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Yubico.YubiKey" Version="1.18.0" />
+  </ItemGroup>
+
+  <!-- Trimming: the Yubico SDK uses reflection internally for HID device
+       discovery; preserve the whole assembly rather than risk breakage. -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="Yubico.YubiKey" />
   </ItemGroup>
 
 </Project>

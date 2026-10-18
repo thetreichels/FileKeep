@@ -1,4 +1,5 @@
 using UsenetBackup.Core;
+using UsenetBackup.Core.Json;
 using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Recovery;
 
@@ -594,8 +595,8 @@ public sealed class RecoveryWizard : Form
                     if (File.Exists(localPath)) continue; // already local
                     try
                     {
-                        var manifest = System.Text.Json.JsonSerializer.Deserialize<BackupManifest>(
-                            File.ReadAllText(file));
+                        var manifest = System.Text.Json.JsonSerializer.Deserialize(
+                            File.ReadAllText(file), FileKeepJsonContext.Default.BackupManifest);
                         if (manifest is not null)
                             result.Add((id, manifest));
                     }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using UsenetBackup.Core.Json;
 
 namespace UsenetBackup.Core.Service;
 
@@ -476,14 +477,10 @@ public sealed class ServiceConfig
         ServiceConfig? config;
         try
         {
-            config = JsonSerializer.Deserialize<ServiceConfig>(json,
-                new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    // Fail closed on typos: a misspelled key (e.g. "autoVeriy")
-                    // must not silently fall back to a default.
-                    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-                });
+            // Fail closed on typos: a misspelled key (e.g. "autoVeriy")
+            // must not silently fall back to a default.
+            config = FileKeepJsonOptions.Deserialize(json,
+                FileKeepJsonOptions.ServiceConfigLoad, FileKeepJsonContext.Default.ServiceConfig);
         }
         catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
         if (config is null)
@@ -602,11 +599,8 @@ public sealed class ServiceConfig
         string json;
         lock (JobsLock)
         {
-            json = JsonSerializer.Serialize(this, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            });
+            json = FileKeepJsonOptions.Serialize(this,
+                FileKeepJsonOptions.ServiceConfigSave, FileKeepJsonContext.Default.ServiceConfig);
         }
         // Unique temp name: concurrent saves must not share a temp file.
         string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
