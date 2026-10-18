@@ -842,12 +842,12 @@
           <h1>Set up your phone</h1>
           <p style="color:var(--text-2);margin:-12px 0 20px" id="sec-phone-lede">Your phone's authenticator app shows a rotating 6-digit code that unlocks restores — scan the code below to add it.</p>
           <div class="card" style="text-align:center">
-            <div style="width:200px;height:200px;background:var(--bg-2);border-radius:8px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;color:var(--text-2)">QR code</div>
+            <div id="sec-phone-qr" style="width:200px;height:200px;background:#fff;border-radius:8px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;color:var(--text-2)">Loading…</div>
             <div style="font-size:13px;color:var(--text-2);margin-bottom:16px">Scan the QR code with Google Authenticator, Authy, Microsoft Authenticator, or any authenticator app — it adds a "FileKeep" entry that shows a new code every 30 seconds.</div>
             <div style="margin-bottom:16px">
               <div style="font-size:13px;font-weight:600;margin-bottom:8px">Can't scan? Enter this secret manually</div>
               <div style="display:flex;gap:8px;align-items:center;justify-content:center">
-                <code style="font-size:16px;letter-spacing:2px;background:var(--bg-2);padding:8px 16px;border-radius:6px">JBSW Y3DP EHPK 3PXP</code>
+                <code id="sec-phone-secret" style="font-size:16px;letter-spacing:2px;background:var(--bg-2);padding:8px 16px;border-radius:6px">····</code>
                 <button onclick="secCopyTotpSecret()">Copy</button>
               </div>
               <div class="meta" style="margin-top:8px">In your app, choose "Enter a setup key" and type the secret exactly as shown.</div>
@@ -2755,6 +2755,7 @@ function secGoStep(n) {
     if (el) el.style.display = 'none';
   });
   document.getElementById('sec-step-' + stepId).style.display = '';
+  if (stepId === '4b' && !secPhoneVerified) secLoadPhoneSetup();
   
   // Update footer
   document.getElementById('sec-step-indicator').textContent = `Step ${n} of ${steps.length}`;
@@ -2860,22 +2861,59 @@ function secTogglePwVisibility(inputId, btn) {
 }
 
 function secCopyTotpSecret() {
-  navigator.clipboard.writeText('JBSWY3DPEHPK3PXP').then(() => toast('Copied', 'ok'));
+  const raw = (secPhoneSecretRaw || '').replace(/\s/g, '');
+  if (!raw) { toast('No secret loaded yet.', 'err'); return; }
+  navigator.clipboard.writeText(raw).then(() => toast('Copied', 'ok'));
 }
 
-function secVerifyPhoneCode() {
-  const code = document.getElementById('sec-phone-code').value;
+let secPhoneSecretRaw = '';
+async function secLoadPhoneSetup() {
+  const qr = document.getElementById('sec-phone-qr');
+  const secEl = document.getElementById('sec-phone-secret');
   const msg = document.getElementById('sec-phone-msg');
-  if (/^\d{6}$/.test(code)) {
-    secPhoneVerified = true;
-    msg.textContent = 'Code verified — Phone is on. Continuing…';
-    msg.style.color = 'var(--ok)';
-    document.getElementById('sec-phone-verify').textContent = 'Verified ✓';
-    document.getElementById('sec-phone-verify').disabled = true;
-    setTimeout(() => secGoStep(secCurrentStep + 1), 1000);
-  } else {
+  qr.textContent = 'Loading…';
+  secEl.textContent = '····';
+  msg.textContent = '';
+  try {
+    const setup = await api('/api/protection/phone/setup', { method: 'POST' });
+    qr.innerHTML = setup.qrSvg;
+    secEl.textContent = setup.secret;
+    secPhoneSecretRaw = setup.secret;
+  } catch (e) {
+    qr.textContent = 'Could not load QR code.';
+    msg.textContent = e.message;
+    msg.style.color = 'var(--bad)';
+  }
+}
+async function secVerifyPhoneCode() {
+  const code = document.getElementById('sec-phone-code').value.trim();
+  const msg = document.getElementById('sec-phone-msg');
+  const btn = document.getElementById('sec-phone-verify');
+  if (!/^\d{6}$/.test(code)) {
     msg.textContent = 'Enter the 6-digit code shown in your authenticator app.';
     msg.style.color = 'var(--bad)';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api('/api/protection/phone/verify', {
+      method: 'POST', body: JSON.stringify({ code })
+    });
+    if (r.ok) {
+      secPhoneVerified = true;
+      msg.textContent = 'Code verified — Phone is on. Continuing…';
+      msg.style.color = 'var(--ok)';
+      btn.textContent = 'Verified ✓';
+      setTimeout(() => secGoStep(secCurrentStep + 1), 1000);
+    } else {
+      msg.textContent = 'That code did not match. Check your app\'s clock and try the current code.';
+      msg.style.color = 'var(--bad)';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.style.color = 'var(--bad)';
+    btn.disabled = false;
   }
 }
 

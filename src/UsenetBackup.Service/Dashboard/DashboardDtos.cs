@@ -216,3 +216,9 @@ public sealed record RemovableDriveDto(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("serial")] string Serial);
+
+/// <summary>Response for POST /api/protection/phone/setup: enrollment data.</summary>
+public sealed record PhoneSetupDto(
+    [property: JsonPropertyName("otpauthUri")] string OtpauthUri,
+    [property: JsonPropertyName("secret")] string Secret,
+    [property: JsonPropertyName("qrSvg")] string QrSvg);

@@ -54,6 +54,7 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(UsbDrives.UsbDrive[]))]
 [JsonSerializable(typeof(RemovableDriveDto))]
 [JsonSerializable(typeof(RemovableDriveDto[]))]
+[JsonSerializable(typeof(PhoneSetupDto))]
 [JsonSerializable(typeof(UploadProgressSnapshot))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {

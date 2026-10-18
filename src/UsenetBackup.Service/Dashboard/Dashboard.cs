@@ -658,6 +658,26 @@ public static class Dashboard
                 "application/json");
         });
 
+        app.MapPost("/api/protection/phone/setup", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.SetupPhoneTotp(config, configPath, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/protection/phone/verify", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
+            var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapGet("/api/yubikey/status", () =>
         {
             var (status, payload) = DashboardApi.GetYubiKeyStatus(yubiKeyProvider);

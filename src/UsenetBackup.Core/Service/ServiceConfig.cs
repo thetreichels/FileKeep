@@ -456,6 +456,15 @@ public sealed class ServiceConfig
     public bool PhoneAuthEnabled { get; set; }
 
     /// <summary>
+    /// DPAPI-protected base32 TOTP secret for the phone authenticator
+    /// (RFC 6238). Generated at phone enrollment; the raw secret never
+    /// sits in plaintext in the config file.
+    /// </summary>
+    [JsonPropertyName("phoneTotpSecretProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PhoneTotpSecretProtected { get; set; }
+
+    /// <summary>
     /// How the Passphrase and YubiKey methods interact: <c>"or"</c>
     /// (default; either one unlocks) or <c>"and"</c> (both required).
     /// The Phone method is never linked.

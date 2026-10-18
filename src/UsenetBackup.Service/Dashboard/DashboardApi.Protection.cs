@@ -1,5 +1,7 @@
+using QRCoder;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Service;
+using UsenetBackup.Service.Security;
 
 namespace UsenetBackup.Service;
 
@@ -117,5 +119,126 @@ public static partial class DashboardApi
         {
             return (400, new ErrorDto(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Starts phone-authenticator enrollment: generates a fresh 160-bit TOTP
+    /// secret, stores it DPAPI-protected, and returns the otpauth URI, the
+    /// grouped base32 secret for manual entry, and a QR-code SVG for
+    /// scanning. The phone method is NOT enabled by this call — the wizard
+    /// must verify a code first, then save the profile with PhoneEnabled.
+    /// </summary>
+    public static (int Status, object Payload) SetupPhoneTotp(ServiceConfig config,
+        string configPath, Action<string>? log = null)
+    {
+        try
+        {
+            byte[] secret = TotpCrypto.GenerateSecret();
+            string base32;
+            try
+            {
+                base32 = TotpCrypto.ToBase32(secret);
+                string protected32 = UsenetBackup.Core.Dpapi.Protect(base32);
+                config.PhoneTotpSecretProtected = protected32;
+                config.Save(configPath);
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+
+            string uri = TotpCrypto.BuildOtpAuthUri(base32);
+            string qrSvg;
+            using (var gen = new QRCodeGenerator())
+            using (var data = gen.CreateQrCode(uri, QRCodeGenerator.ECCLevel.M))
+                qrSvg = QrMatrixToSvg(data.ModuleMatrix, pixelsPerModule: 6);
+
+            // Group the secret for readability: "JBSW Y3DP EHPK 3PXP".
+            string grouped = string.Join(" ",
+                Enumerable.Range(0, (base32.Length + 3) / 4)
+                    .Select(i => base32.Substring(i * 4,
+                        Math.Min(4, base32.Length - i * 4))));
+
+            log?.Invoke("dashboard: phone authenticator enrollment started (new TOTP secret)");
+            return (200, new PhoneSetupDto(uri, grouped, qrSvg));
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Verifies a 6-digit TOTP code against the enrolled secret (RFC 6238,
+    /// ±1 step skew). Returns (200, ok) — the caller enables the phone
+    /// method via <c>SetProtectionProfile</c> after a successful verify.
+    /// </summary>
+    public static (int Status, object Payload) VerifyPhoneTotp(ServiceConfig config, string? code)
+    {
+        if (string.IsNullOrWhiteSpace(config.PhoneTotpSecretProtected))
+            return (400, new ErrorDto("No phone authenticator secret is enrolled. Start setup first."));
+        if (string.IsNullOrWhiteSpace(code) || code.Trim().Length != TotpCrypto.CodeDigits)
+            return (200, new OkDto(false));
+        try
+        {
+            string base32 = UsenetBackup.Core.Dpapi.Unprotect(config.PhoneTotpSecretProtected);
+            byte[] secret;
+            try
+            {
+                secret = TotpCrypto.FromBase32(base32);
+            }
+            finally
+            {
+                // Don't leave the base32 lying around longer than needed.
+                base32 = new string('\0', base32.Length);
+            }
+            bool ok;
+            try
+            {
+                ok = TotpCrypto.ValidateCode(secret, code, DateTimeOffset.UtcNow);
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+            return (200, new OkDto(ok));
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Renders a QR module matrix as a standalone SVG (white background,
+    /// black modules, 4-module quiet zone). Built by hand so we don't depend
+    /// on QRCoder's renderer classes, which aren't in every target build.
+    /// </summary>
+    private static string QrMatrixToSvg(System.Collections.Generic.List<System.Collections.BitArray> matrix, int pixelsPerModule)
+    {
+        int modules = matrix.Count;
+        const int quiet = 4;
+        int total = modules + quiet * 2;
+        int size = total * pixelsPerModule;
+        var sb = new System.Text.StringBuilder(size * 4);
+        sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" ");
+        sb.Append($"viewBox=\"0 0 {size} {size}\" width=\"{size}\" height=\"{size}\">");
+        sb.Append($"<rect width=\"{size}\" height=\"{size}\" fill=\"#ffffff\"/>");
+        sb.Append("<path fill=\"#000000\" d=\"");
+        for (int y = 0; y < modules; y++)
+        {
+            var row = matrix[y];
+            for (int x = 0; x < modules; x++)
+            {
+                if (row[x])
+                {
+                    int px = (x + quiet) * pixelsPerModule;
+                    int py = (y + quiet) * pixelsPerModule;
+                    sb.Append($"M{px},{py}h{pixelsPerModule}v{pixelsPerModule}h-{pixelsPerModule}Z");
+                }
+            }
+        }
+        sb.Append("\"/></svg>");
+        return sb.ToString();
     }
 }
