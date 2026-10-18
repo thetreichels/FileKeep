@@ -17,8 +17,8 @@ namespace UsenetBackup.Service;
 /// </remarks>
 public sealed class RestoreSession
 {
-    /// <summary>Idle expiry for an unlocked session. Default 15 minutes.</summary>
-    public static TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
+    /// <summary>Idle expiry for an unlocked session. Default 1 hour.</summary>
+    public static TimeSpan IdleTimeout { get; set; } = TimeSpan.FromHours(1);
 
     private readonly object _lock = new();
     private byte[]? _passphraseUtf8;
