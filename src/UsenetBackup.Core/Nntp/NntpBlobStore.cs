@@ -277,7 +277,22 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         ArgumentException.ThrowIfNullOrEmpty(setName);
         if (totalParts < 1)
             throw new ArgumentOutOfRangeException(nameof(totalParts));
-        string messageId = ArticleCodec.MakeNfoMessageId(backupId, _repoId);
+        PostNfo(backupId, batchIndex: 0, nfoText, setName, totalParts);
+    }
+
+    /// <summary>
+    /// Posts a batch NFO for batched staging. Each batch gets its own NFO
+    /// article (distinct message ID per batch index) describing that
+    /// batch's post set.
+    /// </summary>
+    public void PostNfo(string backupId, int batchIndex, string nfoText, string setName, int totalParts)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(backupId);
+        ArgumentException.ThrowIfNullOrEmpty(nfoText);
+        ArgumentException.ThrowIfNullOrEmpty(setName);
+        if (totalParts < 1)
+            throw new ArgumentOutOfRangeException(nameof(totalParts));
+        string messageId = ArticleCodec.MakeNfoMessageId(backupId, batchIndex, _repoId);
         if (_journal.IsUploaded(messageId))
             return;
         if (UseClient(c => c.Stat(messageId)))
@@ -381,17 +396,26 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public long StoredCount => _journal.UploadedCount();
 
     /// <summary>
-    /// Posts an encrypted manifest article. Idempotent via STAT check.
+    /// Posts an encrypted manifest article. Idempotent via the journal fast
+    /// path and STAT fallback, like <see cref="Put"/>. The manifest post is
+    /// journaled so interrupted uploads resume without re-posting.
     /// </summary>
     public void PostManifest(string backupId, byte[] encryptedBlob)
     {
         ArgumentNullException.ThrowIfNull(encryptedBlob);
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
+        if (_journal.IsUploaded(messageId))
+            return; // resume fast path: already posted
         if (UseClient(c => c.Stat(messageId)))
-            return; // already posted
+        {
+            _journal.RecordUpload(messageId, backupId); // server already has it
+            return;
+        }
         string article = ArticleCodec.BuildManifestArticle(
             backupId, _repoId, encryptedBlob, _newsgroup, _from);
         UseClient(c => c.Post(article));
+        WaitForArticle(messageId);
+        _journal.RecordUpload(messageId, backupId);
     }
 
     /// <summary>

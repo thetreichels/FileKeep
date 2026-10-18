@@ -57,6 +57,23 @@ public sealed class Catalog : IDisposable
         }
     }
 
+    /// <summary>
+    /// True if the chunk has been seen by this repository (staged now or in
+    /// any prior backup). Used by batched staging for cross-batch dedup
+    /// after earlier batches' chunks were pruned: a known chunk was either
+    /// staged in the current batch or confirmed-uploaded earlier.
+    /// </summary>
+    public bool HasChunk(string id)
+    {
+        lock (_lock)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT 1 FROM chunks WHERE id = $id LIMIT 1";
+            cmd.Parameters.AddWithValue("$id", id);
+            return cmd.ExecuteScalar() is not null;
+        }
+    }
+
     public void RecordBackup(string id, string type, string source, DateTime createdUtc)
     {
         lock (_lock)

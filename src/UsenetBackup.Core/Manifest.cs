@@ -42,6 +42,17 @@ public sealed class VolumeEntry
 
     [JsonPropertyName("size_bytes")]
     public long SizeBytes { get; set; }
+
+    /// <summary>
+    /// NNTP post-set name this volume was uploaded in. Null for legacy
+    /// (pre-batched-staging) backups, where the whole backup was one set.
+    /// Batched backups post one set per batch; the NZB generator and parity
+    /// reconstruction use this to keep per-batch subjects and parity groups
+    /// aligned.
+    /// </summary>
+    [JsonPropertyName("set_name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SetName { get; set; }
 }
 
 public sealed class BackupManifest
@@ -129,6 +140,16 @@ public sealed class BackupManifest
     [JsonPropertyName("yubikey_challenge")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? YubiKeyChallenge { get; set; }
+
+    /// <summary>
+    /// AES-256-GCM wrapped passphrase (base64), encrypted under the KEK
+    /// derived from the YubiKey HMAC. Stored so bare-metal recovery can
+    /// unwrap the passphrase with a YubiKey touch alone (no typing).
+    /// Safe to store publicly — decryptable only with the physical key.
+    /// </summary>
+    [JsonPropertyName("yubikey_wrapped")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? YubiKeyWrappedPassphrase { get; set; }
 
     private static readonly JsonSerializerOptions CanonicalOptions = new()
     {

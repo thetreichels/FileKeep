@@ -161,4 +161,92 @@ public sealed class ManifestSyncTests : IDisposable
         var found = repo.DiscoverRemoteManifests(store);
         Assert.Empty(found);
     }
+
+    [Fact]
+    public void PostManifest_MessageIdIsDeterministic()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        string backupId = Guid.NewGuid().ToString("N");
+        string first = ArticleCodec.MakeManifestMessageId(backupId, repo.RepoId);
+        string second = ArticleCodec.MakeManifestMessageId(backupId, repo.RepoId);
+        Assert.Equal(first, second);
+        // Different backup -> different message ID (no cross-posting).
+        string other = ArticleCodec.MakeManifestMessageId(Guid.NewGuid().ToString("N"), repo.RepoId);
+        Assert.NotEqual(first, other);
+    }
+
+    [Fact]
+    public void PostManifest_JournalsAndSkipsRepost()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+
+        using var client = Connect();
+        using var store = OpenStore(client, repo);
+        string msgId = ArticleCodec.MakeManifestMessageId(manifest.BackupId, repo.RepoId);
+
+        byte[] fakeEncrypted = new byte[] { 1, 2, 3, 4 };
+        store.PostManifest(manifest.BackupId, fakeEncrypted);
+        int afterFirst = _server.PostCount;
+
+        // Second post: journal fast path, no STAT, no re-post.
+        store.PostManifest(manifest.BackupId, fakeEncrypted);
+        Assert.Equal(afterFirst, _server.PostCount);
+        Assert.True(_server.Articles.ContainsKey(msgId));
+    }
+
+    [Fact]
+    public void PostManifest_AdoptsServerArticleIntoJournal()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+
+        // Post with one store (and journal)...
+        using var client = Connect();
+        using var store = OpenStore(client, repo);
+        byte[] fakeEncrypted = new byte[] { 5, 6, 7, 8 };
+        store.PostManifest(manifest.BackupId, fakeEncrypted);
+        int afterFirst = _server.PostCount;
+
+        // ...then a fresh store with an empty journal sees the server's
+        // article via STAT, adopts it into the journal, and doesn't re-post.
+        using var store2 = OpenStore(client, repo, "journal-fresh.db");
+        store2.PostManifest(manifest.BackupId, fakeEncrypted);
+        Assert.Equal(afterFirst, _server.PostCount);
+        // Third call now hits the journal fast path too.
+        store2.PostManifest(manifest.BackupId, fakeEncrypted);
+        Assert.Equal(afterFirst, _server.PostCount);
+    }
+
+    [Fact]
+    public void UploadManifest_PreservesVolumesForStreamedRestore()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+
+        // Simulate what the streaming scheduler path does: attach the
+        // posted volumes to the manifest, then save + upload.
+        manifest.Volumes = new List<VolumeEntry>
+        {
+            new() { Id = new string('a', 64), ChunkIds = new List<string> { new('b', 64) }, SizeBytes = 0 },
+            new() { Id = new string('c', 64), ChunkIds = new List<string> { new('d', 64) }, SizeBytes = 0 },
+        };
+        manifest.VolumeSize = repo.VolumeSizeBytes;
+        repo.SaveManifest(manifest);
+
+        using var client = Connect();
+        using var store = OpenStore(client, repo);
+        repo.UploadManifest(manifest.BackupId, store);
+
+        // Simulate a fresh machine: wipe local manifests, discover from Usenet.
+        foreach (string f in Directory.GetFiles(Path.Combine(_repoDir, "manifests")))
+            File.Delete(f);
+        var found = repo.DiscoverRemoteManifests(store);
+        Assert.Single(found);
+        Assert.Equal(manifest.BackupId, found[0].BackupId);
+        Assert.NotNull(found[0].Manifest.Volumes);
+        Assert.Equal(2, found[0].Manifest.Volumes!.Count);
+        Assert.Equal(new string('a', 64), found[0].Manifest.Volumes![0].Id);
+        Assert.Equal(repo.VolumeSizeBytes, found[0].Manifest.VolumeSize);
+    }
 }

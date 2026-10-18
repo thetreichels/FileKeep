@@ -152,6 +152,31 @@ public sealed class SmbSync
     }
 
     /// <summary>
+    /// Copies specific chunk blobs to the share (batched staging): each
+    /// batch's chunks are copied right after their NNTP upload is confirmed,
+    /// so the local copies can then be pruned. Skips chunks already present
+    /// with matching size. Returns the number copied.
+    /// </summary>
+    public int CopyChunks(IEnumerable<string> chunkIds, string repoRoot, SmbShare share)
+    {
+        ArgumentNullException.ThrowIfNull(chunkIds);
+        ArgumentException.ThrowIfNullOrWhiteSpace(repoRoot);
+        ArgumentNullException.ThrowIfNull(share);
+        int copied = 0;
+        string chunksDir = Path.Combine(repoRoot, "chunks");
+        foreach (string id in chunkIds)
+        {
+            string src = Path.Combine(chunksDir, id[..2], id[2..]);
+            if (!File.Exists(src))
+                continue; // already pruned or never staged; nothing to copy
+            string dest = share.Combine("chunks", id[..2], id[2..]);
+            if (CopyIfNeeded(src, dest, out _))
+                copied++;
+        }
+        return copied;
+    }
+
+    /// <summary>
     /// Copies src to dest if dest is missing or differs in size. Creates
     /// parent directories. Returns true if a copy happened.
     /// </summary>

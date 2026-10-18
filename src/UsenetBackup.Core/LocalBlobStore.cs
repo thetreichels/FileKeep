@@ -23,6 +23,19 @@ public sealed class LocalBlobStore : IBlobStore
 
     public bool Exists(string chunkIdHex) => File.Exists(PathFor(chunkIdHex));
 
+    /// <summary>
+    /// Deletes a staged chunk blob. Used by batched staging to prune a
+    /// batch's chunks after its upload is confirmed. Never deletes
+    /// manifests, catalog, or journal — only chunk blobs.
+    /// </summary>
+    public void Delete(string chunkIdHex)
+    {
+        string path = PathFor(chunkIdHex);
+        try { File.Delete(path); }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+    }
+
     public void Put(string chunkIdHex, byte[] blob)
     {
         string path = PathFor(chunkIdHex);

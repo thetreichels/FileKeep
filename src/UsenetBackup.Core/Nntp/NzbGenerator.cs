@@ -73,12 +73,22 @@ public static class NzbGenerator
 
             if (volumeMode)
             {
-                string setName = ArticleCodec.SetName(manifest.BackupId);
-                int totalParts = manifest.Volumes!.Count + 1;
-                int vi = 0;
-                foreach (VolumeEntry volume in manifest.Volumes!)
-                    WriteVolumeFile(writer, volume, vi++, getVolumeBlob!, getUploadTimeUtc, manifest, options,
-                        setName, totalParts);
+                string legacySetName = ArticleCodec.SetName(manifest.BackupId);
+                // Batched backups post one set per batch; subjects and part
+                // numbers are per-set. Legacy manifests (no set names) keep
+                // the exact single-set layout as before.
+                var setGroups = manifest.Volumes!
+                    .GroupBy(v => v.SetName ?? legacySetName, StringComparer.Ordinal)
+                    .ToList();
+                foreach (var setGroup in setGroups)
+                {
+                    string setName = setGroup.Key;
+                    int totalParts = setGroup.Count() + 1;
+                    int vi = 0;
+                    foreach (VolumeEntry volume in setGroup)
+                        WriteVolumeFile(writer, volume, vi++, getVolumeBlob!, getUploadTimeUtc, manifest, options,
+                            setName, totalParts);
+                }
             }
             else
             {

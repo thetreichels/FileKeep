@@ -50,6 +50,24 @@ public static class ArticleCodec
     }
 
     /// <summary>
+    /// Per-batch post-set name for batched staging. Batch 0 keeps the
+    /// legacy name so single-batch backups post identically to before;
+    /// later batches get a 2-hex-digit suffix (still neutral/alphanumeric).
+    /// </summary>
+    public static string SetName(string backupId, int batchIndex)
+    {
+        if (batchIndex < 0)
+            throw new ArgumentOutOfRangeException(nameof(batchIndex));
+        if (batchIndex == 0)
+            return SetName(backupId);
+        string clean = new string(backupId.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+        if (clean.Length < 4)
+            throw new ArgumentException("Backup ID must contain at least 4 alphanumeric chars.", nameof(backupId));
+        string stem = clean[..Math.Min(6, clean.Length)];
+        return $"{stem}{batchIndex & 0xFF:x2}";
+    }
+
+    /// <summary>
     /// RAR-style part filename for a volume: index 0 is "set.rar",
     /// subsequent volumes are "set.r00", "set.r01", ...
     /// </summary>
@@ -433,6 +451,23 @@ public static class ArticleCodec
         ArgumentException.ThrowIfNullOrEmpty(backupId);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
         string hash = Hashing.Sha256Hex(Encoding.UTF8.GetBytes($"nfo:{backupId}:{repoId}"));
+        return $"<{hash}.{repoId}@{MessageIdDomain}>";
+    }
+
+    /// <summary>
+    /// Per-batch NFO message ID for batched staging. Batch 0 keeps the
+    /// legacy identity; later batches hash in the batch index so each
+    /// batch's NFO is a distinct article.
+    /// </summary>
+    public static string MakeNfoMessageId(string backupId, int batchIndex, string repoId)
+    {
+        if (batchIndex < 0)
+            throw new ArgumentOutOfRangeException(nameof(batchIndex));
+        ArgumentException.ThrowIfNullOrEmpty(backupId);
+        ArgumentException.ThrowIfNullOrEmpty(repoId);
+        if (batchIndex == 0)
+            return MakeNfoMessageId(backupId, repoId);
+        string hash = Hashing.Sha256Hex(Encoding.UTF8.GetBytes($"nfo:{backupId}:batch{batchIndex}:{repoId}"));
         return $"<{hash}.{repoId}@{MessageIdDomain}>";
     }
 

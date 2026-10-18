@@ -827,10 +827,19 @@ public sealed class BackupScheduler
             using ISnapshotProvider? snap = job.IsDiskImage ? null : CreateSnapshotProvider(job);
 
             BackupManifest manifest;
+            // Batched staging + pruning: when remote targets exist, the
+            // backup is staged one batch at a time, each batch is verified,
+            // uploaded/copied to every target, confirmed, then pruned. The
+            // local repo stays staging-only; manifests/catalog never prune.
+            bool batched = ShouldUseBatchedStaging(job, repo, out BackupManifest? batchParent);
             try
             {
                 token.ThrowIfCancellationRequested();
-                if (job.IsDiskImage)
+                if (batched)
+                {
+                    manifest = RunBatchedBackup(job, repo, batchParent, snap, token);
+                }
+                else if (job.IsDiskImage)
                 {
                     // Whole-disk image jobs always capture the full device.
                     // The image name is derived from the job name so each
@@ -857,9 +866,13 @@ public sealed class BackupScheduler
                         : repo.BackupIncremental(job.Source, parent, snap,
                             VerificationModeParser.Parse(job.VerificationMode));
                 }
-                // VSS: writer session finalized only after data is safely stored.
-                if (snap is Recovery.VssSnapshot vss)
-                    vss.Complete();
+                if (!batched)
+                {
+                    // VSS: writer session finalized only after data is safely stored.
+                    // (Batched mode finalizes inside RunBatchedBackup.)
+                    if (snap is Recovery.VssSnapshot vss)
+                        vss.Complete();
+                }
             }
             catch
             {
@@ -872,9 +885,11 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
 
             // Auto-upload to configured targets (nntp and/or smb) if any.
+            // Skipped for batched runs: every batch was already uploaded to
+            // every target (and pruned) during the backup.
             bool autoUploadFailed = false;
             string? autoUploadError = null;
-            if (job.EffectiveTargets.Count > 0)
+            if (job.EffectiveTargets.Count > 0 && !batched)
             {
                 token.ThrowIfCancellationRequested();
                 try {
@@ -896,9 +911,17 @@ public sealed class BackupScheduler
             }
 
             // Auto-verify if configured (default: after each backup).
+            // Skipped for batched runs: every batch's chunks were verified
+            // locally before upload, and pruned chunks can't be re-read.
             bool verifyFailed = false;
             string? verifyError = null;
-            if (job.AutoVerify)
+            if (job.AutoVerify && batched)
+            {
+                Log($"job '{job.Name}': auto-verify skipped (each batch was verified before upload).");
+                OperationLog.Append(job.Repo, "auto-verify",
+                    $"job={job.Name} id={manifest.BackupId} result=skipped-batched");
+            }
+            if (job.AutoVerify && !batched)
             {
                 token.ThrowIfCancellationRequested();
                 try
@@ -1071,6 +1094,9 @@ public sealed class BackupScheduler
         if (_config.PassphraseYubiKey && !string.IsNullOrEmpty(_config.YubiKeyChallenge))
         {
             manifest.YubiKeyChallenge = _config.YubiKeyChallenge;
+            // Stamp the wrapped passphrase too so bare-metal recovery can
+            // unwrap it with a YubiKey touch alone (AES-GCM: safe publicly).
+            manifest.YubiKeyWrappedPassphrase = _config.PassphraseYubiKeyWrapped;
             // Re-save since the manifest was already written
             // (the challenge must be in the uploaded copy)
         }
@@ -1186,6 +1212,351 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// Resolves a job's effective targets into typed locations, with the same
+    /// legacy "nntp"/"smb" fallback as <see cref="UploadToTargets"/>.
+    /// </summary>
+    private List<(string Name, string Type, BackupLocation? Loc)> ResolveTargets(BackupJobConfig job)
+    {
+        var result = new List<(string, string, BackupLocation?)>();
+        foreach (string targetName in job.EffectiveTargets)
+        {
+            BackupLocation? loc = _config.Locations.FirstOrDefault(l =>
+                l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
+            string type = loc?.Type ??
+                (targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" :
+                 targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" : "");
+            if (type == "nntp" || type == "smb" || type == "usb")
+                result.Add((targetName, type, loc));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Decides whether a job should use batched staging + pruning. Requires
+    /// at least one remote target (nntp/smb/usb) — local-only backups keep
+    /// their chunks — and a local chunk store. For incrementals in volume
+    /// mode, the parent's volumes must cover every parent chunk; otherwise
+    /// the child's manifest couldn't be self-contained (parent chunks are
+    /// pruned and can't be re-packed), so we fall back to legacy staging.
+    /// </summary>
+    private bool ShouldUseBatchedStaging(
+        BackupJobConfig job, BackupRepository repo, out BackupManifest? parentManifest)
+    {
+        parentManifest = null;
+        if (ResolveTargets(job).Count == 0)
+            return false;
+        if (repo.LocalChunkStore is null)
+            return false;
+
+        if (!job.IsDiskImage && job.Mode != "full")
+        {
+            string? parentId = repo.ListBackups()
+                .OrderByDescending(b => b.CreatedUtc)
+                .FirstOrDefault()?.BackupId;
+            if (parentId is not null)
+            {
+                parentManifest = repo.LoadManifest(parentId);
+                if (repo.UseVolumes)
+                {
+                    var covered = new HashSet<string>(StringComparer.Ordinal);
+                    if (parentManifest.Volumes is not null)
+                        foreach (var v in parentManifest.Volumes)
+                            foreach (string id in v.ChunkIds)
+                                covered.Add(id);
+                    foreach (var f in parentManifest.Files)
+                        foreach (string id in f.Chunks)
+                            if (!string.IsNullOrEmpty(id) && !covered.Contains(id))
+                            {
+                                Log($"job '{job.Name}': parent backup has chunks outside volumes; " +
+                                    "using legacy full staging for this backup.");
+                                parentManifest = null;
+                                return false;
+                            }
+                }
+            }
+        }
+        return true;
+    }
+
+    private Nntp.NntpBatchUploader CreateBatchUploader(
+        BackupRepository repo, string backupId, BackupJobConfig job, NntpConfig nntp)
+    {
+        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
+            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+        string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
+            ? nntp.RedundancyMode
+            : job.RedundancyMode;
+        return new Nntp.NntpBatchUploader(
+            repo, backupId, nntp, nntpPassword, redundancy, job.ParityGroupSize, Log);
+    }
+
+    /// <summary>
+    /// Runs a backup with batched staging + pruning: one batch at a time,
+    /// each batch is verified locally, uploaded/copied to every target,
+    /// confirmed, then pruned from the local repo. Manifests, the catalog,
+    /// and the upload journal are never pruned. Returns the finalized
+    /// manifest (already uploaded to NNTP targets when present).
+    /// </summary>
+    private BackupManifest RunBatchedBackup(
+        BackupJobConfig job, BackupRepository repo, BackupManifest? parentManifest,
+        ISnapshotProvider? snap, CancellationToken token)
+    {
+        var targets = ResolveTargets(job);
+        string backupId = Guid.NewGuid().ToString("N");
+        bool useVolumes = repo.UseVolumes;
+        var localStore = repo.LocalChunkStore!; // guaranteed by ShouldUseBatchedStaging
+
+        var uploaders = new List<Nntp.NntpBatchUploader>();
+        var smbConns = new List<(string Name, SmbShare Share)>();
+        try
+        {
+            // NNTP uploaders (one per provider).
+            foreach (var (name, type, loc) in targets)
+            {
+                if (type != "nntp")
+                    continue;
+                if (loc is null)
+                {
+                    foreach (var provider in _nntpProviders)
+                        uploaders.Add(CreateBatchUploader(repo, backupId, job, provider));
+                }
+                else
+                {
+                    var provider = new NntpConfig
+                    {
+                        Host = loc.Host,
+                        Port = loc.Port,
+                        Ssl = loc.Ssl,
+                        Username = loc.Username,
+                        Connections = loc.Connections,
+                        Newsgroup = loc.Newsgroup,
+                        RetentionDays = loc.RetentionDays,
+                        PasswordProtected = loc.PasswordProtected,
+                        RedundancyMode = loc.RedundancyMode,
+                    };
+                    uploaders.Add(CreateBatchUploader(repo, backupId, job, provider));
+                }
+            }
+
+            // Batch size: smallest probed ceiling across providers (90%
+            // margin), else the 100 MB default volume size. SMB/USB-only
+            // jobs use a single batch.
+            long batchSize = uploaders.Count > 0
+                ? uploaders.Min(u => u.BatchSizeBytes)
+                : long.MaxValue;
+            Log($"job '{job.Name}': batched staging (batch={FormatBatchSize(batchSize)}, " +
+                $"volumes={(useVolumes ? "on" : "off")}, targets={targets.Count})...");
+
+            // SMB connections, held open for the whole backup.
+            var smbSync = new SmbSync(Log);
+            foreach (var (name, type, loc) in targets)
+            {
+                if (type != "smb")
+                    continue;
+                string share = loc?.Share ?? job.SmbShare;
+                string user = loc?.SmbUser ?? job.SmbUser;
+                string? passwordProtected = loc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+                if (string.IsNullOrWhiteSpace(share))
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}' targets SMB but no share is configured.");
+                string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
+                if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
+                    smbPassword = Dpapi.Unprotect(passwordProtected);
+                smbConns.Add((loc?.Name ?? name, SmbShare.Connect(share, user, smbPassword)));
+            }
+
+            var usbLocs = targets
+                .Where(t => t.Type == "usb" && t.Loc is not null)
+                .Select(t => t.Loc!)
+                .ToList();
+
+            // USB self-backup guard: resolve once up front (drive letters
+            // can change, but the guard is about the drive identity).
+            foreach (var usbLoc in usbLocs)
+            {
+                string? usbPath = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
+                if (usbPath is not null && !string.IsNullOrWhiteSpace(job.Source))
+                    StorageGuard.EnsureUsbDriveNotSource(usbPath, job.Source, job.Name);
+            }
+
+            var tracker = new BatchTrackingBlobStore(localStore, repo.CatalogHasChunk);
+            var batchedVolumes = new List<VolumeEntry>();
+
+            bool OnFlushBatch(IReadOnlyList<string> chunkIds, int batchIndex)
+            {
+                token.ThrowIfCancellationRequested();
+                // 1. Verify staged chunks locally before upload (fail closed).
+                foreach (string id in chunkIds)
+                    repo.VerifyChunk(id);
+                // 2. NNTP: upload the batch to every provider (per-batch
+                //    parity + retry inside the uploader).
+                var entries = new List<VolumeEntry>();
+                foreach (var uploader in uploaders)
+                {
+                    var e = uploader.UploadBatch(chunkIds, batchIndex, useVolumes);
+                    if (entries.Count == 0)
+                        entries.AddRange(e); // deterministic: providers agree
+                }
+                batchedVolumes.AddRange(entries);
+                // 3. SMB: copy the batch's chunks.
+                foreach (var (shareName, share) in smbConns)
+                {
+                    int copied = smbSync.CopyChunks(chunkIds, job.Repo, share);
+                    Log($"job '{job.Name}': batch {batchIndex}: {copied} chunks copied to SMB '{shareName}'.");
+                }
+                // 4. USB: copy the batch's chunks (graceful skip if unplugged).
+                foreach (var usbLoc in usbLocs)
+                    CopyBatchChunksToUsb(usbLoc, chunkIds, job);
+                // 5. Prune: the batch is confirmed at every destination.
+                foreach (string id in chunkIds)
+                    localStore.Delete(id);
+                Log($"job '{job.Name}': batch {batchIndex} complete — " +
+                    $"{chunkIds.Count} chunks uploaded, pruned locally.");
+                OperationLog.Append(job.Repo, "batch-flush",
+                    $"job={job.Name} batch={batchIndex} chunks={chunkIds.Count}");
+                return true;
+            }
+
+            var batchCtx = new BatchedBackupContext(tracker, batchSize, OnFlushBatch);
+
+            BackupManifest manifest;
+            if (job.IsDiskImage)
+            {
+                string imageName = DiskImageName(job.Name);
+                string? volumeLetter = GetVolumeLetterForDevice(job.Source);
+                manifest = repo.BackupDiskImageBatched(
+                    job.Source, imageName, job.Sparse, volumeLetter, batchCtx, backupId);
+            }
+            else
+            {
+                manifest = repo.BackupDirectoryBatched(
+                    job.Source, parentManifest, snap, batchCtx,
+                    VerificationModeParser.Parse(job.VerificationMode), backupId);
+            }
+            batchCtx.FlushRemainder();
+
+            // VSS: writer session finalized only after data is safely stored.
+            if (snap is Recovery.VssSnapshot vss)
+                vss.Complete();
+
+            // Manifest volumes: this backup's batches, plus inherited parent
+            // volumes for incrementals (eligibility pre-checked above).
+            manifest.Volumes ??= new List<VolumeEntry>();
+            manifest.Volumes.AddRange(batchedVolumes);
+            if (parentManifest is not null && useVolumes)
+            {
+                if (!BackupRepository.TryInheritParentVolumes(manifest, parentManifest, out var inherited))
+                    throw new InvalidOperationException(
+                        $"job '{job.Name}': parent volume inheritance failed unexpectedly.");
+                manifest.Volumes.AddRange(inherited);
+            }
+
+            StampYubiKeyChallenge(manifest);
+            manifest = repo.FinalizeBatchedManifest(manifest);
+
+            // NNTP: post the manifest + index per provider.
+            foreach (var uploader in uploaders)
+            {
+                int articles = uploader.UploadManifest();
+                Log($"job '{job.Name}': manifest posted to {uploader.Host} ({articles} articles).");
+                OperationLog.Append(job.Repo, "auto-upload",
+                    $"job={job.Name} id={manifest.BackupId} host={uploader.Host} manifest_articles={articles}");
+            }
+
+            // SMB: final metadata sync (chunks were copied per batch).
+            foreach (var (shareName, share) in smbConns)
+            {
+                var result = smbSync.Sync(job.Repo, share);
+                Log($"job '{job.Name}': SMB metadata sync to '{shareName}' complete.");
+            }
+
+            // USB: final metadata copy (chunks were copied per batch).
+            foreach (var usbLoc in usbLocs)
+                CopyMetadataToUsb(usbLoc, job);
+
+            Log($"job '{job.Name}': batched backup {manifest.BackupId} complete " +
+                $"({manifest.Files.Count} files, {batchedVolumes.Count} new volumes).");
+            return manifest;
+        }
+        finally
+        {
+            foreach (var uploader in uploaders)
+                uploader.Dispose();
+            foreach (var (_, share) in smbConns)
+                share.Dispose();
+        }
+    }
+
+    private static string FormatBatchSize(long bytes) =>
+        bytes == long.MaxValue ? "whole backup"
+        : bytes >= 1024L * 1024 * 1024 ? $"{bytes / (1024.0 * 1024 * 1024):F1} GiB"
+        : bytes >= 1024L * 1024 ? $"{bytes / (1024.0 * 1024):F1} MiB"
+        : $"{bytes / 1024.0:F1} KiB";
+
+    /// <summary>
+    /// Copies one batch's chunk blobs to a USB location. Graceful skip (not
+    /// failure) when the drive isn't currently plugged in.
+    /// </summary>
+    private void CopyBatchChunksToUsb(BackupLocation usbLoc, IReadOnlyList<string> chunkIds, BackupJobConfig job)
+    {
+        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
+        if (targetDir is null)
+        {
+            Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping batch USB copy.");
+            return;
+        }
+        int copied = 0;
+        string chunksDir = Path.Combine(job.Repo, "chunks");
+        string targetChunks = Path.Combine(targetDir, "chunks");
+        foreach (string id in chunkIds)
+        {
+            string src = Path.Combine(chunksDir, id[..2], id[2..]);
+            if (!File.Exists(src))
+                continue;
+            string dst = Path.Combine(targetChunks, id[..2], id[2..]);
+            if (CopyFileIfDifferent(src, dst))
+                copied++;
+        }
+        Log($"job '{job.Name}': {copied} chunks copied to USB '{usbLoc.Name}'.");
+    }
+
+    /// <summary>
+    /// Copies manifests + repo.json to a USB location after all batches
+    /// (chunks were copied per batch). Never pruned locally.
+    /// </summary>
+    private void CopyMetadataToUsb(BackupLocation usbLoc, BackupJobConfig job)
+    {
+        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
+        if (targetDir is null)
+        {
+            Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping metadata copy.");
+            return;
+        }
+        string manifestsDir = Path.Combine(job.Repo, "manifests");
+        if (Directory.Exists(manifestsDir))
+            foreach (string src in Directory.GetFiles(manifestsDir, "*.json"))
+                CopyFileIfDifferent(src, Path.Combine(targetDir, "manifests", Path.GetFileName(src)));
+        string repoJson = Path.Combine(job.Repo, "repo.json");
+        if (File.Exists(repoJson))
+            CopyFileIfDifferent(repoJson, Path.Combine(targetDir, "repo.json"));
+        Log($"job '{job.Name}': metadata copied to USB '{usbLoc.Name}'.");
+    }
+
+    private static bool CopyFileIfDifferent(string src, string dst)
+    {
+        var srcInfo = new FileInfo(src);
+        var dstInfo = new FileInfo(dst);
+        if (dstInfo.Exists && dstInfo.Length == srcInfo.Length)
+            return false;
+        Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+        string tmp = dst + ".tmp";
+        File.Copy(src, tmp, overwrite: true);
+        File.Move(tmp, dst, overwrite: true);
+        return true;
+    }
+
+    /// <summary>
     /// Streams a disk image directly to an SMB share (sparse: used space only).
     /// </summary>
     private BackupManifest StreamDiskImageToSmb(
@@ -1258,15 +1629,63 @@ public sealed class BackupScheduler
         using var client = new Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
         // TODO: Authenticate with provider.Username/Password if configured.
         using var nntp = new NntpBlobStore(
-            client, newsgroup, repo.RepoId, repo.CatalogPath);
+            client, newsgroup, repo.RepoId, repo.CatalogPath,
+            from: repo.GetOrCreatePoster());
         using var streaming = new StreamingVolumeBlobStore(nntp);
         var manifest = repo.BackupDiskImageStreaming(
             job.Source, streaming, imageName, sparse: job.Sparse, volumeLetter: volumeLetter);
         streaming.Flush();
 
+        // Record the streamed volumes in the manifest BEFORE posting it, so a
+        // restore from Usenet alone can find the volume articles. Mirrors the
+        // non-streamed upload path (set volumes + volume size, then save).
+        manifest.Volumes = streaming.PostedVolumes
+            .Select(v => new VolumeEntry
+            {
+                Id = v.VolumeId,
+                ChunkIds = v.ChunkIds.ToList(),
+                // Not tracked in streaming mode; informational only.
+                SizeBytes = 0,
+            })
+            .ToList();
+        manifest.VolumeSize = repo.VolumeSizeBytes;
+        repo.SaveManifest(manifest);
+
+        // Post the manifest now that all of its volumes are confirmed on the
+        // server (Flush is synchronous; WaitForArticle ran per volume). A
+        // failed manifest post does NOT fail the backup — the volumes are
+        // safe on Usenet and the post stays retryable via journal + STAT
+        // idempotency.
+        const int maxManifestAttempts = 3;
+        Exception? manifestError = null;
+        for (int attempt = 1; attempt <= maxManifestAttempts; attempt++)
+        {
+            try
+            {
+                int articles = repo.UploadManifest(manifest.BackupId, nntp);
+                Log($"job '{job.Name}': manifest posted to Usenet ({articles} articles).");
+                manifestError = null;
+                break;
+            }
+            catch (Exception ex)
+            {
+                manifestError = ex;
+                Log($"job '{job.Name}': manifest post attempt {attempt} failed: {ex.Message}");
+                if (attempt < maxManifestAttempts)
+                    Thread.Sleep(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+            }
+        }
+        if (manifestError is not null)
+        {
+            Log($"job '{job.Name}': WARNING: manifest for {manifest.BackupId} could not be " +
+                $"posted after {maxManifestAttempts} attempts: {manifestError.Message}. " +
+                "Volumes are on Usenet; re-run the job or use manual manifest upload to retry.");
+            OperationLog.Append(job.Repo, "manifest-upload-failed",
+                $"job={job.Name} id={manifest.BackupId} error={manifestError.Message}");
+        }
+
         Log($"job '{job.Name}': disk image {manifest.BackupId} streamed to Usenet " +
-            $"({streaming.PostedVolumes.Count} volumes). Manifest is local; " +
-            $"use manual upload to post it.");
+            $"({streaming.PostedVolumes.Count} volumes).");
         OperationLog.Append(job.Repo, "disk-image-stream",
             $"job={job.Name} id={manifest.BackupId} target=nntp volumes={streaming.PostedVolumes.Count} sparse={job.Sparse}");
         return manifest;

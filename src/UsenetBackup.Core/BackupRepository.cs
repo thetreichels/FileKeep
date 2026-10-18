@@ -260,7 +260,8 @@ public sealed class BackupRepository : IDisposable
         string sourceDir,
         BackupManifest? parent,
         ISnapshotProvider? snapshotProvider,
-        VerificationMode verificationMode = VerificationMode.Fast)
+        VerificationMode verificationMode = VerificationMode.Fast,
+        BatchedBackupContext? batch = null)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
@@ -271,7 +272,7 @@ public sealed class BackupRepository : IDisposable
         ISnapshotProvider snap = snapshotProvider ?? (owned = new NullSnapshotProvider(fullSource));
         try
         {
-            return BackupDirectoryFromRoot(fullSource, snap, parent, verificationMode);
+            return BackupDirectoryFromRoot(fullSource, snap, parent, verificationMode, batch);
         }
         finally
         {
@@ -279,7 +280,92 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode)
+    /// <summary>
+    /// File backup with batched staging: chunks are staged through
+    /// <paramref name="batch"/> and flushed (upload → confirm → prune) as
+    /// batches fill, so the local staging area never holds more than about
+    /// one batch. Returns the manifest WITHOUT finalizing it — the caller
+    /// must flush the remainder, inherit parent volumes for incrementals,
+    /// then call <see cref="FinalizeBatchedManifest"/>.
+    /// </summary>
+    public BackupManifest BackupDirectoryBatched(
+        string sourceDir,
+        BackupManifest? parent,
+        ISnapshotProvider? snapshotProvider,
+        BatchedBackupContext batch,
+        VerificationMode verificationMode = VerificationMode.Fast,
+        string? backupId = null)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        StorageGuard.EnsureRepoNotInSource(_root, sourceDir);
+        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode, batch);
+        manifest.BackupId = backupId ?? manifest.BackupId;
+        manifest.Type = parent is null ? "full" : "inc";
+        if (parent is not null)
+            manifest.ParentId = parent.BackupId;
+        return manifest;
+    }
+
+    /// <summary>
+    /// Completes a batched backup: computes the root hash, writes the
+    /// manifest, and records it in the catalog. Manifests are never pruned.
+    /// </summary>
+    public BackupManifest FinalizeBatchedManifest(BackupManifest manifest)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        return FinalizeManifest(manifest);
+    }
+
+    /// <summary>
+    /// Whole-disk image backup with batched staging: the device is read
+    /// sequentially (sparse zero-block gaps are recorded as empty chunk IDs
+    /// in the manifest, exactly like the non-batched paths) and chunks are
+    /// flushed per batch. Returns the manifest WITHOUT finalizing it —
+    /// the caller must flush the remainder, then finalize.
+    /// </summary>
+    public BackupManifest BackupDiskImageBatched(
+        string devicePath,
+        string imageName,
+        bool sparse,
+        string? volumeLetter,
+        BatchedBackupContext batch,
+        string? backupId = null)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+        if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
+            throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
+        StorageGuard.EnsureRepoNotOnDrive(_root, devicePath);
+
+        using var stream = new FileStream(devicePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        try
+        {
+            FileEntry entry;
+            if (sparse)
+                entry = BackupStreamSparse(stream, imageName, DateTime.UtcNow, buffer,
+                    batch.Tracker, volumeLetter, batch);
+            else
+                entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer,
+                    batch.Tracker, batch);
+            var manifest = new BackupManifest
+            {
+                BackupId = backupId ?? Guid.NewGuid().ToString("N"),
+                CreatedUtc = DateTime.UtcNow,
+                Source = devicePath,
+                ChunkSize = _config.ChunkSize,
+                Kind = "disk-image",
+                Files = { entry },
+            };
+            manifest.Type = "full";
+            return manifest;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode, BatchedBackupContext? batch = null)
     {
         string readRoot = snap.SnapshotRoot;
         if (!Directory.Exists(readRoot))
@@ -327,7 +413,7 @@ public sealed class BackupRepository : IDisposable
                 }
                 else
                 {
-                    manifest.Files.Add(BackupOneFile(snap, full, rel, buffer));
+                    manifest.Files.Add(BackupOneFile(snap, full, rel, buffer, batch));
                 }
             }
         }
@@ -462,7 +548,8 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer)
+    private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer,
+        BatchedBackupContext? batch = null)
     {
         if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
         {
@@ -477,7 +564,8 @@ public sealed class BackupRepository : IDisposable
         }
 
         using var stream = snap.OpenRead(fullPath);
-        return BackupStream(stream, relPath, File.GetLastWriteTimeUtc(fullPath), buffer);
+        return BackupStream(stream, relPath, File.GetLastWriteTimeUtc(fullPath), buffer,
+            destination: batch?.Tracker, batch: batch);
     }
 
     /// <summary>
@@ -485,7 +573,7 @@ public sealed class BackupRepository : IDisposable
     /// entry. Used for regular files and for raw disk images alike.
     /// </summary>
     private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore? destination = null)
+        IBlobStore? destination = null, BatchedBackupContext? batch = null)
     {
         // Destination for chunk blobs: local repo by default, or a remote
         // store (SMB/NNTP) for streaming backups where local staging of the
@@ -527,6 +615,8 @@ public sealed class BackupRepository : IDisposable
                 entry.Chunks.Add(chunkId);
                 fileHash.AppendData(span);
                 total += read;
+                if (batch is not null)
+                    batch.CheckFlush(); // throws OperationCanceledException on abort
             }
             entry.Size = size >= 0 ? size : total;
             if (size >= 0 && size != total)
@@ -647,7 +737,7 @@ public sealed class BackupRepository : IDisposable
     /// over the full image with zeros for skipped chunks.
     /// </summary>
     private FileEntry BackupStreamSparse(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore destination, string? volumeLetter)
+        IBlobStore destination, string? volumeLetter, BatchedBackupContext? batch = null)
     {
         var entry = new FileEntry
         {
@@ -713,6 +803,8 @@ public sealed class BackupRepository : IDisposable
                     _catalog.RecordChunk(chunkId, read);
                     entry.Chunks.Add(chunkId);
                     fileHash.AppendData(span);
+                    if (batch is not null)
+                        batch.CheckFlush(); // throws OperationCanceledException on abort
                 }
                 else
                 {
@@ -965,6 +1057,55 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
+    /// For batched incremental backups: the child's own batches only packed
+    /// newly-staged chunks, so parent-referenced chunks need their volume
+    /// entries inherited from the parent manifest to keep the child's
+    /// manifest self-contained for download and NZB generation. Each
+    /// inherited entry keeps its original post-set name, so per-batch parity
+    /// groups stay aligned on the download side.
+    /// Returns false when some referenced chunk is covered by neither the
+    /// child's new volumes nor the parent's volumes (e.g. the parent was
+    /// uploaded chunk-mode) — the caller should fall back to the legacy
+    /// full-staging path rather than produce an unrestorable manifest.
+    /// </summary>
+    public static bool TryInheritParentVolumes(
+        BackupManifest child, BackupManifest parent, out List<VolumeEntry> inherited)
+    {
+        ArgumentNullException.ThrowIfNull(child);
+        ArgumentNullException.ThrowIfNull(parent);
+        inherited = new List<VolumeEntry>();
+
+        var childCovered = new HashSet<string>(StringComparer.Ordinal);
+        if (child.Volumes is not null)
+            foreach (var v in child.Volumes)
+                foreach (string id in v.ChunkIds)
+                    childCovered.Add(id);
+
+        // Parent volume entries indexed by chunk ID.
+        var parentByChunk = new Dictionary<string, VolumeEntry>(StringComparer.Ordinal);
+        if (parent.Volumes is not null)
+            foreach (var v in parent.Volumes)
+                foreach (string id in v.ChunkIds)
+                    parentByChunk.TryAdd(id, v);
+
+        var needed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in child.Files)
+            foreach (string id in f.Chunks)
+                if (!string.IsNullOrEmpty(id) && !childCovered.Contains(id))
+                    needed.Add(id);
+
+        var seenVolumes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string id in needed)
+        {
+            if (!parentByChunk.TryGetValue(id, out VolumeEntry? entry))
+                return false; // uncovered chunk — cannot inherit
+            if (seenVolumes.Add(entry.Id))
+                inherited.Add(entry);
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Recomputes the root hash and writes the manifest back to manifests/.
     /// Used after upload-time mutations (volume packing) so the stored
     /// manifest matches what was posted to Usenet.
@@ -1000,6 +1141,15 @@ public sealed class BackupRepository : IDisposable
 
     /// <summary>Path to catalog.db, which also holds the NNTP upload journal.</summary>
     public string CatalogPath => Path.Combine(_root, "catalog.db");
+
+    /// <summary>
+    /// The local chunk store, for batched staging (track + prune). Null when
+    /// the repo was opened with a custom blob store (remote chunks).
+    /// </summary>
+    internal LocalBlobStore? LocalChunkStore => _blobs as LocalBlobStore;
+
+    /// <summary>Catalog chunk-known query, for batched cross-batch dedup.</summary>
+    internal bool CatalogHasChunk(string chunkIdHex) => _catalog.HasChunk(chunkIdHex);
 
     private ChunkMessageIndex? _messageIndex;
 
@@ -1127,14 +1277,22 @@ public sealed class BackupRepository : IDisposable
         // Chunk->volume plan for skip planning and parity reconstruction.
         // Best-effort: a missing manifest only costs extra fetches.
         Dictionary<string, IReadOnlyList<string>>? plan = null;
+        // Post-set per volume, for batched backups: parity groups are
+        // per-set, so reconstruction must scope groups to the volume's set.
+        // Null (legacy backups) means the whole backup was one set.
+        Dictionary<string, string?>? volumeSets = null;
         if (nzb.BackupId is not null)
         {
             try
             {
                 var manifest = LoadManifest(nzb.BackupId);
                 if (manifest.Volumes is { Count: > 0 })
+                {
                     plan = manifest.Volumes.ToDictionary(
                         v => v.Id, v => (IReadOnlyList<string>)v.ChunkIds);
+                    if (manifest.Volumes.Any(v => v.SetName is not null))
+                        volumeSets = manifest.Volumes.ToDictionary(v => v.Id, v => v.SetName);
+                }
             }
             catch { /* fall back to fetch-and-unpack */ }
         }
@@ -1150,6 +1308,21 @@ public sealed class BackupRepository : IDisposable
         }
         // Canonical (sorted) order for parity group alignment.
         var allVolumeIds = volumeIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+        // Parity scope for a volume: its post set's volumes when the
+        // manifest records per-batch sets, else the whole backup (legacy).
+        IReadOnlyList<string> ParityScope(string vid)
+        {
+            if (volumeSets is not null &&
+                volumeSets.TryGetValue(vid, out string? set) && set is not null)
+            {
+                return volumeIds
+                    .Where(id => volumeSets.TryGetValue(id, out string? s) && s == set)
+                    .OrderBy(id => id, StringComparer.Ordinal)
+                    .ToList();
+            }
+            return allVolumeIds;
+        }
 
         int downloaded = 0, alreadyPresent = 0, reconstructed = 0;
         for (int i = 0; i < volumeIds.Count; i++)
@@ -1175,7 +1348,7 @@ public sealed class BackupRepository : IDisposable
                 catch (Exception)
                 {
                     // Volume missing or corrupted — try parity reconstruction
-                    volumeBytes = TryReconstructVolume(volumeId, allVolumeIds, plan, remote);
+                    volumeBytes = TryReconstructVolume(volumeId, ParityScope(volumeId), plan, remote);
                     if (volumeBytes is null)
                         throw; // Reconstruction failed, rethrow original
                     reconstructed++;
