@@ -20,6 +20,10 @@ namespace UsenetBackup.Core.Json;
 [JsonSerializable(typeof(Dictionary<string, Dictionary<string, string>>))]
 [JsonSerializable(typeof(Dictionary<string, ProviderLimits.LimitEntry>))]
 [JsonSerializable(typeof(ServiceConfig))]
+[JsonSerializable(typeof(ProtectionProfileRequest))]
+[JsonSerializable(typeof(ProtectionProfileResponse))]
+[JsonSerializable(typeof(AddYubiKeyRequest))]
+[JsonSerializable(typeof(AddYubiKeyResponse))]
 [JsonSerializable(typeof(RepositoryConfig))]
 [JsonSerializable(typeof(BackupManifest))]
 public partial class FileKeepJsonContext : JsonSerializerContext

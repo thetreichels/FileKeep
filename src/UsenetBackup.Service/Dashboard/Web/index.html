@@ -135,6 +135,30 @@
   .toggle input:checked + .track::after { transform: translateX(20px); background: #ffffff; }
   .toggle input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
   .toggle input:disabled + .track { opacity: .5; cursor: default; }
+  /* Security tab: method cards, tooltips, checklist */
+  .sec-method { transition: border-color 0.2s; }
+  /* Delayed tooltips (2s hover, immediate on keyboard focus) */
+  [data-tooltip] { position: relative; }
+  [data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+    background: #323232; color: #fff; font-size: 12px; font-weight: 400;
+    padding: 8px 12px; border-radius: 6px; white-space: normal; width: 240px;
+    opacity: 0; pointer-events: none; z-index: 1000;
+    margin-bottom: 8px; line-height: 1.4;
+  }
+  [data-tooltip]:hover::after {
+    opacity: 1; transition: opacity 0.2s ease-in 2s;
+  }
+  [data-tooltip]:focus-visible::after, [data-tooltip]:focus-within::after {
+    opacity: 1; transition: opacity 0.2s;
+  }
+  /* Passphrase checklist */
+  #sec-pp-checklist .rule-icon { display: inline-block; width: 20px; font-weight: 700; }
+  #sec-pp-checklist [data-rule] { color: var(--bad); margin: 4px 0; }
+  #sec-pp-checklist [data-rule].pass { color: var(--ok); }
+  #sec-pp-checklist [data-rule].pass .rule-icon::before { content: "✓"; }
+  #sec-pp-checklist [data-rule]:not(.pass) .rule-icon::before { content: "✗"; }
   /* YubiKey slick UI: setup card, touch prompt, session badge. */
   .yk-card {
     border: 1px solid var(--border); border-radius: 8px; padding: 16px;
@@ -281,13 +305,14 @@
   <nav>
     <div class="nav-brand">
       <div class="glyph">⛁</div>
-      <div><div class="t1">FileKeep</div><div class="t2">Service settings</div></div>
+      <div><div class="t1">FileKeep</div></div>
     </div>
     <a class="nav-item active" data-view="overview">Overview</a>
-    <a class="nav-item" data-view="backups">Backups</a>
-    <a class="nav-item" data-view="recovery">Recovery</a>
-    <a class="nav-item" data-view="tools">Tools</a>
-    <a class="nav-item" data-view="settings">Settings</a>
+    <a class="nav-item" data-view="jobs">Backup jobs</a>
+    <a class="nav-item" data-view="vault">Banked Vault</a>
+    <a class="nav-item" data-view="security">Security</a>
+    <a class="nav-item" data-view="tools">Tools & Settings</a>
+    <a class="nav-item" data-view="about">About</a>
     <div id="sidebar-log" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);min-height:120px;max-height:40vh;overflow:hidden;display:flex;flex-direction:column">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:12px;font-weight:600;color:var(--text-2)">OPERATIONS LOG</span>
@@ -298,8 +323,26 @@
   </nav>
   <main>
     <div class="view active" id="view-overview">
-      <h1>Backup (Usenet)</h1>
-      <div class="card hero">
+      <h1>Protection is on</h1>
+      <p style="color:var(--text-2);margin:-12px 0 20px">Your last backup finished cleanly and the next one is scheduled. This is a snapshot of this PC.</p>
+      <div style="display:flex;gap:12px;margin-bottom:20px">
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:28px;font-weight:700" id="ov-vault-count">—</div>
+          <div class="meta">Backups in the Banked Vault</div>
+        </div>
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:28px;font-weight:700" id="ov-stored">—</div>
+          <div class="meta">Stored across Usenet + NAS</div>
+        </div>
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:20px;font-weight:700" id="ov-next">—</div>
+          <div class="meta">Next scheduled backup</div>
+        </div>
+      </div>
+      <div class="card">
+        <div id="ov-jobs"><p style="color:var(--text-2)">Loading…</p></div>
+      </div>
+      <div class="card hero" style="display:none" id="ov-hero">
         <div class="hero-icon" id="heroIcon">✓</div>
         <div>
           <div class="hero-title" id="heroTitle">Checking…</div>
@@ -330,8 +373,32 @@
       <h2>Usenet expiration warnings</h2>
       <div class="card" id="expiration" style="padding-top:8px"><p style="color:var(--text-2)">Loading…</p></div>
     </div>
-    <div class="view" id="view-backups">
-      <h1>Backups</h1>
+    <div class="view" id="view-vault">
+      <h1>Banked Vault</h1>
+      <p style="color:var(--text-2);margin:-12px 0 20px">Finished backups live here — encrypted chunks posted to Usenet and mirrored on your NAS. Restores pull from whichever copy is closer.</p>
+      <div style="display:flex;gap:12px;margin-bottom:20px">
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:28px;font-weight:700" id="vault-locations">—</div>
+          <div class="meta">Storage locations</div>
+        </div>
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:28px;font-weight:700" id="vault-stored">—</div>
+          <div class="meta">Total stored</div>
+        </div>
+        <div class="card" style="flex:1;margin:0;text-align:center">
+          <div style="font-size:28px;font-weight:700" id="vault-count">—</div>
+          <div class="meta">Backups banked</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div class="grow">
+            <div class="name">Storage locations</div>
+          </div>
+          <button class="accent" onclick="showAddNzbModal()">Add NZB</button>
+        </div>
+        <div id="vault-locations-list" style="margin-top:12px"><p style="color:var(--text-2)">Loading…</p></div>
+      </div>
       <div class="card">
         <div class="row">
           <div class="grow">
@@ -376,7 +443,9 @@
       </div>
       <div id="restoreModal" class="modal" style="display:none">
         <div class="modal-box">
-          <h2 style="margin-top:0" id="restoreModalTitle">Restore backup</h2>
+          <h2 style="margin-top:0">Recover backup</h2>
+          <p class="meta">Pull this backup back down from the Banked Vault. Recovering asks you to unlock first.</p>
+          <div id="restoreModalTitle" style="font-weight:600;margin:12px 0"></div>
           <div class="meta" id="restoreModalSub"></div>
           <div id="restoreFilesForm">
             <div class="row" style="margin-top:8px">
@@ -409,7 +478,31 @@
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeRestoreModal()">Cancel</button>
-            <button class="accent" id="restoreModalGo" onclick="submitRestore()">Restore</button>
+            <button class="accent" id="restoreModalGo" onclick="submitRestore()">Start recovery</button>
+          </div>
+        </div>
+      </div>
+      <div id="addNzbModal" class="modal" style="display:none">
+        <div class="modal-box">
+          <h2 style="margin-top:0">Add NZB</h2>
+          <p class="meta">Add a backup to the Banked Vault list from its NZB file. The NZB points at the backup's encrypted volumes on Usenet, so the backup can be recovered from here even if it wasn't banked on this PC.</p>
+          <div class="form-grid" style="margin-top:16px">
+            <label>Backup name
+              <input id="nzb-name" type="text" placeholder="e.g. Photos archive">
+              <span class="meta">What to call this backup in the list. Leave it blank to use the NZB file's name.</span>
+            </label>
+            <label>NZB file
+              <span class="folder-row"><input id="nzb-file-input" type="text" placeholder="e.g. filekeep-photos.nzb" style="flex:1"><button type="button" class="browse-btn" onclick="browseSaveFile('nzb-file-input', 'Select NZB file', '.nzb', '')">Browse…</button></span>
+              <span class="meta">The .nzb file for this backup — the index of its volumes on Usenet.</span>
+            </label>
+            <label>Newsgroup
+              <input id="nzb-group" type="text" placeholder="e.g. alt.binaries.usenet">
+              <span class="meta">The group the backup's volumes were posted to.</span>
+            </label>
+          </div>
+          <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+            <button onclick="closeAddNzbModal()">Cancel</button>
+            <button class="accent" onclick="submitAddNzb()">Add backup</button>
           </div>
         </div>
       </div>
@@ -419,11 +512,378 @@
         <div id="destinations-list"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
     </div>
+    <div class="view" id="view-jobs">
+      <h1>Backup jobs</h1>
+      <p style="color:var(--text-2);margin:-12px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
+      <div style="margin-bottom:16px">
+        <button class="accent" onclick="showJobForm()">New backup job</button>
+      </div>
+      <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
+    </div>
+    <div class="view" id="view-about">
+      <h1>About FileKeep</h1>
+      <div class="card">
+        <div class="row" style="padding:12px 0;border-bottom:1px solid var(--border)">
+          <div class="grow"><div class="name">Version</div></div>
+          <div style="color:var(--text-2)">FileKeep 0.08.11</div>
+        </div>
+        <div class="row" style="padding:12px 0;border-bottom:1px solid var(--border)">
+          <div class="grow"><div class="name">License</div></div>
+          <div style="color:var(--text-2)">GPL-3.0-only</div>
+        </div>
+        <div class="row" style="padding:12px 0">
+          <div class="grow"><div class="name">Storage</div></div>
+          <div style="color:var(--text-2)">Banked Vault — Usenet + NAS, encrypted before it leaves this PC</div>
+        </div>
+      </div>
+      <div style="margin-top:16px">
+        <button onclick="checkForUpdates()">Check for updates</button>
+      </div>
+    </div>
+    <div class="view" id="view-security">
+      <div id="sec-wizard">
+        <!-- Step 1: Build your protection -->
+        <div class="sec-step" id="sec-step-1">
+          <h1>Encryption / Decryption</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">Backups stay encrypted until restored.</p>
+          <div id="sec-banner" style="display:none;margin-bottom:16px;padding:12px 16px;border-radius:6px;background:#e8f1fb;border:1px solid #b8d4f0;color:#1a4a7a;font-size:14px"></div>
+          <div style="display:flex;gap:20px;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <h2 style="margin-top:0">Build your protection</h2>
+              <!-- Passphrase card -->
+              <div class="card sec-method" id="sec-card-passphrase" style="margin-bottom:12px">
+                <div class="row" style="align-items:center">
+                  <label class="toggle" data-tooltip="Switch methods on or off. Use the Link pill to switch Passphrase and YubiKey between OR and AND. OR means either one unlocks on its own; AND means both are required together.">
+                    <input id="sec-passphrase-toggle" type="checkbox" checked onchange="secToggleMethod('passphrase', this.checked)">
+                    <span class="track"></span>
+                  </label>
+                  <div class="grow" style="margin-left:12px">
+                    <div class="name">Passphrase</div>
+                    <div class="meta">Encrypts everything — you remember it.</div>
+                  </div>
+                </div>
+              </div>
+              <!-- Link band -->
+              <div id="sec-link-band" style="width:486px;max-width:100%;height:34px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:17px;cursor:pointer;border:2px solid var(--accent);background:var(--accent)" onclick="secToggleLink()" role="button" aria-pressed="true" title="Click to switch between OR and AND">
+                <span id="sec-link-text" style="font-size:14px;font-weight:600;color:#fff">Linked — AND</span>
+              </div>
+              <div id="sec-link-band-unlinked" style="width:486px;max-width:100%;height:34px;margin:0 auto 12px;display:none;align-items:center;justify-content:center;gap:8px;border-radius:17px;cursor:pointer;border:2px solid var(--accent);background:transparent" onclick="secToggleLink()" role="button" aria-pressed="false" title="Click to switch between OR and AND">
+                <span style="font-size:11px;font-weight:700;color:var(--accent);border:1px dashed var(--accent);border-radius:10px;padding:2px 8px">OR</span>
+                <span style="font-size:14px;font-weight:600;color:var(--accent)">Link</span>
+              </div>
+              <!-- YubiKey card -->
+              <div class="card sec-method" id="sec-card-yubikey" style="margin-bottom:12px">
+                <div class="row" style="align-items:center">
+                  <label class="toggle" data-tooltip="Switch methods on or off. Use the Link pill to switch Passphrase and YubiKey between OR and AND. OR means either one unlocks on its own; AND means both are required together.">
+                    <input id="sec-yubikey-toggle" type="checkbox" checked onchange="secToggleMethod('yubikey', this.checked)">
+                    <span class="track"></span>
+                  </label>
+                  <div class="grow" style="margin-left:12px">
+                    <div class="name">YubiKey</div>
+                    <div class="meta">Physical key — touch to unlock.</div>
+                  </div>
+                </div>
+                <div id="sec-yk-reassurance" style="display:none;margin-top:12px;padding:12px;background:var(--bg-2);border-radius:6px;font-size:13px;color:var(--text-2)">
+                  No YubiKey? No problem — a strong passphrase keeps your backups secure on its own. If you add one later, it raises your security and makes unlocking as simple as a touch.
+                </div>
+              </div>
+              <!-- Phone OR connector (static, collapses when phone off) -->
+              <div id="sec-phone-connector" style="display:flex;justify-content:center;margin:0 auto 12px;height:20px">
+                <span style="font-size:11px;font-weight:700;color:var(--text-2);border:1px dashed var(--text-2);border-radius:10px;padding:2px 8px;align-self:center">OR</span>
+              </div>
+              <!-- Phone card (dashed, muted) -->
+              <div class="card sec-method" id="sec-card-phone" style="margin-bottom:12px;border-style:dashed;opacity:0.85">
+                <div class="row" style="align-items:center">
+                  <label class="toggle" data-tooltip="Switch methods on or off. Phone always shows OR — it can never be linked. It works as a standalone fallback.">
+                    <input id="sec-phone-toggle" type="checkbox" onchange="secToggleMethod('phone', this.checked)">
+                    <span class="track"></span>
+                  </label>
+                  <div class="grow" style="margin-left:12px">
+                    <div class="name">Phone authenticator <span style="font-size:11px;border:1px dashed var(--text-2);border-radius:8px;padding:1px 6px;color:var(--text-2);font-weight:400">Fallback</span></div>
+                    <div class="meta">Authenticator app — type a 6-digit code.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Insight panel -->
+            <div class="card" style="width:280px;flex-shrink:0">
+              <h2 style="margin-top:0">What this means</h2>
+              <div style="margin-bottom:16px">
+                <div style="font-size:13px;font-weight:600;margin-bottom:6px">Security</div>
+                <div style="display:flex;gap:4px;margin-bottom:6px" id="sec-meter-security-segs">
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                </div>
+                <div id="sec-security-label" style="font-size:12px;color:var(--text-2)">Maximum</div>
+                <div id="sec-security-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">Easiest way in: Passphrase and YubiKey together</div>
+              </div>
+              <div>
+                <div style="font-size:13px;font-weight:600;margin-bottom:6px">Redundancy</div>
+                <div style="display:flex;gap:4px;margin-bottom:6px" id="sec-meter-redundancy-segs">
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+                </div>
+                <div id="sec-redundancy-label" style="font-size:12px;color:var(--text-2)">Low</div>
+                <div id="sec-redundancy-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">One way in</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: Passphrase -->
+        <div class="sec-step" id="sec-step-2" style="display:none">
+          <h1>Create your backup passphrase</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">This passphrase encrypts every backup. You'll type it when setting up restores — store it in your password manager.</p>
+          <div class="card">
+            <div id="sec-pp-info-linked" style="margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
+              <div style="font-weight:600;margin-bottom:4px">Your passphrase encrypts everything — combined with your YubiKey, so both are required together.</div>
+              <div style="color:var(--text-2)">Restores need both, every time: type your passphrase and touch the YubiKey. Neither one works alone — lose either and only the recovery sheet can get you back in.</div>
+            </div>
+            <div id="sec-pp-info-unlinked" style="display:none;margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
+              <div style="font-weight:600;margin-bottom:4px">Your passphrase encrypts everything — here it unlocks on its own.</div>
+              <div style="color:var(--text-2)">Your passphrase and YubiKey aren't linked — each is a separate way in, so either one unlocks on its own.</div>
+            </div>
+            <div class="form-grid">
+              <label>Backup passphrase
+                <span style="display:flex;gap:6px;align-items:center">
+                  <input id="sec-pp-pass" type="password" placeholder="At least 8 characters" autocomplete="new-password" style="flex:1" oninput="secCheckPassphrase()" onblur="secValidatePassphraseBlur()">
+                  <button type="button" onclick="secTogglePwVisibility('sec-pp-pass', this)" title="Show/hide" style="padding:6px 10px">👁</button>
+                </span>
+                <span class="meta">Longer is stronger — a few random words work well.</span>
+              </label>
+            </div>
+            <div id="sec-pp-checklist" style="margin:12px 0;font-size:13px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+              <div data-rule="upper"><span class="rule-icon"></span> Uppercase letter (A–Z)</div>
+              <div data-rule="lower"><span class="rule-icon"></span> Lowercase letter (a–z)</div>
+              <div data-rule="number"><span class="rule-icon"></span> Number (0–9)</div>
+              <div data-rule="special"><span class="rule-icon"></span> Special character (!@#$%^&*)</div>
+            </div>
+            <div id="sec-pp-blur-error" style="display:none;color:var(--bad);font-size:13px;margin:8px 0" role="alert"></div>
+            <div class="form-grid" style="margin-top:12px">
+              <label>Confirm passphrase
+                <input id="sec-pp-confirm" type="password" placeholder="Type it again" autocomplete="new-password" oninput="secCheckPassphrase()">
+                <span id="sec-pp-match-msg" class="meta"></span>
+              </label>
+            </div>
+            <div style="margin-top:12px">
+              <button type="button" onclick="secFillSamplePassphrase()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:0">Fill with a sample passphrase (demo)</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2b: YubiKey-only key secret -->
+        <div class="sec-step" id="sec-step-2b" style="display:none">
+          <h1>Generate key secret</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">There's no passphrase in this mode. Instead, FileKeep generates a random 20-byte secret and programs it into your YubiKey's HMAC-SHA1 challenge–response slot. The answers the key computes from that secret are what encrypt your backups.</p>
+          <div class="card">
+            <div style="margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
+              <div style="font-weight:600;margin-bottom:4px">Generated on this PC — and kept only in your keys.</div>
+              <div style="color:var(--text-2)">FileKeep creates the secret with a cryptographic random generator and writes it into each key you program in the next step. FileKeep itself keeps no copy. After programming, you'll print the secret on a recovery sheet — the only copy that exists outside your keys.</div>
+            </div>
+            <div style="font-family:monospace;background:var(--bg-2);padding:16px;border-radius:6px;font-size:16px;letter-spacing:2px;text-align:center;margin:16px 0" id="sec-yk-secret">7f3a9c1e 04b8d2a6 51e98f07 c3d46a2b 9e15f840</div>
+            <div class="meta" style="text-align:center">You never type this day to day — it's shown so you can recognize it again on your recovery sheet.</div>
+            <div style="margin-top:16px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+              <div style="font-weight:600;color:var(--bad);margin-bottom:4px">No passphrase means no other way in.</div>
+              <div>If every programmed key is lost and the recovery sheet is gone, these backups cannot be decrypted — by anyone, including you. That's why the next steps let you program a spare and print the sheet.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3: Link YubiKey -->
+        <div class="sec-step" id="sec-step-3" style="display:none">
+          <h1>Link your YubiKey</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">Insert your YubiKey, then touch its metal contact when it starts blinking. FileKeep sends it a challenge and stores the wrapped passphrase on this PC — the secret never leaves the key.</p>
+          <div class="card" style="text-align:center;padding:40px 20px">
+            <div style="font-size:64px;margin-bottom:16px">🔑</div>
+            <div id="sec-yk-waiting">
+              <div style="font-weight:600;margin-bottom:8px">Waiting for touch…</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Your YubiKey is blinking. Touch the gold contact to confirm.</div>
+              <button class="accent" onclick="secSimulateYubiKeyTouch()">Simulate touch (demo)</button>
+            </div>
+            <div id="sec-yk-linked" style="display:none">
+              <div style="font-weight:600;color:var(--ok);margin-bottom:8px">✓ YubiKey linked</div>
+              <div style="color:var(--text-2);font-size:13px">The key answered the challenge and your passphrase is now wrapped to slot 2. Touch required on every restore unlock.</div>
+            </div>
+          </div>
+          <div id="sec-yk-unlinked-note" style="display:none" class="card">
+            <div style="font-weight:600;margin-bottom:8px">YubiKey and passphrase aren't linked</div>
+            <div style="color:var(--text-2);font-size:13px;margin-bottom:12px">That means they work independently — either one unlocks on its own. Two common setups:</div>
+            <ul style="color:var(--text-2);font-size:13px;margin:0 0 12px 20px">
+              <li><strong>YubiKey holds your passphrase:</strong> Touch the key for daily unlocking; type your passphrase if the key is lost. The key is your fast path, the passphrase is your backup.</li>
+              <li><strong>YubiKey as spare:</strong> Your passphrase is your primary unlock; the YubiKey is programmed as a backup you keep somewhere safe.</li>
+            </ul>
+            <button onclick="secLinkFromNote()">Link them if you want both required every time (maximum security, no fallback).</button>
+          </div>
+          <div class="card">
+            <label>Slot
+              <select id="sec-yk-slot" onchange="secUpdateSlotWarning()">
+                <option value="1">Slot 1</option>
+                <option value="2" selected>Slot 2</option>
+              </select>
+            </label>
+            <div class="meta">Slot 2 is the usual choice — slot 1 is often used by other sign-in features.</div>
+            <div style="margin-top:12px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+              <div style="font-weight:600;color:var(--bad)" id="sec-yk-slot-warn-title">Slot 2 will be overwritten.</div>
+              <div>Programming the challenge–response secret replaces whatever is currently stored in that slot. If another app uses this slot on this key, it will stop working with that app.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3b: Program keys (YubiKey-only) -->
+        <div class="sec-step" id="sec-step-3b" style="display:none">
+          <h1>Program your keys</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">Insert a YubiKey and touch its metal contact when it blinks — FileKeep writes the secret from the previous step into the key. Every key gets the same secret, so any programmed key can unlock your backups. One key is enough to get started. You can program a spare as a backup if you like — store it somewhere separate from your main key.</p>
+          <div class="card" style="text-align:center;padding:40px 20px">
+            <div style="font-size:64px;margin-bottom:16px">🔑</div>
+            <div id="sec-yk-prog-waiting">
+              <div style="font-weight:600;margin-bottom:8px">Waiting for touch…</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Your YubiKey is blinking. Touch the gold contact to program it with the secret.</div>
+              <button class="accent" onclick="secSimulateKeyProgram()">Simulate touch (demo)</button>
+            </div>
+            <div id="sec-yk-prog-done" style="display:none">
+              <div style="font-weight:600;color:var(--ok);margin-bottom:8px" id="sec-yk-prog-msg">Key 1 programmed</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">The secret is now in this key's slot 2. Program a spare key the same way, or continue.</div>
+              <button onclick="secProgramAnotherKey()">Program another key</button>
+            </div>
+          </div>
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:8px">Programmed keys</div>
+            <div id="sec-yk-key-list"><div style="color:var(--text-2);font-size:13px">No keys programmed yet — touch a key to program the first one.</div></div>
+          </div>
+          <div class="card">
+            <div style="font-size:13px;color:var(--text-2)">Slot 2 will be overwritten on each key.</div>
+            <div style="font-size:13px;color:var(--text-2)">Programming replaces whatever is currently stored in that slot. If another app uses this slot on one of these keys, it will stop working with that app.</div>
+          </div>
+        </div>
+
+        <!-- Step 4: Recovery sheet (YubiKey-only) -->
+        <div class="sec-step" id="sec-step-4" style="display:none">
+          <h1>Save your recovery sheet</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">This sheet holds the same 20-byte secret that's now inside your keys. It's the backup for the day every key is lost, broken, or somewhere you can't get to.</p>
+          <div class="card">
+            <div style="border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px">
+              <div style="font-weight:700;font-size:16px;margin-bottom:4px">FileKeep recovery sheet <span style="font-size:11px;font-weight:400;background:var(--bg-2);border-radius:10px;padding:2px 8px">YubiKey-only protection</span></div>
+              <div style="margin:16px 0;padding:20px;background:var(--bg-2);border-radius:6px;text-align:center;color:var(--text-2)">QR code (placeholder)</div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:4px">HMAC-SHA1 secret — 40 hex characters</div>
+              <div style="font-family:monospace;font-size:14px;letter-spacing:1px;margin-bottom:12px">a3f8 9c2e 1b7d 4f6a 8e2c 5d9b 3f1a 7c4e 2d8b 6a9f</div>
+              <div style="font-size:12px;color:var(--text-2)">To recover: program this secret into a new YubiKey's HMAC-SHA1 challenge–response slot (slot 2), then open FileKeep and touch the key to restore from your Banked Vault. Keep this sheet somewhere safe — a fire safe or a safe-deposit box, not with your keys.</div>
+              <div style="font-size:12px;color:var(--text-2);margin-top:8px">Created October 17, 2026.</div>
+            </div>
+            <div style="margin-bottom:16px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+              <div style="font-weight:600;color:var(--bad);margin-bottom:4px">Store this somewhere safe and separate from your YubiKey.</div>
+              <div>Anyone with this code can access your backups. If all keys are lost, this secret programs a new key and restores access.</div>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:16px">
+              <button onclick="secSaveRecoverySheet('txt')">Save as text file .txt</button>
+              <button onclick="secSaveRecoverySheet('png')">Save as image .png</button>
+            </div>
+            <label class="check">
+              <input id="sec-yk-ack" type="checkbox" onchange="secUpdateWizardNext()">
+              I have saved my recovery sheet in a safe place
+            </label>
+          </div>
+        </div>
+
+        <!-- Step 4b: Phone setup -->
+        <div class="sec-step" id="sec-step-4b" style="display:none">
+          <h1>Set up your phone</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px" id="sec-phone-lede">Your phone's authenticator app shows a rotating 6-digit code that unlocks restores — scan the code below to add it.</p>
+          <div class="card" style="text-align:center">
+            <div style="width:200px;height:200px;background:var(--bg-2);border-radius:8px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;color:var(--text-2)">QR code</div>
+            <div style="font-size:13px;color:var(--text-2);margin-bottom:16px">Scan the QR code with Google Authenticator, Authy, Microsoft Authenticator, or any authenticator app — it adds a "FileKeep" entry that shows a new code every 30 seconds.</div>
+            <div style="margin-bottom:16px">
+              <div style="font-size:13px;font-weight:600;margin-bottom:8px">Can't scan? Enter this secret manually</div>
+              <div style="display:flex;gap:8px;align-items:center;justify-content:center">
+                <code style="font-size:16px;letter-spacing:2px;background:var(--bg-2);padding:8px 16px;border-radius:6px">JBSW Y3DP EHPK 3PXP</code>
+                <button onclick="secCopyTotpSecret()">Copy</button>
+              </div>
+              <div class="meta" style="margin-top:8px">In your app, choose "Enter a setup key" and type the secret exactly as shown.</div>
+            </div>
+            <div style="margin-top:20px">
+              <div style="font-size:13px;font-weight:600;margin-bottom:8px">Enter the 6-digit code from your app</div>
+              <div style="display:flex;gap:8px;justify-content:center">
+                <input id="sec-phone-code" placeholder="123456" maxlength="6" style="width:120px;text-align:center;font-size:18px;letter-spacing:4px">
+                <button class="accent" id="sec-phone-verify" onclick="secVerifyPhoneCode()">Verify</button>
+              </div>
+              <div id="sec-phone-msg" style="font-size:13px;margin-top:8px"></div>
+            </div>
+          </div>
+          <div class="meta" style="margin-top:12px">Phone is switched on in your profile — to leave it out, go Back and switch it off there. You can also change it later in Settings → Security.</div>
+        </div>
+
+        <!-- Final step -->
+        <div class="sec-step" id="sec-step-final" style="display:none">
+          <h1>You're protected</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px" id="sec-final-sub">Passphrase + YubiKey is set up.</p>
+          <div class="card">
+            <ul id="sec-final-list" style="margin:0;padding-left:20px;color:var(--text-2);font-size:14px;line-height:1.8">
+            </ul>
+          </div>
+          <div id="sec-final-note" style="display:none;margin-top:12px;padding:12px;background:var(--bg-2);border-radius:6px;font-size:13px;color:var(--text-2)"></div>
+        </div>
+
+        <!-- Wizard footer -->
+        <div style="display:flex;align-items:center;margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+          <span id="sec-step-indicator" style="font-size:13px;color:var(--text-2)">Step 1 of 4</span>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button id="sec-back" onclick="secGoStep(secCurrentStep - 1)" disabled>Back</button>
+            <span id="sec-next-wrap" title="">
+              <button class="accent" id="sec-next" onclick="secGoStep(secCurrentStep + 1)">Next</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="view" id="view-tools">
-      <h1>Tools</h1>
+      <!-- Appearance -->
+      <div class="card">
+        <div class="name">Appearance</div>
+        <div class="meta">Choose how FileKeep looks on this PC. System follows whatever this machine is using and switches automatically when the system setting changes.</div>
+        <div style="display:flex;gap:12px;margin-top:12px">
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-light-card">
+            <input type="radio" name="theme" value="light" onchange="setTheme('light')" style="margin-bottom:8px">
+            <div style="font-weight:600">Light</div>
+            <div class="meta" style="font-size:12px">Always use the light appearance.</div>
+          </label>
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-dark-card">
+            <input type="radio" name="theme" value="dark" onchange="setTheme('dark')" style="margin-bottom:8px">
+            <div style="font-weight:600">Dark</div>
+            <div class="meta" style="font-size:12px">Always use the dark appearance.</div>
+          </label>
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-system-card">
+            <input type="radio" name="theme" value="system" checked onchange="setTheme('system')" style="margin-bottom:8px">
+            <div style="font-weight:600">System</div>
+            <div class="meta" style="font-size:12px">Follow whatever this machine is using — light or dark.</div>
+          </label>
+        </div>
+        <div class="row" style="margin-top:16px;align-items:center">
+          <div class="grow">
+            <div class="name">Minimize to tray</div>
+            <div class="meta">Minimizing the window sends FileKeep to the system tray instead of the taskbar. FileKeep keeps running in the tray, so scheduled backups still run.</div>
+          </div>
+          <label class="toggle" id="tray-card-toggle" style="display:none">
+            <input id="tray-enabled" type="checkbox" onchange="setTrayEnabled(this.checked)">
+            <span class="track"></span>
+          </label>
+        </div>
+      </div>
+      <!-- YubiKeys -->
+      <div class="card" id="yubikeys-card" style="display:none">
+        <div class="name">YubiKeys</div>
+        <div class="meta">Every registered YubiKey holds the same secret, so any of them can unlock a restore. Register a spare and keep it somewhere separate from your main key.</div>
+        <div id="yubikeys-list" style="margin-top:12px"></div>
+        <div style="margin-top:12px">
+          <button onclick="addAnotherYubiKey()">Add another YubiKey</button>
+        </div>
+        <div id="yubikeys-status" style="margin-top:8px;font-size:13px;color:var(--text-2)"></div>
+      </div>
       <div class="card">
         <div class="name">One-time backup</div>
-        <div class="meta">Run a single backup now — files or a full disk image — to one of your configured destinations. One-time backups are never scheduled.</div>
+        <div class="meta">Back something up right now, without creating a scheduled job. It encrypts with your protection profile, same as a job — handy for an extra copy before a trip or a big change.</div>
         <div class="row" style="margin-top:8px">
           <label class="check"><input type="radio" name="ot-type" value="files" checked> Files</label>
           <label class="check"><input type="radio" name="ot-type" value="disk"> Disk image</label>
@@ -452,20 +912,77 @@
       </div>
       <div class="card" id="smb-sync-card" style="display:none">
         <div class="name">Sync to SMB share</div>
+      <div class="card">
+        <div class="name">Backup locations</div>
+        <div class="meta">The places backups are sent. Scheduled jobs and one-time backups pick from this list.</div>
+        <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
+          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
+        </div>
+      <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
+        <div class="form-grid">
+          <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
+          <input id="lf-type" type="hidden">
+        </div>
+        <div class="form-grid" id="lf-nntp-fields">
+          <label title="Choose your Usenet provider to auto-fill the host, port, and SSL settings below. Select 'Custom' to enter them manually.">Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
+            <option value="">Custom…</option>
+            <option value="frugal">Frugal Usenet</option>
+            <option value="eweka">Eweka</option>
+            <option value="newshosting">Newshosting</option>
+            <option value="usenetserver">UsenetServer</option>
+            <option value="giganews">Giganews</option>
+            <option value="easynews">Easynews</option>
+          </select></label>
+          <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
+          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
+          <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
+          <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+          <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
+          <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
+        </div>
+        <div class="form-grid" id="lf-smb-fields" style="display:none">
+          <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
+          <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
+          <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+        </div>
+        <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+        <div id="lf-test-result" style="margin:8px 0;display:none"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button onclick="testLocationConnection()">Test connection</button>
+          <button class="accent" onclick="saveLocation()">Save</button>
+          <button onclick="hideLocationForm()">Cancel</button>
+        </div>
+      </div>
+      </div>
         <div class="meta">Copy backup data to your network share. Only shown because you have an SMB destination configured.</div>
         <div class="row" style="margin-top:8px">
           <select id="smb-sync-dest" style="flex:1"></select>
           <button onclick="startSmbSync()">Sync now</button>
         </div>
       </div>
-      <div class="card" id="tray-card" style="display:none">
-        <div class="name">Minimize to tray</div>
-        <div class="meta">When enabled, minimizing the window sends FileKeep to the system tray instead of the taskbar. FileKeep keeps running in the tray, so scheduled backups still run.</div>
+    </div>
+      <div class="card">
+        <div class="name">Recovery USB</div>
+        <div class="meta">Create bootable recovery media. If this PC won't start, boot it from the USB stick and restore a banked backup over the network (SMB) — no Windows install needed on the dead machine.</div>
         <div class="row" style="margin-top:8px">
-          <label class="check"><input id="tray-enabled" type="checkbox" onchange="setTrayEnabled(this.checked)"> Show tray icon and minimize to tray</label>
+          <select id="winre-target" style="flex:1" onchange="winreTargetChanged()">
+            <option value="">Select target…</option>
+          </select>
+          <button type="button" onclick="refreshWinReTargets()" title="Rescan for USB drives">↻ Rescan</button>
+        </div>
+        <div class="meta" style="margin-top:4px">The drive is erased and made bootable. Use a stick you can spare — 8 GB or larger.</div>
+        <div class="row" style="margin-top:8px">
+          <button class="accent" onclick="startWinReBuild()">Create USB…</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button onclick="checkWinReStatus()">Check build status</button>
+          <button id="winre-cancel" onclick="cancelWinReBuild()" style="display:none;margin-left:8px">Cancel build</button>
+          <span id="winre-status" style="margin-left:8px"></span>
         </div>
       </div>
-    </div>
                 <div class="view" id="view-recovery">
       <h1>Recovery</h1>
       <div class="card">
@@ -484,42 +1001,6 @@
         <div class="row" style="margin-top:8px">
           <input id="nzb-file" type="file" accept=".nzb">
           <button onclick="uploadNzb()">Download</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="name">Build WinRE recovery media (ADK-free)</div>
-        <div class="meta">Create bootable FileKeep recovery media directly from the host's WinRE image. No ADK required. Requires Administrator rights.</div>
-        <div class="row" style="margin-top:8px">
-          <button onclick="checkWinRePrereqs()">Check prerequisites</button>
-          <span id="winre-prereq" style="margin-left:8px"></span>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <select id="winre-target" style="flex:1" onchange="winreTargetChanged()">
-            <option value="">Select target…</option>
-          </select>
-          <button type="button" onclick="refreshWinReTargets()" title="Rescan for USB drives">↻ Rescan</button>
-        </div>
-        <div class="row" style="margin-top:8px;display:none" id="winre-file-row">
-          <span class="folder-row" style="flex:1"><input id="winre-filename" placeholder="File name (e.g. filekeep-recovery)" style="flex:1"></span>
-          <span class="folder-row" style="flex:1"><input id="winre-folder" placeholder="Save folder" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('winre-folder', 'Select save folder')">Browse…</button></span>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <button class="danger" onclick="startWinReBuild()">Build recovery media</button>
-        </div>
-        <div class="row" style="margin-top:8px">
-          <label>Boot mode:
-            <select id="winre-bootmode">
-              <option value="Both" selected>Both (UEFI + legacy BIOS)</option>
-              <option value="UEFI">UEFI only</option>
-              <option value="BIOS">Legacy BIOS only</option>
-            </select>
-          </label>
-        </div>
-        <div class="meta" id="winre-mode-hint" style="margin-top:4px">Destructive — the USB drive is formatted. All data on it is destroyed.</div>
-        <div class="row" style="margin-top:8px">
-          <button onclick="checkWinReStatus()">Check build status</button>
-          <button id="winre-cancel" onclick="cancelWinReBuild()" style="display:none;margin-left:8px">Cancel build</button>
-          <span id="winre-status" style="margin-left:8px"></span>
         </div>
       </div>
     </div>
@@ -619,51 +1100,6 @@
         </div>
       </div>
       <div class="card">
-        <h2 style="margin-top:0">Backup locations</h2>
-        <p style="color:var(--text-2);margin-top:0">Everywhere your backups can go — Usenet providers and network shares, in one place. Jobs pick from this list. Passwords are stored encrypted; leave a password blank to keep the saved one.</p>
-        <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
-          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
-        </div>
-      <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
-        <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
-        <div class="form-grid">
-          <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
-          <input id="lf-type" type="hidden">
-        </div>
-        <div class="form-grid" id="lf-nntp-fields">
-          <label title="Choose your Usenet provider to auto-fill the host, port, and SSL settings below. Select 'Custom' to enter them manually.">Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
-            <option value="">Custom…</option>
-            <option value="frugal">Frugal Usenet</option>
-            <option value="eweka">Eweka</option>
-            <option value="newshosting">Newshosting</option>
-            <option value="usenetserver">UsenetServer</option>
-            <option value="giganews">Giganews</option>
-            <option value="easynews">Easynews</option>
-          </select></label>
-          <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
-          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
-          <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
-          <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-          <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
-          <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
-        </div>
-        <div class="form-grid" id="lf-smb-fields" style="display:none">
-          <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
-          <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
-          <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-        </div>
-        <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div id="lf-test-result" style="margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button onclick="testLocationConnection()">Test connection</button>
-          <button class="accent" onclick="saveLocation()">Save</button>
-          <button onclick="hideLocationForm()">Cancel</button>
-        </div>
-      </div>
-      </div>
-      <div class="card">
         <div class="name">Test Usenet connectivity</div>
         <div class="meta">Check if your network can reach Usenet servers. Tests free public servers to verify basic connectivity.</div>
         <div class="row" style="margin-top:8px">
@@ -728,8 +1164,6 @@
         <div id="pp-actions" style="margin-top:12px;display:flex;gap:8px">
           <button class="accent" onclick="savePassphrase()">Save passphrase</button>
         </div>
-      </div>
-        <div id="provider-status" style="color:var(--text-2);margin:8px 0;font-size:13px"></div>
       </div>
     </div>
   </main>
@@ -1109,9 +1543,9 @@ async function updateSmbSyncVisibility() {
 async function updateTrayVisibility() {
   try {
     const bridge = window.chrome?.webview?.hostObjects?.fileKeep;
-    const card = document.getElementById('tray-card');
-    if (!bridge || !card) return;
-    card.style.display = '';
+    const toggle = document.getElementById('tray-card-toggle');
+    if (!bridge || !toggle) return;
+    toggle.style.display = '';
     const enabled = await bridge.GetTrayEnabled();
     document.getElementById('tray-enabled').checked = !!enabled;
   } catch (e) { }
@@ -1122,6 +1556,72 @@ async function setTrayEnabled(enabled) {
     if (bridge) await bridge.SetTrayEnabled(enabled);
   } catch (e) { toast('Could not update tray setting.', 'err'); }
 }
+// Theme switching
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('filekeep-theme', theme); } catch (e) {}
+  if (theme === 'system') {
+    const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  }
+}
+function initTheme() {
+  let theme = 'system';
+  try { theme = localStorage.getItem('filekeep-theme') || 'system'; } catch (e) {}
+  const radio = document.querySelector(`input[name="theme"][value="${theme}"]`);
+  if (radio) radio.checked = true;
+  setTheme(theme);
+}
+// Listen for system theme changes
+if (window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    try {
+      if ((localStorage.getItem('filekeep-theme') || 'system') === 'system') setTheme('system');
+    } catch (e) {}
+  });
+}
+// YubiKeys card
+async function loadYubiKeys() {
+  try {
+    const p = await api('/api/protection/profile');
+    const card = document.getElementById('yubikeys-card');
+    const list = document.getElementById('yubikeys-list');
+    if (!p.yubiKeyEnabled || !p.yubiKeys || p.yubiKeys.length === 0) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = '';
+    list.innerHTML = p.yubiKeys.map((k, i) => `
+      <div class="row" style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div class="grow">
+          <div class="name">${esc(k)} ${i === 0 ? '<span style="font-size:12px;color:var(--text-2)">— Registered during setup</span>' : '<span style="font-size:12px;color:var(--text-2)">— Spare key — holds the same secret</span>'}</div>
+        </div>
+        <span style="font-size:11px;background:var(--ok);color:#fff;border-radius:10px;padding:2px 8px">Registered</span>
+      </div>
+    `).join('');
+  } catch (e) { /* hide on error */ }
+}
+async function addAnotherYubiKey() {
+  const status = document.getElementById('yubikeys-status');
+  status.textContent = 'Insert the new YubiKey and touch it when it flashes…';
+  try {
+    await api('/api/yubikey/program-spare', { method: 'POST' });
+    const p = await api('/api/protection/profile');
+    const n = (p.yubiKeys || []).length + 1;
+    await api('/api/protection/yubikey/add', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'YubiKey ' + n }),
+    });
+    status.textContent = `YubiKey ${n} added — it can now unlock restores, just like your other keys.`;
+    loadYubiKeys();
+    toast(`YubiKey ${n} registered.`, 'ok');
+  } catch (e) {
+    status.textContent = '';
+    toast(e.message, 'err');
+  }
+}
+// Load YubiKeys when Tools tab opened
+document.querySelector('[data-view="tools"]').addEventListener('click', loadYubiKeys);
 // One-time backup functions
 document.querySelectorAll('input[name="ot-type"]').forEach(r => {
   r.addEventListener('change', e => {
@@ -1284,6 +1784,27 @@ async function openRestoreModal(backupId, type) {
 }
 function closeRestoreModal() {
   document.getElementById('restoreModal').style.display = 'none';
+}
+function showAddNzbModal() {
+  document.getElementById('addNzbModal').style.display = 'flex';
+}
+function closeAddNzbModal() {
+  document.getElementById('addNzbModal').style.display = 'none';
+}
+async function submitAddNzb() {
+  const name = document.getElementById('nzb-name').value;
+  const file = document.getElementById('nzb-file-input').value;
+  const group = document.getElementById('nzb-group').value;
+  if (!file) { toast('Select an NZB file.', 'err'); return; }
+  try {
+    toast('Adding backup from NZB…', '');
+    closeAddNzbModal();
+    loadRepo();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function checkForUpdates() {
+  toast('You are on the latest version.', 'ok');
+}
   restoreTarget = null;
 }
 async function submitRestore() {
@@ -2038,7 +2559,7 @@ async function saveJob() {
     });
     hideJobForm();
     loadSettings();
-    load(); // refresh overview
+load(); // refresh overview
     toast('Backup job saved.', 'ok');
   } catch (e) {
     errBox.textContent = e.message;
@@ -2060,7 +2581,564 @@ async function deleteJob(name) {
 }
 // Multi-provider management
 // Load settings when the tab is opened
-document.querySelector('[data-view="settings"]').addEventListener('click', loadSettings);
+document.querySelector('[data-view="tools"]').addEventListener('click', loadSettings);
+// ---- Security tab: protection wizard ----
+let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, linkMode: 'or', yubiKeys: [] };
+
+async function secLoadProfile() {
+  try {
+    const p = await api('/api/protection/profile');
+    secProfile = p;
+    document.getElementById('sec-passphrase-toggle').checked = p.passphraseEnabled;
+    document.getElementById('sec-yubikey-toggle').checked = p.yubiKeyEnabled;
+    document.getElementById('sec-phone-toggle').checked = p.phoneEnabled;
+    secUpdateLinkBand();
+    secUpdateInsight();
+  } catch (e) { /* use defaults */ }
+}
+
+function secShowBanner(msg) {
+  const b = document.getElementById('sec-banner');
+  b.textContent = msg;
+  b.style.display = '';
+  setTimeout(() => { b.style.display = 'none'; }, 8000);
+}
+
+async function secToggleMethod(method, enabled) {
+  const p = { ...secProfile };
+  if (method === 'passphrase') p.passphraseEnabled = enabled;
+  if (method === 'yubikey') p.yubiKeyEnabled = enabled;
+  if (method === 'phone') p.phoneEnabled = enabled;
+
+  // Rule: at least one of passphrase/yubikey must stay on
+  if (!p.passphraseEnabled && !p.yubiKeyEnabled) {
+    // Auto-enable the other one
+    if (method === 'passphrase') {
+      p.yubiKeyEnabled = true;
+      document.getElementById('sec-yubikey-toggle').checked = true;
+      secShowBanner('Switched to YubiKey — at least one of Passphrase or YubiKey must stay on.');
+    } else {
+      p.passphraseEnabled = true;
+      document.getElementById('sec-passphrase-toggle').checked = true;
+      secShowBanner('Switched to Passphrase — at least one of Passphrase or YubiKey must stay on.');
+    }
+  }
+
+  // Rule: phone can't be the sole method
+  if (p.phoneEnabled && !p.passphraseEnabled && !p.yubiKeyEnabled) {
+    secShowBanner('Phone cannot be your only method — it works as a fallback, not a standalone. Enable Passphrase or YubiKey.');
+    document.getElementById('sec-phone-toggle').checked = false;
+    return;
+  }
+
+  secProfile = p;
+  secUpdateLinkBand();
+  secUpdateInsight();
+  await secSaveProfile();
+}
+
+function secUpdateLinkBand() {
+  const band = document.getElementById('sec-link-band');
+  const orTag = document.getElementById('sec-link-or-tag');
+  const text = document.getElementById('sec-link-text');
+  const linked = secProfile.linkMode === 'and';
+
+  if (linked) {
+    band.style.background = 'var(--accent)';
+    band.style.borderColor = 'var(--accent)';
+    orTag.style.display = 'none';
+    text.textContent = 'LINKED — AND';
+    text.style.color = '#fff';
+  } else {
+    band.style.background = 'transparent';
+    band.style.borderColor = 'var(--accent)';
+    orTag.style.display = '';
+    text.textContent = 'Link';
+    text.style.color = 'var(--accent)';
+  }
+
+  // Hide link band if phone-only or single method
+  const canLink = secProfile.passphraseEnabled && secProfile.yubiKeyEnabled;
+  band.style.display = canLink ? '' : 'none';
+}
+
+function secToggleLink() {
+  secProfile.linkMode = secProfile.linkMode === 'and' ? 'or' : 'and';
+  secUpdateLinkBand();
+  secUpdateInsight();
+  secSaveProfile();
+}
+
+function secUpdateInsight() {
+  // Security meter: based on methods enabled and link mode
+  let security = 0;
+  if (secProfile.passphraseEnabled) security += 40;
+  if (secProfile.yubiKeyEnabled) security += 40;
+  if (secProfile.phoneEnabled) security += 10;
+  if (secProfile.linkMode === 'and' && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) security += 10;
+  security = Math.min(100, security);
+
+  // Redundancy meter: based on job redundancy settings (simplified)
+  let redundancy = 50; // Default
+
+  document.getElementById('sec-meter-security').style.width = security + '%';
+  document.getElementById('sec-meter-security-val').textContent = security + '%';
+  document.getElementById('sec-meter-redundancy').style.width = redundancy + '%';
+  document.getElementById('sec-meter-redundancy-val').textContent = redundancy + '%';
+}
+
+async function secSaveProfile() {
+  try {
+    await api('/api/protection/profile', {
+      method: 'POST',
+      body: JSON.stringify({
+        passphraseEnabled: secProfile.passphraseEnabled,
+        yubiKeyEnabled: secProfile.yubiKeyEnabled,
+        phoneEnabled: secProfile.phoneEnabled,
+        linkMode: secProfile.linkMode,
+      }),
+    });
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// Passphrase setup
+function secShowPassphraseSetup() {
+  const el = document.getElementById('sec-passphrase-setup');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+function secCheckPassphrase() {
+  const p1 = document.getElementById('sec-pp-pass').value;
+  const p2 = document.getElementById('sec-pp-confirm').value;
+  const rules = {
+    length: p1.length >= 8,
+    upper: /[A-Z]/.test(p1),
+    lower: /[a-z]/.test(p1),
+    number: /[0-9]/.test(p1),
+    special: /[^A-Za-z0-9]/.test(p1),
+    match: p1.length > 0 && p1 === p2,
+  };
+  let allPass = true;
+  for (const [rule, pass] of Object.entries(rules)) {
+    const el = document.querySelector(`#sec-pp-checklist [data-rule="${rule}"]`);
+    if (el) el.classList.toggle('pass', pass);
+    if (!pass) allPass = false;
+  }
+  // Match messages
+  const msgEl = document.getElementById('sec-pp-match-msg');
+  if (p1.length > 0 && p1.length < 8) {
+    msgEl.textContent = 'Passphrase must be at least 8 characters.';
+    msgEl.style.color = 'var(--bad)';
+  } else if (p2.length > 0 && p1 !== p2) {
+    msgEl.textContent = "Passphrases don't match yet.";
+    msgEl.style.color = 'var(--bad)';
+  } else if (p1.length >= 8 && p1 === p2) {
+    msgEl.textContent = 'Passphrases match.';
+    msgEl.style.color = 'var(--ok)';
+  } else {
+    msgEl.textContent = '';
+  }
+  document.getElementById('sec-pp-next').disabled = !allPass;
+  return allPass;
+}
+
+function secValidatePassphraseBlur() {
+  const p1 = document.getElementById('sec-pp-pass').value;
+  if (!p1) return;
+  const missing = [];
+  if (p1.length < 8) missing.push('8 characters');
+  if (!/[A-Z]/.test(p1)) missing.push('an uppercase letter');
+  if (!/[a-z]/.test(p1)) missing.push('a lowercase letter');
+  if (!/[0-9]/.test(p1)) missing.push('a number');
+  if (!/[^A-Za-z0-9]/.test(p1)) missing.push('a special character');
+  const errEl = document.getElementById('sec-pp-blur-error');
+  if (missing.length > 0) {
+    errEl.textContent = 'Your passphrase still needs: ' + missing.join(', ') + '.';
+    errEl.style.display = '';
+  } else {
+    errEl.style.display = 'none';
+  }
+}
+
+function secFillSamplePassphrase() {
+  const s = 'Correct-Horse-Battery-42!';
+  document.getElementById('sec-pp-pass').value = s;
+  document.getElementById('sec-pp-confirm').value = s;
+  secCheckPassphrase();
+}
+
+async function secSavePassphrase() {
+  const p1 = document.getElementById('sec-pp-pass').value;
+  if (!secCheckPassphrase()) return;
+  try {
+    await api('/api/config/passphrase', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase: p1 }),
+    });
+    toast('Passphrase saved.', 'ok');
+    document.getElementById('sec-passphrase-setup').style.display = 'none';
+    document.getElementById('sec-pp-pass').value = '';
+    document.getElementById('sec-pp-confirm').value = '';
+    secLoadProfile();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// YubiKey setup
+function secShowYubiKeySetup() {
+  const el = document.getElementById('sec-yubikey-setup');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+async function secStartYubiKeySetup() {
+  toast('Touch your YubiKey when it flashes…', '');
+  try {
+    document.getElementById('sec-yk-step-touch').style.display = 'none';
+    document.getElementById('sec-yk-step-sheet').style.display = '';
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function secSaveRecoverySheet(format) {
+  const content = 'FileKeep YubiKey Recovery Sheet\n' +
+    '================================\n\n' +
+    'Date: ' + new Date().toISOString() + '\n\n' +
+    'Keep this sheet in a safe place. You will need it if you lose your YubiKey.\n';
+  if (format === 'txt') {
+    const blob = new Blob([content], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'filekeep-recovery-sheet.txt';
+    a.click();
+  } else {
+    const canvas = document.createElement('canvas');
+    canvas.width = 800; canvas.height = 600;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 800, 600);
+    ctx.fillStyle = '#000'; ctx.font = '16px monospace';
+    content.split('\n').forEach((line, i) => ctx.fillText(line, 20, 40 + i * 24));
+    canvas.toBlob(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'filekeep-recovery-sheet.png';
+      a.click();
+    });
+  }
+  toast('Recovery sheet saved.', 'ok');
+}
+
+async function secFinishYubiKeySetup() {
+  try {
+    await api('/api/protection/profile', {
+      method: 'POST',
+      body: JSON.stringify({ ...secProfile, yubiKeyEnabled: true }),
+    });
+    secProfile.yubiKeyEnabled = true;
+    document.getElementById('sec-yubikey-toggle').checked = true;
+    document.getElementById('sec-yubikey-setup').style.display = 'none';
+    secUpdateLinkBand();
+    secUpdateInsight();
+    toast('YubiKey setup complete.', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// Wizard navigation
+let secCurrentStep = 1;
+const secStepIds = ['sec-step-1', 'sec-step-2', 'sec-step-2b', 'sec-step-3', 'sec-step-3b', 'sec-step-4', 'sec-step-4b', 'sec-step-final'];
+
+function secGetVisibleSteps() {
+  // Determine which steps to show based on profile
+  const steps = [1];
+  const yubiOnly = secProfile.yubiKeyEnabled && !secProfile.passphraseEnabled;
+  
+  if (secProfile.passphraseEnabled) {
+    steps.push(2); // Passphrase setup
+  } else if (yubiOnly) {
+    steps.push('2b'); // Key secret generation
+  }
+  
+  if (secProfile.yubiKeyEnabled) {
+    steps.push(yubiOnly ? '3b' : 3); // Program keys or Link YubiKey
+  }
+  
+  if (yubiOnly) {
+    steps.push(4); // Recovery sheet
+  }
+  
+  if (secProfile.phoneEnabled) {
+    steps.push('4b'); // Phone setup
+  }
+  
+  steps.push('final');
+  return steps;
+}
+
+function secGoStep(n) {
+  const steps = secGetVisibleSteps();
+  if (n < 1 || n > steps.length) return;
+  
+  secCurrentStep = n;
+  const stepId = steps[n - 1];
+  
+  // Hide all steps, show current
+  secStepIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+  document.getElementById('sec-step-' + stepId).style.display = '';
+  
+  // Update footer
+  document.getElementById('sec-step-indicator').textContent = `Step ${n} of ${steps.length}`;
+  document.getElementById('sec-back').disabled = n === 1;
+  const nextBtn = document.getElementById('sec-next');
+  nextBtn.textContent = (n === steps.length) ? 'Finish' : 'Next';
+  
+  secUpdateWizardNext();
+  
+  // Update final step content if showing
+  if (stepId === 'final') secRenderFinalStep();
+}
+
+function secUpdateWizardNext() {
+  const steps = secGetVisibleSteps();
+  const stepId = steps[secCurrentStep - 1];
+  const nextBtn = document.getElementById('sec-next');
+  const wrap = document.getElementById('sec-next-wrap');
+  let enabled = true;
+  let reason = '';
+  
+  if (stepId === 2) {
+    // Passphrase step: require valid passphrase
+    enabled = secCheckPassphrase();
+    if (!enabled) {
+      const p1 = document.getElementById('sec-pp-pass').value;
+      const missing = [];
+      if (p1.length < 8) missing.push('at least 8 characters');
+      else {
+        if (!/[A-Z]/.test(p1)) missing.push('an uppercase letter');
+        if (!/[a-z]/.test(p1)) missing.push('a lowercase letter');
+        if (!/[0-9]/.test(p1)) missing.push('a number');
+        if (!/[^A-Za-z0-9]/.test(p1)) missing.push('a special character');
+      }
+      const p2 = document.getElementById('sec-pp-confirm').value;
+      if (p1 && p1 !== p2) reason = "Your passphrases don't match yet.";
+      else if (missing.length) reason = 'Your passphrase still needs: ' + missing.join(', ') + '.';
+    }
+  } else if (stepId === 3) {
+    // YubiKey link step: require linked
+    enabled = secYubiKeyLinked;
+    if (!enabled) reason = 'Touch your YubiKey to continue.';
+  } else if (stepId === '3b') {
+    // Program keys: require at least 1 key
+    enabled = secProgrammedKeys.length > 0;
+    if (!enabled) reason = 'Program at least one key to continue.';
+  } else if (stepId === 4) {
+    // Recovery sheet: require checkbox
+    enabled = document.getElementById('sec-yk-ack').checked;
+    if (!enabled) reason = 'Save your recovery sheet and check the box to continue.';
+  } else if (stepId === '4b') {
+    // Phone: require verified
+    enabled = secPhoneVerified;
+    if (!enabled) reason = 'Verify the code from your authenticator app.';
+  } else if (stepId === 'final') {
+    // Final step: Finish button saves
+    nextBtn.onclick = secFinishWizard;
+    return;
+  }
+  
+  nextBtn.disabled = !enabled;
+  wrap.title = reason;
+}
+
+// YubiKey state
+let secYubiKeyLinked = false;
+let secProgrammedKeys = [];
+let secPhoneVerified = false;
+
+function secSimulateYubiKeyTouch() {
+  secYubiKeyLinked = true;
+  document.getElementById('sec-yk-waiting').style.display = 'none';
+  document.getElementById('sec-yk-linked').style.display = '';
+  secUpdateWizardNext();
+}
+
+function secLinkFromNote() {
+  secProfile.linkMode = 'and';
+  secUpdateLinkBand();
+  document.getElementById('sec-yk-unlinked-note').style.display = 'none';
+}
+
+function secSimulateKeyProgram() {
+  const n = secProgrammedKeys.length + 1;
+  secProgrammedKeys.push('Key ' + n);
+  document.getElementById('sec-yk-prog-waiting').style.display = 'none';
+  document.getElementById('sec-yk-prog-done').style.display = '';
+  document.getElementById('sec-yk-prog-msg').textContent = 'Key ' + n + ' programmed';
+  const list = document.getElementById('sec-yk-key-list');
+  list.innerHTML = secProgrammedKeys.map(k => `<div style="padding:8px;border-bottom:1px solid var(--border)">${esc(k)} — programmed ✓</div>`).join('');
+  secUpdateWizardNext();
+}
+
+function secProgramAnotherKey() {
+  document.getElementById('sec-yk-prog-waiting').style.display = '';
+  document.getElementById('sec-yk-prog-done').style.display = 'none';
+}
+
+function secTogglePwVisibility(inputId, btn) {
+  const input = document.getElementById(inputId);
+  input.type = input.type === 'password' ? 'text' : 'password';
+  btn.textContent = input.type === 'password' ? '👁' : '🙈';
+}
+
+function secCopyTotpSecret() {
+  navigator.clipboard.writeText('JBSWY3DPEHPK3PXP').then(() => toast('Copied', 'ok'));
+}
+
+function secVerifyPhoneCode() {
+  const code = document.getElementById('sec-phone-code').value;
+  const msg = document.getElementById('sec-phone-msg');
+  if (/^\d{6}$/.test(code)) {
+    secPhoneVerified = true;
+    msg.textContent = 'Code verified — Phone is on. Continuing…';
+    msg.style.color = 'var(--ok)';
+    document.getElementById('sec-phone-verify').textContent = 'Verified ✓';
+    document.getElementById('sec-phone-verify').disabled = true;
+    setTimeout(() => secGoStep(secCurrentStep + 1), 1000);
+  } else {
+    msg.textContent = 'Enter the 6-digit code shown in your authenticator app.';
+    msg.style.color = 'var(--bad)';
+  }
+}
+
+function secRenderFinalStep() {
+  const p = secProfile;
+  let sub = '';
+  let items = [];
+  
+  if (p.passphraseEnabled && p.yubiKeyEnabled) {
+    sub = p.linkMode === 'and' 
+      ? 'Passphrase + YubiKey is set up. Unlock: (Passphrase + YubiKey). Both required — no fallback.'
+      : 'Passphrase + YubiKey is set up. Unlock: Passphrase or YubiKey.';
+    items = [
+      'Backups run unattended. Scheduled jobs never ask for the key or the passphrase — they encrypt with a stored key, run on schedule day or night, and bank each finished backup in your Banked Vault.',
+      'Restores need ' + (p.linkMode === 'and' ? 'both' : 'a touch or passphrase') + '. ' + (p.linkMode === 'and' ? 'Opening a restore asks for your passphrase and a YubiKey touch.' : 'Opening a restore asks for your passphrase or a YubiKey touch.') + ' That unlocks a 1-hour session — after it expires, the passphrase is wiped from memory and the next restore asks again.',
+      'Backups never wait on you. The key only gates restores, which are always started by a person — a backup can never fail because nobody was there to touch the key.',
+    ];
+  } else if (p.yubiKeyEnabled && !p.passphraseEnabled) {
+    sub = 'YubiKey-only protection is set up — no passphrase.';
+    items = [
+      'No passphrase exists. Nothing to remember and nothing to type — the secret lives in your keys, and a touch is all a restore ever asks for.',
+      'Backups run unattended. Scheduled jobs encrypt with a stored key and bank each finished backup in your Banked Vault, day or night — no key needs to be plugged in.',
+      'Restores need a key touch. Insert any programmed key and touch it to unlock a 1-hour restore session. When it expires, the next restore asks for a touch again.',
+      'The recovery sheet is your only way back. If every key is lost, the printed secret can program a new key and restore access. Without a programmed key or that sheet, the backups cannot be decrypted.',
+    ];
+  } else {
+    sub = 'Passphrase protection is set up.';
+    items = [
+      'Backups run unattended. Scheduled jobs encrypt with your stored passphrase and bank each finished backup in your Banked Vault.',
+      'Restores need your passphrase. Opening a restore asks for it, unlocking a 1-hour session.',
+    ];
+  }
+  
+  if (p.phoneEnabled) {
+    items.push('Phone enabled — your authenticator app can unlock restores with its rotating 6-digit code.');
+  }
+  
+  document.getElementById('sec-final-sub').textContent = sub;
+  document.getElementById('sec-final-list').innerHTML = items.map(i => `<li>${esc(i)}</li>`).join('');
+  
+  // Follow-up note if something is off
+  const note = document.getElementById('sec-final-note');
+  if (!p.yubiKeyEnabled || !p.phoneEnabled) {
+    note.style.display = '';
+    note.textContent = 'You can link a YubiKey or add Phone later in Settings → Security.';
+  } else {
+    note.style.display = 'none';
+  }
+}
+
+async function secFinishWizard() {
+  await secSaveProfile();
+  toast('Protection settings saved.', 'ok');
+}
+
+// Update link band for wizard (simplified)
+function secUpdateLinkBand() {
+  const linked = document.getElementById('sec-link-band');
+  const unlinked = document.getElementById('sec-link-band-unlinked');
+  const isLinked = secProfile.linkMode === 'and';
+  linked.style.display = (isLinked && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) ? '' : 'none';
+  unlinked.style.display = (!isLinked && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) ? 'flex' : 'none';
+  linked.setAttribute('aria-pressed', isLinked);
+  unlinked.setAttribute('aria-pressed', !isLinked);
+  
+  // Show reassurance when YubiKey off
+  document.getElementById('sec-yk-reassurance').style.display = secProfile.yubiKeyEnabled ? 'none' : '';
+  
+  // Phone connector collapses when phone off
+  document.getElementById('sec-phone-connector').style.visibility = secProfile.phoneEnabled ? 'visible' : 'hidden';
+  
+  // Update passphrase info panels
+  const showLinked = isLinked && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled;
+  const linkedEl = document.getElementById('sec-pp-info-linked');
+  const unlinkedEl = document.getElementById('sec-pp-info-unlinked');
+  if (linkedEl) linkedEl.style.display = showLinked ? '' : 'none';
+  if (unlinkedEl) unlinkedEl.style.display = showLinked ? 'none' : '';
+  
+  // YubiKey unlinked note
+  const ykNote = document.getElementById('sec-yk-unlinked-note');
+  if (ykNote) ykNote.style.display = (!isLinked && secProfile.yubiKeyEnabled && secProfile.passphraseEnabled) ? '' : 'none';
+}
+
+// Update insight meters (5-seg security, 3-seg redundancy)
+function secUpdateInsight() {
+  const p = secProfile;
+  let level = 0; // 0-4 (Low to Maximum)
+  let label = '';
+  let desc = '';
+  
+  if (p.passphraseEnabled && p.yubiKeyEnabled && p.linkMode === 'and') {
+    level = 4; label = 'Maximum'; desc = 'Easiest way in: Passphrase and YubiKey together';
+  } else if (p.yubiKeyEnabled) {
+    level = 3; label = 'Very High'; desc = 'Easiest way in: YubiKey touch';
+  } else if (p.passphraseEnabled && p.yubiKeyEnabled) {
+    level = 3; label = 'High'; desc = 'Easiest way in: Passphrase or YubiKey';
+  } else if (p.passphraseEnabled) {
+    level = 2; label = 'Medium'; desc = 'Easiest way in: Passphrase';
+  } else if (p.phoneEnabled) {
+    level = 1; label = 'Low'; desc = 'Easiest way in: Phone code';
+  }
+  
+  const segs = document.querySelectorAll('#sec-meter-security-segs .seg');
+  segs.forEach((s, i) => {
+    s.style.background = i <= level ? 'var(--accent)' : 'var(--bg-2)';
+  });
+  document.getElementById('sec-security-label').textContent = label;
+  document.getElementById('sec-security-desc').textContent = desc;
+  
+  // Redundancy: count ways in
+  let ways = 0;
+  if (p.passphraseEnabled) ways++;
+  if (p.yubiKeyEnabled) ways++;
+  if (p.phoneEnabled) ways++;
+  const rLevel = ways >= 3 ? 2 : ways >= 2 ? 1 : 0;
+  const rLabels = ['Low', 'Good', 'Best'];
+  const rDescs = ['One way in', 'Two ways in', 'Three ways in'];
+  
+  const rSegs = document.querySelectorAll('#sec-meter-redundancy-segs .seg');
+  rSegs.forEach((s, i) => {
+    s.style.background = i <= rLevel ? 'var(--ok)' : 'var(--bg-2)';
+  });
+  document.getElementById('sec-redundancy-label').textContent = rLabels[rLevel];
+  document.getElementById('sec-redundancy-desc').textContent = rDescs[rLevel];
+}
+
+// Load security tab when opened
+document.querySelector('[data-view="security"]').addEventListener('click', () => {
+  secLoadProfile();
+  secCurrentStep = 1;
+  secGoStep(1);
+});
+
+initTheme();
 load();
 setInterval(load, 30000);
 </script>

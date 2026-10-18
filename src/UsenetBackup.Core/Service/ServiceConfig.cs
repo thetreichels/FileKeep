@@ -431,6 +431,31 @@ public sealed class ServiceConfig
     public string? YubiKeySlotSecretProtected { get; set; }
 
     /// <summary>
+    /// Whether the phone authenticator is enabled as a fallback unlock
+    /// method. It is always standalone: it can never be the sole method
+    /// (at least one of Passphrase/YubiKey must also be on), and it is
+    /// running-system-only — it is never used in USB recovery.
+    /// </summary>
+    [JsonPropertyName("phoneAuthEnabled")]
+    public bool PhoneAuthEnabled { get; set; }
+
+    /// <summary>
+    /// How the Passphrase and YubiKey methods interact: <c>"or"</c>
+    /// (default; either one unlocks) or <c>"and"</c> (both required).
+    /// The Phone method is never linked.
+    /// </summary>
+    [JsonPropertyName("protectionLinkMode")]
+    public string ProtectionLinkMode { get; set; } = "or";
+
+    /// <summary>
+    /// Display names of registered YubiKeys (e.g. "YubiKey 1"). Labels
+    /// only — all keys are programmed with the same slot secret (see
+    /// <see cref="YubiKeySlotSecretProtected"/>) and work interchangeably.
+    /// </summary>
+    [JsonPropertyName("yubiKeys")]
+    public List<string> YubiKeys { get; set; } = new();
+
+    /// <summary>
     /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
     /// otherwise the legacy single Nntp config as a singleton list.
     /// </summary>
@@ -671,6 +696,11 @@ public sealed class ServiceConfig
                         $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
             }
         }
+        if (!string.IsNullOrEmpty(ProtectionLinkMode) &&
+            !ProtectionLinkMode.Equals("or", StringComparison.OrdinalIgnoreCase) &&
+            !ProtectionLinkMode.Equals("and", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"protectionLinkMode '{ProtectionLinkMode}' is invalid (expected \"or\" or \"and\").");
         if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
         {
             if (Nntp.Port is < 1 or > 65535)

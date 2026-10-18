@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using UsenetBackup.Core;
+using UsenetBackup.Core.Json;
 using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Security;
 using UsenetBackup.Core.Service;
@@ -24,6 +25,13 @@ public static class Dashboard
     /// </summary>
     private static string GetBodyString(System.Text.Json.JsonElement body, string name) =>
         body.TryGetProperty(name, out var el) ? el.GetString() ?? "" : "";
+
+    /// <summary>Reads the raw request body as a string for source-generated JSON deserialization.</summary>
+    private static async Task<string> ReadBodyStringAsync(HttpRequest request)
+    {
+        using var reader = new StreamReader(request.Body);
+        return await reader.ReadToEndAsync();
+    }
 
     public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
         string configPath, CancellationToken ct, Action<string>? log = null)
@@ -559,6 +567,56 @@ public static class Dashboard
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
             var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapGet("/api/protection/profile", () =>
+        {
+            var profile = DashboardApi.GetProtectionProfile(config);
+            return Results.Content(FileKeepJsonOptions.Serialize(profile,
+                FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileResponse),
+                "application/json");
+        });
+
+        app.MapPost("/api/protection/profile", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            ProtectionProfileRequest? profile;
+            try
+            {
+                profile = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
+                    FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileRequest);
+            }
+            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            if (profile is null)
+                return Results.BadRequest(new { error = "Empty profile." });
+            var (status, payload) = DashboardApi.SetProtectionProfile(config, configPath, profile, log);
+            if (status != 200)
+                return Results.BadRequest(payload);
+            return Results.Content(FileKeepJsonOptions.Serialize((ProtectionProfileResponse)payload,
+                FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileResponse),
+                "application/json");
+        });
+
+        app.MapPost("/api/protection/yubikey/add", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            AddYubiKeyRequest? body;
+            try
+            {
+                body = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
+                    FileKeepJsonOptions.Default, FileKeepJsonContext.Default.AddYubiKeyRequest);
+            }
+            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            if (body is null)
+                return Results.BadRequest(new { error = "Empty request." });
+            var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log);
+            if (status != 200)
+                return Results.BadRequest(payload);
+            return Results.Content(FileKeepJsonOptions.Serialize((AddYubiKeyResponse)payload,
+                FileKeepJsonOptions.Default, FileKeepJsonContext.Default.AddYubiKeyResponse),
+                "application/json");
         });
 
         app.MapGet("/api/yubikey/status", () =>

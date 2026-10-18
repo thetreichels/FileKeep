@@ -1,0 +1,70 @@
+using System.Text.Json.Serialization;
+
+namespace UsenetBackup.Core.Service;
+
+/// <summary>
+/// Dashboard request body for <c>POST /api/protection/profile</c>: which
+/// unlock methods the protection wizard wants enabled, and how
+/// Passphrase+YubiKey are linked. The Phone method is always a standalone
+/// fallback — it can never be the sole method and is never linked.
+/// </summary>
+public sealed class ProtectionProfileRequest
+{
+    [JsonPropertyName("passphraseEnabled")]
+    public bool PassphraseEnabled { get; set; }
+
+    [JsonPropertyName("yubiKeyEnabled")]
+    public bool YubiKeyEnabled { get; set; }
+
+    [JsonPropertyName("phoneEnabled")]
+    public bool PhoneEnabled { get; set; }
+
+    /// <summary><c>"or"</c> (default) or <c>"and"</c>.</summary>
+    [JsonPropertyName("linkMode")]
+    public string? LinkMode { get; set; }
+}
+
+/// <summary>
+/// Dashboard response body for <c>GET /api/protection/profile</c>:
+/// the current protection profile.
+/// </summary>
+public sealed class ProtectionProfileResponse
+{
+    [JsonPropertyName("passphraseEnabled")]
+    public bool PassphraseEnabled { get; set; }
+
+    [JsonPropertyName("yubiKeyEnabled")]
+    public bool YubiKeyEnabled { get; set; }
+
+    [JsonPropertyName("phoneEnabled")]
+    public bool PhoneEnabled { get; set; }
+
+    [JsonPropertyName("linkMode")]
+    public string LinkMode { get; set; } = "or";
+
+    [JsonPropertyName("yubiKeys")]
+    public List<string> YubiKeys { get; set; } = new();
+}
+
+/// <summary>
+/// Dashboard request body for <c>POST /api/protection/yubikey/add</c>:
+/// registers a display name for another YubiKey. The actual key
+/// programming still goes through <c>/api/yubikey/program-spare</c>.
+/// </summary>
+public sealed class AddYubiKeyRequest
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+}
+
+/// <summary>
+/// Dashboard response body for <c>POST /api/protection/yubikey/add</c>.
+/// </summary>
+public sealed class AddYubiKeyResponse
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("yubiKeys")]
+    public List<string> YubiKeys { get; set; } = new();
+}
