@@ -158,8 +158,10 @@ public class MainForm : Form
         var openItem = new ToolStripMenuItem("Open FileKeep", null, (_, _) => RestoreFromTray());
         _trayToggleItem = new ToolStripMenuItem("Show tray icon", null, (_, _) => ToggleTray());
         _trayToggleItem.Checked = _trayEnabled;
+        var minimizeItem = new ToolStripMenuItem("Minimize to tray", null, (_, _) => { WindowState = FormWindowState.Minimized; });
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitApp());
         trayMenu.Items.Add(openItem);
+        trayMenu.Items.Add(minimizeItem);
         trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add(_trayToggleItem);
         trayMenu.Items.Add(new ToolStripSeparator());
