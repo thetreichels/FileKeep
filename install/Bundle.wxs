@@ -13,7 +13,8 @@
           Version="0.8.9"
           Manufacturer="J. Treichel"
           UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
-          IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
+          IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico"
+          Scope="perMachine">
 
     <!-- WixStandardBootstrapperApplication must sit directly under the inline
          <BootstrapperApplication> (the extension only parses it there; a Ref
