@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- WiX Burn bundle for FileKeep: branded splash screen with progress.
-     Wraps the MSI built from UsenetBackup.wxs. The standard bootstrapper
-     application shows the custom FileKeep theme (install/FileKeepTheme.xml)
-     instead of the MSI wizard: logo, progress bar, status text, no dialogs.
+<!-- WiX Burn bundle for FileKeep: stock WixStandardBootstrapperApplication
+     (hyperlinkLicense theme) with FileKeep branding. No custom theme — the
+     generic installer the user asked for. Shows the FileKeep banner logo,
+     product name and version, a progress bar, and a "Launch FileKeep" button
+     on the Success page. Wraps the MSI built from UsenetBackup.wxs.
 
      Build on Windows after the MSI:
-       wix build -arch x64 -d MsiPath=C:\ub\filekeep-0.8.5.1.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+       wix build -arch x64 -ext <Bal wixext dll> -d SrcRoot=C:\fk -d MsiPath=C:\ub\filekeep-0.08.12.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+     (see install/run-vm-build.ps1 for the full build script).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
@@ -17,9 +19,9 @@
 
     <!-- WixStandardBootstrapperApplication must sit directly under the inline
          <BootstrapperApplication> (the extension only parses it there; a Ref
-         rejects the child). Theme="hyperlinkLicense" is required and selects
-         the stock payload group; ThemeFile/LocalizationFile/LogoFile override
-         its thm.xml/thm.wxl/logo.png with the branded FileKeep versions.
+         rejects the child). Theme="hyperlinkLicense" is the stock payload
+         group; LogoFile brands its Install page with the FileKeep banner.
+         LicenseUrl is empty, so no license link is shown.
          The MSI's own exit-dialog checkbox never shows inside a bundle, so
          launch-on-finish lives here via LaunchTarget: the Success page shows
          a "Launch FileKeep" button when it is set. -->
@@ -28,21 +30,10 @@
         Theme="hyperlinkLicense"
         LicenseUrl=""
         LogoFile="$(var.SrcRoot)/assets/filekeep-banner.bmp"
-        ThemeFile="$(var.SrcRoot)/install/FileKeepTheme.xml"
-        LocalizationFile="$(var.SrcRoot)/install/FileKeepTheme.wxl"
         LaunchTarget="[ProgramFiles6432Folder]FileKeep\gui\FileKeepGui.exe"
         LaunchWorkingFolder="[ProgramFiles6432Folder]FileKeep\gui"
         SuppressOptionsUI="yes"
         ShowVersion="yes" />
-      <!-- Splash artwork for the theme's ImageControl: theme images resolve
-           at runtime from the UX-container payloads, addressed by payload name. -->
-      <Payload Name="filekeep-splash.png"
-               SourceFile="$(var.SrcRoot)/assets/filekeep-splash.png"
-               Compressed="yes" />
-      <!-- Dark theme window background (used by FileKeepTheme-Dark.xml). -->
-      <Payload Name="filekeep-dark-bg.png"
-               SourceFile="$(var.SrcRoot)/install/filekeep-dark-bg.png"
-               Compressed="yes" />
     </BootstrapperApplication>
 
     <Chain>
