@@ -609,7 +609,7 @@
       </div>
       <div class="card">
         <h2 style="margin-top:0">Backup locations</h2>
-        <p style="color:var(--text-2);margin-top:0">Everywhere your backups can go — Usenet providers and network shares, in one place. Jobs pick from this list. Credentials are encrypted with Windows DPAPI; leave a password blank to keep the saved one.</p>
+        <p style="color:var(--text-2);margin-top:0">Everywhere your backups can go — Usenet providers and network shares, in one place. Jobs pick from this list. Passwords are stored encrypted; leave a password blank to keep the saved one.</p>
         <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
         <div style="margin-top:12px;display:flex;gap:8px">
           <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
@@ -667,7 +667,7 @@
       </div>
       <div class="card">
         <h2 style="margin-top:0">Security</h2>
-        <p style="color:var(--text-2);margin-top:0">The repository passphrase encrypts everything you back up. Store it here (Windows DPAPI-encrypted, never in plaintext) so scheduled jobs run without typing it, or keep it in the USENETBACKUP_PASSPHRASE environment variable.</p>
+        <p style="color:var(--text-2);margin-top:0">Your passphrase encrypts everything you back up. Save it here so scheduled backups run automatically — it's stored encrypted, never in plaintext.</p>
         <div class="row" style="margin-top:8px">
           <span id="passphrase-status" style="color:var(--text-2)">Checking…</span>
         </div>
