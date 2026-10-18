@@ -877,7 +877,11 @@ public sealed class BackupScheduler
             if (job.EffectiveTargets.Count > 0)
             {
                 token.ThrowIfCancellationRequested();
-                try { UploadToTargets(job, manifest.BackupId, passphrase, token); }
+                try {
+                    var _m2 = repo.LoadManifest(manifest.BackupId);
+                    if (_m2 is not null) { StampYubiKeyChallenge(_m2); repo.SaveManifest(_m2); }
+                    UploadToTargets(job, manifest.BackupId, passphrase, token);
+                }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
@@ -1058,6 +1062,20 @@ public sealed class BackupScheduler
     /// doesn't stop the other, but all failures are collected and thrown
     /// together so the caller sees the full picture.
     /// </summary>
+    /// <summary>
+    /// Stamps the YubiKey challenge onto a manifest so recovery can use a
+    /// YubiKey without access to service.json. The challenge is not secret.
+    /// </summary>
+    private void StampYubiKeyChallenge(BackupManifest manifest)
+    {
+        if (_config.PassphraseYubiKey && !string.IsNullOrEmpty(_config.YubiKeyChallenge))
+        {
+            manifest.YubiKeyChallenge = _config.YubiKeyChallenge;
+            // Re-save since the manifest was already written
+            // (the challenge must be in the uploaded copy)
+        }
+    }
+
     private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();

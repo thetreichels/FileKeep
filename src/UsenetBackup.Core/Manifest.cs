@@ -119,6 +119,16 @@ public sealed class BackupManifest
     [JsonPropertyName("root_sha256")]
     public string RootSha256 { get; set; } = "";
 
+    /// <summary>
+    /// YubiKey HMAC-SHA1 challenge (base64) used to derive the decryption key.
+    /// Not secret — posted with the backup so recovery can use a YubiKey
+    /// without access to the original service.json. Null when YubiKey mode
+    /// was not used for this backup.
+    /// </summary>
+    [JsonPropertyName("yubikey_challenge")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? YubiKeyChallenge { get; set; }
+
     private static readonly JsonSerializerOptions CanonicalOptions = new()
     {
         WriteIndented = false,
