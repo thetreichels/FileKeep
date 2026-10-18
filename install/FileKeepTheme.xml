@@ -22,11 +22,11 @@
     <Window Width="620" Height="380" HexStyle="120a0000" FontId="0" Caption="#(loc.Caption)">
         <!-- Dark window background: full-window solid image behind everything.
              thmutil has no window background color, so we paint it with an image. -->
-        <ImageControl X="0" Y="0" Width="620" Height="380" ImageFile="filekeep-dark-bg.png" Visible="yes" />
+        <ImageControl X="0" Y="0" Width="620" Height="380" ImageFile="filekeep-dark-bg.png" Visible="yes" HexStyle="4000000" />
 
         <!-- Branding: splash art, left side, ~half the window width.
              Resolved at runtime from the filekeep-splash.png UX payload. -->
-        <ImageControl X="20" Y="20" Width="280" Height="158" ImageFile="filekeep-splash.png" Visible="yes" />
+        <ImageControl X="20" Y="20" Width="280" Height="158" ImageFile="filekeep-splash.png" Visible="yes" HexStyle="4000000" />
 
         <Page Name="Loading">
             <Label X="324" Y="28" Width="272" Height="30" FontId="2" DisablePrefix="yes">#(loc.LoadingLabel)</Label>
