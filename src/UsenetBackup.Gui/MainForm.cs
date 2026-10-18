@@ -109,7 +109,6 @@ public class MainForm : Form
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _trayToggleItem;
     private bool _trayEnabled;
-    private bool _allowClose;
     private const string DashboardUrl = "http://127.0.0.1:15789/";
 
     private static string GuiSettingsPath => Path.Combine(
@@ -187,13 +186,6 @@ public class MainForm : Form
         };
         FormClosing += (s, e) =>
         {
-            if (_trayEnabled && !_allowClose)
-            {
-                // Close button minimizes to tray; use the tray menu to exit.
-                e.Cancel = true;
-                WindowState = FormWindowState.Minimized;
-                return;
-            }
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             _webView?.Dispose();
@@ -219,7 +211,6 @@ public class MainForm : Form
 
     private void ExitApp()
     {
-        _allowClose = true;
         Close();
     }
 
