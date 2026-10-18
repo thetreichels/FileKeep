@@ -9,7 +9,7 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="FileKeep"
-           Version="0.8.9"
+           Version="0.08.09"
            Manufacturer="J. Treichel"
            UpgradeCode="F6E0D6D1-61A1-4843-87B9-2825A47A18DD"
            Scope="perMachine"

@@ -465,8 +465,8 @@ $now = Get-Date
 $buildNo = [int](($now - (Get-Date "2026-01-01")).TotalDays)
 $revNo = $now.Hour * 60 + $now.Minute
 $fileVer = "0.8.$buildNo.$revNo"
-$verProps = @("/p:Version=0.8.9", "/p:FileVersion=$fileVer",
-              "/p:AssemblyVersion=0.8.9", "/p:InformationalVersion=0.8.9")
+$verProps = @("/p:Version=0.08.09", "/p:FileVersion=$fileVer",
+              "/p:AssemblyVersion=0.08.09", "/p:InformationalVersion=0.08.09")
 Write-Host "Stamping FileVersion $fileVer"
 dotnet publish src/UsenetBackup.Cli/UsenetBackup.Cli.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\cli /p:PublishSingleFile=true @verProps
 if ($LASTEXITCODE -ne 0) { throw "CLI publish failed" }
@@ -504,9 +504,9 @@ Write-Host "Building VSS helper..."
 & "$srcRoot\src\UsenetBackup.VssHelper\build-vss-helper.ps1"
 if ($LASTEXITCODE -ne 0) { throw "VSS helper build failed" }
 
-wix build -arch x64 -ext WixToolset.UI.wixext -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d GuiBin=C:\ub\publish\gui -d VssBin=$srcRoot\src\UsenetBackup.VssHelper -o C:\ub\filekeep-0.8.9.msi install/UsenetBackup.wxs
+wix build -arch x64 -ext WixToolset.UI.wixext -d SrcRoot=$srcRoot -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d GuiBin=C:\ub\publish\gui -d VssBin=$srcRoot\src\UsenetBackup.VssHelper -o C:\ub\filekeep-0.08.09.msi install/UsenetBackup.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
-$msi = Get-Item C:\ub\filekeep-0.8.9.msi
+$msi = Get-Item C:\ub\filekeep-0.08.09.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
 # Branded Burn bootstrapper: splash screen with progress instead of the MSI wizard.
@@ -527,14 +527,14 @@ if (-not $balDll) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $balDll) { throw "Bal extension assembly not found" }
-wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.8.9.msi -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
+wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.08.09.msi -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
 if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
 $bundle = Get-Item C:\ub\FileKeep-Setup.exe
 Write-Host ("  Bundle built: {0:N0} bytes" -f $bundle.Length)
 
 Write-Host "=== 5/6 Signing MSI + bundle ==="
 # Sign the MSI directly.
-Invoke-CodeSigning -Files @("C:\ub\filekeep-0.8.9.msi")
+Invoke-CodeSigning -Files @("C:\ub\filekeep-0.08.09.msi")
 
 # A Burn bundle must be signed in two pieces: detach the engine, sign it,
 # reattach it, then sign the whole bundle. Direct-signing the finished
@@ -555,7 +555,7 @@ Move-Item -Force $reattached C:\ub\FileKeep-Setup.exe
 Write-Host "  Bundle signed via detach/sign/reattach/sign."
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
-Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.8.9.msi", "/qn" -Wait
+Start-Process msiexec -ArgumentList "/i", "C:\ub\filekeep-0.08.09.msi", "/qn" -Wait
 Start-Sleep 15
 foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
                  "C:\Program Files\FileKeep\service\FileKeepService.exe",
@@ -581,7 +581,7 @@ if ($prods.Count -gt 0) {
     Start-Sleep 5
 } else {
     Write-Host "  WARNING: FileKeep not found in Win32_Product, trying MSI path..."
-    Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.8.9.msi", "/qn" -Wait
+    Start-Process msiexec -ArgumentList "/x", "C:\ub\filekeep-0.08.09.msi", "/qn" -Wait
     Start-Sleep 10
 }
 if (Test-Path "C:\Program Files\FileKeep") { throw "Uninstall left files behind" }
