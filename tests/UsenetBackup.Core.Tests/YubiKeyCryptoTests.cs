@@ -110,7 +110,8 @@ public sealed class YubiKeyCryptoTests
     {
         var provider = new SimulatedYubiKeyProvider();
         const string passphrase = "my-test-passphrase";
-        var (challenge, wrapped) = YubiKeySetup.Setup(provider, passphrase, slot: 2);
+        var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(provider, passphrase, slot: 2);
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(slotSecret);
         Assert.False(string.IsNullOrEmpty(challenge));
         Assert.False(string.IsNullOrEmpty(wrapped));
         Assert.Equal(YubiKeyCrypto.ChallengeLength, Convert.FromBase64String(challenge).Length);
@@ -123,7 +124,8 @@ public sealed class YubiKeyCryptoTests
     public void Unlock_ReprogrammedSlot_Fails()
     {
         var provider = new SimulatedYubiKeyProvider();
-        var (challenge, wrapped) = YubiKeySetup.Setup(provider, "secret", slot: 2);
+        var (challenge, wrapped, slotSecret2) = YubiKeySetup.Setup(provider, "secret", slot: 2);
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(slotSecret2);
         // User wipes/reprograms the key: the wrapped copy is unrecoverable.
         provider.ProgramSlot(2, RandomNumberGenerator.GetBytes(20));
         Assert.ThrowsAny<CryptographicException>(

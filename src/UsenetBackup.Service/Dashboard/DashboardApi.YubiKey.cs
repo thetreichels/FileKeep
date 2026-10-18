@@ -50,6 +50,7 @@ public static partial class DashboardApi
             config.PassphraseYubiKey = false;
             config.YubiKeyChallenge = null;
             config.PassphraseYubiKeyWrapped = null;
+            config.YubiKeySlotSecretProtected = null;
         }
         else if (useYubiKey)
         {
@@ -57,12 +58,21 @@ public static partial class DashboardApi
                 return (400, new { error = "YubiKey support is unavailable in this build." });
             try
             {
-                var (challenge, wrapped) = YubiKeySetup.Setup(
+                var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(
                     yubiKeyProvider, passphrase, config.YubiKeySlot);
-                config.PassphraseProtected = Dpapi.Protect(passphrase);
-                config.YubiKeyChallenge = challenge;
-                config.PassphraseYubiKeyWrapped = wrapped;
-                config.PassphraseYubiKey = true;
+                try
+                {
+                    config.PassphraseProtected = Dpapi.Protect(passphrase);
+                    config.YubiKeyChallenge = challenge;
+                    config.PassphraseYubiKeyWrapped = wrapped;
+                    config.YubiKeySlotSecretProtected = Dpapi.Protect(
+                        Convert.ToBase64String(slotSecret));
+                    config.PassphraseYubiKey = true;
+                }
+                finally
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(slotSecret);
+                }
             }
             catch (InvalidOperationException ex)
             {
@@ -113,6 +123,43 @@ public static partial class DashboardApi
             detected = devices.Count > 0,
             devices = devices.Select(d => d.Description).ToArray(),
         });
+    }
+
+    /// <summary>
+    /// Programs a spare YubiKey with the stored slot secret so it works
+    /// interchangeably with the original key. Requires YubiKey mode to be
+    /// set up (the secret is stored at setup time).
+    /// </summary>
+    public static (int Status, object Payload) ProgramSpareKey(ServiceConfig config,
+        string configPath, IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null)
+    {
+        if (yubiKeyProvider is null)
+            return (400, new { error = "YubiKey support is unavailable in this build." });
+        if (!config.PassphraseYubiKey || string.IsNullOrEmpty(config.YubiKeySlotSecretProtected))
+            return (400, new { error = "YubiKey is not set up. Complete setup first before programming a spare." });
+        try
+        {
+            string secretB64 = Dpapi.Unprotect(config.YubiKeySlotSecretProtected);
+            byte[] secret = Convert.FromBase64String(secretB64);
+            try
+            {
+                YubiKeySetup.ProgramSpareKey(yubiKeyProvider, secret, config.YubiKeySlot);
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+            log?.Invoke("dashboard: programmed spare YubiKey");
+            return (200, new { ok = true });
+        }
+        catch (TimeoutException)
+        {
+            return (400, new { error = "Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes." });
+        }
+        catch (Exception ex)
+        {
+            return (400, new { error = $"Failed to program spare key: {ex.Message}" });
+        }
     }
 
     /// <summary>

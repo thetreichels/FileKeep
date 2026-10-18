@@ -567,6 +567,14 @@ public static class Dashboard
             return Results.Json(payload);
         });
 
+        app.MapPost("/api/yubikey/program-spare", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.ProgramSpareKey(config, configPath, yubiKeyProvider, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/restore/unlock", (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

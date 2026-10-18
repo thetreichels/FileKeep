@@ -89,7 +89,8 @@ public sealed class RestoreSessionTests
         Assert.Equal(400, s0);
 
         // Simulate a completed setup.
-        var (challenge, wrapped) = YubiKeySetup.Setup(provider, "repo-pass", slot: 2);
+        var (challenge, wrapped, _secret) = YubiKeySetup.Setup(provider, "repo-pass", slot: 2);
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(_secret);
         config.PassphraseYubiKey = true;
         config.YubiKeyChallenge = challenge;
         config.PassphraseYubiKeyWrapped = wrapped;
@@ -114,7 +115,8 @@ public sealed class RestoreSessionTests
     public void UnlockRestoreSession_WrongKey_Fails400()
     {
         var provider = new SimulatedYubiKeyProvider();
-        var (challenge, wrapped) = YubiKeySetup.Setup(provider, "repo-pass", slot: 2);
+        var (challenge, wrapped, _secret) = YubiKeySetup.Setup(provider, "repo-pass", slot: 2);
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(_secret);
         // Attacker swaps in a different key (reprogrammed slot).
         provider.ProgramSlot(2, System.Security.Cryptography.RandomNumberGenerator.GetBytes(20));
 

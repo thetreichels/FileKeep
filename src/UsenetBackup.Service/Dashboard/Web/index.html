@@ -705,6 +705,9 @@
               <span style="font-size:14px">Require YubiKey touch to restore</span>
             </div>
             <div id="pp-yubikey-status" style="color:var(--text-2);font-size:12px;margin-top:8px"></div>
+            <div style="margin-top:8px">
+              <button onclick="programSpareKey()" title="Program another YubiKey with the same secret so it works as a backup. One key is enough; this is optional.">Program spare key</button>
+            </div>
           </div>
         </div>
         <div id="pp-touch" class="yk-touch">
@@ -1585,6 +1588,19 @@ async function savePassphrase() {
   } catch (e) { err.textContent = e.message; err.style.display = ''; }
   finally { touch.classList.remove('show'); }
 }
+async function programSpareKey() {
+  if (!confirm('Insert the spare YubiKey and click OK. You will be prompted to touch it when it flashes.\n\nThis programs the spare with the same secret as your main key.')) return;
+  const csrf = document.querySelector('meta[name=csrf-token]').content;
+  toast('Waiting for YubiKey touch…', '');
+  try {
+    await api('/api/yubikey/program-spare', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf },
+    });
+    toast('Spare key programmed successfully.', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 async function clearPassphrase() {
   if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
   try {

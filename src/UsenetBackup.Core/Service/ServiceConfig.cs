@@ -421,6 +421,15 @@ public sealed class ServiceConfig
     public string? PassphraseYubiKeyWrapped { get; set; }
 
     /// <summary>
+    /// The YubiKey HMAC-SHA1 slot secret, DPAPI-encrypted. Stored so spare
+    /// keys can be programmed later with the same secret. Without this,
+    /// a lost key means re-running setup (which invalidates old keys).
+    /// </summary>
+    [JsonPropertyName("yubiKeySlotSecretProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? YubiKeySlotSecretProtected { get; set; }
+
+    /// <summary>
     /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
     /// otherwise the legacy single Nntp config as a singleton list.
     /// </summary>

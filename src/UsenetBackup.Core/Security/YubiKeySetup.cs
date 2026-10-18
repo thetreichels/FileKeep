@@ -32,7 +32,7 @@ public static class YubiKeySetup
     /// </returns>
     /// <exception cref="InvalidOperationException">No YubiKey attached.</exception>
     /// <exception cref="TimeoutException">No touch within the timeout.</exception>
-    public static (string ChallengeBase64, string WrappedBase64) Setup(
+    public static (string ChallengeBase64, string WrappedBase64, byte[] SlotSecret) Setup(
         IYubiKeyProvider provider, string passphrase, int slot = 2)
     {
         if (provider.FindDevices().Count == 0)
@@ -45,14 +45,9 @@ public static class YubiKeySetup
         // Program the slot with a fresh secret. The secret itself is never
         // stored anywhere; only the key knows it.
         byte[] secret = RandomNumberGenerator.GetBytes(SlotSecretLength);
-        try
-        {
-            provider.ProgramHmacSha1Slot(slot, secret, requireTouch: true);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(secret);
-        }
+        provider.ProgramHmacSha1Slot(slot, secret, requireTouch: true);
+        // Secret is returned (not wiped here) so the caller can store it
+        // encrypted for programming spare keys later. Caller must wipe.
 
         byte[] challenge = YubiKeyCrypto.GenerateChallenge();
         byte[] hmac = provider.CalculateHmacSha1(challenge, slot, SetupTouchTimeout);
@@ -62,7 +57,7 @@ public static class YubiKeySetup
             try
             {
                 string wrapped = YubiKeyCrypto.Wrap(passphrase, kek);
-                return (Convert.ToBase64String(challenge), wrapped);
+                return (Convert.ToBase64String(challenge), wrapped, secret);
             }
             finally
             {
@@ -73,6 +68,21 @@ public static class YubiKeySetup
         {
             CryptographicOperations.ZeroMemory(hmac);
         }
+    }
+
+    /// <summary>
+    /// Programs a spare YubiKey with an existing slot secret (from a previous
+    /// <see cref="Setup"/>). The spare will work interchangeably with the
+    /// original key for the same challenge.
+    /// </summary>
+    public static void ProgramSpareKey(
+        IYubiKeyProvider provider, byte[] slotSecret, int slot = 2)
+    {
+        if (provider.FindDevices().Count == 0)
+            throw new InvalidOperationException("No YubiKey detected. Plug one in and try again.");
+        if (slot is not 1 and not 2)
+            throw new ArgumentOutOfRangeException(nameof(slot), "Slot must be 1 or 2.");
+        provider.ProgramHmacSha1Slot(slot, slotSecret, requireTouch: true);
     }
 
     /// <summary>
