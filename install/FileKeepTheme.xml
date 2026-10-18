@@ -19,7 +19,7 @@
     <Font Id="1" Height="-20" Weight="600" Foreground="4CC2FF" Background="202020">Segoe UI</Font>
     <Font Id="2" Height="-12" Weight="400" Foreground="A7A7A7" Background="202020">Segoe UI</Font>
 
-    <Window Width="620" Height="380" HexStyle="100a0000" FontId="0" Caption="#(loc.Caption)">
+    <Window Width="620" Height="380" HexStyle="120a0000" FontId="0" Caption="#(loc.Caption)">
         <!-- Dark window background: full-window solid image behind everything.
              thmutil has no window background color, so we paint it with an image. -->
         <ImageControl X="0" Y="0" Width="620" Height="380" ImageFile="filekeep-dark-bg.png" Visible="yes" />
@@ -52,8 +52,9 @@
 
         <Page Name="Progress">
             <Label X="324" Y="28" Width="272" Height="34" FontId="1" DisablePrefix="yes">#(loc.ProgressHeader)</Label>
-            <Label Name="OverallProgressPackageText" X="324" Y="80" Width="272" Height="18" FontId="2" DisablePrefix="yes">#(loc.OverallProgressPackageText)</Label>
-            <Progressbar Name="OverallCalculatedProgressbar" X="324" Y="110" Width="272" Height="16" />
+            <Label Name="OverallProgressPackageText" X="324" Y="70" Width="272" Height="18" FontId="2" DisablePrefix="yes">#(loc.OverallProgressPackageText)</Label>
+            <Progressbar Name="OverallCalculatedProgressbar" X="324" Y="94" Width="272" Height="16" />
+            <Label X="324" Y="120" Width="272" Height="60" FontId="2" DisablePrefix="yes">#(loc.ProgressDetailText)</Label>
             <Button Name="ProgressCancelButton" X="486" Y="316" Width="110" Height="30" TabStop="yes" FontId="0">#(loc.ProgressCancelButton)</Button>
         </Page>
 

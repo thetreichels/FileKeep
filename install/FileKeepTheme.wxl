@@ -13,6 +13,7 @@
     <String Id="ProgressHeader" Value="Installing FileKeep…" />
     <String Id="OverallProgressPackageText" Value="" />
     <String Id="ProgressCancelButton" Value="Cancel" />
+    <String Id="ProgressDetailText" Value="Copying program files, registering the service, and creating shortcuts. This usually takes under a minute." />
     <String Id="ConfirmCancelMessage" Value="Are you sure you want to cancel the FileKeep installation?" />
     <String Id="ModifyHeader" Value="FileKeep is installed" />
     <String Id="ModifySubtitle" Value="Repair or uninstall FileKeep." />
