@@ -586,11 +586,15 @@
           <label id="jf-vss-label" class="check" title="Backs up from a point-in-time shadow copy, so files that change during the backup stay consistent. Requires Administrator."><input id="jf-vss" type="checkbox"> Use VSS shadow copy (point-in-time snapshot, admin required)</label>
           <label class="check" title="Checks the backup's integrity automatically after it finishes. Recommended — catches problems early."><input id="jf-autoverify" type="checkbox" checked> Automatically verify backup after it completes</label>
           <label title="Extra recovery data posted alongside uploads, in case some Usenet articles are lost before you download.">Usenet redundancy:
-            <select id="jf-redundancy">
+            <select id="jf-redundancy" onchange="toggleParityGroup()">
               <option value="none">None</option>
               <option value="xor">XOR parity (recovers 1 missing chunk)</option>
               <option value="par2">PAR2 (recovers up to 3 missing)</option>
             </select>
+          </label>
+          <label id="jf-parity-group-label" style="display:none" title="How many data chunks share one parity chunk. Higher = fewer parity files but less protection: only 1 missing chunk recoverable per group. 10 is ~10% overhead; 50 is ~2% overhead.">Parity group size:
+            <input id="jf-parity-group" type="number" min="2" max="100" value="10" style="width:80px">
+            <div class="meta" style="margin-top:4px">Chunks per parity block. Lower protects better (more parity files); higher means fewer files but only 1 recovery per group.</div>
           </label>
           <label>Incremental verification:
             <select id="jf-verification">
@@ -774,6 +778,10 @@ function jobTypeChanged() {
   if (isDisk) refreshDiskList();
 }
 // Toggle advanced job settings.
+function toggleParityGroup() {
+  const mode = document.getElementById('jf-redundancy').value;
+  document.getElementById('jf-parity-group-label').style.display = mode === 'xor' ? '' : 'none';
+}
 function toggleAdvancedJob() {
   const adv = document.getElementById('jf-advanced');
   const btn = document.getElementById('jf-advToggle');
@@ -1854,6 +1862,8 @@ async function showJobForm(job) {
   renderJobLocationChecklist(targets);
   document.getElementById('jf-autoverify').checked = job ? !!job.autoVerify : true;
   document.getElementById('jf-redundancy').value = job && job.redundancyMode ? job.redundancyMode : 'none';
+  document.getElementById('jf-parity-group').value = job && job.parityGroupSize ? job.parityGroupSize : 10;
+  toggleParityGroup();
   document.getElementById('jf-verification').value = job && job.verificationMode ? job.verificationMode : 'fast';
   // Parse schedule
   const sched = job ? job.schedule : 'daily 02:00';
@@ -1975,6 +1985,7 @@ async function saveJob() {
     targets: checkedLocations,
     autoVerify: document.getElementById('jf-autoverify').checked,
     redundancyMode: document.getElementById('jf-redundancy').value,
+    parityGroupSize: parseInt(document.getElementById('jf-parity-group').value, 10) || 10,
     verificationMode: document.getElementById('jf-verification').value,
   };
   const csrf = document.querySelector('meta[name=csrf-token]').content;

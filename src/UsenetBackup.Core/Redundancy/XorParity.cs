@@ -20,7 +20,7 @@ namespace UsenetBackup.Core.Redundancy;
 public static class XorParity
 {
     /// <summary>Number of data chunks per parity group.</summary>
-    public const int GroupSize = 10;
+    public const int DefaultGroupSize = 10;
 
     private static readonly byte[] Magic = "XOR1"u8.ToArray();
     private const int HeaderFixedSize = 8; // magic(4) + numChunks(4)
@@ -33,12 +33,13 @@ public static class XorParity
     public static IReadOnlyDictionary<string, byte[]> GenerateParity(
         IReadOnlyList<string> chunkIds,
         Func<string, byte[]> getChunkBytes,
-        Action<string>? logWarning = null)
+        Action<string>? logWarning = null,
+        int groupSize = DefaultGroupSize)
     {
         var result = new Dictionary<string, byte[]>();
-        for (int i = 0; i < chunkIds.Count; i += GroupSize)
+        for (int i = 0; i < chunkIds.Count; i += groupSize)
         {
-            var group = chunkIds.Skip(i).Take(GroupSize).ToList();
+            var group = chunkIds.Skip(i).Take(groupSize).ToList();
             if (group.Count < 2)
                 continue; // Need at least 2 for parity to be useful
 
@@ -181,13 +182,13 @@ public static class XorParity
     /// <summary>
     /// Finds the parity group containing the given chunk ID.
     /// </summary>
-    public static List<string> GetGroupFor(string chunkId, IReadOnlyList<string> allChunkIds)
+    public static List<string> GetGroupFor(string chunkId, IReadOnlyList<string> allChunkIds, int groupSize = DefaultGroupSize)
     {
         int index = IndexOf(allChunkIds, chunkId);
         if (index < 0)
             return new List<string>();
-        int groupStart = (index / GroupSize) * GroupSize;
-        return allChunkIds.Skip(groupStart).Take(GroupSize).ToList();
+        int groupStart = (index / groupSize) * groupSize;
+        return allChunkIds.Skip(groupStart).Take(groupSize).ToList();
     }
 
     /// <summary>

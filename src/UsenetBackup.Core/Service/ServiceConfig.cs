@@ -292,11 +292,19 @@ public sealed class BackupJobConfig
 
     /// <summary>
     /// Redundancy mode for Usenet uploads: "none" (default), "xor" (single
-    /// parity block per 10 chunks, recovers 1 missing), or "par2"
-    /// (Reed-Solomon, recovers up to 3 missing per 10 chunks).
+    /// parity block per group, recovers 1 missing per group), or "par2"
+    /// (Reed-Solomon, recovers multiple missing per group).
     /// </summary>
     [JsonPropertyName("redundancyMode")]
     public string RedundancyMode { get; set; } = "none";
+
+    /// <summary>
+    /// Number of data chunks per XOR parity group. Default 10 (1 parity per
+    /// 10 chunks, ~10% overhead). Higher values mean fewer parity files but
+    /// less protection: only 1 missing chunk recoverable per group.
+    /// </summary>
+    [JsonPropertyName("parityGroupSize")]
+    public int ParityGroupSize { get; set; } = 10;
 }
 
 /// <summary>

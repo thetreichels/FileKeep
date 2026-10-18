@@ -1476,7 +1476,7 @@ public sealed class BackupScheduler
                                     continue;
                                 IReadOnlyDictionary<string, byte[]> blocks =
                                     redundancy == "xor"
-                                        ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes)
+                                        ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes, null, job.ParityGroupSize)
                                         : Redundancy.Par2Redundancy.GenerateParity(group, GetVolumeBytes);
                                 Parallel.ForEach(blocks, parallelOptions, kvp =>
                                 {
@@ -1499,7 +1499,7 @@ public sealed class BackupScheduler
                             IReadOnlyDictionary<string, byte[]> parityBlocks =
                                 redundancy == "xor"
                                     ? Redundancy.XorParity.GenerateParity(
-                                        chunkIds, id => repo.GetChunkBlob(id))
+                                        chunkIds, id => repo.GetChunkBlob(id), null, job.ParityGroupSize)
                                     : Redundancy.Par2Redundancy.GenerateParity(
                                         chunkIds, id => repo.GetChunkBlob(id));
                             Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
