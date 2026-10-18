@@ -83,16 +83,9 @@ public static partial class DashboardApi
             return (400, new { error = "Drive listing requires Windows." });
         try
         {
-            var drives = UsenetBackup.Core.Recovery.PhysicalDrives.List()
-                .Select(d => new
-                {
-                    number = d.Number,
-                    devicePath = d.DevicePath,
-                    model = d.Model,
-                    sizeBytes = d.SizeBytes,
-                    isSystemDrive = d.IsSystemDrive,
-                })
-                .ToArray();
+            // Return the named PhysicalDrive records directly (not anonymous types)
+            // so System.Text.Json can serialize them under trimming.
+            var drives = UsenetBackup.Core.Recovery.PhysicalDrives.List().ToArray();
             return (200, drives);
         }
         catch (Exception ex)
