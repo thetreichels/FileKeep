@@ -53,22 +53,22 @@ public static partial class DashboardApi
     {
         string linkMode = (request.LinkMode ?? "or").Trim().ToLowerInvariant();
         if (linkMode is not ("or" or "and"))
-            return (400, new { error = "linkMode must be \"or\" or \"and\"." });
+            return (400, new ErrorDto("linkMode must be \"or\" or \"and\"."));
 
         bool passphraseConfigured = HasConfiguredPassphrase(config);
         if (request.PassphraseEnabled && !passphraseConfigured)
-            return (400, new { error = "No passphrase is configured. Set a repository passphrase first." });
+            return (400, new ErrorDto("No passphrase is configured. Set a repository passphrase first."));
         if (!request.PassphraseEnabled && passphraseConfigured)
-            return (400, new { error = "A passphrase is configured. Clear it from the passphrase settings before turning Passphrase off." });
+            return (400, new ErrorDto("A passphrase is configured. Clear it from the passphrase settings before turning Passphrase off."));
         if (request.YubiKeyEnabled && !config.PassphraseYubiKey)
-            return (400, new { error = "YubiKey is not set up. Complete YubiKey setup first." });
+            return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
         if (linkMode == "and" && (!request.PassphraseEnabled || !request.YubiKeyEnabled))
-            return (400, new { error = "\"and\" link mode requires both Passphrase and YubiKey to be enabled." });
+            return (400, new ErrorDto("\"and\" link mode requires both Passphrase and YubiKey to be enabled."));
         if (!request.PassphraseEnabled && !request.YubiKeyEnabled)
         {
             if (request.PhoneEnabled)
-                return (400, new { error = "Phone authenticator cannot be the only enabled method. Enable Passphrase or YubiKey first." });
-            return (400, new { error = "At least one of Passphrase or YubiKey must stay enabled." });
+                return (400, new ErrorDto("Phone authenticator cannot be the only enabled method. Enable Passphrase or YubiKey first."));
+            return (400, new ErrorDto("At least one of Passphrase or YubiKey must stay enabled."));
         }
 
         config.PassphraseYubiKey = request.YubiKeyEnabled;
@@ -84,7 +84,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 
@@ -99,13 +99,13 @@ public static partial class DashboardApi
     {
         string clean = (name ?? "").Trim();
         if (clean.Length == 0)
-            return (400, new { error = "A YubiKey name is required." });
+            return (400, new ErrorDto("A YubiKey name is required."));
         if (clean.Length > MaxYubiKeyNameLength)
-            return (400, new { error = $"YubiKey name is too long (max {MaxYubiKeyNameLength} characters)." });
+            return (400, new ErrorDto($"YubiKey name is too long (max {MaxYubiKeyNameLength} characters)." ));
         if (config.YubiKeys.Any(n => n.Equals(clean, StringComparison.OrdinalIgnoreCase)))
-            return (400, new { error = $"A YubiKey named \"{clean}\" is already registered." });
+            return (400, new ErrorDto($"A YubiKey named \"{clean}\" is already registered." ));
         if (config.YubiKeys.Count >= MaxYubiKeyNames)
-            return (400, new { error = $"Too many YubiKeys registered (max {MaxYubiKeyNames})." });
+            return (400, new ErrorDto($"Too many YubiKeys registered (max {MaxYubiKeyNames})." ));
         config.YubiKeys.Add(clean);
         try
         {
@@ -115,7 +115,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 }

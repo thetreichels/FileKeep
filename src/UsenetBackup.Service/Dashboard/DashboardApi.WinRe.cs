@@ -202,10 +202,10 @@ public static partial class DashboardApi
     public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode, int imageSizeMB)
     {
         if (!OperatingSystem.IsWindows())
-            return (400, new { error = "WinRE recovery media creation requires Windows." });
+            return (400, new ErrorDto("WinRE recovery media creation requires Windows."));
         bootMode = (bootMode ?? "Both").Trim();
         if (bootMode != "UEFI" && bootMode != "BIOS" && bootMode != "Both")
-            return (400, new { error = "bootMode must be UEFI, BIOS, or Both." });
+            return (400, new ErrorDto("bootMode must be UEFI, BIOS, or Both."));
 
         // Validate everything BEFORE claiming the running flag: every return
         // below must leave _winReBuildStatus untouched, or a rejected request
@@ -213,16 +213,16 @@ public static partial class DashboardApi
         // "A WinRE build is already running." with nothing actually running).
         bool imageMode = !string.IsNullOrWhiteSpace(imagePath);
         if (imageMode && (!string.IsNullOrWhiteSpace(driveLetter) || diskNumber >= 0))
-            return (400, new { error = "Specify either a USB target or an image path, not both." });
+            return (400, new ErrorDto("Specify either a USB target or an image path, not both."));
         if (!imageMode)
         {
             driveLetter = driveLetter.Trim().TrimEnd(':', '\\');
             bool hasLetter = driveLetter.Length == 1 && char.IsLetter(driveLetter[0]);
             bool hasDisk = diskNumber >= 0;
             if (!hasLetter && !hasDisk)
-                return (400, new { error = "Select a USB drive." });
+                return (400, new ErrorDto("Select a USB drive."));
             if (hasLetter && hasDisk)
-                return (400, new { error = "Specify either a drive letter or a disk number, not both." });
+                return (400, new ErrorDto("Specify either a drive letter or a disk number, not both."));
             if (hasDisk)
             {
                 // The dashboard only offers USB-bus disks; refuse anything else
@@ -238,30 +238,30 @@ public static partial class DashboardApi
                     knownUsb = false;
                 }
                 if (!knownUsb)
-                    return (400, new { error = $"Disk {diskNumber} is not a USB-attached drive." });
+                    return (400, new ErrorDto($"Disk {diskNumber} is not a USB-attached drive." ));
             }
         }
         else
         {
             var (normalizedPath, pathError) = NormalizeWinReImagePath(imagePath);
             if (pathError is not null)
-                return (400, new { error = pathError });
+                return (400, new ErrorDto(pathError));
             imagePath = normalizedPath!;
             if (imageSizeMB < 1024)
-                return (400, new { error = "Image size must be at least 1024 MB." });
+                return (400, new ErrorDto("Image size must be at least 1024 MB."));
         }
 
         var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
         if (prereq is null || !(prereq.TryGetValue("ready", out var readyObj) && readyObj is bool ready && ready))
         {
             var missing = prereq?.TryGetValue("missing", out var m) == true ? m : "prerequisites not met";
-            return (400, new { error = $"Prerequisites not met: {missing}" });
+            return (400, new ErrorDto($"Prerequisites not met: {missing}" ));
         }
 
         lock (_winReBuildStepsLock)
         {
             if (_winReBuildStatus == "running")
-                return (400, new { error = "A WinRE build is already running." });
+                return (400, new ErrorDto("A WinRE build is already running."));
             _winReBuildStatus = "running";
             _winReBuildSteps.Clear();
             _winReBuildStartedAt = DateTime.UtcNow;
@@ -396,7 +396,7 @@ public static partial class DashboardApi
                 LogWinReBuild($"target={_winReBuildDrive}: FAILED: {_winReBuildError}");
             }
         });
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -458,10 +458,10 @@ public static partial class DashboardApi
         lock (_winReBuildStepsLock)
         {
             if (_winReBuildStatus != "running")
-                return (400, new { error = "No WinRE build is running." });
+                return (400, new ErrorDto("No WinRE build is running."));
             _winReBuildCancelRequested = true;
             try { _winReBuildProcess?.Kill(entireProcessTree: true); } catch { }
-            return (200, new { cancelled = true });
+            return (200, new CancelledDto(true));
         }
     }
 

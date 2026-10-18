@@ -55,6 +55,13 @@ public static class Dashboard
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseUrls($"http://{config.DashboardBind}:{config.DashboardPort}");
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
+        // Use source-generated JSON metadata so Results.Json() works under trimming.
+        // DashboardJsonContext covers dashboard DTOs; FileKeepJsonContext covers Core types.
+        builder.Services.ConfigureHttpJsonOptions(o =>
+        {
+            o.SerializerOptions.TypeInfoResolverChain.Add(DashboardJsonContext.Default);
+            o.SerializerOptions.TypeInfoResolverChain.Add(UsenetBackup.Core.Json.FileKeepJsonContext.Default);
+        });
         var app = builder.Build();
 
         app.MapGet("/", () => Results.Content(DashboardHtml.Page(csrfToken), "text/html; charset=utf-8"));
@@ -65,7 +72,7 @@ public static class Dashboard
         // quick-pick. Uses Environment.GetFolderPath (SHGetKnownFolderPath wrapper).
         app.MapGet("/api/user-folders", () =>
         {
-            var folders = new List<object>();
+            var folders = new List<FolderDto>();
             var known = new (string name, Environment.SpecialFolder folder)[]
             {
                 ("Desktop", Environment.SpecialFolder.Desktop),
@@ -82,7 +89,7 @@ public static class Dashboard
                 if (name == "Downloads" && !string.IsNullOrEmpty(path))
                     path = Path.Combine(path, "Downloads");
                 if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
-                    folders.Add(new { name, path });
+                    folders.Add(new FolderDto(name, path));
             }
             return Results.Json(folders);
         });
@@ -92,7 +99,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             if (!DashboardApi.IsKnownJob(scheduler, name))
-                return Results.NotFound(new { error = $"Unknown job '{name}'." });
+                return Results.NotFound(new ErrorDto($"Unknown job '{name}'." ));
             // Run in the background; the scheduler serializes runs.
             Task.Run(() =>
             {
@@ -237,7 +244,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string path = GetBodyString(body, "path");
             bool exists = !string.IsNullOrEmpty(path) && File.Exists(path);
-            return Results.Json(new { exists });
+            return Results.Json(new ExistsDto(exists));
         });
 
         app.MapGet("/api/operations/usb-drives", () =>
@@ -291,10 +298,10 @@ public static class Dashboard
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            if (!request.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form." });
+            if (!request.HasFormContentType) return Results.BadRequest(new ErrorDto("Expected multipart form."));
             var form = await request.ReadFormAsync();
             var file = form.Files["nzb"];
-            if (file is null || file.Length == 0) return Results.BadRequest(new { error = "No NZB file uploaded." });
+            if (file is null || file.Length == 0) return Results.BadRequest(new ErrorDto("No NZB file uploaded."));
             string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
             await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
             var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, tmp, restoreSession);
@@ -363,74 +370,64 @@ public static class Dashboard
         // Settings UI: read and update the backup job configuration.
         // All writes require the CSRF token and are validated before saving.
         app.MapGet("/api/config", () =>
-            Results.Json(new
-            {
-                dashboardPort = config.DashboardPort,
-                dashboardBind = config.DashboardBind,
+            Results.Json(new ConfigSnapshotDto(
+                config.DashboardPort,
+                config.DashboardBind,
                 // Never expose the encrypted password blob to the UI.
                 // Snapshot under JobsLock: UpsertJob/DeleteJob mutate concurrently.
-                jobs = config.SnapshotJobs().Select(j => new
-                {
-                    name = j.Name,
-                    repo = j.Repo,
-                    source = j.Source,
-                    schedule = j.Schedule,
-                    mode = j.Mode,
-                    jobType = j.JobType,
-                    backupPrivilege = j.BackupPrivilege,
-                    vss = j.Vss,
-                    autoUpload = j.AutoUpload,
-                    targets = j.Targets,
-                    smbShare = j.SmbShare,
-                    smbUser = j.SmbUser,
-                    hasSmbPassword = !string.IsNullOrEmpty(j.SmbPasswordProtected),
-                    autoVerify = j.AutoVerify,
-                    verificationMode = j.VerificationMode,
-                    redundancyMode = j.RedundancyMode,
-                }).ToList(),
+                config.SnapshotJobs().Select(j => new ConfigJobDto(
+                    j.Name,
+                    j.Repo,
+                    j.Source,
+                    j.Schedule,
+                    j.Mode,
+                    j.JobType,
+                    j.BackupPrivilege,
+                    j.Vss,
+                    j.AutoUpload,
+                    j.Targets,
+                    j.SmbShare,
+                    j.SmbUser,
+                    !string.IsNullOrEmpty(j.SmbPasswordProtected),
+                    j.AutoVerify,
+                    j.VerificationMode,
+                    j.RedundancyMode)).ToList(),
                 // Never expose the encrypted password blob to the UI.
-                nntp = config.Nntp == null ? null : new
-                {
-                    host = config.Nntp.Host,
-                    port = config.Nntp.Port,
-                    username = config.Nntp.Username,
-                    ssl = config.Nntp.Ssl,
-                    connections = config.Nntp.Connections,
-                    hasPassword = config.Nntp.HasPassword,
-                },
-                nntpProviders = config.NntpProviders.Select(p => new
-                {
-                    host = p.Host,
-                    port = p.Port,
-                    username = p.Username,
-                    ssl = p.Ssl,
-                    connections = p.Connections,
-                    retentionDays = p.RetentionDays,
-                    redundancyMode = p.RedundancyMode,
-                    hasPassword = p.HasPassword,
-                }).ToList(),
+                config.Nntp == null ? null : new ConfigNntpDto(
+                    config.Nntp.Host,
+                    config.Nntp.Port,
+                    config.Nntp.Username,
+                    config.Nntp.Ssl,
+                    config.Nntp.Connections,
+                    config.Nntp.HasPassword),
+                config.NntpProviders.Select(p => new ConfigNntpProviderDto(
+                    p.Host,
+                    p.Port,
+                    p.Username,
+                    p.Ssl,
+                    p.Connections,
+                    p.RetentionDays,
+                    p.RedundancyMode,
+                    p.HasPassword)).ToList(),
                 // Backup locations (Usenet providers + SMB shares). Never
                 // expose encrypted password blobs to the UI.
-                locations = config.Locations.Select(l => new
-                {
-                    name = l.Name,
-                    type = l.Type,
-                    host = l.Host,
-                    port = l.Port,
-                    username = l.Username,
-                    ssl = l.Ssl,
-                    connections = l.Connections,
-                    newsgroup = l.Newsgroup,
-                    retentionDays = l.RetentionDays,
-                    share = l.Share,
-                    smbUser = l.SmbUser,
-                    hasPassword = l.HasPassword,
-                    usedBy = config.SnapshotJobs()
+                config.Locations.Select(l => new ConfigLocationDto(
+                    l.Name,
+                    l.Type,
+                    l.Host,
+                    l.Port,
+                    l.Username,
+                    l.Ssl,
+                    l.Connections,
+                    l.Newsgroup,
+                    l.RetentionDays,
+                    l.Share,
+                    l.SmbUser,
+                    l.HasPassword,
+                    config.SnapshotJobs()
                         .Where(j => j.EffectiveTargets.Any(t =>
                             t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
-                        .Select(j => j.Name).ToList(),
-                }).ToList(),
-            }));
+                        .Select(j => j.Name).ToList())).ToList())));
 
         app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
         {
@@ -450,19 +447,17 @@ public static class Dashboard
 
                 var tracker = new UsenetUploadTracker(repo);
                 var expiring = tracker.GetExpiring(GetRetention, warnDays);
-                return Results.Json(expiring.Select(x => new
-                {
-                    backupId = x.Record.BackupId,
-                    providerHost = x.Record.ProviderHost,
-                    uploadedUtc = x.Record.UploadedUtc,
-                    expiresUtc = x.ExpiresUtc,
-                    daysLeft = x.DaysLeft,
-                    retentionDays = GetRetention(x.Record.ProviderHost),
-                }).ToList());
+                return Results.Json(expiring.Select(x => new ExpiringBackupDto(
+                    x.Record.BackupId,
+                    x.Record.ProviderHost,
+                    x.Record.UploadedUtc,
+                    x.ExpiresUtc,
+                    x.DaysLeft,
+                    GetRetention(x.Record.ProviderHost))).ToList());
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new { error = ex.Message });
+                return Results.BadRequest(new ErrorDto(ex.Message));
             }
         });
 
@@ -470,8 +465,8 @@ public static class Dashboard
         {
             var tracker = scheduler.ActiveUpload;
             if (tracker is null)
-                return Results.Json(new { active = false });
-            return Results.Json(new { active = true, progress = tracker.GetSnapshot() });
+                return Results.Json(new ActiveDto(false));
+            return Results.Json(new ActiveProgressDto(true, tracker.GetSnapshot()));
         });
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>
@@ -480,9 +475,9 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             BackupJobConfig? job;
             try { job = await request.ReadFromJsonAsync<BackupJobConfig>(); }
-            catch { return Results.BadRequest(new { error = "Invalid job JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid job JSON.")); }
             if (job is null)
-                return Results.BadRequest(new { error = "Empty job." });
+                return Results.BadRequest(new ErrorDto("Empty job."));
             var (status, payload) = DashboardApi.UpsertJob(config, scheduler, configPath, job, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -501,9 +496,9 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             BackupLocation? loc;
             try { loc = await request.ReadFromJsonAsync<BackupLocation>(); }
-            catch { return Results.BadRequest(new { error = "Invalid location JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid location JSON.")); }
             if (loc is null)
-                return Results.BadRequest(new { error = "Empty location." });
+                return Results.BadRequest(new ErrorDto("Empty location."));
             var (status, payload) = DashboardApi.UpsertLocation(config, configPath, loc, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -530,9 +525,9 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             NntpConfig? nntp;
             try { nntp = await request.ReadFromJsonAsync<NntpConfig>(); }
-            catch { return Results.BadRequest(new { error = "Invalid NNTP JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid NNTP JSON.")); }
             if (nntp is null)
-                return Results.BadRequest(new { error = "Empty NNTP config." });
+                return Results.BadRequest(new ErrorDto("Empty NNTP config."));
             var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -543,9 +538,9 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             List<NntpConfig>? providers;
             try { providers = await request.ReadFromJsonAsync<List<NntpConfig>>(); }
-            catch { return Results.BadRequest(new { error = "Invalid providers JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid providers JSON.")); }
             if (providers is null)
-                return Results.BadRequest(new { error = "Empty providers list." });
+                return Results.BadRequest(new ErrorDto("Empty providers list."));
             var (status, payload) = DashboardApi.UpdateNntpProviders(config, scheduler, configPath, providers, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
@@ -562,7 +557,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             System.Text.Json.JsonElement body;
             try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
-            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
             var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log);
@@ -587,9 +582,9 @@ public static class Dashboard
                 profile = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
                     FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileRequest);
             }
-            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             if (profile is null)
-                return Results.BadRequest(new { error = "Empty profile." });
+                return Results.BadRequest(new ErrorDto("Empty profile."));
             var (status, payload) = DashboardApi.SetProtectionProfile(config, configPath, profile, log);
             if (status != 200)
                 return Results.BadRequest(payload);
@@ -608,9 +603,9 @@ public static class Dashboard
                 body = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
                     FileKeepJsonOptions.Default, FileKeepJsonContext.Default.AddYubiKeyRequest);
             }
-            catch { return Results.BadRequest(new { error = "Invalid JSON." }); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             if (body is null)
-                return Results.BadRequest(new { error = "Empty request." });
+                return Results.BadRequest(new ErrorDto("Empty request."));
             var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log);
             if (status != 200)
                 return Results.BadRequest(payload);

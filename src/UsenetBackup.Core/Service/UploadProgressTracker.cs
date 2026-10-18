@@ -160,7 +160,7 @@ public sealed class UploadProgressTracker : IDisposable
     /// <summary>
     /// Returns current progress snapshot for dashboard API.
     /// </summary>
-    public object GetSnapshot()
+    public UploadProgressSnapshot GetSnapshot()
     {
         lock (_lock)
         {
@@ -188,19 +188,17 @@ public sealed class UploadProgressTracker : IDisposable
                 }
             }
 
-            return new
-            {
-                jobName = _jobName,
-                host = _host,
-                doneChunks = done,
-                totalChunks = _totalChunks,
-                percent = Math.Round(pct, 1),
-                bytesPerSec = (long)bytesPerSec,
-                eta = eta, // null if still measuring
-                measuring = !hasEnoughData,
-                elapsedSecs = (int)elapsed.TotalSeconds,
-                phase = _phase,
-            };
+            return new UploadProgressSnapshot(
+                _jobName,
+                _host,
+                done,
+                _totalChunks,
+                Math.Round(pct, 1),
+                (long)bytesPerSec,
+                eta, // null if still measuring
+                !hasEnoughData,
+                (int)elapsed.TotalSeconds,
+                _phase);
         }
     }
 }

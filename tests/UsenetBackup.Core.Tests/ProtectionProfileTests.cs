@@ -33,7 +33,8 @@ public sealed class ProtectionProfileTests : IDisposable
     private static string ErrorMessage((int Status, object Payload) result)
     {
         Assert.NotEqual(200, result.Status);
-        var prop = result.Payload.GetType().GetProperty("error");
+        var prop = result.Payload.GetType().GetProperty("Error")
+            ?? result.Payload.GetType().GetProperty("error");
         Assert.NotNull(prop);
         return (string?)prop.GetValue(result.Payload) ?? "";
     }

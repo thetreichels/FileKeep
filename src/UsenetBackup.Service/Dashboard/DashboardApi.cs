@@ -14,30 +14,24 @@ namespace UsenetBackup.Service;
 /// </summary>
 public static partial class DashboardApi
 {
-    public static object GetStatus(BackupScheduler scheduler) => new
-    {
-        startedLocal = scheduler.StartedLocal,
-        jobs = scheduler.Jobs.Select(j => new
-        {
-            name = j.Config.Name,
-            repo = j.Config.Repo,
-            source = j.Config.Source,
-            schedule = j.Schedule.ToString(),
-            mode = j.Config.Mode,
-            backupPrivilege = j.Config.BackupPrivilege,
-            vss = j.Config.Vss,
-            nextRunLocal = j.NextRunLocal,
-            consecutiveFailures = j.ConsecutiveFailures,
-            lastResult = j.LastResult is null ? null : new
-            {
-                startedLocal = j.LastResult.StartedLocal,
-                success = j.LastResult.Success,
-                backupId = j.LastResult.BackupId,
-                files = j.LastResult.Files,
-                error = j.LastResult.Error,
-            },
-        }),
-    };
+    public static StatusDto GetStatus(BackupScheduler scheduler) => new(
+        scheduler.StartedLocal,
+        scheduler.Jobs.Select(j => new StatusJobDto(
+            j.Config.Name,
+            j.Config.Repo,
+            j.Config.Source,
+            j.Schedule.ToString(),
+            j.Config.Mode,
+            j.Config.BackupPrivilege,
+            j.Config.Vss,
+            j.NextRunLocal,
+            j.ConsecutiveFailures,
+            j.LastResult is null ? null : new StatusLastResultDto(
+                j.LastResult.StartedLocal,
+                j.LastResult.Success,
+                j.LastResult.BackupId,
+                j.LastResult.Files,
+                j.LastResult.Error))).ToList());
 
     public static bool IsKnownJob(BackupScheduler scheduler, string name) =>
         scheduler.Jobs.Any(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -80,7 +74,7 @@ public static partial class DashboardApi
     public static (int Status, object Payload) ListPhysicalDrives()
     {
         if (!OperatingSystem.IsWindows())
-            return (400, new { error = "Drive listing requires Windows." });
+            return (400, new ErrorDto("Drive listing requires Windows."));
         try
         {
             // Return the named PhysicalDrive records directly (not anonymous types)
@@ -90,7 +84,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message });
+            return (500, new ErrorDto(ex.Message));
         }
     }
 
@@ -98,12 +92,12 @@ public static partial class DashboardApi
     public static (int Status, object Payload) GetBackups(ServiceConfig config, string repo, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
         try
         {
             using var r = BackupRepository.Open(repo, passphrase);
@@ -111,7 +105,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message });
+            return (500, new ErrorDto(ex.Message));
         }
     }
 
@@ -123,15 +117,15 @@ public static partial class DashboardApi
     public static (int Status, object Payload) GetRemoteBackups(ServiceConfig config, string repo, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
-            return (400, new { error = "No Usenet provider configured." });
+            return (400, new ErrorDto("No Usenet provider configured."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -167,7 +161,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message });
+            return (500, new ErrorDto(ex.Message));
         }
     }
 
@@ -178,15 +172,15 @@ public static partial class DashboardApi
     public static (int Status, object Payload) ImportRemoteBackups(ServiceConfig config, string repo, string[] backupIds, RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
-            return (400, new { error = "No Usenet provider configured." });
+            return (400, new ErrorDto("No Usenet provider configured."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -216,11 +210,11 @@ public static partial class DashboardApi
             }
             OperationLog.Append(repo, "import-remote",
                 $"imported={imported} host={provider.Host}");
-            return (200, new { imported });
+            return (200, new ImportedDto(imported));
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message });
+            return (500, new ErrorDto(ex.Message));
         }
     }
 
@@ -232,12 +226,12 @@ public static partial class DashboardApi
         ServiceConfig config, BackupScheduler scheduler, string repo, string backupId)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(backupId))
-            return (400, new { error = "backupId is required." });
+            return (400, new ErrorDto("backupId is required."));
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
-            return (400, new { error = "No Usenet provider configured." });
+            return (400, new ErrorDto("No Usenet provider configured."));
         Task.Run(() =>
         {
             try
@@ -251,7 +245,7 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-upload", $"backupId={backupId} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -263,10 +257,10 @@ public static partial class DashboardApi
         ServiceConfig config, string share, string user)
     {
         if (string.IsNullOrWhiteSpace(share))
-            return (400, new { error = "SMB share path is required." });
+            return (400, new ErrorDto("SMB share path is required."));
         var repos = AllJobRepos(config);
         if (repos.Count == 0)
-            return (400, new { error = "No backup jobs configured." });
+            return (400, new ErrorDto("No backup jobs configured."));
         // Find SMB credentials: first matching job's stored password, else env var.
         var job = config.SnapshotJobs().FirstOrDefault(j =>
             !string.IsNullOrWhiteSpace(j.SmbShare));
@@ -295,7 +289,7 @@ public static partial class DashboardApi
         });
         foreach (string repo in repos)
             OperationLog.Append(repo, "smb-sync", $"to {share} started");
-        return (202, new { accepted = true, repos = repos.Count });
+        return (202, new AcceptedReposDto(true, repos.Count));
     }
 
     /// <summary>
@@ -306,14 +300,14 @@ public static partial class DashboardApi
         RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(backupId))
-            return (400, new { error = "backupId is required." });
+            return (400, new ErrorDto("backupId is required."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = "Service passphrase is not configured." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto("Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -329,7 +323,7 @@ public static partial class DashboardApi
                     $"backupId={backupId} FAILED: {ex.Message}");
             }
         });
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -340,7 +334,7 @@ public static partial class DashboardApi
     {
         var repos = AllJobRepos(config);
         if (repos.Count == 0)
-            return (400, new { error = "No backup jobs configured." });
+            return (400, new ErrorDto("No backup jobs configured."));
         Task.Run(() =>
         {
             foreach (string repo in repos)
@@ -358,7 +352,7 @@ public static partial class DashboardApi
         });
         foreach (string repo in repos)
             OperationLog.Append(repo, "manual-retention", $"dryRun={dryRun} started");
-        return (202, new { accepted = true, repos = repos.Count });
+        return (202, new AcceptedReposDto(true, repos.Count));
     }
 
     /// <summary>
@@ -371,16 +365,16 @@ public static partial class DashboardApi
         RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(backupId))
-            return (400, new { error = "backupId is required." });
+            return (400, new ErrorDto("backupId is required."));
         if (string.IsNullOrWhiteSpace(destDir))
-            return (400, new { error = "destDir is required." });
+            return (400, new ErrorDto("destDir is required."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = "Service passphrase is not configured." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto("Service passphrase is not configured."));
         // SMB credentials: matching job's stored password, else env var.
         string? smbPassword = null;
         if (!string.IsNullOrWhiteSpace(smbShare))
@@ -426,7 +420,7 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -436,12 +430,12 @@ public static partial class DashboardApi
         ServiceConfig config, string repo, string sourceDir)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
-            return (400, new { error = "sourceDir must be an existing directory." });
+            return (400, new ErrorDto("sourceDir must be an existing directory."));
         string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return (500, new ErrorDto("Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -458,7 +452,7 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-backup", $"source={sourceDir} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -472,9 +466,9 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string sourceDir, string repoPath, ServiceConfig? config = null)
     {
         if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
-            return (400, new { error = "Choose an existing source folder." });
+            return (400, new ErrorDto("Choose an existing source folder."));
         if (string.IsNullOrWhiteSpace(repoPath))
-            return (400, new { error = "Choose a destination folder for the backup." });
+            return (400, new ErrorDto("Choose a destination folder for the backup."));
         try
         {
             // The repo must not live inside the source: the backup would try
@@ -484,19 +478,19 @@ public static partial class DashboardApi
             string fullRepo = Path.GetFullPath(repoPath).TrimEnd(Path.DirectorySeparatorChar)
                 + Path.DirectorySeparatorChar;
             if (fullRepo.StartsWith(fullSource, StringComparison.OrdinalIgnoreCase))
-                return (400, new { error = "The destination folder cannot be inside the source folder." });
+                return (400, new ErrorDto("The destination folder cannot be inside the source folder."));
             if (fullSource.StartsWith(fullRepo, StringComparison.OrdinalIgnoreCase) && fullSource.Length != fullRepo.Length)
-                return (400, new { error = "The source folder cannot be inside the destination folder." });
+                return (400, new ErrorDto("The source folder cannot be inside the destination folder."));
         }
         catch
         {
-            return (400, new { error = "Invalid folder paths." });
+            return (400, new ErrorDto("Invalid folder paths."));
         }
         string? passphrase = config is null
             ? Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar)
             : BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
-            return (400, new { error = "Set a repository passphrase first (Settings \u2192 Security)." });
+            return (400, new ErrorDto("Set a repository passphrase first (Settings \u2192 Security)."));
         Task.Run(() =>
         {
             try
@@ -515,7 +509,7 @@ public static partial class DashboardApi
                 catch { /* best effort */ }
             }
         });
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -526,14 +520,14 @@ public static partial class DashboardApi
         RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." }, "");
+            return (400, new ErrorDto("Unknown repo (not a configured job)."), "");
         if (string.IsNullOrWhiteSpace(backupId))
-            return (400, new { error = "backupId is required." }, "");
+            return (400, new ErrorDto("backupId is required."), "");
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." }, "")
-                : (500, new { error = "Service passphrase is not configured." }, "");
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."), "")
+                : (500, new ErrorDto("Service passphrase is not configured."), "");
         try
         {
             var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
@@ -551,7 +545,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message }, "");
+            return (500, new ErrorDto(ex.Message), "");
         }
     }
 
@@ -565,15 +559,15 @@ public static partial class DashboardApi
         // Chunks are content-addressed; fetch into the primary repo.
         string? repo = PrimaryRepo(config);
         if (repo is null)
-            return (400, new { error = "No backup jobs configured." });
+            return (400, new ErrorDto("No backup jobs configured."));
         var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
         if (provider is null)
-            return (400, new { error = "No Usenet provider configured." });
+            return (400, new ErrorDto("No Usenet provider configured."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = "Service passphrase is not configured." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto("Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -592,7 +586,7 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-nzb-download", $"nzb={Path.GetFileName(nzbPath)} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -605,12 +599,12 @@ public static partial class DashboardApi
         string? smbShare = null, bool sparse = true)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(device))
-            return (400, new { error = "device is required." });
+            return (400, new ErrorDto("device is required."));
         string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new { error = "Service passphrase is not configured." });
+            return (500, new ErrorDto("Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -639,7 +633,7 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-disk-backup", $"device={device} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 
     /// <summary>
@@ -652,18 +646,18 @@ public static partial class DashboardApi
         RestoreSession? session = null)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         if (string.IsNullOrWhiteSpace(backupId))
-            return (400, new { error = "backupId is required." });
+            return (400, new ErrorDto("backupId is required."));
         if (string.IsNullOrWhiteSpace(device))
-            return (400, new { error = "device is required." });
+            return (400, new ErrorDto("device is required."));
         if (!confirmed)
-            return (400, new { error = "Restore not confirmed. Restore aborted." });
+            return (400, new ErrorDto("Restore not confirmed. Restore aborted."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
-                ? (401, new { error = "Restore session is locked. Touch your YubiKey to unlock it." })
-                : (500, new { error = "Service passphrase is not configured." });
+                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+                : (500, new ErrorDto("Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -680,6 +674,6 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-disk-restore", $"backupId={backupId} device={device} started");
-        return (202, new { accepted = true });
+        return (202, new AcceptedDto(true));
     }
 }

@@ -15,19 +15,12 @@ namespace UsenetBackup.Service;
 public static partial class DashboardApi
 {
     /// <summary>
-    /// A single NNTP port probe result. Named record (not anonymous type) so
-    /// trimmed publishing doesn't need runtime reflection to read it.
-    /// Serialized by ASP.NET Core with camelCase: {"port":...,"result":...}.
-    /// </summary>
-    private sealed record NntpProbeResult(string Port, string Result);
-
-    /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
     public static (int Status, object Payload) TestNntpConnection(string host, int port, string user, string pass, bool ssl)
     {
         if (string.IsNullOrWhiteSpace(host))
-            return (400, new { ok = false, error = "host is required." });
+            return (400, new OkErrorDto(false, "host is required." ));
         try
         {
             using var client = new UsenetBackup.Core.Nntp.NntpClient(host, port, ssl);
@@ -38,43 +31,43 @@ public static partial class DashboardApi
                 client.Authenticate(user, pass);
             }
             try { client.Quit(); } catch { }
-            return (200, new { ok = true, detail = greeting.Length > 80 ? greeting[..80] + "…" : greeting });
+            return (200, new OkDetailDto(true, greeting.Length > 80 ? greeting[..80] + "…" : greeting ));
         }
         catch (Exception ex)
         {
-            return (200, new { ok = false, error = ex.Message });
+            return (200, new OkErrorDto(false, ex.Message ));
         }
     }
 
     public static (int Status, object Payload) TestSmbConnection(string share)
     {
         if (string.IsNullOrWhiteSpace(share))
-            return (400, new { ok = false, error = "share path is required." });
+            return (400, new OkErrorDto(false, "share path is required." ));
         try
         {
             bool exists = Directory.Exists(share);
             if (!exists)
-                return (200, new { ok = false, error = "Share not reachable or does not exist." });
-            return (200, new { ok = true, detail = "Share is accessible." });
+                return (200, new OkErrorDto(false, "Share not reachable or does not exist." ));
+            return (200, new OkDetailDto(true, "Share is accessible." ));
         }
         catch (Exception ex)
         {
-            return (200, new { ok = false, error = ex.Message });
+            return (200, new OkErrorDto(false, ex.Message ));
         }
     }
 
     public static (int Status, object Payload) RunDiagnose(string host)
     {
         if (string.IsNullOrWhiteSpace(host))
-            return (400, new { error = "host is required." });
-        var results = new List<NntpProbeResult>();
+            return (400, new ErrorDto("host is required."));
+        var results = new List<NntpProbeResultDto>();
         foreach (var (port, ssl, label) in new (int, bool, string)[]
                  { (119, false, "119/plain"), (563, true, "563/TLS"), (443, false, "443/plain") })
         {
-            results.Add(new NntpProbeResult(label, ProbeNntp(host, port, ssl)));
+            results.Add(new NntpProbeResultDto(label, ProbeNntp(host, port, ssl)));
         }
         bool anyOk = results.Any(r => r.Result.StartsWith("OK", StringComparison.Ordinal));
-        object? fallback = null;
+        NntpProbeResultDto? fallback = null;
         string diagnosis;
         if (anyOk)
         {
@@ -83,12 +76,12 @@ public static partial class DashboardApi
         else
         {
             string fb = ProbeNntp("freenews.netfront.net", 119, false);
-            fallback = new { host = "freenews.netfront.net:119", result = fb };
+            fallback = new NntpProbeResultDto("freenews.netfront.net:119", fb);
             diagnosis = fb.StartsWith("OK", StringComparison.Ordinal)
                 ? $"Your network CAN reach NNTP (fallback answered), so the problem is specific to {host}."
                 : "No NNTP server is reachable. Your ISP or firewall is likely blocking NNTP.";
         }
-        return (200, new { host, probes = results, fallback, diagnosis });
+        return (200, new NntpProbeResponseDto(host, results, fallback, diagnosis));
     }
 
     private static string ProbeNntp(string host, int port, bool ssl)
@@ -120,17 +113,15 @@ public static partial class DashboardApi
     public static (int Status, object Payload) ListUsbDrives()
     {
         if (!OperatingSystem.IsWindows())
-            return (400, new { error = "USB drive listing requires Windows." });
+            return (400, new ErrorDto("USB drive listing requires Windows."));
         try
         {
-            var drives = UsenetBackup.Core.Recovery.UsbDrives.List()
-                .Select(d => new { number = d.Number, devicePath = d.DevicePath, model = d.Model, sizeBytes = d.SizeBytes })
-                .ToArray();
+            var drives = UsenetBackup.Core.Recovery.UsbDrives.List().ToArray();
             return (200, drives);
         }
         catch (Exception ex)
         {
-            return (500, new { error = ex.Message });
+            return (500, new ErrorDto(ex.Message));
         }
     }
 
@@ -138,7 +129,7 @@ public static partial class DashboardApi
     public static (int Status, object Payload) GetLog(ServiceConfig config, string repo, int lines = 100)
     {
         if (!IsKnownRepo(config, repo))
-            return (400, new { error = "Unknown repo (not a configured job)." });
+            return (400, new ErrorDto("Unknown repo (not a configured job)."));
         string path = Path.Combine(repo, OperationLog.FileName);
         if (!File.Exists(path))
             return (200, Array.Empty<string>());
@@ -155,7 +146,7 @@ public static partial class DashboardApi
         Action<string>? log = null)
     {
         if (string.IsNullOrWhiteSpace(job.Name))
-            return (400, new { error = "Job name is required." });
+            return (400, new ErrorDto("Job name is required."));
         // Default the repo to ProgramData when not specified: the repo is
         // FileKeep's internal storage and users shouldn't have to pick it.
         // ProgramData (not LocalAppData) because the service — not the user —
@@ -169,7 +160,7 @@ public static partial class DashboardApi
             job.Repo = Path.Combine(programData, "FileKeep", "repos", safeName);
         }
         if (string.IsNullOrWhiteSpace(job.Source))
-            return (400, new { error = "Source path is required." });
+            return (400, new ErrorDto("Source path is required."));
         // Validate schedule format and mode via a temporary config.
         var test = new ServiceConfig
         {
@@ -182,13 +173,13 @@ public static partial class DashboardApi
                 .Concat(new[] { job }).ToList(),
         };
         try { test.Validate(); }
-        catch (Exception ex) { return (400, new { error = ex.Message }); }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         // Scheduled jobs must upload to at least one Usenet or network
         // location. Local-only backups are only allowed as manual one-time
         // runs, never on a schedule. This is the server-side enforcement;
         // the dashboard form and the scheduler fail closed as well.
         if (job.EffectiveTargets.Count == 0)
-            return (400, new { error = "Scheduled jobs must have at least one upload target (Usenet or network location)." });
+            return (400, new ErrorDto("Scheduled jobs must have at least one upload target (Usenet or network location)."));
 
         // Apply to the live config under the Jobs lock. Replace the object
         // rather than mutating in place: the scheduler may be running a job
@@ -220,7 +211,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 
@@ -237,9 +228,9 @@ public static partial class DashboardApi
             var existing = config.Jobs.FirstOrDefault(j =>
                 j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (existing is null)
-                return (400, new { error = $"Unknown job '{name}'." });
+                return (400, new ErrorDto($"Unknown job '{name}'." ));
             if (config.Jobs.Count == 1)
-                return (400, new { error = "Cannot delete the last backup job. The service requires at least one job." });
+                return (400, new ErrorDto("Cannot delete the last backup job. The service requires at least one job."));
             config.Jobs.Remove(existing);
         }
         try
@@ -251,11 +242,11 @@ public static partial class DashboardApi
             File.Move(configPath + ".tmp", configPath, overwrite: true);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: job '{name}' deleted");
-            return (200, new { });
+            return (200, new EmptyDto());
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 
@@ -268,13 +259,13 @@ public static partial class DashboardApi
         string configPath, BackupLocation loc, Action<string>? log = null)
     {
         if (string.IsNullOrWhiteSpace(loc.Name))
-            return (400, new { error = "Location name is required." });
+            return (400, new ErrorDto("Location name is required."));
         if (loc.Type != "nntp" && loc.Type != "smb")
-            return (400, new { error = "Location type must be 'nntp' or 'smb'." });
+            return (400, new ErrorDto("Location type must be 'nntp' or 'smb'."));
         if (loc.Type == "nntp" && string.IsNullOrWhiteSpace(loc.Host))
-            return (400, new { error = "Host is required for Usenet locations." });
+            return (400, new ErrorDto("Host is required for Usenet locations."));
         if (loc.Type == "smb" && string.IsNullOrWhiteSpace(loc.Share))
-            return (400, new { error = "Share path is required for SMB locations." });
+            return (400, new ErrorDto("Share path is required for SMB locations."));
 
         var existing = config.Locations.FirstOrDefault(l =>
             l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
@@ -310,7 +301,7 @@ public static partial class DashboardApi
             log?.Invoke($"dashboard: location '{loc.Name}' saved");
             return (200, loc);
         }
-        catch (Exception ex) { return (400, new { error = ex.Message }); }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -323,23 +314,23 @@ public static partial class DashboardApi
         var existing = config.Locations.FirstOrDefault(l =>
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
-            return (400, new { error = $"Unknown location '{name}'." });
+            return (400, new ErrorDto($"Unknown location '{name}'." ));
         var usedBy = config.SnapshotJobs()
             .Where(j => j.EffectiveTargets.Any(t =>
                 t.Equals(name, StringComparison.OrdinalIgnoreCase)))
             .Select(j => j.Name).ToList();
         if (usedBy.Count > 0)
-            return (400, new { error =
+            return (400, new ErrorDto(
                 $"Location '{name}' is used by job(s): {string.Join(", ", usedBy)}. " +
-                "Remove it from those jobs first." });
+                "Remove it from those jobs first."));
         config.Locations.Remove(existing);
         try
         {
             config.Save(configPath);
             log?.Invoke($"dashboard: location '{name}' deleted");
-            return (200, new { });
+            return (200, new EmptyDto());
         }
-        catch (Exception ex) { return (400, new { error = ex.Message }); }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -351,7 +342,7 @@ public static partial class DashboardApi
         var loc = config.Locations.FirstOrDefault(l =>
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (loc is null)
-            return (400, new { error = $"Unknown location '{name}'." });
+            return (400, new ErrorDto($"Unknown location '{name}'." ));
         try
         {
             if (loc.Type == "nntp")
@@ -363,7 +354,7 @@ public static partial class DashboardApi
                     pw = UsenetBackup.Core.Dpapi.Unprotect(loc.PasswordProtected);
                 if (!string.IsNullOrEmpty(loc.Username))
                     client.Authenticate(loc.Username, pw ?? "");
-                return (200, new { ok = true, message = $"Connected to {loc.Host}:{loc.Port}." });
+                return (200, new OkMessageDto(true, $"Connected to {loc.Host}:{loc.Port}." ));
             }
             else
             {
@@ -371,12 +362,12 @@ public static partial class DashboardApi
                 if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
                     pw = UsenetBackup.Core.Dpapi.Unprotect(loc.SmbPasswordProtected);
                 using var share = UsenetBackup.Core.SmbShare.Connect(loc.Share, loc.SmbUser, pw);
-                return (200, new { ok = true, message = $"Share {loc.Share} is reachable." });
+                return (200, new OkMessageDto(true, $"Share {loc.Share} is reachable." ));
             }
         }
         catch (Exception ex)
         {
-            return (200, new { ok = false, message = ex.Message });
+            return (200, new OkMessageDto(false, ex.Message ));
         }
     }
 
@@ -426,7 +417,7 @@ public static partial class DashboardApi
             log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
             // Never return the encrypted blob to the UI; just report whether one is stored.
             object safe = config.Nntp is null
-                ? new { hasPassword = false }
+                ? new HasPasswordDto(false)
                 : new
                 {
                     host = config.Nntp.Host,
@@ -440,7 +431,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 
@@ -452,11 +443,11 @@ public static partial class DashboardApi
         foreach (var p in providers)
         {
             if (string.IsNullOrWhiteSpace(p.Host))
-                return (400, new { error = "Provider host is required." });
+                return (400, new ErrorDto("Provider host is required."));
             if (p.Port is < 1 or > 65535)
-                return (400, new { error = $"Port {p.Port} is out of range." });
+                return (400, new ErrorDto($"Port {p.Port} is out of range." ));
             if (p.Connections is < 1 or > 100)
-                return (400, new { error = $"Connections must be 1-100 (got {p.Connections})." });
+                return (400, new ErrorDto($"Connections must be 1-100 (got {p.Connections})." ));
         }
         // Encrypt supplied plaintext passwords via DPAPI; blank keeps the stored blob.
         // Match against existing providers by host+port to preserve blobs.
@@ -477,11 +468,11 @@ public static partial class DashboardApi
             config.Save(configPath);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: {providers.Count} Usenet provider(s) saved");
-            return (200, new { count = providers.Count });
+            return (200, new CountDto(providers.Count));
         }
         catch (Exception ex)
         {
-            return (400, new { error = ex.Message });
+            return (400, new ErrorDto(ex.Message));
         }
     }
 }
