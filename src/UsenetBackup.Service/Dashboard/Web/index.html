@@ -458,6 +458,13 @@
           <button onclick="startSmbSync()">Sync now</button>
         </div>
       </div>
+      <div class="card" id="tray-card" style="display:none">
+        <div class="name">Minimize to tray</div>
+        <div class="meta">When enabled, minimizing the window sends FileKeep to the system tray instead of the taskbar. FileKeep keeps running in the tray, so scheduled backups still run.</div>
+        <div class="row" style="margin-top:8px">
+          <label class="check"><input id="tray-enabled" type="checkbox" onchange="setTrayEnabled(this.checked)"> Show tray icon and minimize to tray</label>
+        </div>
+      </div>
     </div>
                 <div class="view" id="view-recovery">
       <h1>Recovery</h1>
@@ -1098,6 +1105,23 @@ async function updateSmbSyncVisibility() {
     }
   } catch (e) { }
 }
+// Tray icon setting (only available in the desktop GUI via NativeBridge)
+async function updateTrayVisibility() {
+  try {
+    const bridge = window.chrome?.webview?.hostObjects?.fileKeep;
+    const card = document.getElementById('tray-card');
+    if (!bridge || !card) return;
+    card.style.display = '';
+    const enabled = await bridge.GetTrayEnabled();
+    document.getElementById('tray-enabled').checked = !!enabled;
+  } catch (e) { }
+}
+async function setTrayEnabled(enabled) {
+  try {
+    const bridge = window.chrome?.webview?.hostObjects?.fileKeep;
+    if (bridge) await bridge.SetTrayEnabled(enabled);
+  } catch (e) { toast('Could not update tray setting.', 'err'); }
+}
 // One-time backup functions
 document.querySelectorAll('input[name="ot-type"]').forEach(r => {
   r.addEventListener('change', e => {
@@ -1157,6 +1181,7 @@ async function startOneTimeBackup() {
 document.querySelector('[data-view="tools"]')?.addEventListener('click', () => {
   loadOneTimeDestinations();
   updateSmbSyncVisibility();
+  updateTrayVisibility();
 });
 async function uploadNzb() {
   const input = document.getElementById('nzb-file');

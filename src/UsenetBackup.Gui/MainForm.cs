@@ -98,6 +98,28 @@ public class NativeBridge
 
         return result;
     }
+
+    /// <summary>
+    /// Gets whether the tray icon is enabled.
+    /// </summary>
+    public bool GetTrayEnabled()
+    {
+        return MainForm.LoadTraySetting();
+    }
+
+    /// <summary>
+    /// Sets whether the tray icon is enabled.
+    /// </summary>
+    public void SetTrayEnabled(bool enabled)
+    {
+        if (_owner is MainForm mainForm)
+        {
+            if (_owner.InvokeRequired)
+                _owner.Invoke(() => mainForm.SetTrayEnabled(enabled));
+            else
+                mainForm.SetTrayEnabled(enabled);
+        }
+    }
 }
 
 /// <summary>
@@ -203,7 +225,12 @@ public class MainForm : Form
 
     private void ToggleTray()
     {
-        _trayEnabled = !_trayEnabled;
+        SetTrayEnabled(!_trayEnabled);
+    }
+
+    public void SetTrayEnabled(bool enabled)
+    {
+        _trayEnabled = enabled;
         _trayToggleItem.Checked = _trayEnabled;
         _trayIcon.Visible = _trayEnabled;
         SaveTraySetting(_trayEnabled);
@@ -216,7 +243,7 @@ public class MainForm : Form
         Close();
     }
 
-    private static bool LoadTraySetting()
+    public static bool LoadTraySetting()
     {
         try
         {
