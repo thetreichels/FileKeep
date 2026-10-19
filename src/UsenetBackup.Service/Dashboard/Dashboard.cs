@@ -70,8 +70,10 @@ public static class Dashboard
 
         app.MapGet("/api/version", () =>
         {
-            try { return Results.Json(new { version = DashboardApi.GetAppVersion() }); }
-            catch { return Results.Json(new { version = "0.0.0" }); }
+            // Diagnostic: return plain text to isolate JSON serialization issues
+            // in trimmed single-file deployment.
+            try { return Results.Text(DashboardApi.GetAppVersion(), "text/plain"); }
+            catch (Exception ex) { return Results.Text("ERROR:" + ex.GetType().Name, "text/plain"); }
         });
 
         // Update check: compares the installed version against the VERSION
