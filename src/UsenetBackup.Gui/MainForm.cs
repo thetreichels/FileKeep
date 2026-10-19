@@ -38,6 +38,9 @@ public class NativeBridge
             Description = string.IsNullOrEmpty(title) ? "Select a folder" : title,
             UseDescriptionForTitle = true,
             ShowNewFolderButton = true,
+            // Root at This PC so all drives are visible at the top level,
+            // not buried under Desktop > user folders.
+            RootFolder = Environment.SpecialFolder.MyComputer,
         };
 
         if (dialog.ShowDialog(_owner) == DialogResult.OK)
