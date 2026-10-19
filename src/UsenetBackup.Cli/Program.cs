@@ -49,7 +49,7 @@ static void PrintUsage()
         usenet-backup — local repository engine (milestones 1-2) + NNTP backend (milestone 3)
 
         Usage:
-          usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES]
+          usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES] [--chunking fixed|cdc]
           usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
           usenet-backup backup-disk <repo> <device> [--image-name NAME]
           usenet-backup restore <repo> <backup-id> <dest-dir>
@@ -205,8 +205,9 @@ static int Init(string[] args)
     if (pos.Length < 1) { Console.Error.WriteLine("error: init <repo>"); return 2; }
     int chunkSize = int.TryParse(GetOption(args, "--chunk-size"), out int cs) ? cs : BackupRepository.DefaultChunkSize;
     long volumeSize = long.TryParse(GetOption(args, "--volume-size"), out long vs) ? vs : BackupRepository.DefaultVolumeSizeBytes;
-    using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize, volumeSizeBytes: volumeSize);
-    Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}, volume size {volumeSize}).");
+    string chunking = GetOption(args, "--chunking") ?? BackupRepository.ChunkingSchemeCdc;
+    using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize, volumeSizeBytes: volumeSize, chunkingScheme: chunking);
+    Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}, chunking {chunking}, volume size {volumeSize}).");
     return 0;
 }
 

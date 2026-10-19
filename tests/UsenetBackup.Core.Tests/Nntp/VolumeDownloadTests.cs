@@ -70,7 +70,7 @@ public sealed class VolumeDownloadTests : IDisposable
             File.WriteAllBytes(Path.Combine(_srcDir, $"file{i}.bin"), data);
         }
 
-        var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
         var manifest = repo.BackupDirectory(_srcDir);
         string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
         Assert.True(chunkIds.Length >= 11, "need enough chunks for two parity groups");

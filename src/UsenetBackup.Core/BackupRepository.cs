@@ -18,15 +18,29 @@ public sealed class BackupRepository : IDisposable
     public const long DefaultVolumeSizeBytes = 100L * 1000 * 1000;
     public const int DefaultKdfIterations = 600_000;
 
+    /// <summary>Fixed-size chunking: every chunk is <c>ChunkSize</c> bytes except the last (v1 behavior).</summary>
+    public const string ChunkingSchemeFixed = "fixed";
+    /// <summary>Content-defined chunking: Gear rolling hash, target average = <c>ChunkSize</c>. Default for new repositories.</summary>
+    public const string ChunkingSchemeCdc = "cdc";
+
+    /// <summary>
+    /// Largest plaintext chunk this repository can produce. For fixed
+    /// chunking this is <c>ChunkSize</c>; for CDC it is 4x the target
+    /// average (the chunker's hard cap).
+    /// </summary>
+    public int EffectiveMaxChunkSize => _config.ChunkingScheme == ChunkingSchemeCdc
+        ? _config.ChunkSize * 4
+        : _config.ChunkSize;
+
     /// <summary>
     /// Hard upper bound on a single downloaded chunk blob (encrypted bytes),
-    /// as a multiple of the repo's configured chunk size. Blobs larger than
+    /// as a multiple of the repository's maximum chunk size. Blobs larger than
     /// this are rejected before decryption. Guards the download/decrypt
     /// boundary against malicious oversized articles (memory-exhaustion DoS).
     /// The 4x headroom covers AES-GCM overhead (28 bytes) plus future format
     /// growth; legitimate blobs are always ~chunkSize + 28 bytes.
     /// </summary>
-    public long MaxChunkBlobBytes => (long)_config.ChunkSize * 4;
+    public long MaxChunkBlobBytes => (long)EffectiveMaxChunkSize * 4;
 
     /// <summary>
     /// Read-time cap for a single chunk download (NNTP article or HTTP
@@ -103,13 +117,26 @@ public sealed class BackupRepository : IDisposable
         string passphrase,
         int chunkSize = DefaultChunkSize,
         int kdfIterations = DefaultKdfIterations,
-        long volumeSizeBytes = DefaultVolumeSizeBytes)
+        long volumeSizeBytes = DefaultVolumeSizeBytes,
+        string chunkingScheme = ChunkingSchemeCdc)
     {
         ArgumentException.ThrowIfNullOrEmpty(passphrase);
         if (chunkSize < 4096)
             throw new ArgumentOutOfRangeException(nameof(chunkSize), "Chunk size must be >= 4 KiB.");
         if (volumeSizeBytes <= 0)
             throw new ArgumentOutOfRangeException(nameof(volumeSizeBytes), "Volume size must be positive.");
+        string scheme = (chunkingScheme ?? ChunkingSchemeCdc).ToLowerInvariant();
+        if (scheme != ChunkingSchemeFixed && scheme != ChunkingSchemeCdc)
+            throw new ArgumentOutOfRangeException(nameof(chunkingScheme),
+                $"Unknown chunking scheme '{chunkingScheme}'. Expected '{ChunkingSchemeFixed}' or '{ChunkingSchemeCdc}'.");
+        if (scheme == ChunkingSchemeCdc)
+        {
+            // The Gear mask trick needs a power-of-two target; the 64 KiB
+            // floor keeps the derived minimum (avg/4) at a sane 16 KiB.
+            if ((chunkSize & (chunkSize - 1)) != 0 || chunkSize < 65536)
+                throw new ArgumentOutOfRangeException(nameof(chunkSize),
+                    "CDC chunking requires a power-of-two chunk size >= 64 KiB (it is the target average).");
+        }
 
         Directory.CreateDirectory(repoPath);
         string repoJsonPath = Path.Combine(repoPath, "repo.json");
@@ -122,6 +149,7 @@ public sealed class BackupRepository : IDisposable
             KdfIterations = kdfIterations,
             KdfSaltB64 = Convert.ToBase64String(KeyDerivation.NewSalt()),
             ChunkSize = chunkSize,
+            ChunkingScheme = scheme,
             VolumeSizeBytes = volumeSizeBytes,
         };
         // Atomic write: a crash mid-write must not leave a truncated repo.json
@@ -149,7 +177,7 @@ public sealed class BackupRepository : IDisposable
 
         byte[] key = KeyDerivation.DeriveKey(passphrase, Convert.FromBase64String(config.KdfSaltB64), kdfIterations);
         string fullRoot = Path.GetFullPath(repoPath);
-        OperationLog.Append(fullRoot, "init", $"chunk_size={chunkSize} kdf_iterations={kdfIterations}");
+        OperationLog.Append(fullRoot, "init", $"chunk_size={chunkSize} chunking={scheme} kdf_iterations={kdfIterations}");
         return new BackupRepository(fullRoot, config, key);
     }
 
@@ -233,6 +261,11 @@ public sealed class BackupRepository : IDisposable
             throw new InvalidOperationException(
                 $"Parent backup {parentBackupId} uses chunk size {parent.ChunkSize}, " +
                 $"but this repository uses {_config.ChunkSize}.");
+        string parentScheme = parent.Chunking ?? ChunkingSchemeFixed; // absent = v1 fixed
+        if (parentScheme != _config.ChunkingScheme)
+            throw new InvalidOperationException(
+                $"Parent backup {parentBackupId} uses chunking '{parentScheme}', " +
+                $"but this repository uses '{_config.ChunkingScheme}'.");
         var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode);
         manifest.Type = "inc";
         manifest.ParentId = parentBackupId;
@@ -353,6 +386,7 @@ public sealed class BackupRepository : IDisposable
                 CreatedUtc = DateTime.UtcNow,
                 Source = devicePath,
                 ChunkSize = _config.ChunkSize,
+                Chunking = _config.ChunkingScheme,
                 Kind = "disk-image",
                 Files = { entry },
             };
@@ -377,6 +411,7 @@ public sealed class BackupRepository : IDisposable
             CreatedUtc = DateTime.UtcNow,
             Source = fullSource,
             ChunkSize = _config.ChunkSize,
+            Chunking = _config.ChunkingScheme,
             Snapshot = snap.IsSnapshot ? snap.Name : null,
         };
 
@@ -572,6 +607,12 @@ public sealed class BackupRepository : IDisposable
     /// Chunks, hashes, encrypts and stores a byte stream as one manifest file
     /// entry. Used for regular files and for raw disk images alike.
     /// </summary>
+    /// <summary>
+    /// Chunks, hashes, encrypts and stores a byte stream as one manifest file
+    /// entry. Used for regular files and for raw disk images alike.
+    /// The chunking scheme comes from the repository config: fixed-size
+    /// chunks (v1 behavior) or content-defined chunking.
+    /// </summary>
     private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
         IBlobStore? destination = null, BatchedBackupContext? batch = null)
     {
@@ -593,6 +634,42 @@ public sealed class BackupRepository : IDisposable
         catch (IOException) { size = -1; }
 
         using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long total = _config.ChunkingScheme == ChunkingSchemeCdc
+            ? ChunkStreamCdc(stream, entry, fileHash, blobs, batch)
+            : ChunkStreamFixed(stream, entry, fileHash, buffer, blobs, batch);
+
+        entry.Size = size >= 0 ? size : total;
+        if (size >= 0 && size != total)
+            throw new IOException(
+                $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
+        entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
+        return entry;
+    }
+
+    /// <summary>
+    /// Hashes, encrypts and stores one plaintext chunk, recording it on the
+    /// file entry. Shared by both chunking schemes: chunk IDs are SHA-256 of
+    /// plaintext either way, so deduplication is scheme-agnostic.
+    /// </summary>
+    private void StoreChunk(ReadOnlySpan<byte> chunkPlain, FileEntry entry, IncrementalHash fileHash,
+        byte[] blobBuf, IBlobStore blobs)
+    {
+        string chunkId = Hashing.Sha256Hex(chunkPlain);
+        if (!blobs.Exists(chunkId))
+        {
+            var blobSpan = blobBuf.AsSpan(0, chunkPlain.Length + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+            ChunkCrypto.EncryptInto(chunkPlain, _key, Hashing.HexToBytes(chunkId), blobSpan);
+            blobs.Put(chunkId, blobSpan);
+        }
+        _catalog.RecordChunk(chunkId, chunkPlain.Length);
+        entry.Chunks.Add(chunkId);
+        fileHash.AppendData(chunkPlain);
+    }
+
+    /// <summary>Fixed-size chunking path (v1 behavior).</summary>
+    private long ChunkStreamFixed(Stream stream, FileEntry entry, IncrementalHash fileHash, byte[] buffer,
+        IBlobStore blobs, BatchedBackupContext? batch)
+    {
         // One pooled buffer reused for every chunk's encrypted blob
         // (nonce + chunk + tag): zero per-chunk allocation on the hot path.
         byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
@@ -603,32 +680,76 @@ public sealed class BackupRepository : IDisposable
             int read;
             while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
             {
-                var span = buffer.AsSpan(0, read);
-                string chunkId = Hashing.Sha256Hex(span);
-                if (!blobs.Exists(chunkId))
-                {
-                    var blobSpan = blobBuf.AsSpan(0, read + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
-                    ChunkCrypto.EncryptInto(span, _key, Hashing.HexToBytes(chunkId), blobSpan);
-                    blobs.Put(chunkId, blobSpan);
-                }
-                _catalog.RecordChunk(chunkId, read);
-                entry.Chunks.Add(chunkId);
-                fileHash.AppendData(span);
+                StoreChunk(buffer.AsSpan(0, read), entry, fileHash, blobBuf, blobs);
                 total += read;
-                if (batch is not null)
-                    batch.CheckFlush(); // throws OperationCanceledException on abort
+                batch?.CheckFlush(); // throws OperationCanceledException on abort
             }
-            entry.Size = size >= 0 ? size : total;
-            if (size >= 0 && size != total)
-                throw new IOException(
-                    $"Stream length changed during backup of '{relPath}': expected {size} bytes, read {total}.");
-            entry.Sha256 = Convert.ToHexString(fileHash.GetHashAndReset()).ToLowerInvariant();
+            return total;
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(blobBuf);
         }
-        return entry;
+    }
+
+    /// <summary>
+    /// Content-defined chunking path (Gear rolling hash). Bytes stream into
+    /// an accumulation buffer; the chunker reports boundary lengths and each
+    /// completed chunk is stored from the front of the buffer, with the
+    /// remainder shifted down. The chunker's max-size force-cut guarantees
+    /// the buffer never overflows.
+    /// </summary>
+    private long ChunkStreamCdc(Stream stream, FileEntry entry, IncrementalHash fileHash,
+        IBlobStore blobs, BatchedBackupContext? batch)
+    {
+        int maxChunk = EffectiveMaxChunkSize;
+        int avgChunk = _config.ChunkSize; // CDC target average; min = avg/4, max = avg*4
+        var chunker = new CdcChunker(avgChunk / 4, avgChunk, avgChunk * 4);
+        byte[] accum = ArrayPool<byte>.Shared.Rent(maxChunk);
+        byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
+            maxChunk + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+        var completed = new List<int>();
+        long total = 0;
+        try
+        {
+            int accumLen = 0;
+            void Drain(int chunkLen)
+            {
+                StoreChunk(accum.AsSpan(0, chunkLen), entry, fileHash, blobBuf, blobs);
+                total += chunkLen;
+                int rest = accumLen - chunkLen;
+                Buffer.BlockCopy(accum, chunkLen, accum, 0, rest);
+                accumLen = rest;
+                batch?.CheckFlush(); // throws OperationCanceledException on abort
+            }
+
+            int read;
+            while ((read = stream.Read(accum, accumLen, accum.Length - accumLen)) > 0)
+            {
+                chunker.Feed(accum.AsSpan(accumLen, read), completed);
+                accumLen += read;
+                foreach (int chunkLen in completed)
+                    Drain(chunkLen);
+                completed.Clear();
+                if (accumLen == accum.Length)
+                {
+                    // Unreachable: the chunker force-cuts at maxChunk, so a
+                    // full buffer always yields a completed chunk above.
+                    // Cut manually rather than spin on a full buffer.
+                    Drain(accum.Length);
+                    chunker.Reset();
+                }
+            }
+            chunker.Finish(completed);
+            foreach (int chunkLen in completed)
+                Drain(chunkLen);
+            return total;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(accum);
+            ArrayPool<byte>.Shared.Return(blobBuf);
+        }
     }
 
     // ---------- disk images ----------
@@ -659,6 +780,7 @@ public sealed class BackupRepository : IDisposable
                 CreatedUtc = DateTime.UtcNow,
                 Source = devicePath,
                 ChunkSize = _config.ChunkSize,
+                Chunking = _config.ChunkingScheme,
                 Kind = "disk-image",
                 Files = { entry },
             };
@@ -718,6 +840,7 @@ public sealed class BackupRepository : IDisposable
                 CreatedUtc = DateTime.UtcNow,
                 Source = devicePath,
                 ChunkSize = _config.ChunkSize,
+                Chunking = _config.ChunkingScheme,
                 Kind = "disk-image",
                 Files = { entry },
             };
@@ -898,7 +1021,9 @@ public sealed class BackupRepository : IDisposable
         // One pooled buffer reused for every decrypted chunk: zero per-chunk
         // allocation on the plaintext side. (The encrypted blob still comes
         // from source.Get; a pooled read path would be a separate change.)
-        byte[] plainBuf = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        // Sized for the largest chunk this repo can produce (CDC chunks can
+        // be up to 4x the target average); oversized blobs are rejected below.
+        byte[] plainBuf = ArrayPool<byte>.Shared.Rent(EffectiveMaxChunkSize);
         byte[] zeroBuf = new byte[_config.ChunkSize];
         try
         {

@@ -68,7 +68,7 @@ public sealed class DownloadTests : IDisposable
         }
         Directory.CreateDirectory(Path.Combine(_srcDir, "empty"));
 
-        var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
         var manifest = repo.BackupDirectory(_srcDir);
         string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToArray();
         Assert.NotEmpty(chunkIds);
@@ -318,7 +318,7 @@ public sealed class DownloadTests : IDisposable
     [Fact]
     public void Download_RejectsOversizedBlob_BeforeDecrypt()
     {
-        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
         // Synthetic chunk ID: the size check fires before any crypto, so the
         // ID never needs to correspond to a real chunk.
         string chunkId = new string('a', 64);
@@ -341,7 +341,7 @@ public sealed class DownloadTests : IDisposable
     [Fact]
     public void MaxChunkBlobBytes_ScalesWithChunkSize()
     {
-        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
         // A legitimate blob (chunk + AES-GCM nonce/tag overhead) is far below
         // the bound; the bound itself is a small multiple of the chunk size.
         Assert.Equal((long)ChunkSize * 4, repo.MaxChunkBlobBytes);

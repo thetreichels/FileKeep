@@ -34,7 +34,7 @@ public sealed class ComplianceTests : IDisposable
     }
 
     private BackupRepository InitRepo() =>
-        BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
 
     private void WriteSrc(string rel, byte[] data)
     {

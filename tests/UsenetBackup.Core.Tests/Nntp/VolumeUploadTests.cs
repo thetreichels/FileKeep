@@ -57,7 +57,7 @@ public sealed class VolumeUploadTests : IDisposable
             File.WriteAllBytes(Path.Combine(_srcDir, $"file{i}.bin"), data);
         }
 
-        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
         var manifest = repo.BackupDirectory(_srcDir);
         string[] chunkIds = ChunkOrdering.GetOrderedChunkIds(manifest);
         Assert.True(chunkIds.Length > 2);

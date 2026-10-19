@@ -101,6 +101,16 @@ public sealed class BackupManifest
     [JsonPropertyName("chunk_size")]
     public int ChunkSize { get; set; }
 
+    /// <summary>
+    /// Chunking scheme used for this backup: "fixed" or "cdc"
+    /// (content-defined chunking). Null/absent means "fixed" (all v1
+    /// manifests). Additive; old manifests verify unchanged, and restore
+    /// never consults it — it only follows the chunk ID list.
+    /// </summary>
+    [JsonPropertyName("chunking")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Chunking { get; set; }
+
     [JsonPropertyName("compression")]
     public string Compression { get; set; } = "none";
 

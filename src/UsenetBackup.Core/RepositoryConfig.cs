@@ -24,6 +24,19 @@ public sealed class RepositoryConfig
     public int ChunkSize { get; set; }
 
     /// <summary>
+    /// How file bytes are divided into chunks: "fixed" (v1 behavior — every
+    /// chunk is exactly <see cref="ChunkSize"/> bytes except the last) or
+    /// "cdc" (content-defined chunking via a Gear rolling hash, with
+    /// <see cref="ChunkSize"/> as the target average, min = avg/4,
+    /// max = avg*4). Absent in older repo.json files -&gt; "fixed" (they
+    /// predate CDC). New repositories default to "cdc".
+    /// Chunk IDs are SHA-256 of plaintext either way, so deduplication,
+    /// encryption, restore and verification are scheme-agnostic.
+    /// </summary>
+    [JsonPropertyName("chunking_scheme")]
+    public string ChunkingScheme { get; set; } = "fixed";
+
+    /// <summary>
     /// Target packed-volume size in bytes for Usenet uploads (default 100 MB, the scene-standard DVD9 RAR size).
     /// Chunks are greedily packed into volumes of at most this size; one
     /// volume is posted as one article. Absent in older repo.json files ->

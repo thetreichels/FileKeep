@@ -47,6 +47,22 @@ user's passphrase at runtime.
   already present is never written twice, across all backups in the
   repository.
 
+### Content-defined chunking
+
+- New repositories default to `"chunking_scheme": "cdc"` in `repo.json`
+  (`init --chunking fixed` selects the old behavior). Chunk boundaries are
+  chosen by a Gear rolling hash: cut when the hash hits a mask target after
+  a minimum size, with `chunk_size` as the target average (min = avg/4,
+  max = avg*4). A small edit to a large file only disturbs boundaries near
+  the edit, so incrementals upload a few chunks instead of re-uploading the
+  whole file. Repositories created before CDC (no `chunking_scheme` key)
+  behave as `"fixed"`.
+- Chunk IDs are still SHA-256 of plaintext, so deduplication,
+  encryption, restore and verification are identical — restore never
+  consults the chunking scheme. Manifests record `"chunking":
+  "fixed"|"cdc"` (absent = `"fixed"`); incrementals require the parent
+  manifest's scheme to match the repository's.
+
 ## Encryption (v1)
 
 Boring, standard, no invented cryptography:

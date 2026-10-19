@@ -33,7 +33,7 @@ public sealed class SnapshotAndImageTests : IDisposable
     }
 
     private BackupRepository InitRepo() =>
-        BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations);
+        BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations, chunkingScheme: BackupRepository.ChunkingSchemeFixed);
 
     private static byte[] RandomBytes(int n)
     {
