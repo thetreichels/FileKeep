@@ -1,7 +1,9 @@
 # Third-party notices
 
-FileKeep itself is licensed under the GNU General Public License v3.0 only
-(GPL-3.0-only) — see `LICENSE` in the repository root.
+FileKeep itself is proprietary commercial software (© 2026 J. Treichel,
+all rights reserved) — see `LICENSE` in the repository root. Earlier
+releases keep their original licenses (MIT through 0.8.1, GPL-3.0-only
+after that).
 
 The FileKeep installer distributes the following third-party components.
 Each remains the property of its respective authors and is licensed under

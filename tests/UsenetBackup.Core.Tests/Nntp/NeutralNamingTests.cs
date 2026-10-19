@@ -60,8 +60,8 @@ public sealed class NeutralNamingTests
             "9f2c41bd7e03a855c1d6942f6b0e3f1a", "2026-10-14", 120, "poster-x");
 
         Assert.Contains("Backup ID : 9f2c41bd7e03a855c1d6942f6b0e3f1a", nfo);
-        Assert.Contains("These articles contain private archival data generated", nfo);
-        Assert.Contains("under GPL-3.0-only. Their contents are encoded for", nfo);
+        Assert.Contains("These articles contain private archival data.", nfo);
+        Assert.Contains("Their contents are encoded for", nfo);
         Assert.Contains("authorized restoration only.", nfo);
         Assert.DoesNotContain("FileKeep", nfo);
         Assert.DoesNotContain("filekeep", nfo);

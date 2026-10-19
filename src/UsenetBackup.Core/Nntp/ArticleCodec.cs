@@ -432,9 +432,8 @@ public static class ArticleCodec
         sb.Append("  Poster    : ").AppendLine(poster);
         sb.AppendLine();
         sb.AppendLine("------------------------------------------------------------");
-        sb.AppendLine("These articles contain private archival data generated");
-        sb.AppendLine("under GPL-3.0-only. Their contents are encoded for");
-        sb.AppendLine("authorized restoration only.");
+        sb.AppendLine("These articles contain private archival data.");
+        sb.AppendLine("Their contents are encoded for authorized restoration only.");
         sb.Append("============================================================");
         return sb.ToString();
     }

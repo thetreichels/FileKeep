@@ -4,7 +4,7 @@
 
 **Encrypted backups that live on Usenet.** FileKeep is an open-source Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
 
-[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
+[![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
 [![Tests](https://img.shields.io/badge/tests-318-blue.svg)]()
 
@@ -147,8 +147,11 @@ On the roadmap: merge/selective restore (deferred to v2), scheduled deep verific
 
 ## License
 
-GPL-3.0-only — see [LICENSE](LICENSE). Copyright © 2026 J. Treichel.
+Proprietary commercial license — see [LICENSE](LICENSE). Copyright © 2026 J. Treichel. All rights reserved.
 
-FileKeep is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, **version 3 of the License only** (no "or later" option). Anyone distributing FileKeep or modified versions must make the corresponding source available under the same terms.
+New versions of FileKeep are commercial software: you may install and use it, but you may not redistribute it, modify it, create derivative works from it, or sublicense it.
 
-Note: versions of FileKeep released under the MIT license (up to and including 0.8.1) remain available under those MIT terms; the GPL-3.0-only license applies from this version forward.
+License history — released versions keep their licenses permanently; only future versions change:
+- Versions up to and including 0.8.1: MIT.
+- Versions after 0.8.1 through the final GPL release: GPL-3.0-only.
+- New versions: proprietary commercial (this license).

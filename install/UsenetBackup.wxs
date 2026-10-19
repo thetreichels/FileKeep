@@ -194,6 +194,6 @@
     <WixVariable Id="WixUIDialogBmp" Value="$(var.SrcRoot)/assets/filekeep-dialog.bmp" />
 
     <!-- License text shown in the wizard (replaces the WiX placeholder) -->
-    <WixVariable Id="WixUILicenseRtf" Value="$(var.SrcRoot)/install/gpl-3.0-license.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SrcRoot)/install/filekeep-license.rtf" />
   </Package>
 </Wix>
