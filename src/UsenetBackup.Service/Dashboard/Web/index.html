@@ -586,11 +586,11 @@
       <div class="card">
         <div class="row" style="padding:12px 0;border-bottom:1px solid var(--border)">
           <div class="grow"><div class="name">Version</div></div>
-          <div style="color:var(--text-2)">FileKeep 0.08.11</div>
+          <div style="color:var(--text-2)" id="about-version">…</div>
         </div>
         <div class="row" style="padding:12px 0;border-bottom:1px solid var(--border)">
           <div class="grow"><div class="name">License</div></div>
-          <div style="color:var(--text-2)">GPL-3.0-only</div>
+          <div style="color:var(--text-2)">Commercial</div>
         </div>
         <div class="row" style="padding:12px 0">
           <div class="grow"><div class="name">Storage</div></div>
@@ -1305,6 +1305,7 @@ document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', 
   a.classList.add('active');
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + a.dataset.view).classList.add('active');
+  if (a.dataset.view === 'about') loadAboutVersion();
 }));
 function fmtLast(j) {
   if (!j.lastResult) return '<span class="pill idle">never run</span>';
@@ -1741,8 +1742,26 @@ async function submitAddNzbDirect() {
     loadRepo();
   } catch (e) { toast(e.message, 'err'); }
 }
-function checkForUpdates() {
-  toast('You are on the latest version.', 'ok');
+async function checkForUpdates() {
+  toast('Checking GitHub for the latest version…');
+  try {
+    const r = await api('/api/update-check', { method: 'POST' });
+    if (r.error) { toast(r.error, 'err'); return; }
+    if (r.updateAvailable) {
+      toast('FileKeep ' + r.latest + ' is available on GitHub (you have ' + r.current + ').', 'warn');
+    } else {
+      toast('You are on the latest version (FileKeep ' + r.current + ').', 'ok');
+    }
+  } catch (e) {
+    toast('Update check failed: ' + e.message, 'err');
+  }
+}
+// Fill the About version from the installed build.
+async function loadAboutVersion() {
+  try {
+    const r = await api('/api/version');
+    document.getElementById('about-version').textContent = 'FileKeep ' + r.version;
+  } catch { /* leave the placeholder */ }
 }
 async function submitRestore() {
   const repo = document.getElementById('repo').value;

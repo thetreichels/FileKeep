@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +15,80 @@ namespace UsenetBackup.Service;
 /// </summary>
 public static partial class DashboardApi
 {
+    /// <summary>
+    /// The installed app version, from the assembly informational version
+    /// stamped at build time (run-vm-build.ps1 /p:InformationalVersion=).
+    /// Falls back to the assembly version, then "0.0.0".
+    /// </summary>
+    public static string GetAppVersion()
+    {
+        var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+        string? info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(info))
+        {
+            // InformationalVersion may carry "+gitsha" suffixes; take the version part.
+            string v = info.Split('+')[0].Trim();
+            if (TryParseVersion(v, out _))
+                return v;
+        }
+        return asm.GetName().Version?.ToString() ?? "0.0.0";
+    }
+
+    /// <summary>
+    /// Checks the GitHub repo for the most recent released version by reading
+    /// the VERSION file committed and pushed to main. Returns the installed
+    /// version, the latest pushed version, and whether an update is available.
+    /// </summary>
+    public static async Task<(bool Ok, string? Latest, string? Error)> CheckForUpdatesAsync()
+    {
+        const string url = "https://raw.githubusercontent.com/thetreichels/FileKeep/main/VERSION";
+        string latest;
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            latest = (await http.GetStringAsync(url)).Trim();
+        }
+        catch (Exception ex)
+        {
+            return (false, null, $"Couldn't reach GitHub: {ex.Message}");
+        }
+        if (!TryParseVersion(latest, out _))
+            return (false, null, $"GitHub returned an unrecognized version ('{latest}').");
+        return (true, latest, null);
+    }
+
+    /// <summary>Parses "n.nn.nn" (leading zeros allowed) into ints for comparison.</summary>
+    public static bool TryParseVersion(string s, out int[] parts)
+    {
+        parts = Array.Empty<int>();
+        var p = s.Trim().Split('.');
+        if (p.Length < 2 || p.Length > 4)
+            return false;
+        var nums = new int[p.Length];
+        for (int i = 0; i < p.Length; i++)
+        {
+            // int.TryParse handles leading zeros ("08" -> 8).
+            if (!int.TryParse(p[i], out nums[i]) || nums[i] < 0)
+                return false;
+        }
+        parts = nums;
+        return true;
+    }
+
+    /// <summary>True when <paramref name="latest"/> is newer than <paramref name="current"/>.</summary>
+    public static bool IsNewerVersion(string current, string latest)
+    {
+        if (!TryParseVersion(current, out int[] c) || !TryParseVersion(latest, out int[] l))
+            return false;
+        for (int i = 0; i < Math.Max(c.Length, l.Length); i++)
+        {
+            int a = i < c.Length ? c[i] : 0;
+            int b = i < l.Length ? l[i] : 0;
+            if (b != a)
+                return b > a;
+        }
+        return false;
+    }
     public static StatusDto GetStatus(BackupScheduler scheduler) => new(
         scheduler.StartedLocal,
         scheduler.Jobs.Select(j => new StatusJobDto(

@@ -68,6 +68,25 @@ public static class Dashboard
 
         app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
 
+        app.MapGet("/api/version", () =>
+            Results.Json(new { version = DashboardApi.GetAppVersion() }));
+
+        // Update check: compares the installed version against the VERSION
+        // file committed and pushed to GitHub main.
+        app.MapPost("/api/update-check", async () =>
+        {
+            string current = DashboardApi.GetAppVersion();
+            var (ok, latest, error) = await DashboardApi.CheckForUpdatesAsync();
+            if (!ok)
+                return Results.Json(new { current, error });
+            return Results.Json(new
+            {
+                current,
+                latest,
+                updateAvailable = DashboardApi.IsNewerVersion(current, latest!),
+            });
+        });
+
         // Windows known user folders (Documents, Pictures, etc.) for the GUI's
         // quick-pick. Uses Environment.GetFolderPath (SHGetKnownFolderPath wrapper).
         app.MapGet("/api/user-folders", () =>
