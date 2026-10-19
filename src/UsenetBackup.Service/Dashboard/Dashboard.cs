@@ -92,7 +92,7 @@ public static class Dashboard
             var (ok, latest, error, unmet) = await DashboardApi.CheckForUpdatesAsync();
             if (!ok)
                 return Results.Content("{\"current\":" + Jq(current) + ",\"error\":" + Jq(error) + "}", "application/json");
-            string unmetJson = "[" + string.Join(",", (unmet ?? new List<string>()).Select(Jq)) + "]";
+            string unmetJson = "[" + string.Join(",", (unmet ?? Array.Empty<string>()).Select(Jq)) + "]";
             return Results.Content("{\"current\":" + Jq(current) +
                 ",\"latest\":" + Jq(latest) +
                 ",\"updateAvailable\":" + (DashboardApi.IsNewerVersion(current, latest!) ? "true" : "false") +
