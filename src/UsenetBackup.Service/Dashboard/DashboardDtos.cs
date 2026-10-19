@@ -115,7 +115,8 @@ public sealed record ConfigJobDto(
     [property: JsonPropertyName("hasSmbPassword")] bool HasSmbPassword,
     [property: JsonPropertyName("autoVerify")] bool AutoVerify,
     [property: JsonPropertyName("verificationMode")] string? VerificationMode,
-    [property: JsonPropertyName("redundancyMode")] string? RedundancyMode);
+    [property: JsonPropertyName("redundancyMode")] string? RedundancyMode,
+    [property: JsonPropertyName("sources")] List<string>? Sources);
 
 /// <summary>NNTP config summary for /api/config response.</summary>
 public sealed record ConfigNntpDto(

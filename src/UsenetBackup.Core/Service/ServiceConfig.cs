@@ -176,6 +176,33 @@ public sealed class BackupJobConfig
     public string Source { get; set; } = "";
 
     /// <summary>
+    /// Source folders to back up. When non-empty, this job backs up every
+    /// folder in the list (one manifest per folder per run). When empty,
+    /// the legacy <see cref="Source"/> is used. The dashboard guarantees
+    /// the folders are not nested inside each other (a folder already
+    /// includes everything below it).
+    /// </summary>
+    [JsonPropertyName("sources")]
+    public List<string> Sources { get; set; } = new();
+
+    /// <summary>
+    /// Effective source folders: <see cref="Sources"/> when set, otherwise
+    /// the legacy single <see cref="Source"/>. Never null; may be empty
+    /// (validated on save).
+    /// </summary>
+    [JsonIgnore]
+    public List<string> EffectiveSources
+    {
+        get
+        {
+            var list = Sources.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            if (list.Count > 0)
+                return list;
+            return string.IsNullOrWhiteSpace(Source) ? new List<string>() : new List<string> { Source };
+        }
+    }
+
+    /// <summary>
     /// <c>"daily HH:mm"</c> (local time, e.g. <c>"daily 02:00"</c>) or
     /// <c>"interval N"</c> (every N minutes).
     /// </summary>
@@ -681,8 +708,11 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException($"Duplicate job name '{job.Name}'.");
             if (string.IsNullOrWhiteSpace(job.Repo))
                 throw new InvalidOperationException($"Job '{job.Name}' has no repo path.");
-            if (string.IsNullOrWhiteSpace(job.Source))
-                throw new InvalidOperationException($"Job '{job.Name}' has no source path.");
+            if (job.EffectiveSources.Count == 0)
+                throw new InvalidOperationException($"Job '{job.Name}' has no source folder.");
+            if (job.IsDiskImage && job.EffectiveSources.Count > 1)
+                throw new InvalidOperationException($"Job '{job.Name}': disk-image jobs back up a single device.");
+            ValidateNoNestedSources(job);
             ScheduleParser.Parse(job.Schedule); // validates format
             if (job.Mode is not ("incremental" or "full"))
                 throw new InvalidOperationException(
@@ -732,6 +762,44 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException($"nntp.port {Nntp.Port} is out of range.");
             if (Nntp.Connections < 1 || Nntp.Connections > 100)
                 throw new InvalidOperationException("nntp.connections must be between 1 and 100.");
+        }
+    }
+
+    /// <summary>
+    /// Rejects duplicate or nested source folders: backing up a folder
+    /// already includes everything below it, so listing both would back up
+    /// the nested files twice. The dashboard prevents this in the UI; this
+    /// is the server-side backstop for hand-edited configs.
+    /// </summary>
+    public static void ValidateNoNestedSources(BackupJobConfig job)
+    {
+        var normalized = new List<string>();
+        foreach (string s in job.EffectiveSources)
+        {
+            string n;
+            try
+            {
+                n = Path.GetFullPath(s).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch
+            {
+                throw new InvalidOperationException($"Job '{job.Name}' has an invalid source path '{s}'.");
+            }
+            normalized.Add(n);
+        }
+        for (int i = 0; i < normalized.Count; i++)
+        {
+            for (int j = 0; j < normalized.Count; j++)
+            {
+                if (i == j)
+                    continue;
+                if (normalized[i].Equals(normalized[j], StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}' lists the same source folder twice: '{job.EffectiveSources[i]}'.");
+                if (normalized[i].StartsWith(normalized[j] + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}': source '{job.EffectiveSources[i]}' is inside source '{job.EffectiveSources[j]}' — a folder already includes everything below it.");
+            }
         }
     }
 }

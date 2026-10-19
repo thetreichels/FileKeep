@@ -20,6 +20,7 @@ namespace UsenetBackup.Core.Json;
 [JsonSerializable(typeof(Dictionary<string, Dictionary<string, string>>))]
 [JsonSerializable(typeof(Dictionary<string, ProviderLimits.LimitEntry>))]
 [JsonSerializable(typeof(ServiceConfig))]
+[JsonSerializable(typeof(BackupJobConfig))]
 [JsonSerializable(typeof(ProtectionProfileRequest))]
 [JsonSerializable(typeof(ProtectionProfileResponse))]
 [JsonSerializable(typeof(AddYubiKeyRequest))]

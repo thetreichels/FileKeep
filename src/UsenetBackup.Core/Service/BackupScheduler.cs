@@ -1,5 +1,7 @@
 namespace UsenetBackup.Core.Service;
 
+using System.Text.Json;
+using UsenetBackup.Core.Json;
 using UsenetBackup.Core.Nntp;
 
 /// <summary>
@@ -758,10 +760,11 @@ public sealed class BackupScheduler
     /// never scheduled and never persists a job. The repo is initialized
     /// here if it does not exist yet.
     /// </summary>
-    public JobRunResult RunOneTimeBackup(string sourceDir, string repoPath)
+    public JobRunResult RunOneTimeBackup(IEnumerable<string> sourceDirs, string repoPath)
     {
-        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
-            throw new ArgumentException("Source folder must be an existing directory.", nameof(sourceDir));
+        var sources = sourceDirs.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        if (sources.Count == 0 || sources.Any(s => !Directory.Exists(s)))
+            throw new ArgumentException("Source folders must be existing directories.", nameof(sourceDirs));
         if (string.IsNullOrWhiteSpace(repoPath))
             throw new ArgumentException("A destination folder is required.", nameof(repoPath));
         string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
@@ -774,7 +777,8 @@ public sealed class BackupScheduler
         var job = new BackupJobConfig
         {
             Name = "One-time backup",
-            Source = sourceDir,
+            Source = sources[0],
+            Sources = sources,
             Repo = repoPath,
             Mode = "full",
         };
@@ -822,73 +826,167 @@ public sealed class BackupScheduler
                     "environment variable for the service account.");
 
             using var repo = OpenOrInitRepo(job.Repo, passphrase);
-            // Disk-image jobs read the raw device; file snapshot providers
-            // (VSS, backup privilege) do not apply.
-            using ISnapshotProvider? snap = job.IsDiskImage ? null : CreateSnapshotProvider(job);
 
-            BackupManifest manifest;
-            // Batched staging + pruning: when remote targets exist, the
-            // backup is staged one batch at a time, each batch is verified,
-            // uploaded/copied to every target, confirmed, then pruned. The
-            // local repo stays staging-only; manifests/catalog never prune.
-            bool batched = ShouldUseBatchedStaging(job, repo, out BackupManifest? batchParent);
-            try
+            // Disk-image jobs read the raw device; file snapshot providers
+            // (VSS, backup privilege) do not apply. Always a single source.
+            if (job.IsDiskImage)
+            {
+                // Whole-disk image jobs always capture the full device.
+                // The image name is derived from the job name so each
+                // scheduled run lands under a stable, no-typing name.
+                //
+                // If an SMB target is configured, stream chunks directly
+                // to the share (sparse: used space only) instead of
+                // staging them locally — a full drive image cannot fit
+                // in a repo on the same drive. The manifest stays local.
+                // Without an SMB target, fall back to local staging.
+                bool batched = ShouldUseBatchedStaging(job, repo, out BackupManifest? batchParent);
+                BackupManifest manifest;
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    manifest = batched
+                        ? RunBatchedBackup(job, repo, batchParent, null, token)
+                        : RunDiskImageJob(job, repo, token);
+                }
+                catch
+                {
+                    throw;
+                }
+                return FinishBackup(job, repo,
+                    new[] { (manifest, batched) }, passphrase, token, opName, now);
+            }
+
+            // File jobs: one manifest per source folder. Each source gets
+            // its own snapshot provider (VSS snapshots are per-volume) and
+            // its own incremental parent chain (matched by source folder),
+            // so folders never diff against each other.
+            var done = new List<(BackupManifest Manifest, bool Batched)>();
+            foreach (string source in job.EffectiveSources)
             {
                 token.ThrowIfCancellationRequested();
-                if (batched)
+                var srcJob = CloneJobForSource(job, source);
+                using ISnapshotProvider? snap = CreateSnapshotProvider(srcJob);
+                // Batched staging + pruning: when remote targets exist, the
+                // backup is staged one batch at a time, each batch is verified,
+                // uploaded/copied to every target, confirmed, then pruned. The
+                // local repo stays staging-only; manifests/catalog never prune.
+                bool batched = ShouldUseBatchedStaging(srcJob, repo, out BackupManifest? batchParent);
+                BackupManifest manifest;
+                try
                 {
-                    manifest = RunBatchedBackup(job, repo, batchParent, snap, token);
-                }
-                else if (job.IsDiskImage)
-                {
-                    // Whole-disk image jobs always capture the full device.
-                    // The image name is derived from the job name so each
-                    // scheduled run lands under a stable, no-typing name.
-                    //
-                    // If an SMB target is configured, stream chunks directly
-                    // to the share (sparse: used space only) instead of
-                    // staging them locally — a full drive image cannot fit
-                    // in a repo on the same drive. The manifest stays local.
-                    // Without an SMB target, fall back to local staging.
-                    manifest = RunDiskImageJob(job, repo, token);
-                }
-                else if (job.Mode == "full")
-                {
-                    manifest = repo.BackupDirectory(job.Source, snap);
-                }
-                else
-                {
-                    string? parent = repo.ListBackups()
-                        .OrderByDescending(b => b.CreatedUtc)
-                        .FirstOrDefault()?.BackupId;
-                    manifest = parent is null
-                        ? repo.BackupDirectory(job.Source, snap)
-                        : repo.BackupIncremental(job.Source, parent, snap,
-                            VerificationModeParser.Parse(job.VerificationMode));
-                }
-                if (!batched)
-                {
+                    if (batched)
+                    {
+                        manifest = RunBatchedBackup(srcJob, repo, batchParent, snap, token);
+                    }
+                    else if (srcJob.Mode == "full")
+                    {
+                        manifest = repo.BackupDirectory(srcJob.Source, snap);
+                    }
+                    else
+                    {
+                        string? parent = LatestBackupIdForSource(repo, srcJob.Source);
+                        manifest = parent is null
+                            ? repo.BackupDirectory(srcJob.Source, snap)
+                            : repo.BackupIncremental(srcJob.Source, parent, snap,
+                                VerificationModeParser.Parse(srcJob.VerificationMode));
+                    }
                     // VSS: writer session finalized only after data is safely stored.
                     // (Batched mode finalizes inside RunBatchedBackup.)
-                    if (snap is Recovery.VssSnapshot vss)
+                    if (!batched && snap is Recovery.VssSnapshot vss)
                         vss.Complete();
                 }
+                catch
+                {
+                    // VssSnapshot.Dispose aborts the writer session fail-safe.
+                    throw;
+                }
+                done.Add((manifest, batched));
             }
-            catch
+            return FinishBackup(job, repo, done, passphrase, token, opName, now);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is not a failure: propagate so the caller can
+            // distinguish "stopped by user/service" from "backup failed".
+            Log($"job '{job.Name}': cancelled");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            TryAppendFailureLog(job, ex);
+            Log($"job '{job.Name}': FAILED: {ex.Message}");
+            return new JobRunResult
             {
-                // VssSnapshot.Dispose aborts the writer session fail-safe.
-                throw;
-            }
+                JobName = job.Name,
+                StartedLocal = now,
+                Success = false,
+                Error = $"{ex.GetType().Name}: {ex.Message}",
+            };
+        }
+    }
 
+    /// <summary>
+    /// Shallow-copies a job with a single source folder, so the existing
+    /// single-source backup machinery (snapshots, batching, upload guards)
+    /// runs once per folder. JSON round-trip keeps the clone in sync with
+    /// future config properties.
+    /// </summary>
+    private static BackupJobConfig CloneJobForSource(BackupJobConfig job, string source)
+    {
+        string json = JsonSerializer.Serialize(job, FileKeepJsonContext.Default.BackupJobConfig);
+        var clone = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupJobConfig)
+            ?? throw new InvalidOperationException($"Failed to clone job '{job.Name}'.");
+        clone.Source = source;
+        clone.Sources = new List<string> { source };
+        return clone;
+    }
+
+    /// <summary>
+    /// Latest backup ID for a given source folder (matched by full path,
+    /// case-insensitive). Incremental chains are per-source: each folder
+    /// diffs against its own previous backup, never another folder's.
+    /// </summary>
+    private static string? LatestBackupIdForSource(BackupRepository repo, string source)
+    {
+        string full;
+        try { full = Path.GetFullPath(source); }
+        catch { return null; }
+        return repo.ListBackups()
+            .Where(b =>
+            {
+                try { return string.Equals(Path.GetFullPath(b.Source), full, StringComparison.OrdinalIgnoreCase); }
+                catch { return false; }
+            })
+            .OrderByDescending(b => b.CreatedUtc)
+            .FirstOrDefault()?.BackupId;
+    }
+
+    /// <summary>
+    /// Per-manifest post-backup: operation log, auto-upload to targets,
+    /// auto-verify. Aggregates into one <see cref="JobRunResult"/>; when a
+    /// job backs up several folders, BackupId holds every manifest ID.
+    /// </summary>
+    private JobRunResult FinishBackup(
+        BackupJobConfig job, BackupRepository repo,
+        IReadOnlyList<(BackupManifest Manifest, bool Batched)> done,
+        string passphrase, CancellationToken token, string opName, DateTime now)
+    {
+        bool autoUploadFailed = false;
+        string? autoUploadError = null;
+        bool verifyFailed = false;
+        string? verifyError = null;
+        int totalFiles = 0;
+        foreach (var (manifest, batched) in done)
+        {
             OperationLog.Append(job.Repo, opName,
                 $"job={job.Name} id={manifest.BackupId} type={manifest.Type} files={manifest.Files.Count}");
             Log($"job '{job.Name}': {manifest.Type} backup {manifest.BackupId} ({manifest.Files.Count} files)");
+            totalFiles += manifest.Files.Count;
 
             // Auto-upload to configured targets (nntp and/or smb) if any.
             // Skipped for batched runs: every batch was already uploaded to
             // every target (and pruned) during the backup.
-            bool autoUploadFailed = false;
-            string? autoUploadError = null;
             if (job.EffectiveTargets.Count > 0 && !batched)
             {
                 token.ThrowIfCancellationRequested();
@@ -913,8 +1011,6 @@ public sealed class BackupScheduler
             // Auto-verify if configured (default: after each backup).
             // Skipped for batched runs: every batch's chunks were verified
             // locally before upload, and pruned chunks can't be re-read.
-            bool verifyFailed = false;
-            string? verifyError = null;
             if (job.AutoVerify && batched)
             {
                 Log($"job '{job.Name}': auto-verify skipped (each batch was verified before upload).");
@@ -941,39 +1037,20 @@ public sealed class BackupScheduler
                         $"job={job.Name} id={manifest.BackupId} error={ex.Message}");
                 }
             }
+        }
 
-            return new JobRunResult
-            {
-                JobName = job.Name,
-                StartedLocal = now,
-                Success = true,
-                BackupId = manifest.BackupId,
-                Files = manifest.Files.Count,
-                AutoUploadFailed = autoUploadFailed,
-                AutoUploadError = autoUploadError,
-                VerifyFailed = verifyFailed,
-                VerifyError = verifyError,
-            };
-        }
-        catch (OperationCanceledException)
+        return new JobRunResult
         {
-            // Cancellation is not a failure: propagate so the caller can
-            // distinguish "stopped by user/service" from "backup failed".
-            Log($"job '{job.Name}': cancelled");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            TryAppendFailureLog(job, ex);
-            Log($"job '{job.Name}': FAILED: {ex.Message}");
-            return new JobRunResult
-            {
-                JobName = job.Name,
-                StartedLocal = now,
-                Success = false,
-                Error = $"{ex.GetType().Name}: {ex.Message}",
-            };
-        }
+            JobName = job.Name,
+            StartedLocal = now,
+            Success = true,
+            BackupId = string.Join(",", done.Select(d => d.Manifest.BackupId)),
+            Files = totalFiles,
+            AutoUploadFailed = autoUploadFailed,
+            AutoUploadError = autoUploadError,
+            VerifyFailed = verifyFailed,
+            VerifyError = verifyError,
+        };
     }
 
     /// <summary>
@@ -1250,9 +1327,7 @@ public sealed class BackupScheduler
 
         if (!job.IsDiskImage && job.Mode != "full")
         {
-            string? parentId = repo.ListBackups()
-                .OrderByDescending(b => b.CreatedUtc)
-                .FirstOrDefault()?.BackupId;
+            string? parentId = LatestBackupIdForSource(repo, job.Source);
             if (parentId is not null)
             {
                 parentManifest = repo.LoadManifest(parentId);
@@ -1751,8 +1826,9 @@ public sealed class BackupScheduler
         }
 
         // Guard: don't back up a drive to itself.
-        if (!string.IsNullOrWhiteSpace(job.Source))
-            StorageGuard.EnsureUsbDriveNotSource(targetDir, job.Source, job.Name);
+        foreach (string src in job.EffectiveSources)
+            if (!string.IsNullOrWhiteSpace(src))
+                StorageGuard.EnsureUsbDriveNotSource(targetDir, src, job.Name);
 
         Log($"job '{job.Name}': syncing backup {backupId} to USB '{locName}' ({targetDir})");
         var result = SyncRepoToLocalFolder(job.Repo, targetDir);

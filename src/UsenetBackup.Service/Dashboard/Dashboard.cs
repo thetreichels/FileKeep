@@ -120,9 +120,20 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            string sourceDir = GetBodyString(body, "sourceDir");
+            var sources = new List<string>();
+            if (body.TryGetProperty("sources", out var srcEl) && srcEl.ValueKind == JsonValueKind.Array)
+                foreach (var el in srcEl.EnumerateArray())
+                    if (el.GetString() is string s && !string.IsNullOrWhiteSpace(s))
+                        sources.Add(s);
+            if (sources.Count == 0)
+            {
+                // Backward compat: older dashboard sends a single sourceDir.
+                string legacy = GetBodyString(body, "sourceDir");
+                if (!string.IsNullOrWhiteSpace(legacy))
+                    sources.Add(legacy);
+            }
             string repoPath = GetBodyString(body, "repoPath");
-            var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sourceDir, repoPath, config);
+            var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sources, repoPath, config);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 
@@ -397,7 +408,8 @@ public static class Dashboard
                     !string.IsNullOrEmpty(j.SmbPasswordProtected),
                     j.AutoVerify,
                     j.VerificationMode,
-                    j.RedundancyMode)).ToList(),
+                    j.RedundancyMode,
+                    j.Sources)).ToList(),
                 // Never expose the encrypted password blob to the UI.
                 config.Nntp == null ? null : new ConfigNntpDto(
                     config.Nntp.Host,

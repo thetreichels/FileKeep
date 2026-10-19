@@ -31,6 +31,11 @@
   .folder-row { display: flex; gap: 6px; align-items: center; }
   .folder-row input { flex: 1; min-width: 0; }
   .browse-btn { white-space: nowrap; }
+  /* Multi-folder source list: explanation bar + rows. */
+  .folder-list-msg { display:flex; gap:8px; align-items:flex-start; border:1px solid #b9cdf5; background:#eef4ff; color:#1d3a6e; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:13px; }
+  .folder-list-msg.err { border-color:#f0b3ac; background:#fdecea; color:#8f1d12; }
+  .folder-list-msg .folder-msg-x { margin-left:auto; flex:none; background:none; border:none; cursor:pointer; color:inherit; font-size:15px; line-height:1; padding:0 0 0 8px; }
+  .folder-list-rows .folder-row { margin-bottom:6px; }
   * { box-sizing: border-box; }
   body {
     font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -294,6 +299,9 @@
     .toast.err { background: #a4262c; }
     /* Invalid fields: dark red tint instead of light pink. */
     input.invalid, select.invalid { background: #3a1d1d; }
+    /* Multi-folder explanation bar on dark surfaces. */
+    .folder-list-msg { border-color:#3a4d7a; background:#1d2942; color:#c9d8f5; }
+    .folder-list-msg.err { border-color:#7a2e28; background:#3a1d1d; color:#f5c9c4; }
     .hero-icon.warn { background: #b34a0e; }
     button.danger { background: #a4262c; border-color: #a4262c; }
     button.danger:hover { background: #8f2026; border-color: #8f2026; }
@@ -476,11 +484,11 @@
       </div>
     </div>
     <div class="view" id="view-jobs">
-      <h1>Backup jobs</h1>
-      <p style="color:var(--text-2);margin:-12px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
-      <div style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h1 style="margin:0">Backup jobs</h1>
         <button class="accent" onclick="showJobForm()">New backup job</button>
       </div>
+      <p style="color:var(--text-2);margin:8px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
       <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
           <div class="card" id="jobFormCard" style="display:none">
         <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
@@ -500,7 +508,11 @@
         </div>
         <div class="form-grid">
           <label title="A name for this backup job, e.g. 'Documents' or 'Photos'. Must be unique.">Name<input id="jf-name" type="text" placeholder="Documents"></label>
-          <label id="jf-source-label" title="The folder to back up. Click Browse to pick it, or choose from your user folders above.">Source folder<span class="folder-row"><input id="jf-source" type="text" placeholder="Choose a folder above or browse"><button type="button" class="browse-btn" onclick="browseFolder('jf-source', 'Select source folder')">Browse…</button></span></label>
+          <label id="jf-source-label" title="The folders to back up. Click Browse to pick them, or choose from your user folders above.">Source folders
+            <div id="jf-folder-msg" class="folder-list-msg" style="display:none"><span id="jf-folder-msg-text"></span><button type="button" class="folder-msg-x" title="Dismiss">×</button></div>
+            <div id="jf-folder-rows" class="folder-list-rows"></div>
+            <div><button type="button" id="jf-folder-add">Add another folder…</button></div>
+          </label>
           <label title="How often to run this backup.">Schedule<select id="jf-schedType">
             <option value="daily">Daily at…</option>
             <option value="interval">Every N minutes</option>
@@ -938,13 +950,21 @@
           <label class="check"><input type="radio" name="ot-type" value="disk"> Disk image</label>
         </div>
         <div class="row" style="margin-top:8px" id="ot-files-row">
-          <span class="folder-row" style="flex:1"><input id="ot-source" placeholder="Folder to back up" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('ot-source', 'Select folder to back up')">Browse…</button></span>
+          <div style="flex:1">
+            <div id="ot-folder-msg" class="folder-list-msg" style="display:none"><span id="ot-folder-msg-text"></span><button type="button" class="folder-msg-x" title="Dismiss">×</button></div>
+            <div id="ot-folder-rows" class="folder-list-rows"></div>
+            <div><button type="button" id="ot-folder-add">Add another folder…</button></div>
+          </div>
         </div>
+        <div class="row" style="margin-top:8px" id="ot-repopath-row">
+          <span class="folder-row" style="flex:1"><input id="ot-repopath" placeholder="Destination folder for this backup" style="flex:1" readonly><button type="button" class="browse-btn" onclick="browseFolder('ot-repopath', 'Select destination folder')">Browse…</button></span>
+        </div>
+        <div class="meta" id="ot-repopath-meta" style="margin-top:4px">A local folder where this one-time backup will be stored.</div>
         <div class="row" style="margin-top:8px;display:none" id="ot-disk-row">
           <select id="ot-disk" style="flex:1"><option>Loading drives…</option></select>
           <button type="button" onclick="refreshOtDisks()">Rescan</button>
         </div>
-        <div class="row" style="margin-top:8px">
+        <div class="row" style="margin-top:8px;display:none" id="ot-dest-row">
           <select id="ot-destination" style="flex:1"><option>Loading destinations…</option></select>
         </div>
         <div class="row" style="margin-top:8px">
@@ -1045,6 +1065,136 @@ async function browseSaveFile(inputId, title, filter, defaultName) {
     } catch (e) { /* dialog unavailable; leave the typed value */ }
   }
 }
+// ---- Multi-folder source picker ----
+// A folder already includes everything below it, so the list must not
+// contain duplicates or nested folders. The guard runs on Browse picks
+// and on quick-pick adds; the server re-validates as a backstop.
+function normFolderPath(p) {
+  return String(p || '').trim().replace(/[\\/]+$/, '');
+}
+// Relation of a to b: 'same' | 'inside' | 'parent' | null. Case-insensitive.
+function folderRelation(a, b) {
+  const na = normFolderPath(a).toLowerCase().replace(/\//g, '\\');
+  const nb = normFolderPath(b).toLowerCase().replace(/\//g, '\\');
+  if (!na || !nb) return null;
+  if (na === nb) return 'same';
+  if (na.startsWith(nb + '\\')) return 'inside';
+  if (nb.startsWith(na + '\\')) return 'parent';
+  return null;
+}
+// prefix: 'jf' (job form) or 'ot' (one-time backup). Requires DOM elements:
+// #{prefix}-folder-msg, #{prefix}-folder-msg-text, #{prefix}-folder-rows,
+// #{prefix}-folder-add.
+function makeFolderList(prefix) {
+  const rowsBox = document.getElementById(prefix + '-folder-rows');
+  const msgBox = document.getElementById(prefix + '-folder-msg');
+  const msgText = document.getElementById(prefix + '-folder-msg-text');
+  let seq = 0;
+  function showMsg(text, isErr) {
+    msgBox.classList.toggle('err', !!isErr);
+    msgText.textContent = text;
+    msgBox.style.display = '';
+  }
+  function hideMsg() { msgBox.style.display = 'none'; }
+  function rowInputs() { return [...rowsBox.querySelectorAll('input[data-folder-row]')]; }
+  function getFolders() { return rowInputs().map(i => i.value.trim()).filter(v => v); }
+  // Applies the nesting guard for `picked` on behalf of `changedInput`.
+  // Returns true when accepted (input filled); false when refused.
+  function applyPickedPath(changedInput, picked) {
+    const others = rowInputs().filter(i => i !== changedInput).map(i => i.value.trim()).filter(v => v);
+    for (const o of others) {
+      const rel = folderRelation(picked, o);
+      if (rel === 'same') { showMsg('"' + picked + '" is already in the list.', true); return false; }
+      if (rel === 'inside') { showMsg('"' + picked + '" is inside "' + o + '" — a folder already includes everything below it.', true); return false; }
+    }
+    // New path is a parent of existing rows: drop the covered rows.
+    const covered = rowInputs().filter(i => i !== changedInput && folderRelation(picked, i.value.trim()) === 'parent');
+    if (covered.length) {
+      const names = covered.map(i => '"' + i.value.trim() + '"').join(', ');
+      covered.forEach(i => i.closest('.folder-row').remove());
+      showMsg('Removed ' + names + ' — ' + (covered.length === 1 ? 'it is' : 'they are') + ' inside "' + picked + '", which now covers ' + (covered.length === 1 ? 'it' : 'them') + '.', false);
+    } else {
+      hideMsg();
+    }
+    changedInput.value = picked;
+    changedInput.dataset.committed = picked;
+    changedInput.classList.remove('invalid');
+    return true;
+  }
+  function addRow(initialValue) {
+    const input = document.createElement('input');
+    input.setAttribute('data-folder-row', '');
+    input.id = prefix + '-folder-' + (seq++);
+    input.placeholder = 'Type or browse a folder';
+    input.value = initialValue || '';
+    input.dataset.committed = initialValue || '';
+    const browseBtn = document.createElement('button');
+    browseBtn.type = 'button';
+    browseBtn.className = 'browse-btn';
+    browseBtn.textContent = 'Browse…';
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'remove-btn';
+    removeBtn.title = 'Remove this folder';
+    removeBtn.textContent = '×';
+    const row = document.createElement('div');
+    row.className = 'folder-row';
+    row.append(input, browseBtn, removeBtn);
+    browseBtn.addEventListener('click', async () => {
+      const before = input.dataset.committed || '';
+      await browseFolder(input.id, 'Select folder to back up');
+      const picked = input.value.trim();
+      if (!picked || picked === before) { input.value = before; return; }
+      if (!applyPickedPath(input, picked)) input.value = before; // guard refused
+    });
+    // Typed paths go through the same guard.
+    input.addEventListener('change', () => {
+      const before = input.dataset.committed || '';
+      const v = input.value.trim();
+      if (!v || v === before) { input.value = before; return; }
+      if (!applyPickedPath(input, v)) input.value = before; // guard refused
+    });
+    removeBtn.addEventListener('click', () => { row.remove(); hideMsg(); });
+    rowsBox.appendChild(row);
+    return input;
+  }
+  // Adds a folder through the guard (quick-pick). Fills an empty row first.
+  function addFolder(path) {
+    const p = String(path || '').trim();
+    if (!p) return false;
+    let target = rowInputs().find(i => !i.value.trim());
+    let isNew = false;
+    if (!target) { target = addRow(''); isNew = true; }
+    if (!applyPickedPath(target, p)) {
+      if (isNew) target.closest('.folder-row').remove();
+      return false;
+    }
+    return true;
+  }
+  function setFolders(list) {
+    rowsBox.innerHTML = '';
+    hideMsg();
+    const vals = list && list.length ? list : [''];
+    vals.forEach(v => addRow(v));
+  }
+  function markInvalid() {
+    let inputs = rowInputs();
+    if (!inputs.length) inputs = [addRow('')];
+    inputs[0].classList.add('invalid');
+    inputs[0].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  document.getElementById(prefix + '-folder-add').addEventListener('click', async () => {
+    const input = addRow('');
+    await browseFolder(input.id, 'Select folder to back up');
+    const picked = input.value.trim();
+    if (!picked || !applyPickedPath(input, picked)) input.closest('.folder-row').remove();
+  });
+  msgBox.querySelector('.folder-msg-x').addEventListener('click', hideMsg);
+  return { getFolders, setFolders, addFolder, markInvalid };
+}
+const jfFolders = makeFolderList('jf');
+const otFolders = makeFolderList('ot');
+otFolders.setFolders(['']); // one-time card starts with a single empty row
 // NNTP provider presets: fill host/port/SSL from a known provider.
 const nntpPresets = {
   frugal: { host: 'news.frugalusenet.com', port: 563, ssl: true },
@@ -1109,7 +1259,7 @@ async function loadUserFolders() {
   }
 }
 function pickUserFolder(path, name) {
-  document.getElementById('jf-source').value = path;
+  jfFolders.addFolder(path);
   const nameInput = document.getElementById('jf-name');
   if (!nameInput.value) nameInput.value = name;
 }
@@ -1429,9 +1579,13 @@ document.querySelector('[data-view="tools"]').addEventListener('click', loadYubi
 // One-time backup functions
 document.querySelectorAll('input[name="ot-type"]').forEach(r => {
   r.addEventListener('change', e => {
-    document.getElementById('ot-files-row').style.display = e.target.value === 'files' ? '' : 'none';
-    document.getElementById('ot-disk-row').style.display = e.target.value === 'disk' ? '' : 'none';
-    if (e.target.value === 'disk') refreshOtDisks();
+    const isFiles = e.target.value === 'files';
+    document.getElementById('ot-files-row').style.display = isFiles ? '' : 'none';
+    document.getElementById('ot-repopath-row').style.display = isFiles ? '' : 'none';
+    document.getElementById('ot-repopath-meta').style.display = isFiles ? '' : 'none';
+    document.getElementById('ot-dest-row').style.display = isFiles ? 'none' : '';
+    document.getElementById('ot-disk-row').style.display = isFiles ? 'none' : '';
+    if (!isFiles) refreshOtDisks();
   });
 });
 async function refreshOtDisks() {
@@ -1458,17 +1612,19 @@ async function loadOneTimeDestinations() {
 }
 async function startOneTimeBackup() {
   const type = document.querySelector('input[name="ot-type"]:checked').value;
-  const dest = document.getElementById('ot-destination').value;
-  if (!dest) { toast('Select a destination. Add one in Settings → Backup locations.', 'err'); return; }
   try {
     if (type === 'files') {
-      const source = document.getElementById('ot-source').value.trim();
-      if (!source) { toast('Select a folder to back up.', 'err'); return; }
-      await api('/api/operations/backup-now', {
+      const sources = otFolders.getFolders();
+      const repoPath = document.getElementById('ot-repopath').value.trim();
+      if (!sources.length) { toast('Select at least one folder to back up.', 'err'); return; }
+      if (!repoPath) { toast('Select a destination folder for the backup.', 'err'); return; }
+      await api('/api/backup/once', {
         method: 'POST',
-        body: JSON.stringify({ source, location: dest })
+        body: JSON.stringify({ sources, repoPath })
       });
     } else {
+      const dest = document.getElementById('ot-destination').value;
+      if (!dest) { toast('Select a destination. Add one in Settings → Backup locations.', 'err'); return; }
       const device = document.getElementById('ot-disk').value;
       if (!device) { toast('Select a disk.', 'err'); return; }
       await api('/api/operations/disk-backup', {
@@ -2326,7 +2482,8 @@ async function showJobForm(job) {
     await refreshDiskList();
     document.getElementById('jf-disk').value = job ? job.source : '';
   } else {
-    document.getElementById('jf-source').value = job ? job.source : '';
+    const srcs = job ? (job.sources && job.sources.length ? job.sources : (job.source ? [job.source] : [])) : [];
+    jfFolders.setFolders(srcs.length ? srcs : ['']);
   }
   document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
   document.getElementById('jf-priv').checked = job ? !!job.backupPrivilege : false;
@@ -2408,11 +2565,13 @@ async function saveJob() {
   const markInvalid = id => { document.getElementById(id).classList.add('invalid'); valid = false; };
   const name = document.getElementById('jf-name').value.trim();
   const isDiskJob = document.querySelector('input[name="jf-type"]:checked').value === 'disk';
+  const sources = isDiskJob ? [] : jfFolders.getFolders();
   const source = isDiskJob
     ? document.getElementById('jf-disk').value
-    : document.getElementById('jf-source').value.trim();
+    : (sources[0] || '');
   if (!name) markInvalid('jf-name');
-  if (!source) markInvalid(isDiskJob ? 'jf-disk' : 'jf-source');
+  if (isDiskJob) { if (!source) markInvalid('jf-disk'); }
+  else if (!sources.length) { jfFolders.markInvalid(); valid = false; }
   if (schedType === 'daily') {
     if (!dailyTime) markInvalid('jf-daily');
   } else if (schedType === 'interval') {
@@ -2451,6 +2610,7 @@ async function saveJob() {
   const job = {
     name,
     source,
+    sources,
     jobType: isDiskJob ? 'disk' : 'files',
     schedule,
     mode: isDiskJob ? 'full' : document.getElementById('jf-mode').value,

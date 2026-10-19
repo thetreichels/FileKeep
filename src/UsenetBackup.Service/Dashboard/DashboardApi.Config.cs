@@ -186,8 +186,15 @@ public static partial class DashboardApi
             string safeName = string.Concat(job.Name.Split(Path.GetInvalidFileNameChars()));
             job.Repo = Path.Combine(programData, "FileKeep", "repos", safeName);
         }
-        if (string.IsNullOrWhiteSpace(job.Source))
-            return (400, new ErrorDto("Source path is required."));
+        if (job.EffectiveSources.Count == 0)
+            return (400, new ErrorDto("Add at least one source folder."));
+        if (job.IsDiskImage && job.EffectiveSources.Count > 1)
+            return (400, new ErrorDto("Disk-image jobs back up a single device."));
+        foreach (string src in job.EffectiveSources)
+            if (!Directory.Exists(src))
+                return (400, new ErrorDto($"Source folder does not exist: {src}"));
+        try { ServiceConfig.ValidateNoNestedSources(job); }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         // Validate schedule format and mode via a temporary config.
         var test = new ServiceConfig
         {

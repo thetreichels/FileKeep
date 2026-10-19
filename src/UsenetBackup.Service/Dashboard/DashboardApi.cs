@@ -601,24 +601,49 @@ public static partial class DashboardApi
     /// Returns (202, {accepted:true}) or (400, {error}).
     /// </summary>
     public static (int Status, object Payload) StartOneTimeBackup(
-        BackupScheduler scheduler, string sourceDir, string repoPath, ServiceConfig? config = null)
+        BackupScheduler scheduler, IReadOnlyList<string> sourceDirs, string repoPath, ServiceConfig? config = null)
     {
-        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
-            return (400, new ErrorDto("Choose an existing source folder."));
+        var sources = sourceDirs.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        if (sources.Count == 0 || sources.Any(s => !Directory.Exists(s)))
+            return (400, new ErrorDto("Choose at least one existing source folder."));
+        // A folder already includes everything below it: reject duplicates
+        // and nesting (the dashboard picker guards this in the UI; this is
+        // the server-side backstop).
+        var normalized = new List<string>();
+        foreach (string s in sources)
+        {
+            string n;
+            try { n = Path.GetFullPath(s).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar); }
+            catch { return (400, new ErrorDto($"Invalid folder path: {s}")); }
+            normalized.Add(n);
+        }
+        for (int i = 0; i < normalized.Count; i++)
+            for (int j = 0; j < normalized.Count; j++)
+            {
+                if (i == j)
+                    continue;
+                if (normalized[i].Equals(normalized[j], StringComparison.OrdinalIgnoreCase))
+                    return (400, new ErrorDto($"The same folder is listed twice: {sources[i]}"));
+                if (normalized[i].StartsWith(normalized[j] + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    return (400, new ErrorDto($"'{sources[i]}' is inside '{sources[j]}' — a folder already includes everything below it."));
+            }
         if (string.IsNullOrWhiteSpace(repoPath))
             return (400, new ErrorDto("Choose a destination folder for the backup."));
         try
         {
-            // The repo must not live inside the source: the backup would try
+            // The repo must not live inside any source: the backup would try
             // to back up its own output.
-            string fullSource = Path.GetFullPath(sourceDir).TrimEnd(Path.DirectorySeparatorChar)
-                + Path.DirectorySeparatorChar;
             string fullRepo = Path.GetFullPath(repoPath).TrimEnd(Path.DirectorySeparatorChar)
                 + Path.DirectorySeparatorChar;
-            if (fullRepo.StartsWith(fullSource, StringComparison.OrdinalIgnoreCase))
-                return (400, new ErrorDto("The destination folder cannot be inside the source folder."));
-            if (fullSource.StartsWith(fullRepo, StringComparison.OrdinalIgnoreCase) && fullSource.Length != fullRepo.Length)
-                return (400, new ErrorDto("The source folder cannot be inside the destination folder."));
+            foreach (string s in sources)
+            {
+                string fullSource = Path.GetFullPath(s).TrimEnd(Path.DirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                if (fullRepo.StartsWith(fullSource, StringComparison.OrdinalIgnoreCase))
+                    return (400, new ErrorDto("The destination folder cannot be inside a source folder."));
+                if (fullSource.StartsWith(fullRepo, StringComparison.OrdinalIgnoreCase) && fullSource.Length != fullRepo.Length)
+                    return (400, new ErrorDto("A source folder cannot be inside the destination folder."));
+            }
         }
         catch
         {
@@ -633,16 +658,16 @@ public static partial class DashboardApi
         {
             try
             {
-                var result = scheduler.RunOneTimeBackup(sourceDir, repoPath);
+                var result = scheduler.RunOneTimeBackup(sources, repoPath);
                 OperationLog.Append(repoPath, "one-time-backup",
-                    $"source={sourceDir} {(result.Success ? $"OK id={result.BackupId} files={result.Files}" : "FAILED: " + result.Error)}");
+                    $"sources={string.Join(";", sources)} {(result.Success ? $"OK id={result.BackupId} files={result.Files}" : "FAILED: " + result.Error)}");
             }
             catch (Exception ex)
             {
                 try
                 {
                     OperationLog.Append(repoPath, "one-time-backup",
-                        $"source={sourceDir} FAILED: {ex.GetType().Name}: {ex.Message}");
+                        $"sources={string.Join(";", sources)} FAILED: {ex.GetType().Name}: {ex.Message}");
                 }
                 catch { /* best effort */ }
             }
