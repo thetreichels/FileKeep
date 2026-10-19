@@ -25,13 +25,32 @@ public static partial class DashboardApi
     /// </summary>
     public static string GetAppVersion()
     {
+        // Primary: FileVersionInfo on the running executable. In single-file
+        // deployments reflection on the entry assembly is unreliable, but
+        // FileVersionInfo.ProductVersion carries the stamped InformationalVersion
+        // (e.g. "0.08.15+gitsha").
+        try
+        {
+            string? path = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                string? product = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductVersion;
+                if (!string.IsNullOrWhiteSpace(product))
+                {
+                    string v = product.Split('+')[0].Trim();
+                    if (TryParseVersion(v, out _))
+                        return v;
+                }
+            }
+        }
+        catch { }
+        // Fallback: assembly informational version via reflection.
         try
         {
             var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
             string? info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
             if (!string.IsNullOrWhiteSpace(info))
             {
-                // InformationalVersion may carry "+gitsha" suffixes; take the version part.
                 string v = info.Split('+')[0].Trim();
                 if (TryParseVersion(v, out _))
                     return v;

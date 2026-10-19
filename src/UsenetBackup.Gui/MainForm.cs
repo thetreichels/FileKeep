@@ -287,7 +287,15 @@ public class MainForm : Form
     {
         try
         {
-            string? guiVersion = System.Reflection.Assembly.GetExecutingAssembly()
+            string? guiVersion = null;
+            try
+            {
+                string? path = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(path))
+                    guiVersion = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductVersion?.Split('+')[0].Trim();
+            }
+            catch { }
+            guiVersion ??= System.Reflection.Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
                 ?.InformationalVersion?.Split('+')[0].Trim();
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
