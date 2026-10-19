@@ -484,12 +484,14 @@
       </div>
     </div>
     <div class="view" id="view-jobs">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <h1 style="margin:0">Backup jobs</h1>
-        <button class="accent" onclick="showJobForm()">New backup job</button>
+      <h1 style="margin:0 0 20px">Backup jobs</h1>
+      <div class="card" id="jobs-list">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px">
+          <p style="color:var(--text-2);margin:0">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
+          <button class="accent" onclick="showJobForm()" style="flex-shrink:0">New backup job</button>
+        </div>
+        <div id="jobs-list-content"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
-      <p style="color:var(--text-2);margin:8px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
-      <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
           <div class="card" id="jobFormCard" style="display:none">
         <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
         <div class="row" id="jf-type-row" style="margin-bottom:12px">
