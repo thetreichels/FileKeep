@@ -294,7 +294,7 @@ public sealed class BackupRepository : IDisposable
         BackupManifest? parent,
         ISnapshotProvider? snapshotProvider,
         VerificationMode verificationMode = VerificationMode.Fast,
-        BatchedBackupContext? batch = null)
+        IBatchedBackupContext? batch = null)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
@@ -325,7 +325,7 @@ public sealed class BackupRepository : IDisposable
         string sourceDir,
         BackupManifest? parent,
         ISnapshotProvider? snapshotProvider,
-        BatchedBackupContext batch,
+        IBatchedBackupContext batch,
         VerificationMode verificationMode = VerificationMode.Fast,
         string? backupId = null)
     {
@@ -361,7 +361,7 @@ public sealed class BackupRepository : IDisposable
         string imageName,
         bool sparse,
         string? volumeLetter,
-        BatchedBackupContext batch,
+        IBatchedBackupContext batch,
         string? backupId = null)
     {
         ArgumentNullException.ThrowIfNull(batch);
@@ -399,7 +399,7 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode, BatchedBackupContext? batch = null)
+    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode, IBatchedBackupContext? batch = null)
     {
         string readRoot = snap.SnapshotRoot;
         if (!Directory.Exists(readRoot))
@@ -434,28 +434,44 @@ public sealed class BackupRepository : IDisposable
         if (dirs.Length > 0)
             manifest.Directories = new List<string>(dirs);
 
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
-        try
+        // Parallel file processing: hash/chunk/encrypt across CPU cores.
+        // Each file is independent (content-addressed chunk IDs); results are
+        // collected by index and added to the manifest in sorted path order
+        // for determinism. The tracker is thread-safe; flushes are serialized.
+        var entries = new FileEntry?[files.Length];
+        var parallelOptions = new ParallelOptions
         {
-            foreach (string rel in files)
+            // Leave one core for the upload pipeline and OS.
+            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1)
+        };
+        Parallel.For(0, files.Length, parallelOptions, i =>
+        {
+            string rel = files[i];
+            string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            if (parentByPath is not null &&
+                parentByPath.TryGetValue(rel, out var parentEntry) &&
+                IsUnchangedForMode(full, parentEntry, snap, verificationMode))
             {
-                string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
-                if (parentByPath is not null &&
-                    parentByPath.TryGetValue(rel, out var parentEntry) &&
-                    IsUnchangedForMode(full, parentEntry, snap, verificationMode))
+                entries[i] = parentEntry;
+            }
+            else
+            {
+                // Per-thread buffer (ArrayPool is thread-safe).
+                byte[] threadBuffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+                try
                 {
-                    manifest.Files.Add(parentEntry);
+                    entries[i] = BackupOneFile(snap, full, rel, threadBuffer, batch);
                 }
-                else
+                finally
                 {
-                    manifest.Files.Add(BackupOneFile(snap, full, rel, buffer, batch));
+                    ArrayPool<byte>.Shared.Return(threadBuffer);
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        });
+
+        // Deterministic order: sorted by path, matching the sequential behavior.
+        foreach (var entry in entries)
+            manifest.Files.Add(entry!);
 
         return manifest;
     }
@@ -584,7 +600,7 @@ public sealed class BackupRepository : IDisposable
     }
 
     private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer,
-        BatchedBackupContext? batch = null)
+        IBatchedBackupContext? batch = null)
     {
         if ((File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
         {
@@ -614,7 +630,7 @@ public sealed class BackupRepository : IDisposable
     /// chunks (v1 behavior) or content-defined chunking.
     /// </summary>
     private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore? destination = null, BatchedBackupContext? batch = null)
+        IBlobStore? destination = null, IBatchedBackupContext? batch = null)
     {
         // Destination for chunk blobs: local repo by default, or a remote
         // store (SMB/NNTP) for streaming backups where local staging of the
@@ -647,6 +663,99 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
+    /// Batches chunk dedup checks to reduce SQLite round-trips. Accumulates
+    /// (chunkId, plaintext) pairs; on <see cref="Flush"/>, does a single
+    /// <see cref="Catalog.HasChunks"/> query, encrypts+stores only unknown
+    /// chunks, records all in a single transaction, and updates file entries
+    /// and hashes in order. Bounds memory to <see cref="MaxPendingChunks"/>
+    /// chunks (64MB max for 1MB chunks).
+    /// </summary>
+    private sealed class BatchedChunkStager : IDisposable
+    {
+        private const int MaxPendingChunks = 64;
+
+        private readonly BackupRepository _repo;
+        private readonly byte[] _blobBuf;
+        private readonly List<PendingChunk> _pending = new();
+        private bool _disposed;
+
+        private sealed record PendingChunk(
+            string Id, byte[] Plaintext, FileEntry Entry,
+            IncrementalHash FileHash, IBlobStore Blobs);
+
+        public BatchedChunkStager(BackupRepository repo)
+        {
+            _repo = repo ?? throw new ArgumentNullException(nameof(repo));
+            // Size for the largest possible chunk (CDC max is 4x average).
+            _blobBuf = ArrayPool<byte>.Shared.Rent(
+                repo.EffectiveMaxChunkSize + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+        }
+
+        /// <summary>
+        /// Queues a chunk for batched processing. The plaintext is copied
+        /// (the caller's buffer is reused). Flushes automatically when full.
+        /// </summary>
+        public void AddChunk(ReadOnlySpan<byte> plaintext, FileEntry entry,
+            IncrementalHash fileHash, IBlobStore blobs, IBatchedBackupContext? batch)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            string id = Hashing.Sha256Hex(plaintext);
+            _pending.Add(new PendingChunk(id, plaintext.ToArray(), entry, fileHash, blobs));
+            if (_pending.Count >= MaxPendingChunks)
+                Flush(batch);
+        }
+
+        /// <summary>
+        /// Processes all pending chunks: single HasChunks query, encrypt+store
+        /// unknowns, record all in one transaction, update entries/hashes in
+        /// order. Calls <paramref name="batch"/>.CheckFlush() afterwards.
+        /// </summary>
+        public void Flush(IBatchedBackupContext? batch)
+        {
+            if (_pending.Count == 0)
+                return;
+
+            // Single DB round-trip for the whole batch.
+            var ids = new List<string>(_pending.Count);
+            foreach (var p in _pending)
+                ids.Add(p.Id);
+            HashSet<string> known = _repo._catalog.HasChunks(ids);
+
+            var toRecord = new List<(string id, long sizeBytes)>(_pending.Count);
+            foreach (var p in _pending)
+            {
+                // Skip encrypt+store if catalog knows it OR local store has it
+                // (covers crash-recovery edge where Put succeeded but
+                // RecordChunk didn't).
+                if (!known.Contains(p.Id) && !p.Blobs.Exists(p.Id))
+                {
+                    var blobSpan = _blobBuf.AsSpan(0,
+                        p.Plaintext.Length + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+                    ChunkCrypto.EncryptInto(p.Plaintext, _repo._key,
+                        Hashing.HexToBytes(p.Id), blobSpan);
+                    p.Blobs.Put(p.Id, blobSpan);
+                }
+                toRecord.Add((p.Id, p.Plaintext.Length));
+                p.Entry.Chunks.Add(p.Id);
+                p.FileHash.AppendData(p.Plaintext);
+            }
+            // Single transaction for all catalog writes.
+            _repo._catalog.RecordChunks(toRecord);
+
+            _pending.Clear();
+            batch?.CheckFlush(); // throws OperationCanceledException on abort
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            ArrayPool<byte>.Shared.Return(_blobBuf);
+        }
+    }
+
+    /// <summary>
     /// Hashes, encrypts and stores one plaintext chunk, recording it on the
     /// file entry. Shared by both chunking schemes: chunk IDs are SHA-256 of
     /// plaintext either way, so deduplication is scheme-agnostic.
@@ -668,27 +777,27 @@ public sealed class BackupRepository : IDisposable
 
     /// <summary>Fixed-size chunking path (v1 behavior).</summary>
     private long ChunkStreamFixed(Stream stream, FileEntry entry, IncrementalHash fileHash, byte[] buffer,
-        IBlobStore blobs, BatchedBackupContext? batch)
+        IBlobStore blobs, IBatchedBackupContext? batch)
     {
-        // One pooled buffer reused for every chunk's encrypted blob
-        // (nonce + chunk + tag): zero per-chunk allocation on the hot path.
-        byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
-            _config.ChunkSize + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
+        // Batched dedup: accumulate chunks, single HasChunks query per batch.
+        using var stager = new BatchedChunkStager(this);
         try
         {
             long total = 0;
             int read;
             while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
             {
-                StoreChunk(buffer.AsSpan(0, read), entry, fileHash, blobBuf, blobs);
+                stager.AddChunk(buffer.AsSpan(0, read), entry, fileHash, blobs, batch);
                 total += read;
-                batch?.CheckFlush(); // throws OperationCanceledException on abort
+                // Note: CheckFlush is called by stager.Flush (every 64 chunks
+                // or at end), not per chunk. Throws on abort.
             }
+            stager.Flush(batch);
             return total;
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(blobBuf);
+            // stager.Dispose returns the blob buffer
         }
     }
 
@@ -700,27 +809,27 @@ public sealed class BackupRepository : IDisposable
     /// the buffer never overflows.
     /// </summary>
     private long ChunkStreamCdc(Stream stream, FileEntry entry, IncrementalHash fileHash,
-        IBlobStore blobs, BatchedBackupContext? batch)
+        IBlobStore blobs, IBatchedBackupContext? batch)
     {
         int maxChunk = EffectiveMaxChunkSize;
         int avgChunk = _config.ChunkSize; // CDC target average; min = avg/4, max = avg*4
         var chunker = new CdcChunker(avgChunk / 4, avgChunk, avgChunk * 4);
         byte[] accum = ArrayPool<byte>.Shared.Rent(maxChunk);
-        byte[] blobBuf = ArrayPool<byte>.Shared.Rent(
-            maxChunk + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
         var completed = new List<int>();
         long total = 0;
+        // Batched dedup: accumulate chunks, single HasChunks query per batch.
+        using var stager = new BatchedChunkStager(this);
         try
         {
             int accumLen = 0;
             void Drain(int chunkLen)
             {
-                StoreChunk(accum.AsSpan(0, chunkLen), entry, fileHash, blobBuf, blobs);
+                stager.AddChunk(accum.AsSpan(0, chunkLen), entry, fileHash, blobs, batch);
                 total += chunkLen;
                 int rest = accumLen - chunkLen;
                 Buffer.BlockCopy(accum, chunkLen, accum, 0, rest);
                 accumLen = rest;
-                batch?.CheckFlush(); // throws OperationCanceledException on abort
+                // Note: CheckFlush is called by stager.Flush, not per chunk.
             }
 
             int read;
@@ -743,12 +852,12 @@ public sealed class BackupRepository : IDisposable
             chunker.Finish(completed);
             foreach (int chunkLen in completed)
                 Drain(chunkLen);
+            stager.Flush(batch);
             return total;
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(accum);
-            ArrayPool<byte>.Shared.Return(blobBuf);
         }
     }
 
@@ -860,7 +969,7 @@ public sealed class BackupRepository : IDisposable
     /// over the full image with zeros for skipped chunks.
     /// </summary>
     private FileEntry BackupStreamSparse(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore destination, string? volumeLetter, BatchedBackupContext? batch = null)
+        IBlobStore destination, string? volumeLetter, IBatchedBackupContext? batch = null)
     {
         var entry = new FileEntry
         {

@@ -74,6 +74,67 @@ public sealed class Catalog : IDisposable
         }
     }
 
+    /// <summary>
+    /// Batched version of <see cref="HasChunk"/>: returns the subset of
+    /// <paramref name="ids"/> already in the catalog, using a single query.
+    /// Reduces SQLite round-trips when checking many chunks (e.g. during
+    /// parallel file processing). Returns an empty set for empty input.
+    /// </summary>
+    public HashSet<string> HasChunks(IEnumerable<string> ids)
+    {
+        var idList = ids as IReadOnlyList<string> ?? ids.ToList();
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        if (idList.Count == 0)
+            return known;
+
+        lock (_lock)
+        {
+            // SQLite has a 999-variable limit; chunk the IN clause.
+            const int batchSize = 500;
+            for (int i = 0; i < idList.Count; i += batchSize)
+            {
+                var batch = idList.Skip(i).Take(batchSize).ToList();
+                using var cmd = _conn.CreateCommand();
+                var paramNames = new string[batch.Count];
+                for (int j = 0; j < batch.Count; j++)
+                {
+                    paramNames[j] = "$p" + j;
+                    cmd.Parameters.AddWithValue(paramNames[j], batch[j]);
+                }
+                cmd.CommandText =
+                    "SELECT id FROM chunks WHERE id IN (" + string.Join(",", paramNames) + ")";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    known.Add(reader.GetString(0));
+            }
+        }
+        return known;
+    }
+
+    /// <summary>
+    /// Batched version of <see cref="RecordChunk"/>: inserts multiple chunks
+    /// in a single transaction. Used with <see cref="HasChunks"/> to keep
+    /// per-chunk SQLite round-trips down during backup.
+    /// </summary>
+    public void RecordChunks(IEnumerable<(string id, long sizeBytes)> chunks)
+    {
+        lock (_lock)
+        {
+            using var tx = _conn.BeginTransaction();
+            string ts = DateTime.UtcNow.ToString("O");
+            foreach (var (id, sizeBytes) in chunks)
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "INSERT OR IGNORE INTO chunks(id, size_bytes, created_utc) VALUES($id, $size, $ts)";
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.Parameters.AddWithValue("$size", sizeBytes);
+                cmd.Parameters.AddWithValue("$ts", ts);
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+    }
+
     public void RecordBackup(string id, string type, string source, DateTime createdUtc)
     {
         lock (_lock)

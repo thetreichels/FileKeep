@@ -1464,16 +1464,27 @@ public sealed class BackupScheduler
                 // 1. Verify staged chunks locally before upload (fail closed).
                 foreach (string id in chunkIds)
                     repo.VerifyChunk(id);
-                // 2. NNTP: upload the batch to every provider (per-batch
-                //    parity + retry inside the uploader).
+                // 2. NNTP: upload the batch to every provider in parallel
+                //    (per-batch parity + retry inside the uploader). Volume
+                //    entries are deterministic across providers (same chunks,
+                //    same packing), so we take them from the first uploader.
                 var entries = new List<VolumeEntry>();
-                foreach (var uploader in uploaders)
+                if (uploaders.Count == 1)
                 {
-                    var e = uploader.UploadBatch(chunkIds, batchIndex, useVolumes);
-                    if (entries.Count == 0)
-                        entries.AddRange(e); // deterministic: providers agree
+                    entries.AddRange(uploaders[0].UploadBatch(chunkIds, batchIndex, useVolumes));
                 }
-                batchedVolumes.AddRange(entries);
+                else if (uploaders.Count > 1)
+                {
+                    var uploaderEntries = new List<VolumeEntry>?[uploaders.Count];
+                    Parallel.For(0, uploaders.Count, i =>
+                    {
+                        uploaderEntries[i] = uploaders[i].UploadBatch(chunkIds, batchIndex, useVolumes);
+                    });
+                    // Deterministic: all providers produce identical entries.
+                    entries.AddRange(uploaderEntries[0]!);
+                }
+                lock (batchedVolumes)
+                    batchedVolumes.AddRange(entries);
                 // 3. SMB: copy the batch's chunks.
                 foreach (var (shareName, share) in smbConns)
                 {
@@ -1493,7 +1504,10 @@ public sealed class BackupScheduler
                 return true;
             }
 
-            var batchCtx = new BatchedBackupContext(tracker, batchSize, OnFlushBatch);
+            // Pipelined: staging of batch N+1 overlaps upload of batch N.
+            // Uploads run serially in order on a background task; FlushRemainder
+            // waits for completion and propagates failures.
+            using var batchCtx = new PipelinedBackupContext(tracker, batchSize, OnFlushBatch);
 
             BackupManifest manifest;
             if (job.IsDiskImage)

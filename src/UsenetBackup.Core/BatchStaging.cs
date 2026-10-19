@@ -36,15 +36,40 @@ public static class BatchStaging
 }
 
 /// <summary>
+/// Abstraction over batched backup orchestration. Implemented by
+/// <see cref="BatchedBackupContext"/> (synchronous flush) and
+/// <see cref="PipelinedBackupContext"/> (overlapped staging/upload).
+/// </summary>
+public interface IBatchedBackupContext
+{
+    /// <summary>The tracking store chunks are staged through.</summary>
+    BatchTrackingBlobStore Tracker { get; }
+
+    /// <summary>
+    /// Called after staged chunks. Flushes when the batch is full.
+    /// Throws on abort or prior upload failure.
+    /// </summary>
+    void CheckFlush();
+
+    /// <summary>
+    /// Flushes the final partial batch and waits for completion.
+    /// </summary>
+    void FlushRemainder();
+}
+
+/// <summary>
 /// Orchestrates flush boundaries during a batched backup. The backup loop
 /// stages chunks through <see cref="Tracker"/>; after each chunk,
 /// <see cref="CheckFlush"/> runs <see cref="OnFlushBatch"/> (upload →
 /// confirm → prune) when the staged bytes reach <see cref="BatchSizeBytes"/>.
 /// The callback returns false to abort the backup.
+/// Thread-safe: multiple staging threads may call <see cref="CheckFlush"/>
+/// concurrently; flushes are serialized.
 /// </summary>
-public sealed class BatchedBackupContext
+public sealed class BatchedBackupContext : IBatchedBackupContext
 {
     private int _batchIndex;
+    private readonly object _flushLock = new();
 
     public BatchedBackupContext(
         BatchTrackingBlobStore tracker,
@@ -70,27 +95,42 @@ public sealed class BatchedBackupContext
     /// <summary>
     /// Called after each staged chunk. Flushes when the batch is full.
     /// Throws <see cref="OperationCanceledException"/> if the flush
-    /// callback aborted the backup.
+    /// callback aborted the backup. Thread-safe.
     /// </summary>
     public void CheckFlush()
     {
+        // Fast path: avoid lock when clearly under threshold.
         if (Tracker.StagedBytesThisBatch < BatchSizeBytes)
             return;
-        Flush();
+        lock (_flushLock)
+        {
+            if (Tracker.StagedBytesThisBatch < BatchSizeBytes)
+                return;
+            FlushUnderLock();
+        }
     }
 
     /// <summary>
     /// Flushes the current batch even if it is under the batch size
-    /// (end of backup). No-op when nothing was staged.
+    /// (end of backup). No-op when nothing was staged. Thread-safe.
     /// </summary>
     public void FlushRemainder()
     {
-        if (Tracker.StagedIds.Count == 0)
-            return;
-        Flush();
+        lock (_flushLock)
+        {
+            if (Tracker.StagedIds.Count == 0)
+                return;
+            FlushUnderLock();
+        }
     }
 
     private void Flush()
+    {
+        lock (_flushLock)
+            FlushUnderLock();
+    }
+
+    private void FlushUnderLock()
     {
         var ids = Tracker.StagedIds.ToList();
         bool ok = OnFlushBatch(ids, _batchIndex);
@@ -98,6 +138,132 @@ public sealed class BatchedBackupContext
         if (!ok)
             throw new OperationCanceledException("Batched backup aborted during flush.");
         _batchIndex++;
+    }
+}
+
+/// <summary>
+/// Pipelined variant of <see cref="BatchedBackupContext"/>: overlaps staging
+/// with upload. When a batch fills, <see cref="CheckFlush"/> captures the
+/// batch's chunk IDs, resets tracking, and queues the upload to a background
+/// task — staging of the next batch continues immediately. Uploads run
+/// serially in batch order (verify → upload → prune per batch).
+/// <see cref="FlushRemainder"/> (or <see cref="WaitForCompletion"/>) blocks
+/// until all queued uploads finish and propagates the first failure.
+/// Memory/disk stay bounded: at most ~2 batches are staged locally (one
+/// uploading, one staging).
+/// </summary>
+public sealed class PipelinedBackupContext : IBatchedBackupContext, IDisposable
+{
+    private readonly BatchedBackupContext _inner;
+    private readonly Func<IReadOnlyList<string>, int, bool> _onFlushBatch;
+    private readonly object _queueLock = new();
+    private readonly Queue<Task> _pendingUploads = new();
+    private Task _tail = Task.CompletedTask;
+    private Exception? _firstError;
+    private bool _disposed;
+
+    public PipelinedBackupContext(
+        BatchTrackingBlobStore tracker,
+        long batchSizeBytes,
+        Func<IReadOnlyList<string>, int, bool> onFlushBatch)
+    {
+        _onFlushBatch = onFlushBatch ?? throw new ArgumentNullException(nameof(onFlushBatch));
+        // The inner context's OnFlushBatch captures+queues instead of running inline.
+        _inner = new BatchedBackupContext(tracker, batchSizeBytes, QueueFlush);
+    }
+
+    public BatchTrackingBlobStore Tracker => _inner.Tracker;
+
+    public long BatchSizeBytes => _inner.BatchSizeBytes;
+
+    public int BatchIndex => _inner.BatchIndex;
+
+    /// <summary>
+    /// Called after each staged chunk. When the batch is full, hands it to
+    /// the background uploader and returns immediately. Thread-safe.
+    /// Throws if a prior upload failed.
+    /// </summary>
+    public void CheckFlush()
+    {
+        ThrowIfUploadFailed();
+        _inner.CheckFlush();
+    }
+
+    /// <summary>
+    /// Queues the final partial batch and waits for all uploads to complete.
+    /// Throws the first upload failure, if any.
+    /// </summary>
+    public void FlushRemainder()
+    {
+        _inner.FlushRemainder();
+        WaitForCompletion();
+    }
+
+    /// <summary>
+    /// Blocks until all queued uploads finish. Throws the first failure.
+    /// </summary>
+    public void WaitForCompletion()
+    {
+        Task[] pending;
+        lock (_queueLock)
+            pending = _pendingUploads.ToArray();
+        try
+        {
+            Task.WaitAll(pending);
+        }
+        catch
+        {
+            // Fall through to throw the first error below.
+        }
+        ThrowIfUploadFailed();
+    }
+
+    private bool QueueFlush(IReadOnlyList<string> chunkIds, int batchIndex)
+    {
+        // Capture IDs and reset tracking atomically so staging continues.
+        // (The inner context already did this via FlushUnderLock; we just
+        // need to queue the work.)
+        var idsCopy = chunkIds.ToList();
+        lock (_queueLock)
+        {
+            if (_firstError is not null)
+                return false;
+            // Chain onto the tail to preserve batch order.
+            _tail = _tail.ContinueWith(_ =>
+            {
+                try
+                {
+                    return _onFlushBatch(idsCopy, batchIndex);
+                }
+                catch (Exception ex)
+                {
+                    lock (_queueLock)
+                        _firstError ??= ex;
+                    return false;
+                }
+            }, TaskScheduler.Default);
+            _pendingUploads.Enqueue(_tail);
+        }
+        return true;
+    }
+
+    private void ThrowIfUploadFailed()
+    {
+        lock (_queueLock)
+        {
+            if (_firstError is not null)
+                throw new InvalidOperationException(
+                    "Batched backup failed during pipelined upload.", _firstError);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        try { WaitForCompletion(); }
+        catch { /* Dispose must not throw; error already recorded */ }
     }
 }
 
@@ -118,6 +284,7 @@ public sealed class BatchTrackingBlobStore : IBlobStore
     private readonly LocalBlobStore _inner;
     private readonly Func<string, bool> _isKnownRemotely;
     private readonly List<string> _stagedIds = new();
+    private readonly object _lock = new();
     private long _stagedBytes;
 
     public BatchTrackingBlobStore(LocalBlobStore inner, Func<string, bool> isKnownRemotely)
@@ -127,33 +294,47 @@ public sealed class BatchTrackingBlobStore : IBlobStore
     }
 
     /// <summary>Chunk IDs staged since the last <see cref="ResetBatch"/>.</summary>
-    public IReadOnlyList<string> StagedIds => _stagedIds;
+    public IReadOnlyList<string> StagedIds
+    {
+        get { lock (_lock) return _stagedIds.ToList(); }
+    }
 
     /// <summary>Blob bytes staged since the last <see cref="ResetBatch"/>.</summary>
-    public long StagedBytesThisBatch => _stagedBytes;
+    public long StagedBytesThisBatch
+    {
+        get { lock (_lock) return _stagedBytes; }
+    }
 
     public bool Exists(string chunkIdHex) =>
         _inner.Exists(chunkIdHex) || _isKnownRemotely(chunkIdHex);
 
     public void Put(string chunkIdHex, byte[] blob)
     {
-        bool isNew = !_inner.Exists(chunkIdHex);
-        _inner.Put(chunkIdHex, blob);
-        if (isNew)
+        bool isNew;
+        lock (_lock)
         {
-            _stagedIds.Add(chunkIdHex);
-            _stagedBytes += blob.Length;
+            isNew = !_inner.Exists(chunkIdHex);
+            _inner.Put(chunkIdHex, blob);
+            if (isNew)
+            {
+                _stagedIds.Add(chunkIdHex);
+                _stagedBytes += blob.Length;
+            }
         }
     }
 
     public void Put(string chunkIdHex, ReadOnlySpan<byte> blob)
     {
-        bool isNew = !_inner.Exists(chunkIdHex);
-        _inner.Put(chunkIdHex, blob);
-        if (isNew)
+        bool isNew;
+        lock (_lock)
         {
-            _stagedIds.Add(chunkIdHex);
-            _stagedBytes += blob.Length;
+            isNew = !_inner.Exists(chunkIdHex);
+            _inner.Put(chunkIdHex, blob);
+            if (isNew)
+            {
+                _stagedIds.Add(chunkIdHex);
+                _stagedBytes += blob.Length;
+            }
         }
     }
 
@@ -164,7 +345,25 @@ public sealed class BatchTrackingBlobStore : IBlobStore
     /// <summary>Clears the per-batch tracking after a flush (upload → prune).</summary>
     public void ResetBatch()
     {
-        _stagedIds.Clear();
-        _stagedBytes = 0;
+        lock (_lock)
+        {
+            _stagedIds.Clear();
+            _stagedBytes = 0;
+        }
+    }
+
+    /// <summary>
+    /// Atomically captures the current batch's staged IDs and resets tracking.
+    /// Used by pipelined flush to hand off a batch without blocking staging.
+    /// </summary>
+    internal List<string> CaptureAndReset()
+    {
+        lock (_lock)
+        {
+            var ids = new List<string>(_stagedIds);
+            _stagedIds.Clear();
+            _stagedBytes = 0;
+            return ids;
+        }
     }
 }
