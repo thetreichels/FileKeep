@@ -10,7 +10,8 @@
      (see install/run-vm-build.ps1 for the full build script).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="FileKeep"
           Version="0.08.12"
           Manufacturer="J. Treichel"
@@ -43,7 +44,27 @@
         ShowVersion="yes" />
     </BootstrapperApplication>
 
+    <!-- Detect an installed WebView2 runtime (any version) for the ExePackage below. -->
+    <util:RegistrySearch Id="WebView2RuntimeSearch"
+                         Root="HKLM"
+                         Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                         Value="pv"
+                         Variable="WebView2RuntimeVersion" />
+
     <Chain>
+      <!-- WebView2 runtime: the dashboard GUI cannot start without it.
+           Evergreen bootstrapper, downloaded from Microsoft at install time
+           (not embedded, keeps the bundle small). Skipped when the runtime
+           is already present (registry detect). Vital=no so an offline
+           install still completes — the GUI then names the missing runtime
+           explicitly instead of the old misleading "service running?" error.
+           Permanent=yes: it's a shared system component, not ours to remove. -->
+      <ExePackage Id="WebView2Runtime"
+                  Cache="no" Compressed="no" PerMachine="yes" Permanent="yes" Vital="no"
+                  SourceFile="MicrosoftEdgeWebview2Setup.exe"
+                  DownloadUrl="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+                  DetectCondition="WebView2RuntimeVersion"
+                  InstallCommand="/silent /install" />
       <!-- No DisplayInternalUI attribute: the default already routes everything
            to the bootstrapper (bal:DisplayInternalUICondition unset = false). -->
       <MsiPackage SourceFile="$(var.MsiPath)"

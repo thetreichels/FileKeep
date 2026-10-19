@@ -185,7 +185,9 @@ if (-not $balDll) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $balDll) { throw "Bal extension assembly not found" }
-wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.08.12.msi -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
+# Util extension (WixToolset.Util.wixext): needed for the WebView2
+# util:RegistrySearch in Bundle.wxs. Resolves by moniker like the UI ext.
+wix build -arch x64 -ext $balDll -ext WixToolset.Util.wixext -d SrcRoot=$srcRoot -d MsiPath=C:\ub\filekeep-0.08.12.msi -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
 if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
 $bundle = Get-Item C:\ub\FileKeep-Setup.exe
 Write-Host ("  Bundle built: {0:N0} bytes" -f $bundle.Length)

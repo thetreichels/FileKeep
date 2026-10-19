@@ -345,6 +345,16 @@ public class MainForm : Form
 
             _webView.CoreWebView2.Navigate(DashboardUrl);
         }
+        catch (WebView2RuntimeNotFoundException)
+        {
+            MessageBox.Show(
+                "FileKeep needs the Microsoft Edge WebView2 runtime, which isn't installed on this PC.\n\n" +
+                "Install it free from Microsoft, then start FileKeep again:\n" +
+                "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+                "FileKeep — WebView2 required",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
         catch (Exception ex)
         {
             MessageBox.Show(
