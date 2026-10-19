@@ -168,7 +168,7 @@ $msi = Get-Item C:\ub\filekeep-0.08.12.msi
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
 # Branded Burn bootstrapper: stock WixStandardBootstrapperApplication with the
-# FileKeep banner logo (see install/Bundle.wxs). No custom theme, so no splash
+# FileKeep logo (see install/Bundle.wxs). No custom theme, so no splash
 # copy is needed — the old FileKeepTheme files stay in install/ unreferenced.
 # NOTE: the Bal NuGet package (WixToolset.Bal.wixext) ships its assembly as
 # WixToolset.BootstrapperApplications.wixext.dll, so the -ext moniker cannot
