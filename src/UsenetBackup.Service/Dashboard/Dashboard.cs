@@ -70,10 +70,14 @@ public static class Dashboard
 
         app.MapGet("/api/version", () =>
         {
-            // Diagnostic: return plain text to isolate JSON serialization issues
-            // in trimmed single-file deployment.
-            try { return Results.Text(DashboardApi.GetAppVersion(), "text/plain"); }
-            catch (Exception ex) { return Results.Text("ERROR:" + ex.GetType().Name, "text/plain"); }
+            // Note: Results.Json with anonymous types breaks under trimmer in
+            // single-file deployment (returns empty). Build JSON manually.
+            try
+            {
+                string v = DashboardApi.GetAppVersion().Replace("\"", "");
+                return Results.Content("{\"version\":\"" + v + "\"}", "application/json");
+            }
+            catch { return Results.Content("{\"version\":\"0.0.0\"}", "application/json"); }
         });
 
         // Update check: compares the installed version against the VERSION
@@ -82,17 +86,17 @@ public static class Dashboard
         // does not meet.
         app.MapPost("/api/update-check", async () =>
         {
+            // Manual JSON: Results.Json with anonymous types breaks under trimmer.
+            static string Jq(string? s) => "\"" + (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
             string current = DashboardApi.GetAppVersion();
             var (ok, latest, error, unmet) = await DashboardApi.CheckForUpdatesAsync();
             if (!ok)
-                return Results.Json(new { current, error });
-            return Results.Json(new
-            {
-                current,
-                latest,
-                updateAvailable = DashboardApi.IsNewerVersion(current, latest!),
-                unmetRequirements = unmet,
-            });
+                return Results.Content("{\"current\":" + Jq(current) + ",\"error\":" + Jq(error) + "}", "application/json");
+            string unmetJson = "[" + string.Join(",", (unmet ?? new List<string>()).Select(Jq)) + "]";
+            return Results.Content("{\"current\":" + Jq(current) +
+                ",\"latest\":" + Jq(latest) +
+                ",\"updateAvailable\":" + (DashboardApi.IsNewerVersion(current, latest!) ? "true" : "false") +
+                ",\"unmetRequirements\":" + unmetJson + "}", "application/json");
         });
 
         // Windows known user folders (Documents, Pictures, etc.) for the GUI's
