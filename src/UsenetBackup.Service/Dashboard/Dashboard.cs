@@ -69,7 +69,10 @@ public static class Dashboard
         app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
 
         app.MapGet("/api/version", () =>
-            Results.Json(new { version = DashboardApi.GetAppVersion() }));
+        {
+            try { return Results.Json(new { version = DashboardApi.GetAppVersion() }); }
+            catch { return Results.Json(new { version = "0.0.0" }); }
+        });
 
         // Update check: compares the installed version against the VERSION
         // file committed and pushed to GitHub main, and reports any of the
