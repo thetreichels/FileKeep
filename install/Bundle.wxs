@@ -55,12 +55,12 @@
       <!-- WebView2 runtime: the dashboard GUI cannot start without it.
            Evergreen bootstrapper, downloaded from Microsoft at install time
            (not embedded, keeps the bundle small). Skipped when the runtime
-           is already present (registry detect). Vital=no so an offline
-           install still completes — the GUI then names the missing runtime
-           explicitly instead of the old misleading "service running?" error.
+           is already present (registry detect). Vital=yes: if the WebView2
+           install fails, the whole install stops with an error instead of
+           silently continuing — re-running the installer retries it.
            Permanent=yes: it's a shared system component, not ours to remove. -->
       <ExePackage Id="WebView2Runtime"
-                  Cache="no" Compressed="no" PerMachine="yes" Permanent="yes" Vital="no"
+                  Cache="no" Compressed="no" PerMachine="yes" Permanent="yes" Vital="yes"
                   SourceFile="MicrosoftEdgeWebview2Setup.exe"
                   DownloadUrl="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
                   DetectCondition="WebView2RuntimeVersion"
