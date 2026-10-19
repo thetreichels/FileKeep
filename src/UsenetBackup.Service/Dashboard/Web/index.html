@@ -1751,7 +1751,10 @@ async function checkForUpdates() {
     const r = await api('/api/update-check', { method: 'POST' });
     if (r.error) { toast(r.error, 'err'); return; }
     if (r.updateAvailable) {
-      toast('FileKeep ' + r.latest + ' is available on GitHub (you have ' + r.current + ').', 'warn');
+      let msg = 'FileKeep ' + r.latest + ' is available on GitHub (you have ' + r.current + ').';
+      if (r.unmetRequirements && r.unmetRequirements.length)
+        msg += ' Your PC is missing: ' + r.unmetRequirements.join('; ') + '.';
+      toast(msg, r.unmetRequirements && r.unmetRequirements.length ? 'err' : 'warn');
     } else {
       toast('You are on the latest version (FileKeep ' + r.current + ').', 'ok');
     }

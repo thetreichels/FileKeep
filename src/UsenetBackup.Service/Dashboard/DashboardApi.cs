@@ -19,43 +19,99 @@ public static partial class DashboardApi
     /// <summary>
     /// The installed app version, from the assembly informational version
     /// stamped at build time (run-vm-build.ps1 /p:InformationalVersion=).
-    /// Falls back to the assembly version, then "0.0.0".
+    /// Falls back to the assembly version, then "0.0.0". Never throws:
+    /// in single-file deployments reflection can behave unexpectedly, and
+    /// a version lookup must not 500 the dashboard.
     /// </summary>
     public static string GetAppVersion()
     {
-        var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
-        string? info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (!string.IsNullOrWhiteSpace(info))
+        try
         {
-            // InformationalVersion may carry "+gitsha" suffixes; take the version part.
-            string v = info.Split('+')[0].Trim();
-            if (TryParseVersion(v, out _))
-                return v;
+            var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+            string? info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(info))
+            {
+                // InformationalVersion may carry "+gitsha" suffixes; take the version part.
+                string v = info.Split('+')[0].Trim();
+                if (TryParseVersion(v, out _))
+                    return v;
+            }
+            return asm.GetName().Version?.ToString() ?? "0.0.0";
         }
-        return asm.GetName().Version?.ToString() ?? "0.0.0";
+        catch
+        {
+            return "0.0.0";
+        }
     }
 
     /// <summary>
     /// Checks the GitHub repo for the most recent released version by reading
     /// the VERSION file committed and pushed to main. Returns the installed
-    /// version, the latest pushed version, and whether an update is available.
+    /// version, the latest pushed version, whether an update is available,
+    /// and any of the latest version's requirements this machine does not
+    /// meet (from REQUIREMENTS.json next to VERSION; best-effort).
     /// </summary>
-    public static async Task<(bool Ok, string? Latest, string? Error)> CheckForUpdatesAsync()
+    public static async Task<(bool Ok, string? Latest, string? Error, string[] UnmetRequirements)> CheckForUpdatesAsync()
     {
-        const string url = "https://raw.githubusercontent.com/thetreichels/FileKeep/main/VERSION";
-        string latest;
+        const string baseUrl = "https://raw.githubusercontent.com/thetreichels/FileKeep/main";
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-            latest = (await http.GetStringAsync(url)).Trim();
+            string latest = (await http.GetStringAsync(baseUrl + "/VERSION")).Trim();
+            if (!TryParseVersion(latest, out _))
+                return (false, null, $"GitHub returned an unrecognized version ('{latest}').", Array.Empty<string>());
+            string[] unmet = await GetUnmetRequirementsAsync(http);
+            return (true, latest, null, unmet);
         }
         catch (Exception ex)
         {
-            return (false, null, $"Couldn't reach GitHub: {ex.Message}");
+            return (false, null, $"Couldn't reach GitHub: {ex.Message}", Array.Empty<string>());
         }
-        if (!TryParseVersion(latest, out _))
-            return (false, null, $"GitHub returned an unrecognized version ('{latest}').");
-        return (true, latest, null);
+    }
+
+    /// <summary>
+    /// Reads REQUIREMENTS.json from GitHub main and returns the human-readable
+    /// list of requirements this machine does not meet. Empty when the file
+    /// is missing, unparsable, or everything is satisfied.
+    /// </summary>
+    private static async Task<string[]> GetUnmetRequirementsAsync(HttpClient http)
+    {
+        var unmet = new List<string>();
+        try
+        {
+            const string url = "https://raw.githubusercontent.com/thetreichels/FileKeep/main/REQUIREMENTS.json";
+            string json = await http.GetStringAsync(url);
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("requires", out var req))
+                return Array.Empty<string>();
+            if (req.TryGetProperty("webView2", out var wv) && wv.GetBoolean() && !IsWebView2Installed())
+                unmet.Add("Microsoft Edge WebView2 runtime (the installer adds it automatically)");
+            if (req.TryGetProperty("minWindowsBuild", out var wb) && wb.TryGetInt32(out int minBuild) &&
+                OperatingSystem.IsWindows() && Environment.OSVersion.Version.Build < minBuild)
+                unmet.Add($"Windows 10 build {minBuild} or newer (this PC: build {Environment.OSVersion.Version.Build})");
+        }
+        catch
+        {
+            // Best-effort: a missing or broken manifest means no extra requirements.
+        }
+        return unmet.ToArray();
+    }
+
+    /// <summary>True when the WebView2 runtime is installed (Windows-only check).</summary>
+    public static bool IsWebView2Installed()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}");
+            return key?.GetValue("pv") is string pv && !string.IsNullOrWhiteSpace(pv);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>Parses "n.nn.nn" (leading zeros allowed) into ints for comparison.</summary>

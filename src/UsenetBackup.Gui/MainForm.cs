@@ -274,8 +274,42 @@ public class MainForm : Form
         catch { /* settings are best-effort */ }
     }
 
+    /// <summary>
+    /// Warns when the GUI and the FileKeep service report different versions
+    /// (they ship in one installer, so a mismatch means mixed binaries).
+    /// Best-effort: skipped silently when the service isn't reachable yet.
+    /// </summary>
+    private async Task CheckServiceVersionAsync()
+    {
+        try
+        {
+            string? guiVersion = System.Reflection.Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion?.Split('+')[0].Trim();
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            string json = await http.GetStringAsync(DashboardUrl + "api/version");
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            string? svcVersion = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() : null;
+            if (!string.IsNullOrWhiteSpace(guiVersion) && !string.IsNullOrWhiteSpace(svcVersion) &&
+                !string.Equals(guiVersion, svcVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    $"Version mismatch: this FileKeep window is {guiVersion}, but the FileKeep service is {svcVersion}.\n\n" +
+                    "They ship together — reinstall FileKeep so both match.",
+                    "FileKeep — version mismatch",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+        catch
+        {
+            // Service not up yet; the WebView init below reports that case.
+        }
+    }
+
     private async Task InitializeWebViewAsync()
     {
+        await CheckServiceVersionAsync();
         try
         {
             // WebView2 needs a writable user data folder. The default is next

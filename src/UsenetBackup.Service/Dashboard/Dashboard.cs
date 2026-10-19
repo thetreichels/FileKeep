@@ -72,11 +72,13 @@ public static class Dashboard
             Results.Json(new { version = DashboardApi.GetAppVersion() }));
 
         // Update check: compares the installed version against the VERSION
-        // file committed and pushed to GitHub main.
+        // file committed and pushed to GitHub main, and reports any of the
+        // latest version's requirements (REQUIREMENTS.json) this machine
+        // does not meet.
         app.MapPost("/api/update-check", async () =>
         {
             string current = DashboardApi.GetAppVersion();
-            var (ok, latest, error) = await DashboardApi.CheckForUpdatesAsync();
+            var (ok, latest, error, unmet) = await DashboardApi.CheckForUpdatesAsync();
             if (!ok)
                 return Results.Json(new { current, error });
             return Results.Json(new
@@ -84,6 +86,7 @@ public static class Dashboard
                 current,
                 latest,
                 updateAvailable = DashboardApi.IsNewerVersion(current, latest!),
+                unmetRequirements = unmet,
             });
         });
 
