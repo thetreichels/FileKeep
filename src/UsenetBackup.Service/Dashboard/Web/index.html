@@ -1669,7 +1669,10 @@ async function refreshDiskList() {
     drives.filter(d => !excludeSystem || !d.isSystemDrive).forEach(d => {
       const label = d.number + ': ' + d.model + ' (' + fmtSize(d.sizeBytes) + ')' +
         (d.isSystemDrive ? ' — \u26a0 SYSTEM DISK' : '');
-      sel.add(new Option(label, d.devicePath));
+      const opt = new Option(label, d.devicePath);
+      opt.dataset.model = d.model;
+      opt.dataset.size = d.sizeBytes;
+      sel.add(opt);
     });
     if ([...sel.options].some(o => o.value === cur && cur)) sel.value = cur;
   };
@@ -1767,13 +1770,18 @@ async function submitRestore() {
   const repo = document.getElementById('repo').value;
   if (!restoreTarget) return;
   if (restoreTarget.type === 'disk-image') {
-    const device = document.getElementById('m-disk-target').value;
+    const sel = document.getElementById('m-disk-target');
+    const device = sel.value;
     const ack = document.getElementById('m-disk-ack').checked;
     if (!device) { toast('Select the target disk.', 'err'); return; }
     if (!ack) { toast('Check the box to acknowledge the destructive restore.', 'err'); return; }
-    const label = document.querySelector('#m-disk-target option:checked')?.textContent || device;
+    const opt = sel.options[sel.selectedIndex];
+    const label = opt?.textContent || device;
     if (!window.confirm('This will DESTROY all data on ' + label + '. Continue?')) return;
-    await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, device, confirmed: true }) });
+    await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({
+      repo, backupId: restoreTarget.backupId, device, confirmed: true,
+      deviceModel: opt?.dataset.model, deviceSizeBytes: Number(opt?.dataset.size) || null,
+    }) });
     toast('Disk restore started in the background. Watch the Operations log.');
   } else {
     const destDir = document.getElementById('m-restore-dest').value.trim();

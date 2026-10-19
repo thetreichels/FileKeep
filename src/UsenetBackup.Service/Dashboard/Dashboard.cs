@@ -367,7 +367,9 @@ public static class Dashboard
             string backupId = GetBodyString(body, "backupId");
             string device = GetBodyString(body, "device");
             bool confirmed = body.TryGetProperty("confirmed", out var c) && c.GetBoolean();
-            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession);
+            string? deviceModel = body.TryGetProperty("deviceModel", out var dm) ? dm.GetString() : null;
+            long? deviceSizeBytes = body.TryGetProperty("deviceSizeBytes", out var ds) && ds.TryGetInt64(out long s) ? s : null;
+            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes);
             return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
         });
 

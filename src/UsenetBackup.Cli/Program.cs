@@ -178,18 +178,26 @@ static string PromptInteractive(string prompt, string flagName, string envName)
 
 static string? GetOption(string[] args, string name)
 {
-    for (int i = 0; i < args.Length - 1; i++)
-        if (args[i] == name)
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == name && i + 1 < args.Length)
             return args[i + 1];
+        if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+            return args[i][(name.Length + 1)..];
+    }
     return null;
 }
 
 static string[] GetOptions(string[] args, string name)
 {
     var values = new List<string>();
-    for (int i = 0; i < args.Length - 1; i++)
-        if (args[i] == name)
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == name && i + 1 < args.Length)
             values.Add(args[i + 1]);
+        else if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+            values.Add(args[i][(name.Length + 1)..]);
+    }
     return values.ToArray();
 }
 

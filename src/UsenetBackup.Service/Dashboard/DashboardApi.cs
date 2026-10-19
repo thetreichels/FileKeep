@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
+using UsenetBackup.Core.Recovery;
 using UsenetBackup.Core.Security;
 using UsenetBackup.Core.Service;
 
@@ -878,10 +879,13 @@ public static partial class DashboardApi
     /// Starts a disk-image restore in the background. Destructive: the caller
     /// must pass confirmed=true (the UI requires an explicit checkbox plus a
     /// confirm dialog, and never lists the running system drive as a target).
+    /// The target is re-validated against the currently installed drives:
+    /// if the disk is gone, or a different disk now sits at that device path
+    /// (USB shuffle between pick and confirm), the restore is refused.
     /// </summary>
     public static (int Status, object Payload) StartDiskRestore(
         ServiceConfig config, string repo, string backupId, string device, bool confirmed,
-        RestoreSession? session = null)
+        RestoreSession? session = null, string? expectedModel = null, long? expectedSizeBytes = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -891,6 +895,24 @@ public static partial class DashboardApi
             return (400, new ErrorDto("device is required."));
         if (!confirmed)
             return (400, new ErrorDto("Restore not confirmed. Restore aborted."));
+        // The drive list the picker showed may be stale (USB unplugged,
+        // device numbers shifted). Re-enumerate and make sure the target is
+        // still there and still the same disk the user picked.
+        // (Windows-only: PhysicalDrives.List() is empty elsewhere.)
+        if (OperatingSystem.IsWindows())
+        {
+            var drive = PhysicalDrives.List()
+                .FirstOrDefault(d => string.Equals(d.DevicePath, device, StringComparison.OrdinalIgnoreCase));
+            if (drive is null)
+                return (400, new ErrorDto(
+                    $"The selected disk ({device}) is no longer present. Re-select the target disk and try again."));
+            if (!string.IsNullOrWhiteSpace(expectedModel) &&
+                (!string.Equals(drive.Model, expectedModel, StringComparison.Ordinal) ||
+                 (expectedSizeBytes.HasValue && drive.SizeBytes != expectedSizeBytes.Value)))
+                return (400, new ErrorDto(
+                    $"The disk at {device} changed since you selected it " +
+                    $"(now: {drive.Model}, {drive.SizeBytes} bytes). Re-select the target disk and confirm again."));
+        }
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey

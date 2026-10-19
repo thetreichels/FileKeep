@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using UsenetBackup.Core.Json;
 using UsenetBackup.Core.Nntp;
 
@@ -1106,8 +1107,24 @@ public sealed class BackupRepository : IDisposable
     /// default, or a remote store for streaming backups). Sparse images
     /// (empty-string chunk IDs) are restored with zeros for skipped positions.
     /// </summary>
+    /// <summary>
+    /// Refuses to write a disk image to anything that is not a raw physical
+    /// device path. On Windows that means \\.\PhysicalDriveN — without this a
+    /// typo or a bad API call could overwrite a regular file. The check is
+    /// Windows-only so the cross-platform test suite can restore to files.
+    /// </summary>
+    private static void ValidateDevicePath(string devicePath)
+    {
+        if (OperatingSystem.IsWindows() &&
+            !Regex.IsMatch(devicePath ?? "", @"^\\\\\.\\PhysicalDrive\d+$", RegexOptions.IgnoreCase))
+            throw new ArgumentException(
+                $"Refusing to write a disk image to '{devicePath}': not a physical drive path " +
+                @"(expected \\.\PhysicalDriveN).", nameof(devicePath));
+    }
+
     public void RestoreDiskImage(string backupId, string devicePath, IBlobStore source)
     {
+        ValidateDevicePath(devicePath);
         var manifest = LoadManifest(backupId); // validates root hash
         if (!manifest.IsDiskImage || manifest.Files.Count != 1)
             throw new InvalidOperationException(

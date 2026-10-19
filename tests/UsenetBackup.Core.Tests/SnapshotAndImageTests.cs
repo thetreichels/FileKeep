@@ -371,4 +371,24 @@ public sealed class SnapshotAndImageTests : IDisposable
         byte[] restoredBytes = File.ReadAllBytes(restored);
         Assert.Equal(diskBytes, restoredBytes);
     }
+
+    [Fact]
+    public void RestoreDiskImage_RejectsNonDevicePath()
+    {
+        // The device-path guard runs before the manifest is even loaded, so a
+        // bogus backup id is fine here: on Windows the ArgumentException must
+        // fire first; elsewhere the guard is inactive (Linux tests restore to
+        // files) and we get whatever LoadManifest throws instead.
+        using var repo = InitRepo();
+        string bogusFile = Path.Combine(_workDir, "not-a-device.bin");
+        if (OperatingSystem.IsWindows())
+        {
+            var ex = Assert.Throws<ArgumentException>(() => repo.RestoreDiskImage("nope", bogusFile));
+            Assert.Contains("PhysicalDrive", ex.Message);
+        }
+        else
+        {
+            Assert.ThrowsAny<Exception>(() => repo.RestoreDiskImage("nope", bogusFile));
+        }
+    }
 }
