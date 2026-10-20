@@ -674,7 +674,7 @@
         <div class="sec-step" id="sec-step-1">
           <h1>Encryption / Decryption</h1>
           <p style="color:var(--text-2);margin:-12px 0 20px">Backups stay encrypted until restored.</p>
-          <div id="sec-banner" style="display:none;margin-bottom:16px;padding:12px 16px;border-radius:6px;background:#e8f1fb;border:1px solid #b8d4f0;color:#1a4a7a;font-size:14px"></div>
+          <div id="sec-banner" style="display:none;margin-bottom:16px;padding:12px 16px;border-radius:6px;background:var(--bg-2);border:1px solid var(--accent);color:var(--text);font-size:14px"></div>
           <div style="display:flex;gap:20px;align-items:flex-start">
             <div style="flex:1;min-width:0">
               <h2 style="margin-top:0">Build your protection</h2>
@@ -767,11 +767,11 @@
           <h1>Create your backup passphrase</h1>
           <p style="color:var(--text-2);margin:-12px 0 20px">This passphrase encrypts every backup. You'll type it when setting up restores — store it in your password manager.</p>
           <div class="card">
-            <div id="sec-pp-info-linked" style="margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
+            <div id="sec-pp-info-linked" style="margin-bottom:16px;padding:12px;background:var(--bg-2);border:1px solid var(--border);border-radius:6px;font-size:13px">
               <div style="font-weight:600;margin-bottom:4px">Your passphrase encrypts everything — combined with your YubiKey, so both are required together.</div>
               <div style="color:var(--text-2)">Restores need both, every time: type your passphrase and touch the YubiKey. Neither one works alone — lose either and only the recovery sheet can get you back in.</div>
             </div>
-            <div id="sec-pp-info-unlinked" style="display:none;margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
+            <div id="sec-pp-info-unlinked" style="display:none;margin-bottom:16px;padding:12px;background:var(--bg-2);border:1px solid var(--border);border-radius:6px;font-size:13px">
               <div style="font-weight:600;margin-bottom:4px">Your passphrase encrypts everything — here it unlocks on its own.</div>
               <div style="color:var(--text-2)">Your passphrase and YubiKey aren't linked — each is a separate way in, so either one unlocks on its own.</div>
             </div>
@@ -793,7 +793,10 @@
             <div id="sec-pp-blur-error" style="display:none;color:var(--bad);font-size:13px;margin:8px 0" role="alert"></div>
             <div class="form-grid" style="margin-top:12px">
               <label>Confirm passphrase
-                <input id="sec-pp-confirm" type="password" placeholder="Type it again" autocomplete="new-password" oninput="secCheckPassphrase()">
+                <span style="display:flex;gap:6px;align-items:center">
+                  <input id="sec-pp-confirm" type="password" placeholder="Type it again" autocomplete="new-password" style="flex:1" oninput="secCheckPassphrase()">
+                  <button type="button" onclick="secTogglePwVisibility('sec-pp-confirm', this)" title="Show/hide" style="padding:6px 10px">👁</button>
+                </span>
                 <span id="sec-pp-match-msg" class="meta"></span>
               </label>
             </div>
@@ -808,12 +811,11 @@
           <h1>Generate key secret</h1>
           <p style="color:var(--text-2);margin:-12px 0 20px">There's no passphrase in this mode. Instead, FileKeep generates a random 20-byte secret and programs it into your YubiKey's HMAC-SHA1 challenge–response slot. The answers the key computes from that secret are what encrypt your backups.</p>
           <div class="card">
-            <div style="margin-bottom:16px;padding:12px;background:#e8f1fb;border-radius:6px;font-size:13px">
-              <div style="font-weight:600;margin-bottom:4px">Generated on this PC — and kept only in your keys.</div>
-              <div style="color:var(--text-2)">FileKeep creates the secret with a cryptographic random generator and writes it into each key you program in the next step. FileKeep itself keeps no copy. After programming, you'll print the secret on a recovery sheet — the only copy that exists outside your keys.</div>
+            <div style="margin-bottom:16px;padding:12px;background:var(--bg-2);border:1px solid var(--border);border-radius:6px;font-size:13px">
+              <div style="font-weight:600;margin-bottom:4px">Generated during programming — never typed.</div>
+              <div style="color:var(--text-2)">FileKeep creates the secret with a cryptographic random generator and writes it into each key when you program it. FileKeep itself keeps no copy. After programming, you'll print the secret on a recovery sheet — the only copy that exists outside your keys.</div>
             </div>
-            <div style="font-family:monospace;background:var(--bg-2);padding:16px;border-radius:6px;font-size:16px;letter-spacing:2px;text-align:center;margin:16px 0" id="sec-yk-secret">7f3a9c1e 04b8d2a6 51e98f07 c3d46a2b 9e15f840</div>
-            <div class="meta" style="text-align:center">You never type this day to day — it's shown so you can recognize it again on your recovery sheet.</div>
+            <div class="meta" style="text-align:center">You never type this day to day — it's shown on your recovery sheet so you can recognize it.</div>
             <div style="margin-top:16px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">No passphrase means no other way in.</div>
               <div>If every programmed key is lost and the recovery sheet is gone, these backups cannot be decrypted — by anyone, including you. That's why the next steps let you program a spare and print the sheet.</div>
@@ -941,17 +943,6 @@
             </div>
           </div>
           <div class="meta" style="margin-top:12px">Phone is switched on in your profile — to leave it out, go Back and switch it off there. You can also change it later in Settings → Security.</div>
-        </div>
-
-        <!-- Final step -->
-        <div class="sec-step" id="sec-step-final" style="display:none">
-          <h1>You're protected</h1>
-          <p style="color:var(--text-2);margin:-12px 0 20px" id="sec-final-sub">Passphrase + YubiKey is set up.</p>
-          <div class="card">
-            <ul id="sec-final-list" style="margin:0;padding-left:20px;color:var(--text-2);font-size:14px;line-height:1.8">
-            </ul>
-          </div>
-          <div id="sec-final-note" style="display:none;margin-top:12px;padding:12px;background:var(--bg-2);border-radius:6px;font-size:13px;color:var(--text-2)"></div>
         </div>
 
         <!-- Wizard footer -->
@@ -2978,7 +2969,7 @@ async function secFinishYubiKeySetup() {
 
 // Wizard navigation
 let secCurrentStep = 1;
-const secStepIds = ['sec-step-1', 'sec-step-2', 'sec-step-2b', 'sec-step-3', 'sec-step-3b', 'sec-step-4', 'sec-step-4b', 'sec-step-final'];
+const secStepIds = ['sec-step-1', 'sec-step-2', 'sec-step-2b', 'sec-step-3', 'sec-step-3b', 'sec-step-4', 'sec-step-4b'];
 
 function secGetVisibleSteps() {
   // Determine which steps to show based on profile
@@ -3003,7 +2994,6 @@ function secGetVisibleSteps() {
     steps.push('4b'); // Phone setup
   }
   
-  steps.push('final');
   return steps;
 }
 
@@ -3029,9 +3019,6 @@ function secGoStep(n) {
   nextBtn.textContent = (n === steps.length) ? 'Finish' : 'Next';
   
   secUpdateWizardNext();
-  
-  // Update final step content if showing
-  if (stepId === 'final') secRenderFinalStep();
 }
 
 function secUpdateWizardNext() {
@@ -3077,14 +3064,13 @@ function secUpdateWizardNext() {
     // Phone: require verified
     enabled = secPhoneVerified;
     if (!enabled) reason = 'Verify the code from your authenticator app.';
-  } else if (stepId === 'final') {
-    // Final step: Finish button saves
-    nextBtn.onclick = secFinishWizard;
-    return;
   }
   
   nextBtn.disabled = !enabled;
   wrap.title = reason;
+  // The Finish button lives on the last step itself (no separate summary
+  // page): on the last step, the button finishes instead of advancing.
+  nextBtn.onclick = (secCurrentStep === steps.length) ? secFinishWizard : secNext;
 }
 
 // YubiKey state
@@ -3184,54 +3170,14 @@ async function secVerifyPhoneCode() {
   }
 }
 
-function secRenderFinalStep() {
-  const p = secProfile;
-  let sub = '';
-  let items = [];
-  
-  if (p.passphraseEnabled && p.yubiKeyEnabled) {
-    sub = p.linkMode === 'and' 
-      ? 'Passphrase + YubiKey is set up. Unlock: (Passphrase + YubiKey). Both required — no fallback.'
-      : 'Passphrase + YubiKey is set up. Unlock: Passphrase or YubiKey.';
-    items = [
-      'Backups run unattended. Scheduled jobs never ask for the key or the passphrase — they encrypt with a stored key, run on schedule day or night, and bank each finished backup in your Banked Vault.',
-      'Restores need ' + (p.linkMode === 'and' ? 'both' : 'a touch or passphrase') + '. ' + (p.linkMode === 'and' ? 'Opening a restore asks for your passphrase and a YubiKey touch.' : 'Opening a restore asks for your passphrase or a YubiKey touch.') + ' That unlocks a 1-hour session — after it expires, the passphrase is wiped from memory and the next restore asks again.',
-      'Backups never wait on you. The key only gates restores, which are always started by a person — a backup can never fail because nobody was there to touch the key.',
-    ];
-  } else if (p.yubiKeyEnabled && !p.passphraseEnabled) {
-    sub = 'YubiKey-only protection is set up — no passphrase.';
-    items = [
-      'No passphrase exists. Nothing to remember and nothing to type — the secret lives in your keys, and a touch is all a restore ever asks for.',
-      'Backups run unattended. Scheduled jobs encrypt with a stored key and bank each finished backup in your Banked Vault, day or night — no key needs to be plugged in.',
-      'Restores need a key touch. Insert any programmed key and touch it to unlock a 1-hour restore session. When it expires, the next restore asks for a touch again.',
-      'The recovery sheet is your only way back. If every key is lost, the printed secret can program a new key and restore access. Without a programmed key or that sheet, the backups cannot be decrypted.',
-    ];
-  } else {
-    sub = 'Passphrase protection is set up.';
-    items = [
-      'Backups run unattended. Scheduled jobs encrypt with your stored passphrase and bank each finished backup in your Banked Vault.',
-      'Restores need your passphrase. Opening a restore asks for it, unlocking a 1-hour session.',
-    ];
-  }
-  
-  if (p.phoneEnabled) {
-    items.push('Phone enabled — your authenticator app can unlock restores with its rotating 6-digit code.');
-  }
-  
-  document.getElementById('sec-final-sub').textContent = sub;
-  document.getElementById('sec-final-list').innerHTML = items.map(i => `<li>${esc(i)}</li>`).join('');
-  
-  // Follow-up note if something is off
-  const note = document.getElementById('sec-final-note');
-  if (!p.yubiKeyEnabled || !p.phoneEnabled) {
-    note.style.display = '';
-    note.textContent = 'You can link a YubiKey or add Phone later in Settings → Security.';
-  } else {
-    note.style.display = 'none';
-  }
-}
-
 async function secFinishWizard() {
+  // When the passphrase step is also the last step, leaving via Finish must
+  // persist the passphrase first, exactly like leaving via Next does.
+  const steps = secGetVisibleSteps();
+  if (steps[secCurrentStep - 1] === 2) {
+    const entered = document.getElementById('sec-pp-pass').value;
+    if (entered && !(await secSavePassphrase())) return;
+  }
   // Only claim success when the profile actually persisted — the save can
   // be rejected (e.g. a selected method whose setup never completed).
   if (await secSaveProfile()) toast('Protection settings saved.', 'ok');
