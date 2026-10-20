@@ -1525,25 +1525,26 @@ async function loadRepo() {
   const vcEl = document.getElementById('vault-count');
   if (vcEl) vcEl.textContent = bs.length;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
-  document.getElementById('remoteBackups').innerHTML = '';
+  const rbEl = document.getElementById('remoteBackups');
+  if (rbEl) rbEl.innerHTML = '';
 }
 async function uploadBackup(backupId) {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   if (!confirm(`Upload backup ${backupId} to Usenet?`)) return;
   await api('/api/operations/upload', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
   toast('Upload started in the background. Watch the Operations log.');
 }
 async function verifyBackup(backupId) {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
   toast('Verification started in the background. Watch the Operations log.');
 }
 function downloadNzb(backupId) {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   window.location = '/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId);
 }
 async function startAdhocBackup() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   const sourceDir = document.getElementById('adhoc-source').value.trim();
   if (!sourceDir) { toast('Enter a source folder.', 'err'); return; }
   await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
@@ -1699,7 +1700,7 @@ document.querySelector('[data-view="tools"]')?.addEventListener('click', () => {
   updateTrayVisibility();
 });
 async function startDiskBackup() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   const device = document.getElementById('disk-device').value;
   if (!device) { toast('Select a disk.', 'err'); return; }
   // Image name is generated: disk<N>-<timestamp>.img — no typing needed.
@@ -1825,7 +1826,7 @@ async function loadAboutVersion() {
   } catch { /* leave the placeholder */ }
 }
 async function submitRestore() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   if (!restoreTarget) return;
   if (restoreTarget.type === 'disk-image') {
     const sel = document.getElementById('m-disk-target');
@@ -1853,7 +1854,7 @@ async function submitRestore() {
   closeRestoreModal();
 }
 async function importRemote() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   const ids = [...document.querySelectorAll('.remote-check:checked')].map(c => c.value);
   if (!ids.length) { toast('Select at least one backup.', 'err'); return; }
   await api('/api/backups/remote/import?repo=' + encodeURIComponent(repo),
@@ -2064,8 +2065,11 @@ document.getElementById('jf-schedType').addEventListener('change', e => {
 });
 async function loadSettings() {
   const cfg = await api('/api/config');
+  // The #settingsJobs summary list was removed in the redesign; the jobs
+  // themselves are rendered by load(). Skip the summary when absent —
+  // dereferencing it killed loadSettings and with it the locations list.
   const box = document.getElementById('settingsJobs');
-  box.innerHTML = cfg.jobs.map(j => `
+  if (box) box.innerHTML = cfg.jobs.map(j => `
     <div class="row">
       <div class="grow">
         <div class="name">${esc(j.name)}</div>
@@ -2287,7 +2291,7 @@ function closeScanResultsModal() {
 async function importDiscoveredBackup(index) {
   const u = (window._scanResults || [])[index];
   if (!u) return;
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   if (!repo) { toast('Select a repository first.', 'err'); return; }
   try {
     toast('Adding ' + u.backupId + ' to vault...', '');
@@ -2863,7 +2867,10 @@ function secCheckPassphrase() {
   } else {
     msgEl.textContent = '';
   }
-  document.getElementById('sec-pp-next').disabled = !allPass;
+  // The wizard's Next/Finish button is #sec-next (there is no per-step
+  // #sec-pp-next — dereferencing it threw and broke the Finish wiring).
+  const wizNext = document.getElementById('sec-next');
+  if (wizNext) wizNext.disabled = !allPass;
   return allPass;
 }
 
@@ -2901,7 +2908,6 @@ async function secSavePassphrase() {
       body: JSON.stringify({ passphrase: p1 }),
     });
     toast('Passphrase saved.', 'ok');
-    document.getElementById('sec-passphrase-setup').style.display = 'none';
     document.getElementById('sec-pp-pass').value = '';
     document.getElementById('sec-pp-confirm').value = '';
     await secLoadProfile();
