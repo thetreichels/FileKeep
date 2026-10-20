@@ -541,6 +541,7 @@
           <button onclick="hideLocationForm()">Cancel</button>
         </div>
       </div>
+      </div>
           <div class="card" id="jobFormCard" style="display:none">
         <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
         <div class="row" id="jf-type-row" style="margin-bottom:12px">
@@ -1029,7 +1030,6 @@
           <button class="accent" onclick="startOneTimeBackup()">Start backup</button>
         </div>
       </div>
-      </div>
       <div class="card">
         <div class="name">Recovery USB</div>
         <div class="meta">Create bootable recovery media. If this PC won't start, boot it from the USB stick and restore a banked backup over the network (SMB) — no Windows install needed on the dead machine.</div>
@@ -1325,6 +1325,7 @@ function toast(msg, kind) {
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 350); }, 4000);
 }
 let jobNames = [];
+let jobRepos = [];
 document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
   document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
   a.classList.add('active');
@@ -1397,6 +1398,7 @@ async function renderSetupCard(jobs, locations) {
 async function load() {
   const s = await api('/api/status');
   jobNames = s.jobs.map(j => j.name);
+  jobRepos = s.jobs.map(j => j.repo).filter(Boolean);
   const icon = document.getElementById('heroIcon');
   const title = document.getElementById('heroTitle');
   const sub = document.getElementById('heroSub');
@@ -1438,12 +1440,19 @@ async function load() {
   // Start upload progress polling
   startUploadPolling();
   const sel = document.getElementById('repo');
-  if (!sel.options.length)
+  if (sel && !sel.options.length)
     s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
   loadRepo();
   loadLog();
 }
 let uploadPollTimer = null;
+// The legacy repo-picker select was removed in the redesign; code that
+// needs "the current repo" falls back to the first job's repo.
+function currentRepo() {
+  const el = document.getElementById('repo');
+  if (el && el.value) return el.value;
+  return jobRepos[0] || '';
+}
 function startUploadPolling() {
   if (uploadPollTimer) return;
   const poll = async () => {
@@ -1498,7 +1507,7 @@ async function runJob(name) {
   load();
 }
 async function loadRepo() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   if (!repo) return;
   refreshRestoreSession();
   const q = '?repo=' + encodeURIComponent(repo);
@@ -1514,7 +1523,7 @@ async function loadRepo() {
       `<button onclick="openRestoreModal('${esc(b.backupId)}','${esc(b.type)}')">Restore</button></td></tr>`).join('')
       || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
   const vcEl = document.getElementById('vault-count');
-  if (vcEl) vcEl.textContent = backups.length;
+  if (vcEl) vcEl.textContent = bs.length;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
   document.getElementById('remoteBackups').innerHTML = '';
 }
@@ -2027,7 +2036,7 @@ function toggleSidebarLog() {
   }
 }
 async function loadLog() {
-  const repo = document.getElementById('repo').value;
+  const repo = currentRepo();
   if (!repo) return;
   try {
     const lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=30');
