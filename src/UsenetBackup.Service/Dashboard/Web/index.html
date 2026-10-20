@@ -42,9 +42,11 @@
     background: var(--bg); color: var(--text);
     margin: 0; padding: 0; font-size: 14px;
   }
-  .app { display: flex; min-height: 100vh; }
-  /* Left nav, Settings-style (only our own real sections — no fake entries). */
-  nav { width: 300px; flex-shrink: 0; padding: 24px 12px 24px 20px; }
+  .app { display: flex; height: 100vh; }
+  /* Left nav, Settings-style (only our own real sections — no fake entries).
+     The nav is a fixed full-height column; only <main> scrolls, so the nav
+     and the operations log stay on screen on long views. */
+  nav { width: 300px; flex-shrink: 0; padding: 24px 12px 24px 20px; display: flex; flex-direction: column; overflow: hidden; }
   .nav-brand { display: flex; align-items: center; gap: 12px; padding: 4px 12px 20px; }
   .nav-brand .glyph {
     width: 40px; height: 40px; border-radius: 10px;
@@ -64,7 +66,7 @@
     content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 3px;
     border-radius: 2px; background: var(--accent);
   }
-  main { flex: 1; padding: 32px 40px 60px 12px; max-width: 960px; }
+  main { flex: 1; min-width: 0; padding: 32px 40px 60px 12px; max-width: 960px; overflow-y: auto; }
   h1 { font-size: 28px; font-weight: 600; margin: 0 0 20px; }
   h2 { font-size: 16px; font-weight: 600; margin: 28px 0 12px; }
   .card {
@@ -258,53 +260,50 @@
   input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   input[type=checkbox]:disabled { opacity: .5; cursor: default; }
   label.check { display: flex; align-items: center; gap: 10px; cursor: pointer; }
-  /* Dark mode: follow the OS color scheme, Windows 11 dark palette. */
-  @media (prefers-color-scheme: dark) {
-    :root {
-      color-scheme: dark;
-      --bg: #202020;
-      --card: #2b2b2b;
-      --border: #353535;
-      --text: #f3f3f3;
-      --text-2: #a7a7a7;
-      --ok: #6ccb5f;
-      --bad: #f1707b;
-    }
-    .nav-item:hover, .nav-item.active { background: #2d2d2d; }
-    button {
-      background: #2d2d2d; border-color: rgba(255,255,255,0.1);
-      border-bottom-color: rgba(255,255,255,0.2); color: var(--text);
-    }
-    button:hover { background: #323232; }
-    button:active { background: #2a2a2a; }
-    .toggle .track { background: #2d2d2d; border-color: #8a8a8a; }
-    .toggle .track::after { background: #a7a7a7; }
-    .infobar.warning { background: #2d2419; }
-    .yk-touch { background: #1a2b3c; }
-    .yk-badge.unlocked { background: #1d3325; }
-    .yk-badge.locked { background: #2d2d2d; }
-    .infobar.error { background: #2d1f1e; }
-    select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
-    pre { background: #242424; }
-    .pill { background: #1d3325; }
-    .pill.fail { background: #3a2320; }
-    .pill.idle { background: #2d2d2d; }
-    .form-grid input[type=text], .form-grid input[type=time], .form-grid input[type=number] {
-      background: #2d2d2d; border-color: #3a3a3a; color: var(--text);
-    }
-    input[type=checkbox] { background: #2d2d2d; border-color: #8a8a8a; }
+  /* Dark mode: Windows 11 dark palette. Applied via data-theme="dark" on
+     <html>; setTheme() resolves the Light/Dark/System choice (System reads
+     the OS scheme), so an explicit Dark works on a light-OS machine and an
+     explicit Light works on a dark-OS machine. */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #202020;
+    --card: #2b2b2b;
+    --border: #353535;
+    --text: #f3f3f3;
+    --text-2: #a7a7a7;
+    --ok: #6ccb5f;
+    --bad: #f1707b;
+    & .nav-item:hover, & .nav-item.active { background: #2d2d2d; }
+    & button { background: #2d2d2d; border-color: rgba(255,255,255,0.1);
+      border-bottom-color: rgba(255,255,255,0.2); color: var(--text); }
+    & button:hover { background: #323232; }
+    & button:active { background: #2a2a2a; }
+    & .toggle .track { background: #2d2d2d; border-color: #8a8a8a; }
+    & .toggle .track::after { background: #a7a7a7; }
+    & .infobar.warning { background: #2d2419; }
+    & .yk-touch { background: #1a2b3c; }
+    & .yk-badge.unlocked { background: #1d3325; }
+    & .yk-badge.locked { background: #2d2d2d; }
+    & .infobar.error { background: #2d1f1e; }
+    & select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
+    & pre { background: #242424; }
+    & .pill { background: #1d3325; }
+    & .pill.fail { background: #3a2320; }
+    & .pill.idle { background: #2d2d2d; }
+    & .form-grid input[type=text], & .form-grid input[type=time], & .form-grid input[type=number] { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
+    & input[type=checkbox] { background: #2d2d2d; border-color: #8a8a8a; }
     /* Toasts stay readable on dark surfaces. */
-    .toast { background: #3a3a3a; border: 1px solid #4d4d4d; }
-    .toast.ok { background: #0f7a0f; }
-    .toast.err { background: #a4262c; }
+    & .toast { background: #3a3a3a; border: 1px solid #4d4d4d; }
+    & .toast.ok { background: #0f7a0f; }
+    & .toast.err { background: #a4262c; }
     /* Invalid fields: dark red tint instead of light pink. */
-    input.invalid, select.invalid { background: #3a1d1d; }
+    & input.invalid, & select.invalid { background: #3a1d1d; }
     /* Multi-folder explanation bar on dark surfaces. */
-    .folder-list-msg { border-color:#3a4d7a; background:#1d2942; color:#c9d8f5; }
-    .folder-list-msg.err { border-color:#7a2e28; background:#3a1d1d; color:#f5c9c4; }
-    .hero-icon.warn { background: #b34a0e; }
-    button.danger { background: #a4262c; border-color: #a4262c; }
-    button.danger:hover { background: #8f2026; border-color: #8f2026; }
+    & .folder-list-msg { border-color:#3a4d7a; background:#1d2942; color:#c9d8f5; }
+    & .folder-list-msg.err { border-color:#7a2e28; background:#3a1d1d; color:#f5c9c4; }
+    & .hero-icon.warn { background: #b34a0e; }
+    & button.danger { background: #a4262c; border-color: #a4262c; }
+    & button.danger:hover { background: #8f2026; border-color: #8f2026; }
   }
 </style>
 </head>
@@ -342,8 +341,8 @@
   </nav>
   <main>
     <div class="view active" id="view-overview">
-      <h1>Protection is on</h1>
-      <p style="color:var(--text-2);margin:-12px 0 20px">Your last backup finished cleanly and the next one is scheduled. This is a snapshot of this PC.</p>
+      <h1 id="ovTitle">Welcome to FileKeep</h1>
+      <p id="ovSub" style="color:var(--text-2);margin:-12px 0 20px">This is a snapshot of this PC.</p>
       <div style="display:flex;gap:12px;margin-bottom:20px">
         <div class="card" style="flex:1;margin:0;text-align:center">
           <div style="font-size:28px;font-weight:700" id="ov-vault-count">—</div>
@@ -356,13 +355,6 @@
         <div class="card" style="flex:1;margin:0;text-align:center">
           <div style="font-size:20px;font-weight:700" id="ov-next">—</div>
           <div class="meta">Next scheduled backup</div>
-        </div>
-      </div>
-      <div class="card hero" style="display:none" id="ov-hero">
-        <div class="hero-icon" id="heroIcon">✓</div>
-        <div>
-          <div class="hero-title" id="heroTitle">Checking…</div>
-          <div class="hero-sub" id="heroSub"></div>
         </div>
       </div>
       <div class="card" id="setupCard" style="display:none">
@@ -1331,6 +1323,7 @@ document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', 
   a.classList.add('active');
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + a.dataset.view).classList.add('active');
+  document.querySelector('main').scrollTop = 0;
   if (a.dataset.view === 'about') loadAboutVersion();
 }));
 function fmtLast(j) {
@@ -1401,28 +1394,36 @@ async function load() {
   const s = await api('/api/status');
   jobNames = s.jobs.map(j => j.name);
   jobRepos = s.jobs.map(j => j.repo).filter(Boolean);
-  const icon = document.getElementById('heroIcon');
-  const title = document.getElementById('heroTitle');
-  const sub = document.getElementById('heroSub');
+  // The Overview header states the real protection state — it used to be
+  // static mockup copy ("Protection is on…") shown even on a fresh,
+  // unconfigured install.
+  const title = document.getElementById('ovTitle');
+  const sub = document.getElementById('ovSub');
   const anyFail = s.jobs.some(j => j.lastResult && !j.lastResult.success);
   const anyNever = s.jobs.some(j => !j.lastResult);
   const lastOk = s.jobs.flatMap(j => j.lastResult && j.lastResult.success ? [j.lastResult.startedLocal] : []).sort().pop();
   if (!s.jobs.length) {
-    icon.textContent = '⛁'; icon.className = 'hero-icon warn';
-    title.textContent = 'No backup jobs configured';
-    sub.textContent = 'Add jobs to service.json and restart the service.';
+    title.textContent = 'Set up your first backup';
+    sub.textContent = 'Nothing is backed up yet. The steps below walk you through security, a backup location, and your first job.';
   } else if (anyFail) {
-    icon.textContent = '!'; icon.className = 'hero-icon bad';
     title.textContent = 'A backup needs attention';
     sub.textContent = 'One or more jobs failed. See Backup jobs below.';
   } else if (anyNever) {
-    icon.textContent = '⛁'; icon.className = 'hero-icon warn';
     title.textContent = 'Backup is set up';
     sub.textContent = 'No backup has run yet. Press "Back up now" or wait for the schedule.';
   } else {
-    icon.textContent = '✓'; icon.className = 'hero-icon';
-    title.textContent = "You're backed up";
-    sub.textContent = lastOk ? 'Last backup: ' + lastOk + ' (local time)' : '';
+    title.textContent = 'Protection is on';
+    sub.textContent = 'Your last backup finished cleanly' + (lastOk ? ' (' + lastOk + ')' : '') + ' and the next one is scheduled. This is a snapshot of this PC.';
+  }
+  const nextEl = document.getElementById('ov-next');
+  if (nextEl) {
+    const upcoming = s.jobs.map(j => j.nextRunLocal).filter(Boolean);
+    let nextText = '—';
+    if (upcoming.length) {
+      const parsed = upcoming.map(t => ({ t, d: Date.parse(t) })).filter(x => !isNaN(x.d));
+      nextText = parsed.length ? parsed.sort((a, b) => a.d - b.d)[0].t : upcoming[0];
+    }
+    nextEl.textContent = nextText;
   }
   document.getElementById('jobs').innerHTML = s.jobs.map(j => `
     <div class="row">
@@ -1526,6 +1527,8 @@ async function loadRepo() {
       || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
   const vcEl = document.getElementById('vault-count');
   if (vcEl) vcEl.textContent = bs.length;
+  const ovEl = document.getElementById('ov-vault-count');
+  if (ovEl) ovEl.textContent = bs.length;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
   const rbEl = document.getElementById('remoteBackups');
   if (rbEl) rbEl.innerHTML = '';
@@ -2040,7 +2043,13 @@ function toggleSidebarLog() {
 }
 async function loadLog() {
   const repo = currentRepo();
-  if (!repo) return;
+  if (!repo) {
+    // No jobs yet, so there is no repo log to read — say so instead of
+    // leaving the panel blank.
+    const logContent = document.getElementById('sidebar-log-content');
+    if (logContent && !logContent.innerHTML) logContent.innerHTML = '<div>No operations yet.</div>';
+    return;
+  }
   try {
     const lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=30');
     const logContent = document.getElementById('sidebar-log-content');
@@ -2067,10 +2076,10 @@ document.getElementById('jf-schedType').addEventListener('change', e => {
 });
 async function loadSettings() {
   const cfg = await api('/api/config');
-  // The #settingsJobs summary list was removed in the redesign; the jobs
-  // themselves are rendered by load(). Skip the summary when absent —
-  // dereferencing it killed loadSettings and with it the locations list.
-  const box = document.getElementById('settingsJobs');
+  // The Backup jobs view's list is #jobs-list. (It was #settingsJobs before
+  // the redesign; when the id changed, this render silently went nowhere
+  // and the view sat on "Loading…" forever.)
+  const box = document.getElementById('jobs-list');
   if (box) box.innerHTML = cfg.jobs.map(j => `
     <div class="row">
       <div class="grow">
@@ -2080,7 +2089,7 @@ async function loadSettings() {
       </div>
       <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
       <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
-    </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured.</p>';
+    </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured. Use "New backup job" to create one.</p>';
   // Load backup locations
   renderLocations(cfg.locations || []);
   renderVaultLocations(cfg.locations || []);
@@ -2749,6 +2758,7 @@ document.querySelector('[data-view="tools"]').addEventListener('click', loadSett
 // The Backup locations card lives in the Backup jobs view, so its list
 // must load there too (not only when Tools is opened).
 document.querySelector('[data-view="jobs"]').addEventListener('click', loadSettings);
+document.querySelector('[data-view="vault"]').addEventListener('click', loadSettings);
 // ---- Security tab: protection wizard ----
 let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, linkMode: 'or', yubiKeys: [] };
 
@@ -3231,6 +3241,12 @@ function secUpdateLinkBand() {
   if (ykNote) ykNote.style.display = (!isLinked && secProfile.yubiKeyEnabled && secProfile.passphraseEnabled) ? '' : 'none';
 }
 
+// Both insight meters share one color ramp, so the same rating always
+// reads the same color: weakest = warning orange, middle = accent, best = green.
+function meterColor(level, max) {
+  const f = max ? level / max : 0;
+  return f <= 0.25 ? '#ca5010' : f <= 0.6 ? 'var(--accent)' : 'var(--ok)';
+}
 // Update insight meters (5-seg security, 3-seg redundancy)
 function secUpdateInsight() {
   const p = secProfile;
@@ -3255,7 +3271,7 @@ function secUpdateInsight() {
 
   const segs = document.querySelectorAll('#sec-meter-security-segs .seg');
   segs.forEach((s, i) => {
-    s.style.background = i <= level ? 'var(--accent)' : 'var(--bg-2)';
+    s.style.background = i <= level ? meterColor(level, 4) : 'var(--bg-2)';
   });
   document.getElementById('sec-security-label').textContent = label;
   document.getElementById('sec-security-desc').textContent = desc;
@@ -3276,7 +3292,7 @@ function secUpdateInsight() {
   
   const rSegs = document.querySelectorAll('#sec-meter-redundancy-segs .seg');
   rSegs.forEach((s, i) => {
-    s.style.background = i <= rLevel ? 'var(--ok)' : 'var(--bg-2)';
+    s.style.background = i <= rLevel ? meterColor(rLevel, 2) : 'var(--bg-2)';
   });
   document.getElementById('sec-redundancy-label').textContent = rLabels[rLevel];
   document.getElementById('sec-redundancy-desc').textContent = rDescs[rLevel];
