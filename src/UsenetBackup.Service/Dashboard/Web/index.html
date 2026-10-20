@@ -490,6 +490,57 @@
       </div>
       <p style="color:var(--text-2);margin:8px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
       <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
+      <div class="card">
+        <div class="name">Backup locations</div>
+        <div class="meta">The places backups are sent. Scheduled jobs and one-time backups pick from this list.</div>
+        <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
+          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
+          <button class="accent" onclick="showLocationForm('usb')" style="font-size:14px;padding:10px 18px">＋ Add removable drive</button>
+        </div>
+      <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
+        <div class="form-grid">
+          <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
+          <input id="lf-type" type="hidden">
+        </div>
+        <div class="form-grid" id="lf-nntp-fields">
+          <label title="Choose your Usenet provider to auto-fill the host, port, and SSL settings below. Select 'Custom' to enter them manually.">Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
+            <option value="">Custom…</option>
+            <option value="frugal">Frugal Usenet</option>
+            <option value="eweka">Eweka</option>
+            <option value="newshosting">Newshosting</option>
+            <option value="usenetserver">UsenetServer</option>
+            <option value="giganews">Giganews</option>
+            <option value="easynews">Easynews</option>
+          </select></label>
+          <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
+          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
+          <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
+          <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+          <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
+          <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
+        </div>
+        <div class="form-grid" id="lf-smb-fields" style="display:none">
+          <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
+          <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
+          <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
+        </div>
+        <div class="form-grid" id="lf-usb-fields" style="display:none">
+          <label title="Pick a removable USB drive. The drive is identified by its volume serial, so it works even if the drive letter changes.">USB drive<select id="lf-usbdrive"><option>Loading drives…</option></select></label>
+          <label title="Folder on the USB drive where backups are stored.">Folder<input id="lf-usbfolder" type="text" value="FileKeep" placeholder="FileKeep"></label>
+          <input id="lf-usbserial" type="hidden">
+          <input id="lf-usblabel" type="hidden">
+        </div>
+        <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
+        <div id="lf-test-result" style="margin:8px 0;display:none"></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button onclick="testLocationConnection()">Test connection</button>
+          <button class="accent" onclick="saveLocation()">Save</button>
+          <button onclick="hideLocationForm()">Cancel</button>
+        </div>
+      </div>
           <div class="card" id="jobFormCard" style="display:none">
         <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
         <div class="row" id="jf-type-row" style="margin-bottom:12px">
@@ -909,7 +960,7 @@
           <div style="margin-left:auto;display:flex;gap:8px">
             <button id="sec-back" onclick="secGoStep(secCurrentStep - 1)" disabled>Back</button>
             <span id="sec-next-wrap" title="">
-              <button class="accent" id="sec-next" onclick="secGoStep(secCurrentStep + 1)">Next</button>
+              <button class="accent" id="sec-next" onclick="secNext()">Next</button>
             </span>
           </div>
         </div>
@@ -987,57 +1038,6 @@
           <button class="accent" onclick="startOneTimeBackup()">Start backup</button>
         </div>
       </div>
-      <div class="card">
-        <div class="name">Backup locations</div>
-        <div class="meta">The places backups are sent. Scheduled jobs and one-time backups pick from this list.</div>
-        <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
-          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
-          <button class="accent" onclick="showLocationForm('usb')" style="font-size:14px;padding:10px 18px">＋ Add USB drive</button>
-        </div>
-      <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
-        <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
-        <div class="form-grid">
-          <label title="A friendly name for this backup destination, e.g. 'Frugal Usenet' or 'NAS backups'. Must be unique.">Name<input id="lf-name" type="text" placeholder="e.g. Frugal Usenet, NAS backups"></label>
-          <input id="lf-type" type="hidden">
-        </div>
-        <div class="form-grid" id="lf-nntp-fields">
-          <label title="Choose your Usenet provider to auto-fill the host, port, and SSL settings below. Select 'Custom' to enter them manually.">Provider preset<select id="lf-preset" onchange="applyNntpPreset()">
-            <option value="">Custom…</option>
-            <option value="frugal">Frugal Usenet</option>
-            <option value="eweka">Eweka</option>
-            <option value="newshosting">Newshosting</option>
-            <option value="usenetserver">UsenetServer</option>
-            <option value="giganews">Giganews</option>
-            <option value="easynews">Easynews</option>
-          </select></label>
-          <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
-          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
-          <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
-          <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-          <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
-          <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
-        </div>
-        <div class="form-grid" id="lf-smb-fields" style="display:none">
-          <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
-          <label title="Username for the network share, if it requires authentication. Leave blank for guest/anonymous shares.">Username<input id="lf-smbuser" type="text" placeholder="(optional)"></label>
-          <label title="Password for the network share. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-smbpass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
-        </div>
-        <div class="form-grid" id="lf-usb-fields" style="display:none">
-          <label title="Pick a removable USB drive. The drive is identified by its volume serial, so it works even if the drive letter changes.">USB drive<select id="lf-usbdrive"><option>Loading drives…</option></select></label>
-          <label title="Folder on the USB drive where backups are stored.">Folder<input id="lf-usbfolder" type="text" value="FileKeep" placeholder="FileKeep"></label>
-          <input id="lf-usbserial" type="hidden">
-          <input id="lf-usblabel" type="hidden">
-        </div>
-        <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
-        <div id="lf-test-result" style="margin:8px 0;display:none"></div>
-        <div style="margin-top:12px;display:flex;gap:8px">
-          <button onclick="testLocationConnection()">Test connection</button>
-          <button class="accent" onclick="saveLocation()">Save</button>
-          <button onclick="hideLocationForm()">Cancel</button>
-        </div>
-      </div>
       </div>
       <div class="card">
         <div class="name">Recovery USB</div>
@@ -1047,6 +1047,24 @@
             <option value="">Select target…</option>
           </select>
           <button type="button" onclick="refreshWinReTargets()" title="Rescan for USB drives">↻ Rescan</button>
+        </div>
+        <div id="winre-file-row" style="display:none;margin-top:8px">
+          <div class="row">
+            <input id="winre-folder" style="flex:1" placeholder="Folder to save the image in">
+            <button type="button" onclick="browseFolder('winre-folder','Choose a folder for the recovery image')">Browse…</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <input id="winre-filename" style="flex:1" value="filekeep-recovery" title="Image file name (.vhdx is added if missing)">
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label style="display:flex;gap:8px;align-items:center">Boot mode
+            <select id="winre-bootmode" title="UEFI and BIOS (Both) boots the widest range of PCs">
+              <option value="Both" selected>UEFI + BIOS (Both)</option>
+              <option value="UEFI">UEFI only</option>
+              <option value="BIOS">BIOS only</option>
+            </select>
+          </label>
         </div>
         <div class="meta" style="margin-top:4px">The drive is erased and made bootable. Use a stick you can spare — 2 GB or larger.</div>
         <div class="row" style="margin-top:8px">
@@ -1327,13 +1345,13 @@ function fmtLast(j) {
   if (!j.lastResult) return '<span class="pill idle">never run</span>';
   return j.lastResult.success
     ? '<span class="pill">backed up</span>'
-    : '<span class="pill fail">failed</span>';
+    : `<span class="pill fail" title="${esc(j.lastResult.error || 'Backup failed')}">failed</span>`;
 }
 // First-run setup card: visible on Overview until at least one backup
 // location and one job exist. Buttons link into the existing forms.
 let lastSetupSig = '';
 function gotoSettingsLocation() {
-  document.querySelector('[data-view="tools"]').click();
+  document.querySelector('[data-view="jobs"]').click();
   showLocationForm('nntp');
   setTimeout(() => document.getElementById('locationFormCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 60);
 }
@@ -1371,12 +1389,12 @@ async function renderSetupCard(jobs, locations) {
       ${done ? '<span class="pill">done</span>' : btnHtml}
     </div>`;
   document.getElementById('setupSteps').innerHTML =
-    step(passphraseSet, 1, 'Set your backup passphrase',
+    step(passphraseSet, 1, 'Setup your security',
       'Protects your backups. You can leave it blank, but you must make the choice.',
-      '<button class="accent" onclick="gotoSettingsSecurity()">Set passphrase</button>') +
+      '<button class="accent" onclick="gotoSettingsSecurity()">Set up security</button>') +
     step(locations.length > 0, 2, 'Add a backup location',
       'Where backups go — a Usenet provider or a network share.',
-      '<button class="accent" onclick="gotoSettingsLocation()" title="Open the add-location form in Tools & Settings">Add location</button>') +
+      '<button class="accent" onclick="gotoSettingsLocation()" title="Open the add-location form in Backup jobs">Add location</button>') +
     step(jobs.length > 0, 3, 'Create a backup job',
       'Pick a folder and a schedule.',
       '<button class="accent" onclick="gotoSettingsJob()" title="Open the add-job form in Backup jobs">Add job</button>') +
@@ -1463,9 +1481,30 @@ function startUploadPolling() {
 }
 async function runJob(name) {
   const csrf = document.querySelector('meta[name=csrf-token]').content;
-  await api('/api/jobs/' + encodeURIComponent(name) + '/run',
-    { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
-  setTimeout(load, 2000);
+  const runStart = new Date();
+  try {
+    await api('/api/jobs/' + encodeURIComponent(name) + '/run',
+      { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
+  } catch (e) { toast(e.message, 'err'); return; }
+  toast('Backup "' + name + '" started…', '');
+  // The job runs in the background; the server accepts the request (202) and
+  // used to swallow failures into the service log, invisible to the user.
+  // Watch for the job's LastResult to change and report the outcome here.
+  const started = runStart.getTime();
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    let st;
+    try { st = await api('/api/status'); } catch { return; }
+    const j = (st.jobs || []).find(x => x.name === name);
+    if (j && j.lastResult && new Date(j.lastResult.startedLocal).getTime() >= started) {
+      if (j.lastResult.success) toast('Backup "' + name + '" finished.', 'ok');
+      else toast('Backup "' + name + '" failed: ' + (j.lastResult.error || 'unknown error'), 'err');
+      load();
+      return;
+    }
+  }
+  toast('Backup "' + name + '" is still running — check Backup jobs for its result.', '');
+  load();
 }
 async function loadRepo() {
   const repo = document.getElementById('repo').value;
@@ -1641,7 +1680,7 @@ async function startOneTimeBackup() {
       });
     } else {
       const dest = document.getElementById('ot-destination').value;
-      if (!dest) { toast('Select a destination. Add one in Settings → Backup locations.', 'err'); return; }
+      if (!dest) { toast('Select a destination. Add one in Backup jobs → Backup locations.', 'err'); return; }
       const device = document.getElementById('ot-disk').value;
       if (!device) { toast('Select a disk.', 'err'); return; }
       await api('/api/operations/disk-backup', {
@@ -1962,8 +2001,9 @@ async function refreshWinReTargets() {
     sel.innerHTML = '<option value="">Scan failed</option><option value="folder">Save to folder (.vhdx file)…</option>';
   }
 }
-// Populate the target dropdown when the Recovery view is opened.
-document.querySelector('[data-view="recovery"]')?.addEventListener('click', refreshWinReTargets);
+// Populate the WinRE target dropdown when Tools & Settings opens (the
+// recovery card lives on that tab now).
+document.querySelector('[data-view="tools"]')?.addEventListener('click', refreshWinReTargets);
 document.querySelector('[data-view="backups"]')?.addEventListener('click', refreshDiskList);
 // Human-readable summary of the operations log.
 // Raw lines look like: 2026-10-13T12:34:56.789Z [backup] type=full id=abc files=5 ...
@@ -2132,7 +2172,7 @@ function renderVaultLocations(locations) {
   if (statEl) statEl.textContent = locations.length;
   if (!box) return;
   if (!locations.length) {
-    box.innerHTML = '<p style="color:var(--text-2)">No storage locations configured. Add them in Tools &amp; Settings → Backup locations.</p>';
+    box.innerHTML = '<p style="color:var(--text-2)">No storage locations configured. Add them in Backup jobs → Backup locations.</p>';
     return;
   }
   box.innerHTML = locations.map(l => {
@@ -2754,7 +2794,11 @@ async function secToggleMethod(method, enabled) {
   secUpdateInsight();
   secCurrentStep = 1;
   secGoStep(1);
-  await secSaveProfile();
+  // No server save here: selecting a method is intent only. The method is
+  // enabled when its own setup step completes (passphrase entry, key
+  // programming, phone verify) or when Finish saves the profile. Saving on
+  // toggle made every selection error out on a fresh system, because the
+  // server requires a method to be set up before it can be enabled.
 }
 
 function secToggleLink() {
@@ -2775,7 +2819,8 @@ async function secSaveProfile() {
         linkMode: secProfile.linkMode,
       }),
     });
-  } catch (e) { toast(e.message, 'err'); }
+    return true;
+  } catch (e) { toast(e.message, 'err'); return false; }
 }
 
 // Passphrase setup
@@ -2846,7 +2891,7 @@ function secFillSamplePassphrase() {
 
 async function secSavePassphrase() {
   const p1 = document.getElementById('sec-pp-pass').value;
-  if (!secCheckPassphrase()) return;
+  if (!secCheckPassphrase()) return false;
   try {
     await api('/api/config/passphrase', {
       method: 'POST',
@@ -2856,8 +2901,22 @@ async function secSavePassphrase() {
     document.getElementById('sec-passphrase-setup').style.display = 'none';
     document.getElementById('sec-pp-pass').value = '';
     document.getElementById('sec-pp-confirm').value = '';
-    secLoadProfile();
-  } catch (e) { toast(e.message, 'err'); }
+    await secLoadProfile();
+    return true;
+  } catch (e) { toast(e.message, 'err'); return false; }
+}
+
+// Wizard Next: leaving the passphrase step persists the passphrase first —
+// without this the entered passphrase was never sent to the server at all
+// (secSavePassphrase existed but was wired to nothing).
+async function secNext() {
+  const steps = secGetVisibleSteps();
+  const stepId = steps[secCurrentStep - 1];
+  if (stepId === 2) {
+    const entered = document.getElementById('sec-pp-pass').value;
+    if (entered && !(await secSavePassphrase())) return;
+  }
+  secGoStep(secCurrentStep + 1);
 }
 
 // YubiKey setup
@@ -2984,8 +3043,10 @@ function secUpdateWizardNext() {
   let reason = '';
   
   if (stepId === 2) {
-    // Passphrase step: require valid passphrase
-    enabled = secCheckPassphrase();
+    // Passphrase step: require valid passphrase — unless one is already
+    // configured and the fields were left blank (unchanged).
+    const p1Blank = !document.getElementById('sec-pp-pass').value;
+    enabled = (p1Blank && secProfile.passphraseEnabled) ? true : secCheckPassphrase();
     if (!enabled) {
       const p1 = document.getElementById('sec-pp-pass').value;
       const missing = [];
@@ -3171,8 +3232,9 @@ function secRenderFinalStep() {
 }
 
 async function secFinishWizard() {
-  await secSaveProfile();
-  toast('Protection settings saved.', 'ok');
+  // Only claim success when the profile actually persisted — the save can
+  // be rejected (e.g. a selected method whose setup never completed).
+  if (await secSaveProfile()) toast('Protection settings saved.', 'ok');
 }
 
 // Update link band for wizard (simplified)

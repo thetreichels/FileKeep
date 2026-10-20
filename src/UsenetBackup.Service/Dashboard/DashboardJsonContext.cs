@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using UsenetBackup.Core.Recovery;
 using UsenetBackup.Core.Service;
@@ -56,6 +57,7 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(RemovableDriveDto[]))]
 [JsonSerializable(typeof(PhoneSetupDto))]
 [JsonSerializable(typeof(UploadProgressSnapshot))]
+[JsonSerializable(typeof(JsonElement))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {
 }
