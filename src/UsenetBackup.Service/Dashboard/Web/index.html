@@ -1359,16 +1359,18 @@ async function runAll() {
   setTimeout(load, 2000);
 }
 async function renderSetupCard(jobs, locations) {
-  const sig = jobs.length + ':' + locations.length + ':' + jobs.some(j => j.lastResult);
-  if (sig === lastSetupSig) return;
-  lastSetupSig = sig;
-  const card = document.getElementById('setupCard');
-  // Check if passphrase is configured
+  // Check if passphrase is configured FIRST — it must be part of the
+  // change signature, or saving a passphrase never re-renders the card
+  // and step 1 stays "incomplete" until a full page reload.
   let passphraseSet = false;
   try {
     const pp = await api('/api/config/passphrase-status');
     passphraseSet = pp.configured;
   } catch (e) { }
+  const sig = jobs.length + ':' + locations.length + ':' + jobs.some(j => j.lastResult) + ':' + passphraseSet;
+  if (sig === lastSetupSig) return;
+  lastSetupSig = sig;
+  const card = document.getElementById('setupCard');
   if (locations.length && jobs.length && passphraseSet) { card.style.display = 'none'; return; }
   const hasRun = jobs.some(j => j.lastResult);
   const step = (done, n, title, meta, btnHtml) => `
