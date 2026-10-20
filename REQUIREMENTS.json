@@ -1,1 +1,7 @@
-{"requires":{"minWindowsBuild":19041,"webView2":true},"version":"0.08.16"}
+{
+  "requires": {
+    "minWindowsBuild": 19041,
+    "webView2": true
+  },
+  "version": "0.08.17"
+}

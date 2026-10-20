@@ -6,13 +6,13 @@
      on the Success page. Wraps the MSI built from UsenetBackup.wxs.
 
      Build on Windows after the MSI:
-       wix build -arch x64 -ext <Bal wixext dll> -d SrcRoot=C:\fk -d MsiPath=C:\ub\filekeep-0.08.13.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
+       wix build -arch x64 -ext <Bal wixext dll> -d SrcRoot=C:\fk -d MsiPath=C:\ub\filekeep-0.08.17.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
      (see install/run-vm-build.ps1 for the full build script).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
   <Bundle Name="FileKeep"
-          Version="0.08.13"
+          Version="0.08.17"
           Manufacturer="J. Treichel"
           UpgradeCode="A3B8F2C1-7D4E-4A9B-8C5D-2E6F1A3B4C5D"
           IconSourceFile="$(var.SrcRoot)/assets/filekeep.ico">
