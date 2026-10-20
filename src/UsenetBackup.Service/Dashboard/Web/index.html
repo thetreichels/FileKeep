@@ -2740,6 +2740,9 @@ async function deleteJob(name) {
 // Multi-provider management
 // Load settings when the tab is opened
 document.querySelector('[data-view="tools"]').addEventListener('click', loadSettings);
+// The Backup locations card lives in the Backup jobs view, so its list
+// must load there too (not only when Tools is opened).
+document.querySelector('[data-view="jobs"]').addEventListener('click', loadSettings);
 // ---- Security tab: protection wizard ----
 let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, linkMode: 'or', yubiKeys: [] };
 
