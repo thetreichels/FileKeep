@@ -309,6 +309,18 @@ public sealed class BackupJobConfig
     public string? SmbPasswordPlaintext { get; set; }
 
     /// <summary>
+    /// A shallow copy of this job with a different target list. The
+    /// scheduler runs a due job against a copy filtered to the targets
+    /// available right now, leaving the stored job untouched.
+    /// </summary>
+    public BackupJobConfig CloneWithTargets(IReadOnlyList<string> targets)
+    {
+        var clone = (BackupJobConfig)MemberwiseClone();
+        clone.Targets = targets.ToList();
+        return clone;
+    }
+
+    /// <summary>
     /// Effective upload targets: explicit <see cref="Targets"/> (location
     /// names), or the legacy <see cref="AutoUpload"/> default. The scheduler
     /// resolves these against <see cref="ServiceConfig.Locations"/>.

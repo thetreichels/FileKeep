@@ -210,7 +210,7 @@ public sealed record StatusJobDto(
     [property: JsonPropertyName("nextRunLocal")] DateTime? NextRunLocal,
     [property: JsonPropertyName("consecutiveFailures")] int ConsecutiveFailures,
     [property: JsonPropertyName("lastResult")] StatusLastResultDto? LastResult,
-    // JobRunState name: Active | UserPaused | NeedsLocation | WaitingForDrive.
+    // JobRunState name: Active | UserPaused | NeedsLocation | WaitingForDrive | WaitingForNetwork.
     [property: JsonPropertyName("state")] string State);
 
 /// <summary>Response for GET /api/status.</summary>

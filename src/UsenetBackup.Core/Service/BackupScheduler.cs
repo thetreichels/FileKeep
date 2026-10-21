@@ -214,6 +214,15 @@ public sealed class JobState
     public JobRunResult? LastResult { get; set; }
     public int ConsecutiveFailures { get; set; }
 
+    /// <summary>
+    /// Recorded result of this job's last network try: true when every
+    /// network target was unreachable at the last due time (or manual
+    /// run), so the job is derived-paused as WaitingForNetwork. Runtime
+    /// state only — learned from tries, never probed in the background,
+    /// and cleared by the first try that finds a usable target.
+    /// </summary>
+    public bool NetworkAway { get; set; }
+
     public JobState(BackupJobConfig config, Schedule schedule, DateTime nextRunLocal)
     {
         Config = config;
@@ -257,6 +266,7 @@ public sealed class BackupScheduler
     private readonly IClock _clock;
     private readonly TimeSpan _pollInterval;
     private readonly Action<string>? _log;
+    private readonly Func<BackupLocation, bool> _networkReachable;
     /// <summary>
     /// Guards short-lived scheduler state: _jobs, _config, _nntpProviders,
     /// _lastRetentionCheck, _activeOperationCts, ActiveUpload. Never held
@@ -295,11 +305,13 @@ public sealed class BackupScheduler
     public DateTime StartedLocal { get; }
 
     public BackupScheduler(ServiceConfig config, IClock? clock = null,
-        TimeSpan? pollInterval = null, Action<string>? log = null)
+        TimeSpan? pollInterval = null, Action<string>? log = null,
+        Func<BackupLocation, bool>? networkReachable = null)
     {
         _clock = clock ?? SystemClock.Instance;
         _pollInterval = pollInterval ?? TimeSpan.FromSeconds(30);
         _log = log;
+        _networkReachable = networkReachable ?? NetworkProbe.IsLocationReachable;
         StartedLocal = _clock.Now;
         _config = config;
         _nntpProviders = config.EffectiveProviders;
@@ -339,6 +351,7 @@ public sealed class BackupScheduler
                 {
                     state.LastResult = old.LastResult;
                     state.ConsecutiveFailures = old.ConsecutiveFailures;
+                    state.NetworkAway = old.NetworkAway;
                     // Keep the earlier next-run if the schedule didn't change.
                     if (string.Equals(old.Config.Schedule, jc.Schedule,
                             StringComparison.Ordinal) && old.NextRunLocal > now)
@@ -683,13 +696,59 @@ public sealed class BackupScheduler
     /// The job's current run state, evaluated against the live config
     /// (targets + attached USB drives). Single evaluation path used by
     /// the due scan, manual runs and the dashboard's status feed.
+    /// Network away-ness is never probed here — status reads pass the
+    /// recorded result of the job's last try, so rendering a page never
+    /// touches the network.
     /// </summary>
-    public JobRunState EvaluateJobState(BackupJobConfig job)
+    public JobRunState EvaluateJobState(BackupJobConfig job) =>
+        EvaluateJobState(job, recordedNetworkAway: false);
+
+    public JobRunState EvaluateJobState(BackupJobConfig job, bool recordedNetworkAway)
     {
         var cfg = _config;
         if (cfg is null)
             return job.Paused ? JobRunState.UserPaused : JobRunState.Active;
-        return JobStateEvaluator.Evaluate(job, JobStateEvaluator.BuildLookup(cfg));
+        return JobStateEvaluator.Evaluate(job,
+            JobStateEvaluator.BuildLookup(cfg, _ => recordedNetworkAway));
+    }
+
+    /// <summary>
+    /// The availability gate, evaluated at a due time or a manual run —
+    /// the only places network locations are ever probed. Each of the
+    /// job's network locations gets one bounded reachability try. When
+    /// the job can run, also returns the config to execute: a copy
+    /// filtered to the targets usable right now, so an away target is
+    /// skipped for this run (and, per the no-caching rule, gets nothing
+    /// later). Stored pauses and target-less jobs short-circuit before
+    /// any probe.
+    /// </summary>
+    private (JobRunState State, BackupJobConfig? Runnable) Gate(BackupJobConfig job)
+    {
+        var cfg = _config;
+        if (cfg is null)
+            return (job.Paused ? JobRunState.UserPaused : JobRunState.Active, job);
+        var probeCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool Away(BackupLocation loc)
+        {
+            if (!probeCache.TryGetValue(loc.Name, out bool reachable))
+            {
+                reachable = _networkReachable(loc);
+                probeCache[loc.Name] = reachable;
+            }
+            return !reachable;
+        }
+        var lookup = JobStateEvaluator.BuildLookup(cfg, Away);
+        var state = JobStateEvaluator.Evaluate(job, lookup);
+        if (state != JobRunState.Active)
+            return (state, null);
+        var usable = job.EffectiveTargets.Where(t =>
+        {
+            var f = lookup(t);
+            return !f.Exists || (f.IsUsb ? f.UsbPresent : !f.NetworkAway);
+        }).ToList();
+        return (state, usable.Count == job.EffectiveTargets.Count
+            ? job
+            : job.CloneWithTargets(usable));
     }
 
     /// <summary>
@@ -705,25 +764,27 @@ public sealed class BackupScheduler
         List<JobState> due;
         lock (_stateLock)
             due = _jobs.Where(j => j.NextRunLocal <= now).OrderBy(j => j.NextRunLocal).ToList();
-        var lookup = _config is null ? null : JobStateEvaluator.BuildLookup(_config);
         foreach (var job in due)
         {
             stopping.ThrowIfCancellationRequested();
-            JobRunState state = lookup is null
-                ? (job.Config.Paused ? JobRunState.UserPaused : JobRunState.Active)
-                : JobStateEvaluator.Evaluate(job.Config, lookup);
+            var (state, runnable) = Gate(job.Config);
             if (state != JobRunState.Active)
             {
                 lock (_stateLock)
                 {
                     if (_jobs.Contains(job))
+                    {
                         job.NextRunLocal = job.Schedule.NextAfter(now);
+                        if (state == JobRunState.WaitingForNetwork)
+                            job.NetworkAway = true;
+                    }
                 }
                 Log($"job '{job.Config.Name}' skipped ({JobStateEvaluator.Describe(state)}); " +
                     $"next run {job.NextRunLocal:yyyy-MM-dd HH:mm}");
                 continue;
             }
-            RunOne(job, now, stopping);
+            lock (_stateLock) { job.NetworkAway = false; }
+            RunOne(job, now, stopping, runnable);
         }
     }
 
@@ -740,15 +801,28 @@ public sealed class BackupScheduler
             config = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
                 ?.Config ?? throw new InvalidOperationException($"Unknown job '{name}'.");
         }
-        JobRunState state = EvaluateJobState(config);
+        var (state, runnable) = Gate(config);
         if (state != JobRunState.Active)
+        {
+            if (state == JobRunState.WaitingForNetwork)
+                lock (_stateLock)
+                {
+                    var js = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (js is not null) js.NetworkAway = true;
+                }
             throw new InvalidOperationException(
                 $"Job '{name}' cannot run: {JobStateEvaluator.Describe(state)}.");
+        }
+        lock (_stateLock)
+        {
+            var js = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (js is not null) js.NetworkAway = false;
+        }
         JobRunResult result;
         lock (_operationLock)
         {
             CancellationToken token = BeginOperation();
-            try { result = Execute(config, _clock.Now, token); }
+            try { result = Execute(runnable ?? config, _clock.Now, token); }
             finally { EndOperation(); }
         }
         lock (_stateLock)
@@ -765,13 +839,14 @@ public sealed class BackupScheduler
         return result;
     }
 
-    private void RunOne(JobState job, DateTime now, CancellationToken stopping)
+    private void RunOne(JobState job, DateTime now, CancellationToken stopping,
+        BackupJobConfig? configOverride = null)
     {
         JobRunResult result;
         lock (_operationLock)
         {
             CancellationToken token = BeginOperation();
-            try { result = Execute(job.Config, now, token); }
+            try { result = Execute(configOverride ?? job.Config, now, token); }
             finally { EndOperation(); }
         }
         lock (_stateLock)

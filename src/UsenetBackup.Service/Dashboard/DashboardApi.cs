@@ -219,7 +219,7 @@ public static partial class DashboardApi
                 j.LastResult.BackupId,
                 j.LastResult.Files,
                 j.LastResult.Error),
-            scheduler.EvaluateJobState(j.Config).ToString())).ToList());
+            scheduler.EvaluateJobState(j.Config, j.NetworkAway).ToString())).ToList());
 
     public static bool IsKnownJob(BackupScheduler scheduler, string name) =>
         scheduler.Jobs.Any(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase));

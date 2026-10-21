@@ -59,8 +59,18 @@ public sealed class JobPauseTests : IDisposable
         var hit = locations.FirstOrDefault(l =>
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         return hit.Name is null
-            ? new JobStateEvaluator.LocationFacts(false, false, false)
-            : new JobStateEvaluator.LocationFacts(true, hit.IsUsb, hit.Present);
+            ? new JobStateEvaluator.LocationFacts(false, false, false, false)
+            : new JobStateEvaluator.LocationFacts(true, hit.IsUsb, hit.Present, false);
+    };
+
+    private static Func<string, JobStateEvaluator.LocationFacts> NetLookup(
+        params (string Name, bool Away)[] locations) => name =>
+    {
+        var hit = locations.FirstOrDefault(l =>
+            l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return hit.Name is null
+            ? new JobStateEvaluator.LocationFacts(false, false, false, false)
+            : new JobStateEvaluator.LocationFacts(true, false, false, hit.Away);
     };
 
     [Fact]
@@ -114,6 +124,46 @@ public sealed class JobPauseTests : IDisposable
         // the executor as before; it is never a derived pause.
         Assert.Equal(JobRunState.Active, JobStateEvaluator.Evaluate(
             Job(false, "nntp"), Lookup()));
+    }
+
+    [Fact]
+    public void Evaluator_NetworkAwayOnly_IsWaitingForNetwork()
+    {
+        Assert.Equal(JobRunState.WaitingForNetwork, JobStateEvaluator.Evaluate(
+            Job(false, "vault"), NetLookup(("vault", true))));
+    }
+
+    [Fact]
+    public void Evaluator_OneNetworkAwayOtherReachable_IsActive()
+    {
+        Assert.Equal(JobRunState.Active, JobStateEvaluator.Evaluate(
+            Job(false, "vault", "usenet"),
+            NetLookup(("vault", true), ("usenet", false))));
+    }
+
+    [Fact]
+    public void Evaluator_UsbAwayAndNetworkAway_PrefersDrive()
+    {
+        // Both block; the physical, user-actionable one is reported.
+        var facts = new Dictionary<string, JobStateEvaluator.LocationFacts>
+        {
+            ["stick"] = new(true, true, false, false),
+            ["vault"] = new(true, false, false, true),
+        };
+        Assert.Equal(JobRunState.WaitingForDrive, JobStateEvaluator.Evaluate(
+            Job(false, "stick", "vault"), n => facts[n]));
+    }
+
+    [Fact]
+    public void Evaluator_UsbPresentAndNetworkAway_IsActive()
+    {
+        var facts = new Dictionary<string, JobStateEvaluator.LocationFacts>
+        {
+            ["stick"] = new(true, true, true, false),
+            ["vault"] = new(true, false, false, true),
+        };
+        Assert.Equal(JobRunState.Active, JobStateEvaluator.Evaluate(
+            Job(false, "stick", "vault"), n => facts[n]));
     }
 
     // ---------- the scheduler: skip + re-arm, never catch up ----------
@@ -189,6 +239,75 @@ public sealed class JobPauseTests : IDisposable
         var scheduler = new BackupScheduler(config, clock);
         var ex = Assert.Throws<InvalidOperationException>(() => scheduler.RunJobNow("docs"));
         Assert.Contains("paused", ex.Message);
+    }
+
+    // ---------- the network gate: try at the due time, pause if away ----------
+
+    private ServiceConfig MakeGateConfig()
+    {
+        string shareDir = Path.Combine(_workDir, "share");
+        Directory.CreateDirectory(shareDir);
+        return new ServiceConfig
+        {
+            DashboardBind = "127.0.0.1",
+            DashboardPort = 15789,
+            Locations = new List<BackupLocation>
+            {
+                // A local folder as the "share": SmbShare treats non-UNC
+                // paths as local, so a run can really sync to it here.
+                new() { Name = "vault", Type = "smb", Share = shareDir },
+            },
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "interval 60", Mode = "incremental",
+                        Targets = new List<string> { "vault" } },
+            },
+        };
+    }
+
+    [Fact]
+    public void Scheduler_NetworkAway_SkipsRecordsAndRearms_ThenRunsWhenBack()
+    {
+        bool reachable = false;
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeGateConfig();
+        var scheduler = new BackupScheduler(config, clock,
+            networkReachable: _ => reachable);
+        var job = Assert.Single(scheduler.Jobs);
+        Assert.Equal(new DateTime(2026, 10, 5, 11, 0, 0), job.NextRunLocal);
+
+        // Due with the network away: no run, no failure — a derived
+        // pause is recorded and the occurrence is discarded.
+        clock.Now = new DateTime(2026, 10, 5, 11, 0, 0);
+        scheduler.RunDueJobs(clock.Now);
+        Assert.Null(job.LastResult);
+        Assert.True(job.NetworkAway);
+        Assert.Equal(new DateTime(2026, 10, 5, 12, 0, 0), job.NextRunLocal);
+        Assert.Equal(JobRunState.WaitingForNetwork,
+            scheduler.EvaluateJobState(job.Config, job.NetworkAway));
+
+        // Network back by the next occurrence: the job runs (to the
+        // local-folder share) and the recorded pause clears.
+        reachable = true;
+        clock.Now = new DateTime(2026, 10, 5, 12, 0, 0);
+        scheduler.RunDueJobs(clock.Now);
+        Assert.NotNull(job.LastResult);
+        Assert.True(job.LastResult.Success);
+        Assert.False(job.NetworkAway);
+    }
+
+    [Fact]
+    public void Scheduler_RunJobNow_NetworkAway_ThrowsAndRecords()
+    {
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeGateConfig();
+        var scheduler = new BackupScheduler(config, clock,
+            networkReachable: _ => false);
+        var job = Assert.Single(scheduler.Jobs);
+        var ex = Assert.Throws<InvalidOperationException>(() => scheduler.RunJobNow("docs"));
+        Assert.Contains("network", ex.Message);
+        Assert.True(job.NetworkAway);
     }
 
     // ---------- the dashboard operations ----------

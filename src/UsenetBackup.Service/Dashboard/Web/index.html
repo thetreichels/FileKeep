@@ -1676,7 +1676,8 @@ async function load() {
   document.getElementById('jobs').innerHTML = s.jobs.map(j => {
     const stateNote = j.state === 'UserPaused' ? 'Paused'
       : j.state === 'NeedsLocation' ? 'Paused — no backup location'
-      : j.state === 'WaitingForDrive' ? 'Paused — waiting for USB drive' : null;
+      : j.state === 'WaitingForDrive' ? 'Paused — waiting for USB drive'
+      : j.state === 'WaitingForNetwork' ? 'Paused — waiting for network' : null;
     return `
     <div class="row">
       <div class="grow">
@@ -2364,6 +2365,8 @@ function jobStateButton(j, state) {
       return `<button class="state-btn bad" title="This job has no backup location and cannot run. Click to give it one." onclick='openLocationWizard(${n})'>⏸ No location</button>`;
     case 'WaitingForDrive':
       return `<button class="state-btn bad" title="This job's USB drive is not connected. It resumes on its own when the drive is plugged back in." onclick='waitingDriveInfo(${n})'>⏸ Waiting for USB</button>`;
+    case 'WaitingForNetwork':
+      return `<button class="state-btn bad" title="This job's network location was unavailable at its scheduled time. It tries again at the next scheduled time." onclick='waitingNetworkInfo(${n})'>⏸ Waiting for network</button>`;
     case 'UserPaused':
       return `<button class="state-btn" title="Paused. Click to resume — resuming never runs a catch-up backup; the job waits for its next scheduled time." onclick='setJobPaused(${n}, false)'>▶ Resume</button>`;
     default:
@@ -2382,6 +2385,9 @@ async function setJobPaused(name, paused) {
 }
 function waitingDriveInfo(name) {
   toast(`'${name}' is waiting for its USB drive. Plug the drive back in and the job resumes on its own — no catch-up run, it just picks up its schedule.`, '');
+}
+function waitingNetworkInfo(name) {
+  toast(`'${name}' found its network location unavailable at its scheduled time, so that backup was skipped — not failed. It tries again at the next scheduled time; nothing is cached meanwhile.`, '');
 }
 // ---- Location repair wizard (for jobs left without a location) ----
 let wizardJob = null;
