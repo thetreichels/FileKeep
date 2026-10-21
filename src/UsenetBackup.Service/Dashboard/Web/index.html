@@ -809,7 +809,7 @@
               <div style="color:var(--text-2)">FileKeep creates the secret with a cryptographic random generator and writes it into each key when you program it. FileKeep itself keeps no copy. After programming, you'll print the secret on a recovery sheet — the only copy that exists outside your keys.</div>
             </div>
             <div class="meta" style="text-align:center">You never type this day to day — it's shown on your recovery sheet so you can recognize it.</div>
-            <div style="margin-top:16px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+            <div style="margin-top:16px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">No passphrase means no other way in.</div>
               <div>If every programmed key is lost and the recovery sheet is gone, these backups cannot be decrypted — by anyone, including you. That's why the next steps let you program a spare and print the sheet.</div>
             </div>
@@ -849,7 +849,7 @@
               </select>
             </label>
             <div class="meta">Slot 2 is the usual choice — slot 1 is often used by other sign-in features.</div>
-            <div style="margin-top:12px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+            <div style="margin-top:12px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad)" id="sec-yk-slot-warn-title">Slot 2 will be overwritten.</div>
               <div>Programming the challenge–response secret replaces whatever is currently stored in that slot. If another app uses this slot on this key, it will stop working with that app.</div>
             </div>
@@ -896,7 +896,7 @@
               <div style="font-size:12px;color:var(--text-2)">To recover: program this secret into a new YubiKey's HMAC-SHA1 challenge–response slot (slot 2), then open FileKeep and touch the key to restore from your Banked Vault. Keep this sheet somewhere safe — a fire safe or a safe-deposit box, not with your keys.</div>
               <div style="font-size:12px;color:var(--text-2);margin-top:8px">Created October 17, 2026.</div>
             </div>
-            <div style="margin-bottom:16px;padding:12px;background:#fdf0ef;border:1px solid var(--bad);border-radius:6px;font-size:13px">
+            <div style="margin-bottom:16px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">Store this somewhere safe and separate from your YubiKey.</div>
               <div>Anyone with this code can access your backups. If all keys are lost, this secret programs a new key and restores access.</div>
             </div>
@@ -2922,7 +2922,11 @@ async function secSavePassphrase() {
     toast('Passphrase saved.', 'ok');
     document.getElementById('sec-pp-pass').value = '';
     document.getElementById('sec-pp-confirm').value = '';
-    await secLoadProfile();
+    // Do NOT secLoadProfile() here: it refetches the server profile, where
+    // the wizard's other unsaved toggle choices (e.g. Phone on) don't exist
+    // yet, and overwrites them — silently dropping later wizard steps and
+    // leaving Next a no-op. The local profile already reflects the save.
+    secUpdateWizardNext();
     return true;
   } catch (e) { toast(e.message, 'err'); return false; }
 }
