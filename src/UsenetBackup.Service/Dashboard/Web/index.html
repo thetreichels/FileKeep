@@ -110,6 +110,12 @@
   .row .grow { flex: 1; }
   .row .name { font-weight: 600; }
   .row .meta { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  /* Job run-state button (pause/resume + derived pauses) in the jobs list.
+     Green = healthy, running on schedule. Red = derived pause that needs
+     the user (no location / USB drive away). Neutral = user-paused. */
+  .state-btn { white-space: nowrap; }
+  .state-btn.ok { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
+  .state-btn.bad { color: var(--bad); border: 1px solid var(--bad); background: transparent; font-weight: 600; }
   .pill {
     font-size: 12px; padding: 2px 10px; border-radius: 10px; font-weight: 600;
     background: #e8f5e9; color: var(--ok);
@@ -514,6 +520,31 @@
           <div id="scanResultsBody" style="margin-top:12px"></div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeScanResultsModal()">Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="locationWizardModal" class="modal" style="display:none">
+        <div class="modal-box">
+          <h2 style="margin-top:0">Give this job a backup location</h2>
+          <p class="meta" id="lw-sub">This job has no backup location, so it is paused. Pick one of your saved locations, or create a new one.</p>
+          <div id="lw-step1">
+            <div id="lw-locations" style="margin-top:12px"></div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button onclick="closeLocationWizard()">Cancel</button>
+              <button class="accent" onclick="lwContinue()">Continue</button>
+            </div>
+          </div>
+          <div id="lw-step2" style="display:none">
+            <p class="meta">What kind of location?</p>
+            <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+              <button onclick="lwNewType('nntp')">📡 Usenet provider</button>
+              <button onclick="lwNewType('smb')">💾 Network share</button>
+              <button onclick="lwNewType('usb')">🔌 USB drive</button>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button onclick="lwBack()">Back</button>
+              <button onclick="closeLocationWizard()">Cancel</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1626,7 +1657,7 @@ async function load() {
   }
   const nextEl = document.getElementById('ov-next');
   if (nextEl) {
-    const upcoming = s.jobs.map(j => j.nextRunLocal).filter(Boolean);
+    const upcoming = s.jobs.filter(j => !j.state || j.state === 'Active').map(j => j.nextRunLocal).filter(Boolean);
     let nextText = '—';
     if (upcoming.length) {
       const parsed = upcoming.map(t => ({ t, d: Date.parse(t) })).filter(x => !isNaN(x.d));
@@ -1634,16 +1665,21 @@ async function load() {
     }
     nextEl.textContent = nextText;
   }
-  document.getElementById('jobs').innerHTML = s.jobs.map(j => `
+  document.getElementById('jobs').innerHTML = s.jobs.map(j => {
+    const stateNote = j.state === 'UserPaused' ? 'Paused'
+      : j.state === 'NeedsLocation' ? 'Paused — no backup location'
+      : j.state === 'WaitingForDrive' ? 'Paused — waiting for USB drive' : null;
+    return `
     <div class="row">
       <div class="grow">
         <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
         <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}<br>
         ${esc(j.source)} → ${esc(j.repo)}<br>
-        Next run: ${esc(j.nextRunLocal)} (local)${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}</div>
+        ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(j.nextRunLocal)} (local)`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}</div>
       </div>
-      <button onclick="runJob('${esc(j.name)}')">Run now</button>
-    </div>`).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
+      <button onclick="runJob('${esc(j.name)}')" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
+    </div>`;
+  }).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
   // First-run setup card (Overview).
   try {
     const cfg = await api('/api/config');
@@ -2275,6 +2311,10 @@ async function loadLog() {
 setInterval(loadLog, 10000);
 // ---- Settings ----
 let editingJob = null;
+// The stored user-pause of the job being edited, carried through saves:
+// the edit form has no pause control, so without this an edit would
+// silently unpause a paused job.
+let editingJobPaused = false;
 document.getElementById('jf-schedType').addEventListener('change', e => {
   const t = e.target.value;
   document.getElementById('jf-dailyWrap').style.display = t === 'daily' ? '' : 'none';
@@ -2283,8 +2323,118 @@ document.getElementById('jf-schedType').addEventListener('change', e => {
   document.getElementById('jf-monthlyWrap').style.display = t === 'monthly' ? '' : 'none';
   document.getElementById('jf-yearlyWrap').style.display = t === 'yearly' ? '' : 'none';
 });
+// Last config snapshot's jobs by name — the location wizard and the
+// pause buttons read user-pause state from here.
+let lastConfigJobs = {};
+// The job run-state button for a jobs-list row. States come from
+// /api/status (JobRunState): green = healthy and running; red = a
+// derived pause that needs the user; neutral = user-paused.
+function jobStateButton(j, state) {
+  const n = JSON.stringify(j.name);
+  switch (state) {
+    case 'NeedsLocation':
+      return `<button class="state-btn bad" title="This job has no backup location and cannot run. Click to give it one." onclick='openLocationWizard(${n})'>⏸ No location</button>`;
+    case 'WaitingForDrive':
+      return `<button class="state-btn bad" title="This job's USB drive is not connected. It resumes on its own when the drive is plugged back in." onclick='waitingDriveInfo(${n})'>⏸ Waiting for USB</button>`;
+    case 'UserPaused':
+      return `<button class="state-btn" title="Paused. Click to resume — resuming never runs a catch-up backup; the job waits for its next scheduled time." onclick='setJobPaused(${n}, false)'>▶ Resume</button>`;
+    default:
+      return `<button class="state-btn ok" title="Running on schedule. Click to pause." onclick='setJobPaused(${n}, true)'>⏸ Pause</button>`;
+  }
+}
+async function setJobPaused(name, paused) {
+  try {
+    await api('/api/config/jobs/' + encodeURIComponent(name) + '/pause', {
+      method: 'POST', body: JSON.stringify({ paused }),
+    });
+    toast(paused ? `Job '${name}' paused.` : `Job '${name}' resumed — it will run at its next scheduled time.`, 'ok');
+    loadSettings();
+    load();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function waitingDriveInfo(name) {
+  toast(`'${name}' is waiting for its USB drive. Plug the drive back in and the job resumes on its own — no catch-up run, it just picks up its schedule.`, '');
+}
+// ---- Location repair wizard (for jobs left without a location) ----
+let wizardJob = null;
+let pendingAttachJob = null;
+async function openLocationWizard(name) {
+  wizardJob = name;
+  document.getElementById('lw-sub').textContent =
+    `Job '${name}' has no backup location, so it is paused. Pick one of your saved locations, or create a new one.`;
+  document.getElementById('lw-step1').style.display = '';
+  document.getElementById('lw-step2').style.display = 'none';
+  const box = document.getElementById('lw-locations');
+  box.innerHTML = '<p style="color:var(--text-2)">Loading locations…</p>';
+  document.getElementById('locationWizardModal').style.display = '';
+  try {
+    const cfg = await api('/api/config');
+    const locations = cfg.locations || [];
+    const icon = t => t === 'nntp' ? '📡' : t === 'usb' ? '🔌' : '💾';
+    box.innerHTML = locations.map(l => `
+      <label class="row" style="cursor:pointer">
+        <input type="radio" name="lw-pick" value="${esc(l.name)}">
+        <div class="grow"><div class="name">${icon(l.type)} ${esc(l.name)}</div>
+        <div class="meta">${esc(l.type)}</div></div>
+      </label>`).join('') + `
+      <label class="row" style="cursor:pointer">
+        <input type="radio" name="lw-pick" value="__new" ${locations.length ? '' : 'checked'}>
+        <div class="grow"><div class="name">Create a new location…</div>
+        <div class="meta">A Usenet provider, a network share, or a USB drive.</div></div>
+      </label>`;
+  } catch (e) {
+    box.innerHTML = '<p style="color:var(--bad)">Could not load locations.</p>';
+  }
+}
+function closeLocationWizard() {
+  document.getElementById('locationWizardModal').style.display = 'none';
+  wizardJob = null;
+}
+function lwBack() {
+  document.getElementById('lw-step1').style.display = '';
+  document.getElementById('lw-step2').style.display = 'none';
+}
+async function lwContinue() {
+  const pick = document.querySelector('input[name="lw-pick"]:checked');
+  if (!pick) { toast('Pick a location, or choose "Create a new location…".', 'err'); return; }
+  if (pick.value === '__new') {
+    document.getElementById('lw-step1').style.display = 'none';
+    document.getElementById('lw-step2').style.display = '';
+    return;
+  }
+  const jobName = wizardJob;
+  try {
+    await api('/api/config/jobs/' + encodeURIComponent(jobName) + '/attach-location', {
+      method: 'POST', body: JSON.stringify({ location: pick.value }),
+    });
+    closeLocationWizard();
+    const stillPaused = lastConfigJobs[jobName] && lastConfigJobs[jobName].paused;
+    toast(stillPaused
+      ? `Location attached to '${jobName}'. The job is still paused — resume it when ready.`
+      : `Location attached to '${jobName}'. It will run at its next scheduled time.`, 'ok');
+    loadSettings();
+    load();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function lwNewType(type) {
+  // Hand off to the standard add-location form; when it saves, the new
+  // location is attached to the wizard's job (see saveLocation).
+  pendingAttachJob = wizardJob;
+  closeLocationWizard();
+  showLocationForm(type);
+}
 async function loadSettings() {
   const cfg = await api('/api/config');
+  lastConfigJobs = {};
+  cfg.jobs.forEach(j => { lastConfigJobs[j.name] = j; });
+  // Job run-states live on /api/status; merge them in for the state
+  // buttons. If the status fetch fails, fall back to the stored pause
+  // flag so pause/resume still renders.
+  let states = {};
+  try {
+    const st = await api('/api/status');
+    (st.jobs || []).forEach(j => { states[j.name] = j.state; });
+  } catch (e) { /* states stay empty; fallback below applies */ }
   // The Backup jobs view's list is #jobs-list. (It was #settingsJobs before
   // the redesign; when the id changed, this render silently went nowhere
   // and the view sat on "Loading…" forever.)
@@ -2296,6 +2446,7 @@ async function loadSettings() {
         <div class="meta">${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join(', ') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
         ${esc(j.source)} → ${esc(j.repo)}</div>
       </div>
+      ${jobStateButton(j, states[j.name] || (j.paused ? 'UserPaused' : ((j.targets && j.targets.length) ? 'Active' : 'NeedsLocation')))}
       <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
       <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
     </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured. Use "New backup job" to create one.</p>';
@@ -2644,18 +2795,37 @@ async function saveLocation() {
     err.style.display = '';
     return;
   }
+  const wasEdit = !!editingLocation;
   try {
     await api('/api/config/locations', { method: 'POST', body: JSON.stringify(loc) });
     hideLocationForm();
     loadSettings();
-    toast('Location saved.', 'ok');
+    // Location-wizard hand-off: this form was opened from a job's
+    // repair wizard, so the new location is attached to that job,
+    // finishing the repair.
+    if (pendingAttachJob && !wasEdit) {
+      const jobName = pendingAttachJob;
+      pendingAttachJob = null;
+      try {
+        await api('/api/config/jobs/' + encodeURIComponent(jobName) + '/attach-location', {
+          method: 'POST', body: JSON.stringify({ location: loc.name }),
+        });
+        toast(`Location saved and attached to '${jobName}'. It will run at its next scheduled time.`, 'ok');
+        loadSettings();
+        load();
+      } catch (e2) {
+        toast(`Location saved, but attaching it to '${jobName}' failed: ${e2.message}`, 'err');
+      }
+    } else {
+      toast('Location saved.', 'ok');
+    }
   } catch (e) {
     err.textContent = e.message;
     err.style.display = '';
   }
 }
 async function deleteLocation(name) {
-  if (!confirm(`Remove location '${name}'?`)) return;
+  if (!confirm(`Remove location '${name}'? Jobs that use it keep going without it — a job left with no location is paused until it is given another one.`)) return;
   try {
     await api('/api/config/locations/' + encodeURIComponent(name), { method: 'DELETE' });
     loadSettings();
@@ -2689,6 +2859,7 @@ async function renderJobLocationChecklist(selected) {
 }
 async function showJobForm(job) {
   editingJob = job ? job.name : null;
+  editingJobPaused = job ? !!job.paused : false;
   document.getElementById('jobFormTitle').textContent = job ? 'Edit backup job' : 'Add backup job';
   // Reset advanced section to collapsed for a clean simple view.
   document.getElementById('jf-advanced').style.display = 'none';
@@ -2767,6 +2938,7 @@ async function showJobForm(job) {
 function hideJobForm() {
   document.getElementById('jobFormCard').style.display = 'none';
   editingJob = null;
+  editingJobPaused = false;
 }
 function editJob(name) {
   api('/api/config').then(cfg => {
@@ -2807,9 +2979,11 @@ async function saveJob() {
   } else if (schedType === 'yearly') {
     if (!document.getElementById('jf-yearly-date').value) markInvalid('jf-yearly-date');
   }
-  // Scheduled backups must upload to Usenet or a network location —
-  // local-only jobs cannot be scheduled.
-  if (!checkedLocations.length) {
+  // A job must be CREATED with at least one upload location (scheduled
+  // backups upload to Usenet or a network location — local-only jobs
+  // cannot be scheduled). An EXISTING job may be saved with none: it
+  // stays, paused, until a location is attached again.
+  if (!checkedLocations.length && !editingJob) {
     document.getElementById('jf-location-list').classList.add('invalid');
     valid = false;
     errBox.textContent = 'Scheduled backups must upload to Usenet or a network location \u2014 choose at least one. (Local-only backups can only be run manually, one at a time.)';
@@ -2839,6 +3013,7 @@ async function saveJob() {
     mode: isDiskJob ? 'full' : document.getElementById('jf-mode').value,
     backupPrivilege: document.getElementById('jf-priv').checked,
     vss: document.getElementById('jf-vss').checked,
+    paused: editingJobPaused,
     targets: checkedLocations,
     autoVerify: document.getElementById('jf-autoverify').checked,
     redundancyMode: document.getElementById('jf-redundancy').value,
