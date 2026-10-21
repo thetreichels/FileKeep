@@ -269,8 +269,11 @@ public static partial class DashboardApi
                 j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
             if (existing is null)
                 return (400, new ErrorDto($"Unknown job '{name}'." ));
-            if (config.Jobs.Count == 1)
-                return (400, new ErrorDto("Cannot delete the last backup job. The service requires at least one job."));
+            // No last-job guard: zero jobs is a valid state (it is the
+            // fresh-install state), and the GUI's per-delete confirm is
+            // the accident protection. A previous guard here (7943f06)
+            // was an invented invariant with no product requirement
+            // behind it; removed 2026-10-20 at the user's decision.
             config.Jobs.Remove(existing);
         }
         try

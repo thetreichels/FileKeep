@@ -179,19 +179,21 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
-    public void DeleteJob_RefusesToDeleteLastJob()
+    public void DeleteJob_DeletesTheLastJob()
     {
+        // Zero jobs is a valid state (the fresh-install state), so the
+        // only job deletes like any other. The former last-job guard
+        // (7943f06) was an invented invariant; removed at the user's
+        // decision 2026-10-20.
         var config = MakeConfig();
         var scheduler = new BackupScheduler(config);
         string configPath = Path.Combine(_workDir, "service.json");
         config.Save(configPath);
 
-        var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, "docs");
-        Assert.Equal(400, status);
-        using var doc = ToJson(payload);
-        Assert.Contains("last backup job", doc.RootElement.GetProperty("error").GetString());
-        // Job still exists
-        Assert.Single(config.Jobs);
+        var (status, _) = DashboardApi.DeleteJob(config, scheduler, configPath, "docs");
+        Assert.Equal(200, status);
+        Assert.Empty(config.Jobs);
+        Assert.Empty(ServiceConfig.Load(configPath).Jobs);
     }
 
     [Fact]
