@@ -39,12 +39,26 @@ public static partial class DashboardApi
         }
     }
 
-    public static (int Status, object Payload) TestSmbConnection(string share)
+    public static (int Status, object Payload) TestSmbConnection(
+        string share, string? user = null, string? password = null)
     {
         if (string.IsNullOrWhiteSpace(share))
             return (400, new OkErrorDto(false, "share path is required." ));
         try
         {
+            // With credentials, test the way the product actually
+            // connects — authenticated, as the given user. A bare
+            // Directory.Exists runs as the service account and falsely
+            // reports auth-required shares as unreachable even when the
+            // typed credentials are correct (WALK-1).
+            if (!string.IsNullOrWhiteSpace(user) || !string.IsNullOrEmpty(password))
+            {
+                using var conn = UsenetBackup.Core.SmbShare.Connect(
+                    share, user, password, createIfMissing: false);
+                return Directory.Exists(share)
+                    ? (200, new OkDetailDto(true, "Share is accessible."))
+                    : (200, new OkErrorDto(false, "Share not reachable or does not exist."));
+            }
             bool exists = Directory.Exists(share);
             if (!exists)
                 return (200, new OkErrorDto(false, "Share not reachable or does not exist." ));

@@ -178,6 +178,80 @@ public sealed class DashboardTests : IDisposable
         Assert.False(DashboardApi.ValidateCsrfToken("", "abc123"));
     }
 
+    // ---------- walk fixes (2026-10-20 GUI verification walk) ----------
+
+    [Fact]
+    public void ResolveRestoreSmb_UsesJobsLocationWhenRequestIsBlank()
+    {
+        // WALK-3: a location-based job's restore must source its share
+        // and user from the job's SMB target location — the job's own
+        // legacy fields are empty for such jobs.
+        var config = MakeConfig();
+        var job = config.Jobs[0];
+        job.Targets = new List<string> { "vault" };
+        job.SmbUser = "";
+        config.Locations.Add(new BackupLocation
+        {
+            Name = "vault", Type = "smb",
+            Share = @"\\nas\backups", SmbUser = @"nas\alice",
+        });
+        var (share, user, _) = DashboardApi.ResolveRestoreSmb(config, _repoDir, null, null);
+        Assert.Equal(@"\\nas\backups", share);
+        Assert.Equal(@"nas\alice", user);
+    }
+
+    [Fact]
+    public void ResolveRestoreSmb_ExplicitRequestWins()
+    {
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string> { "vault" };
+        config.Locations.Add(new BackupLocation
+        {
+            Name = "vault", Type = "smb",
+            Share = @"\\nas\backups", SmbUser = @"nas\alice",
+        });
+        var (share, user, _) = DashboardApi.ResolveRestoreSmb(
+            config, _repoDir, @"\\other\share", "bob");
+        Assert.Equal(@"\\other\share", share);
+        Assert.Equal("bob", user);
+    }
+
+    [Fact]
+    public void TestSmbConnection_CredentialsTakeTheConnectPath()
+    {
+        // WALK-1: with credentials supplied, the test must go through
+        // SmbShare.Connect (which rejects credentials for non-UNC
+        // paths) instead of a bare existence check that would happily
+        // pass for this existing local directory.
+        var (status, payload) = DashboardApi.TestSmbConnection(_srcDir, "alice", "secret");
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Contains("UNC", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void TestSmbConnection_NoCredentials_ExistenceCheck()
+    {
+        var (status, payload) = DashboardApi.TestSmbConnection(_srcDir);
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+    }
+
+    [Fact]
+    public void HtmlPage_HasSessionUnlockButtonAndHonestPlaceholder()
+    {
+        // WALK-2: the restore session row carries its own Unlock button
+        // (the backups table's Restore buttons never render while
+        // locked). WALK-5: the restore destination placeholder reads as
+        // an example, not a prefilled value.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("restore-unlock-btn", html);
+        Assert.Contains("Unlock with YubiKey", html);
+        Assert.Contains("placeholder=\"e.g. C:\\Restore\"", html);
+    }
+
     [Fact]
     public void DeleteJob_DeletesTheLastJob()
     {

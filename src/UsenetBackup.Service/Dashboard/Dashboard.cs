@@ -298,7 +298,9 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string share = GetBodyString(body, "share");
-            var (status, payload) = DashboardApi.TestSmbConnection(share);
+            string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
+            string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.TestSmbConnection(share, user, pass);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 

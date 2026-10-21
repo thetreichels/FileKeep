@@ -696,6 +696,51 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// Resolves a restore's SMB share, user and password. The job's SMB
+    /// target LOCATION is the modern credential home: when the request
+    /// names no share, the location's share is used automatically (with
+    /// local chunks pruned after upload, the banked location is the only
+    /// place the chunks can come from), and its stored user/password
+    /// fill any gaps the request and the job's legacy smb* fields leave.
+    /// Explicit request values always win. (WALK-3: restores previously
+    /// read only the job's legacy fields, which location-based jobs
+    /// leave empty, so no restore could pull from an auth-required
+    /// share.)
+    /// </summary>
+    public static (string? Share, string? User, string? Password) ResolveRestoreSmb(
+        ServiceConfig config, string repo, string? smbShare, string? smbUser)
+    {
+        var job = config.SnapshotJobs().FirstOrDefault(j =>
+            j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
+        BackupLocation? smbLoc = null;
+        if (job is not null)
+        {
+            var locByName = config.Locations.ToDictionary(
+                l => l.Name, StringComparer.OrdinalIgnoreCase);
+            smbLoc = job.EffectiveTargets
+                .Select(t => locByName.TryGetValue(t, out var l) ? l : null)
+                .FirstOrDefault(l => l is not null &&
+                    l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase));
+        }
+        if (string.IsNullOrWhiteSpace(smbShare) && smbLoc is not null)
+            smbShare = smbLoc.Share;
+        string? smbPassword = null;
+        if (!string.IsNullOrWhiteSpace(smbShare))
+        {
+            smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
+            if (string.IsNullOrEmpty(smbPassword) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
+                smbPassword = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
+            if (string.IsNullOrEmpty(smbPassword) && smbLoc is not null && !string.IsNullOrEmpty(smbLoc.SmbPasswordProtected))
+                smbPassword = UsenetBackup.Core.Dpapi.Unprotect(smbLoc.SmbPasswordProtected);
+            if (string.IsNullOrWhiteSpace(smbUser))
+                smbUser = job?.SmbUser;
+            if (string.IsNullOrWhiteSpace(smbUser))
+                smbUser = smbLoc?.SmbUser;
+        }
+        return (smbShare, smbUser, smbPassword);
+    }
+
+    /// <summary>
     /// Starts a restore of a backup to a destination directory in the background.
     /// </summary>
     public static (int Status, object Payload) StartRestore(
@@ -715,18 +760,12 @@ public static partial class DashboardApi
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
                 : (500, new ErrorDto("Service passphrase is not configured."));
-        // SMB credentials: matching job's stored password, else env var.
-        string? smbPassword = null;
-        if (!string.IsNullOrWhiteSpace(smbShare))
-        {
-            var job = config.SnapshotJobs().FirstOrDefault(j =>
-                j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
-            smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-            if (string.IsNullOrEmpty(smbPassword) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
-                smbPassword = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
-            if (string.IsNullOrWhiteSpace(smbUser))
-                smbUser = job?.SmbUser;
-        }
+        // SMB source and credentials: the job's SMB target location is
+        // the credential home; see ResolveRestoreSmb.
+        var (resolvedShare, resolvedUser, smbPassword) =
+            ResolveRestoreSmb(config, repo, smbShare, smbUser);
+        smbShare = resolvedShare;
+        smbUser = resolvedUser;
         Task.Run(() =>
         {
             try

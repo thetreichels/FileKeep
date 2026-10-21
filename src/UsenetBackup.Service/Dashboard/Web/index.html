@@ -323,6 +323,10 @@
     & button:active { background: #2a2a2a; }
     & .toggle .track { background: #2d2d2d; border-color: #8a8a8a; }
     & .toggle .track::after { background: #a7a7a7; }
+    /* The dark track rule above outranks the light :checked rule, so
+       ON rendered grey in dark mode (WALK-5). Restate it here. */
+    & .toggle input:checked + .track { background: var(--accent); border-color: var(--accent); }
+    & .toggle input:checked + .track::after { background: #ffffff; }
     & .infobar.warning { background: #2d2419; }
     & .yk-touch { background: #1a2b3c; }
     & .yk-badge.unlocked { background: #1d3325; }
@@ -462,7 +466,8 @@
         <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px;align-items:center">
           <span id="restore-session-status" class="yk-badge locked">&#128273; Locked</span>
           <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
-          <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto">Lock</button>
+          <button id="restore-unlock-btn" class="accent" onclick="unlockRestoreSession()" title="Unlock restores with a YubiKey touch" style="margin-left:auto">Unlock with YubiKey</button>
+          <button id="restore-lock-btn" onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto;display:none">Lock</button>
         </div>
         <div class="row" id="restore-secret-row" style="display:none;margin-bottom:8px;align-items:center">
           <span style="color:var(--text-2);font-size:13px">Or enter the recovery secret from your recovery sheet:</span>
@@ -480,7 +485,7 @@
           <div class="meta" id="restoreModalSub"></div>
           <div id="restoreFilesForm">
             <div class="row" style="margin-top:8px">
-              <span class="folder-row" style="flex:1"><input id="m-restore-dest" placeholder="C:\Restore" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('m-restore-dest', 'Select restore destination')">Browse…</button></span>
+              <span class="folder-row" style="flex:1"><input id="m-restore-dest" placeholder="e.g. C:\Restore" style="flex:1"><button type="button" class="browse-btn" onclick="browseFolder('m-restore-dest', 'Select restore destination')">Browse…</button></span>
             </div>
             <div class="row" style="margin-top:8px">
               <label>If a file already exists:
@@ -1661,7 +1666,10 @@ async function load() {
     let nextText = '—';
     if (upcoming.length) {
       const parsed = upcoming.map(t => ({ t, d: Date.parse(t) })).filter(x => !isNaN(x.d));
-      nextText = parsed.length ? parsed.sort((a, b) => a.d - b.d)[0].t : upcoming[0];
+      // Friendly local format, not the raw ISO timestamp (WALK-5).
+      nextText = parsed.length
+        ? new Date(parsed.sort((a, b) => a.d - b.d)[0].d).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        : upcoming[0];
     }
     nextEl.textContent = nextText;
   }
@@ -1762,9 +1770,11 @@ function fmtBytes(b) {
   return b + ' B';
 }
 async function loadRepo() {
+  // The restore-session row must refresh even with no repo (zero jobs):
+  // protection can be on with nothing banked yet (WALK-0).
+  refreshRestoreSession();
   const repo = currentRepo();
   if (!repo) return;
-  refreshRestoreSession();
   const q = '?repo=' + encodeURIComponent(repo);
   let bs = [];
   try {
@@ -1992,6 +2002,17 @@ async function lockRestoreSession() {
   try { await api('/api/restore/lock', { method: 'POST' }); } catch (e) { /* ignore */ }
   refreshRestoreSession();
 }
+async function unlockRestoreSession() {
+  // The session row's own unlock: a YubiKey touch, same endpoint the
+  // Restore buttons use, but reachable while locked (WALK-2).
+  toast('Touch your YubiKey…');
+  try {
+    await api('/api/restore/unlock', { method: 'POST' });
+    toast('Restore session unlocked.', 'ok');
+  } catch (e) { toast('Unlock failed: ' + e.message, 'err'); }
+  refreshRestoreSession();
+  loadRepo();
+}
 async function refreshRestoreSession() {
   const row = document.getElementById('restore-session-row');
   const st = document.getElementById('restore-session-status');
@@ -2004,6 +2025,13 @@ async function refreshRestoreSession() {
     st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
     st.innerHTML = s.unlocked ? '&#128275; Unlocked' : '&#128273; Locked';
     st.style.color = s.unlocked ? 'var(--good)' : 'var(--text-2)';
+    // The unlock path lives HERE, on the session row — not only behind
+    // a backup row's Restore button, which never renders while the
+    // session is locked (WALK-2). Exactly one of Unlock/Lock shows.
+    const unlockBtn = document.getElementById('restore-unlock-btn');
+    const lockBtn = document.getElementById('restore-lock-btn');
+    if (unlockBtn) unlockBtn.style.display = s.unlocked ? 'none' : '';
+    if (lockBtn) lockBtn.style.display = s.unlocked ? '' : 'none';
     // Typed-secret unlock exists only in YubiKey-only (generated-secret)
     // mode, and only while the session is locked — in passphrase mode
     // the endpoint refuses by design, so the control never renders.
@@ -2727,9 +2755,13 @@ async function testLocationConnection() {
     } else if (type === 'smb') {
       const share = document.getElementById('lf-share').value.trim();
       if (!share) { resultEl.innerHTML = '<span style="color:var(--bad)">Enter a share path first.</span>'; return; }
+      // Test with the credentials typed into the form, the way the
+      // product will actually connect — not as the service account.
       result = await api('/api/operations/smb-test', {
         method: 'POST',
-        body: JSON.stringify({ share })
+        body: JSON.stringify({ share,
+          user: document.getElementById('lf-smbuser').value.trim(),
+          pass: document.getElementById('lf-smbpass').value })
       });
     } else if (type === 'usb') {
       const serial = document.getElementById('lf-usbserial').value.trim();
