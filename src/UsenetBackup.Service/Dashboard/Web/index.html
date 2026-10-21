@@ -118,6 +118,26 @@
   .state-btn.ok { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
   .state-btn.bad { color: var(--bad); border: 1px solid var(--bad); background: transparent; font-weight: 600; }
   .state-btn.warn { color: var(--warn); border: 1px solid var(--warn); background: transparent; font-weight: 600; }
+  /* Security link band — one pill in both states, per the walkthrough
+     mockup: the same full-width box, flush with the cards above and
+     below (their facing corners square off), so the two cards and the
+     band read as one block. Linked: solid accent, "Linked — AND".
+     Unlinked: outline, an OR tag and "Link". */
+  .link-pill { display: flex; width: 100%; height: 34px; align-items: center; justify-content: center; gap: 8px;
+    font-family: inherit; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    cursor: pointer; color: var(--text-2);
+    border: 1.5px solid color-mix(in srgb, var(--text) 32%, transparent); background: var(--card);
+    border-radius: 0; padding: 0 16px; margin: 0;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease; }
+  .link-pill svg { width: 13px; height: 13px; flex: 0 0 13px; }
+  .link-pill:hover { color: var(--accent); border-color: var(--accent); }
+  .link-pill.is-linked { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .link-pill.is-linked:hover { background: var(--accent); color: #fff; filter: brightness(1.15); }
+  .band-or { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; line-height: 1.2;
+    border: 1.5px dashed currentColor; border-radius: 999px; padding: 1px 8px; }
+  .band-or[hidden] { display: none; }
+  #sec-card-passphrase.join-b { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  #sec-card-yubikey.join-t { border-top-left-radius: 0; border-top-right-radius: 0; }
   .pill {
     font-size: 12px; padding: 2px 10px; border-radius: 10px; font-weight: 600;
     background: #e8f5e9; color: var(--ok);
@@ -766,15 +786,8 @@
                   </div>
                 </div>
               </div>
-              <!-- Link band -->
-              <div id="sec-link-band" style="width:486px;max-width:100%;height:34px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:17px;cursor:pointer;border:2px solid var(--accent);background:var(--accent)" onclick="secToggleLink()" role="button" aria-pressed="true" title="Click to switch between OR and AND">
-                <span style="font-size:11px;font-weight:700;color:#fff;border:1px dashed rgba(255,255,255,0.85);border-radius:10px;padding:2px 8px">AND</span>
-                <span id="sec-link-text" style="font-size:14px;font-weight:600;color:#fff">Linked</span>
-              </div>
-              <div id="sec-link-band-unlinked" style="width:486px;max-width:100%;height:34px;margin:0 auto 12px;display:none;align-items:center;justify-content:center;gap:8px;border-radius:17px;cursor:pointer;border:2px solid var(--accent);background:transparent" onclick="secToggleLink()" role="button" aria-pressed="false" title="Click to switch between OR and AND">
-                <span style="font-size:11px;font-weight:700;color:var(--accent);border:1px dashed var(--accent);border-radius:10px;padding:2px 8px">OR</span>
-                <span style="font-size:14px;font-weight:600;color:var(--accent)">Link</span>
-              </div>
+              <!-- Link band: one pill in both states (walkthrough mockup) -->
+              <button class="link-pill is-linked" type="button" id="sec-link-band" onclick="secToggleLink()" aria-pressed="true" title="Click to switch between OR and AND"><span class="band-or" id="sec-band-or" aria-hidden="true" hidden>OR</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.1"/><path d="M14 10a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.1"/></svg><span id="sec-link-text">Linked — AND</span></button>
               <!-- YubiKey card -->
               <div class="card sec-method" id="sec-card-yubikey" style="margin-bottom:12px">
                 <div class="row" style="align-items:center">
@@ -3786,16 +3799,26 @@ async function secFinishWizard() {
   }
 }
 
-// Update link band for wizard (simplified)
+// Update link band for wizard: one pill in both states (mockup). The
+// pill shows only while both methods are on; the facing card corners
+// square off and the gap collapses so cards + band read as one block.
 function secUpdateLinkBand() {
-  const linked = document.getElementById('sec-link-band');
-  const unlinked = document.getElementById('sec-link-band-unlinked');
+  const band = document.getElementById('sec-link-band');
+  const orTag = document.getElementById('sec-band-or');
+  const label = document.getElementById('sec-link-text');
   const isLinked = secProfile.linkMode === 'and';
-  linked.style.display = (isLinked && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) ? '' : 'none';
-  unlinked.style.display = (!isLinked && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled) ? 'flex' : 'none';
-  linked.setAttribute('aria-pressed', isLinked);
-  unlinked.setAttribute('aria-pressed', !isLinked);
-  
+  const bothOn = secProfile.passphraseEnabled && secProfile.yubiKeyEnabled;
+  band.style.display = bothOn ? 'flex' : 'none';
+  band.classList.toggle('is-linked', isLinked);
+  band.setAttribute('aria-pressed', isLinked);
+  orTag.hidden = isLinked;
+  label.textContent = isLinked ? 'Linked — AND' : 'Link';
+  const passCard = document.getElementById('sec-card-passphrase');
+  const ykCard = document.getElementById('sec-card-yubikey');
+  passCard.classList.toggle('join-b', bothOn);
+  ykCard.classList.toggle('join-t', bothOn);
+  passCard.style.marginBottom = bothOn ? '0' : '';
+
   // Show reassurance when YubiKey off
   document.getElementById('sec-yk-reassurance').style.display = secProfile.yubiKeyEnabled ? 'none' : '';
   
@@ -3831,7 +3854,7 @@ function secUpdateLinkBand() {
    pair, the other half is stranded — it gets a grey dashed
    attempt line toward the padlock that stops short at an
    ✕, because one half of a pair can't open the lock alone.
-   Hovering the "Linked (AND)" band between the two cards
+   Hovering the "Linked — AND" band between the two cards
    previews losing the whole pair: both greyed out and
    crossed, and nothing comes out of the pair at all — no
    chain between the two icons and no attempt line, since
@@ -4003,7 +4026,7 @@ function youDiagram(keys, gs, lostKeys, usbLimit) {
 
 /* What the diagram currently previews losing via
    hover: a method key, "pair" while the pointer rests
-   on the Linked (AND) band (both halves of the pair
+   on the Linked — AND band (both halves of the pair
    lost), or null for the default healthy picture.
    renderYouDiagram falls back to the default whenever
    the hovered method is no longer enabled. Unlike the
@@ -4020,7 +4043,7 @@ function renderYouDiagram() {
      one half of a linked pair: the pair breaks and
      the surviving half is left stranded with its grey
      attempt line. The "pair" hover state — set by the
-     Linked (AND) band — previews losing both halves:
+     Linked — AND band — previews losing both halves:
      both crossed, nothing drawn from either. */
   let lostKeys = [];
   if (igHoverKey === 'pair') {
@@ -4091,7 +4114,7 @@ SEC_IG_ORDER.forEach(k => {
     if (igHoverKey === k) igSetHover(null);
   });
 });
-/* The "Linked (AND)" band between the Passphrase and
+/* The "Linked — AND" band between the Passphrase and
    YubiKey cards previews losing the whole pair: while
    the two are linked, resting on the band crosses both
    halves and draws nothing from either — distinct

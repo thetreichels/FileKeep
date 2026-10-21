@@ -150,6 +150,23 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void HtmlPage_LinkBand_FollowsTheMockup()
+    {
+        // The walkthrough mockup: ONE pill in both states (full width,
+        // flush with the cards, facing corners squared). Linked: solid,
+        // "Linked — AND". Unlinked: outline, OR tag + "Link". The old
+        // two-div version also showed the linked band with display '',
+        // dropping its flex centering so the label collapsed to the
+        // left edge — showing the pill must set 'flex'.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("class=\"link-pill is-linked\"", html);
+        Assert.Contains("id=\"sec-band-or\"", html);
+        Assert.Contains("band.style.display = bothOn ? 'flex' : 'none'", html);
+        Assert.Contains("label.textContent = isLinked ? 'Linked — AND' : 'Link'", html);
+        Assert.DoesNotContain("sec-link-band-unlinked", html);
+    }
+
+    [Fact]
     public void HtmlPage_BakesBuildTokenAndSidebarCheck()
     {
         string html = DashboardHtml.Page("test-csrf-token");
