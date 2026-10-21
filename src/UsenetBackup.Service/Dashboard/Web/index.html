@@ -3191,6 +3191,10 @@ async function secVerifyPhoneCode() {
       msg.textContent = 'Code verified — Phone is on. Continuing…';
       msg.style.color = 'var(--ok)';
       btn.textContent = 'Verified ✓';
+      // Refresh the footer gate now — when the phone step is the last
+      // step, the auto-advance below no-ops (there is no next step) and
+      // Finish would otherwise stay disabled forever.
+      secUpdateWizardNext();
       setTimeout(() => secGoStep(secCurrentStep + 1), 1000);
     } else {
       msg.textContent = 'That code did not match. Check your app\'s clock and try the current code.';
