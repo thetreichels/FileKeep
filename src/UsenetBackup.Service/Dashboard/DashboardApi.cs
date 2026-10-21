@@ -218,7 +218,8 @@ public static partial class DashboardApi
                 j.LastResult.Success,
                 j.LastResult.BackupId,
                 j.LastResult.Files,
-                j.LastResult.Error),
+                j.LastResult.Error,
+                j.LastResult.DegradedNote),
             scheduler.EvaluateJobState(j.Config, j.NetworkAway).ToString())).ToList());
 
     public static bool IsKnownJob(BackupScheduler scheduler, string name) =>

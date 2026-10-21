@@ -196,7 +196,10 @@ public sealed record StatusLastResultDto(
     [property: JsonPropertyName("success")] bool Success,
     [property: JsonPropertyName("backupId")] string? BackupId,
     [property: JsonPropertyName("files")] int Files,
-    [property: JsonPropertyName("error")] string? Error);
+    [property: JsonPropertyName("error")] string? Error,
+    // Why one of several locations missed the last backup, when the job
+    // is degraded (partial delivery). Null otherwise.
+    [property: JsonPropertyName("degradedNote")] string? DegradedNote);
 
 /// <summary>Job status for /api/status.</summary>
 public sealed record StatusJobDto(

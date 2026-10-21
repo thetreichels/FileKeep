@@ -310,6 +310,93 @@ public sealed class JobPauseTests : IDisposable
         Assert.True(job.NetworkAway);
     }
 
+    // ---------- degraded: one of several locations misses a backup ----------
+
+    private ServiceConfig MakeMultiTargetConfig(params BackupLocation[] locations)
+    {
+        return new ServiceConfig
+        {
+            DashboardBind = "127.0.0.1",
+            DashboardPort = 15789,
+            Locations = locations.ToList(),
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "interval 60", Mode = "incremental",
+                        Targets = locations.Select(l => l.Name).ToList() },
+            },
+        };
+    }
+
+    private BackupLocation LocalShare(string name)
+    {
+        string dir = Path.Combine(_workDir, name);
+        Directory.CreateDirectory(dir);
+        return new BackupLocation { Name = name, Type = "smb", Share = dir };
+    }
+
+    private BackupLocation BrokenShare(string name)
+    {
+        // A FILE where the share folder should be: the gate passes it
+        // (non-UNC = local), the sync fails trying to create it.
+        string file = Path.Combine(_workDir, name);
+        File.WriteAllBytes(file, "not a folder"u8.ToArray());
+        return new BackupLocation { Name = name, Type = "smb", Share = file };
+    }
+
+    [Fact]
+    public void Run_PartialUpload_SucceedsWithDegradedNote()
+    {
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(LocalShare("vault"), BrokenShare("broken"));
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success);
+        Assert.NotNull(result.DegradedNote);
+        Assert.Contains("broken", result.DegradedNote);
+        Assert.Contains("didn't receive", result.DegradedNote);
+
+        // And it reaches the dashboard status feed.
+        var status = DashboardApi.GetStatus(scheduler);
+        Assert.Equal(result.DegradedNote,
+            Assert.Single(status.Jobs).LastResult!.DegradedNote);
+    }
+
+    [Fact]
+    public void Run_GateSkippedTarget_SucceedsWithDegradedNote()
+    {
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var usb = new BackupLocation
+        {
+            Name = "stick", Type = "usb",
+            VolumeSerial = "DEADBEEF", UsbFolder = "FileKeep",
+        };
+        var config = MakeMultiTargetConfig(LocalShare("vault"), usb);
+        var scheduler = new BackupScheduler(config, clock);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success);
+        Assert.NotNull(result.DegradedNote);
+        Assert.Contains("stick", result.DegradedNote);
+        Assert.Contains("USB drive not connected", result.DegradedNote);
+    }
+
+    [Fact]
+    public void Run_AllTargetsFail_NoDegradedNote()
+    {
+        // Nothing was delivered anywhere: the run fails outright (the
+        // batched path's long-standing behavior when no destination can
+        // take the backup) — a failure, not a partial yellow state.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(BrokenShare("broken1"), BrokenShare("broken2"));
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.False(result.Success);
+        Assert.Null(result.DegradedNote);
+    }
+
     // ---------- the dashboard operations ----------
 
     private ServiceConfig MakeConfigWithLocations()

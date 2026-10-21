@@ -18,6 +18,7 @@
     --text-2: #616161;
     --ok: #107c10;
     --bad: #c42b1c;
+    --warn: #9d5d00;
   }
   /* Toast notifications: replace alert() popups with inline feedback. */
   #toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
@@ -116,6 +117,7 @@
   .state-btn { white-space: nowrap; }
   .state-btn.ok { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
   .state-btn.bad { color: var(--bad); border: 1px solid var(--bad); background: transparent; font-weight: 600; }
+  .state-btn.warn { color: var(--warn); border: 1px solid var(--warn); background: transparent; font-weight: 600; }
   .pill {
     font-size: 12px; padding: 2px 10px; border-radius: 10px; font-weight: 600;
     background: #e8f5e9; color: var(--ok);
@@ -316,6 +318,7 @@
     --text-2: #a7a7a7;
     --ok: #6ccb5f;
     --bad: #f1707b;
+    --warn: #f7b955;
     & .nav-item:hover, & .nav-item.active { background: #2d2d2d; }
     & button { background: #2d2d2d; border-color: rgba(255,255,255,0.1);
       border-bottom-color: rgba(255,255,255,0.2); color: var(--text); }
@@ -1684,7 +1687,7 @@ async function load() {
         <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
         <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}<br>
         ${esc(j.source)} → ${esc(j.repo)}<br>
-        ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(j.nextRunLocal)} (local)`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}</div>
+        ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(j.nextRunLocal)} (local)`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}${!stateNote && j.lastResult && j.lastResult.degradedNote ? `<br><span style="color:var(--warn)">⚠ ${esc(j.lastResult.degradedNote)}</span>` : ''}</div>
       </div>
       <button onclick="runJob('${esc(j.name)}')" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
     </div>`;
@@ -2355,11 +2358,22 @@ document.getElementById('jf-schedType').addEventListener('change', e => {
 // Last config snapshot's jobs by name — the location wizard and the
 // pause buttons read user-pause state from here.
 let lastConfigJobs = {};
+// Degraded notes (partial delivery) by job name, from the last
+// /api/status merge — the yellow button's tooltip and toast read these.
+let lastDegraded = {};
+function degradedInfo(name) {
+  toast(lastDegraded[name] || 'One of this job\'s backup locations missed the last backup.', '');
+}
 // The job run-state button for a jobs-list row. States come from
 // /api/status (JobRunState): green = healthy and running; red = a
-// derived pause that needs the user; neutral = user-paused.
+// derived pause that needs the user; neutral = user-paused; yellow
+// play = running but degraded (one of several locations missed the
+// last backup), with the reason as the tooltip.
 function jobStateButton(j, state) {
   const n = JSON.stringify(j.name);
+  if ((state === 'Active' || !state) && lastDegraded[j.name]) {
+    return `<button class="state-btn warn" title="${esc(lastDegraded[j.name])}" onclick='degradedInfo(${n})'>▶ Degraded</button>`;
+  }
   switch (state) {
     case 'NeedsLocation':
       return `<button class="state-btn bad" title="This job has no backup location and cannot run. Click to give it one." onclick='openLocationWizard(${n})'>⏸ No location</button>`;
@@ -2465,9 +2479,13 @@ async function loadSettings() {
   // buttons. If the status fetch fails, fall back to the stored pause
   // flag so pause/resume still renders.
   let states = {};
+  lastDegraded = {};
   try {
     const st = await api('/api/status');
-    (st.jobs || []).forEach(j => { states[j.name] = j.state; });
+    (st.jobs || []).forEach(j => {
+      states[j.name] = j.state;
+      if (j.lastResult && j.lastResult.degradedNote) lastDegraded[j.name] = j.lastResult.degradedNote;
+    });
   } catch (e) { /* states stay empty; fallback below applies */ }
   // The Backup jobs view's list is #jobs-list. (It was #settingsJobs before
   // the redesign; when the id changed, this render silently went nowhere

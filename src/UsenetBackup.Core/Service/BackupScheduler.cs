@@ -196,6 +196,16 @@ public sealed class JobRunResult
     public bool AutoUploadFailed { get; init; }
     public string? AutoUploadError { get; init; }
     /// <summary>
+    /// Set when the job has several backup locations and at least one
+    /// received the backup while at least one did not — skipped by the
+    /// availability gate or failed during upload. The job is degraded,
+    /// not failed: the dashboard shows a yellow warning with this note
+    /// as the reason. Null when every location received the backup, or
+    /// when none did (that is <see cref="AutoUploadFailed"/> territory),
+    /// or for single-location jobs.
+    /// </summary>
+    public string? DegradedNote { get; init; }
+    /// <summary>
     /// True when auto-verify ran and found corruption. The backup may be
     /// damaged — investigate immediately.
     /// </summary>
@@ -722,11 +732,13 @@ public sealed class BackupScheduler
     /// later). Stored pauses and target-less jobs short-circuit before
     /// any probe.
     /// </summary>
-    private (JobRunState State, BackupJobConfig? Runnable) Gate(BackupJobConfig job)
+    private (JobRunState State, BackupJobConfig? Runnable,
+        IReadOnlyList<(string Name, string Reason)> Skipped) Gate(BackupJobConfig job)
     {
         var cfg = _config;
         if (cfg is null)
-            return (job.Paused ? JobRunState.UserPaused : JobRunState.Active, job);
+            return (job.Paused ? JobRunState.UserPaused : JobRunState.Active, job,
+                Array.Empty<(string, string)>());
         var probeCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         bool Away(BackupLocation loc)
         {
@@ -740,15 +752,22 @@ public sealed class BackupScheduler
         var lookup = JobStateEvaluator.BuildLookup(cfg, Away);
         var state = JobStateEvaluator.Evaluate(job, lookup);
         if (state != JobRunState.Active)
-            return (state, null);
-        var usable = job.EffectiveTargets.Where(t =>
+            return (state, null, Array.Empty<(string, string)>());
+        var usable = new List<string>();
+        var skipped = new List<(string, string)>();
+        foreach (string t in job.EffectiveTargets)
         {
             var f = lookup(t);
-            return !f.Exists || (f.IsUsb ? f.UsbPresent : !f.NetworkAway);
-        }).ToList();
+            if (!f.Exists || (f.IsUsb ? f.UsbPresent : !f.NetworkAway))
+                usable.Add(t);
+            else
+                skipped.Add((t, f.IsUsb
+                    ? "USB drive not connected"
+                    : "network location unavailable"));
+        }
         return (state, usable.Count == job.EffectiveTargets.Count
             ? job
-            : job.CloneWithTargets(usable));
+            : job.CloneWithTargets(usable), skipped);
     }
 
     /// <summary>
@@ -767,7 +786,7 @@ public sealed class BackupScheduler
         foreach (var job in due)
         {
             stopping.ThrowIfCancellationRequested();
-            var (state, runnable) = Gate(job.Config);
+            var (state, runnable, skipped) = Gate(job.Config);
             if (state != JobRunState.Active)
             {
                 lock (_stateLock)
@@ -784,7 +803,7 @@ public sealed class BackupScheduler
                 continue;
             }
             lock (_stateLock) { job.NetworkAway = false; }
-            RunOne(job, now, stopping, runnable);
+            RunOne(job, now, stopping, runnable, skipped);
         }
     }
 
@@ -801,7 +820,7 @@ public sealed class BackupScheduler
             config = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
                 ?.Config ?? throw new InvalidOperationException($"Unknown job '{name}'.");
         }
-        var (state, runnable) = Gate(config);
+        var (state, runnable, skipped) = Gate(config);
         if (state != JobRunState.Active)
         {
             if (state == JobRunState.WaitingForNetwork)
@@ -822,7 +841,7 @@ public sealed class BackupScheduler
         lock (_operationLock)
         {
             CancellationToken token = BeginOperation();
-            try { result = Execute(runnable ?? config, _clock.Now, token); }
+            try { result = Execute(runnable ?? config, _clock.Now, token, skipped); }
             finally { EndOperation(); }
         }
         lock (_stateLock)
@@ -840,13 +859,14 @@ public sealed class BackupScheduler
     }
 
     private void RunOne(JobState job, DateTime now, CancellationToken stopping,
-        BackupJobConfig? configOverride = null)
+        BackupJobConfig? configOverride = null,
+        IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
     {
         JobRunResult result;
         lock (_operationLock)
         {
             CancellationToken token = BeginOperation();
-            try { result = Execute(configOverride ?? job.Config, now, token); }
+            try { result = Execute(configOverride ?? job.Config, now, token, gateSkipped); }
             finally { EndOperation(); }
         }
         lock (_stateLock)
@@ -863,8 +883,9 @@ public sealed class BackupScheduler
         stopping.ThrowIfCancellationRequested();
     }
 
-    private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token)
-        => Execute(job, now, token, requireTargets: true, opName: "scheduled-backup");
+    private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token,
+        IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
+        => Execute(job, now, token, requireTargets: true, opName: "scheduled-backup", gateSkipped);
 
     /// <summary>
     /// Runs a one-time manual backup to a local folder chosen at run time.
@@ -905,7 +926,8 @@ public sealed class BackupScheduler
     }
 
     private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token,
-        bool requireTargets, string opName)
+        bool requireTargets, string opName,
+        IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
     {
         // Fail closed: a scheduled job must upload to at least one Usenet or
         // network location. Local-only backups are only allowed as manual
@@ -954,26 +976,30 @@ public sealed class BackupScheduler
                 // Without an SMB target, fall back to local staging.
                 bool batched = ShouldUseBatchedStaging(job, repo, out BackupManifest? batchParent);
                 BackupManifest manifest;
+                IReadOnlyList<(string Target, string? Error)> outcomes =
+                    Array.Empty<(string, string?)>();
                 try
                 {
                     token.ThrowIfCancellationRequested();
-                    manifest = batched
-                        ? RunBatchedBackup(job, repo, batchParent, null, token)
-                        : RunDiskImageJob(job, repo, token);
+                    if (batched)
+                        (manifest, outcomes) = RunBatchedBackup(job, repo, batchParent, null, token);
+                    else
+                        manifest = RunDiskImageJob(job, repo, token);
                 }
                 catch
                 {
                     throw;
                 }
                 return FinishBackup(job, repo,
-                    new[] { (manifest, batched) }, passphrase, token, opName, now);
+                    new[] { (manifest, batched, outcomes) }, passphrase, token, opName, now, gateSkipped);
             }
 
             // File jobs: one manifest per source folder. Each source gets
             // its own snapshot provider (VSS snapshots are per-volume) and
             // its own incremental parent chain (matched by source folder),
             // so folders never diff against each other.
-            var done = new List<(BackupManifest Manifest, bool Batched)>();
+            var done = new List<(BackupManifest Manifest, bool Batched,
+                IReadOnlyList<(string Target, string? Error)> Outcomes)>();
             foreach (string source in job.EffectiveSources)
             {
                 token.ThrowIfCancellationRequested();
@@ -985,11 +1011,13 @@ public sealed class BackupScheduler
                 // local repo stays staging-only; manifests/catalog never prune.
                 bool batched = ShouldUseBatchedStaging(srcJob, repo, out BackupManifest? batchParent);
                 BackupManifest manifest;
+                IReadOnlyList<(string Target, string? Error)> outcomes =
+                    Array.Empty<(string, string?)>();
                 try
                 {
                     if (batched)
                     {
-                        manifest = RunBatchedBackup(srcJob, repo, batchParent, snap, token);
+                        (manifest, outcomes) = RunBatchedBackup(srcJob, repo, batchParent, snap, token);
                     }
                     else if (srcJob.Mode == "full")
                     {
@@ -1013,9 +1041,9 @@ public sealed class BackupScheduler
                     // VssSnapshot.Dispose aborts the writer session fail-safe.
                     throw;
                 }
-                done.Add((manifest, batched));
+                done.Add((manifest, batched, outcomes));
             }
-            return FinishBackup(job, repo, done, passphrase, token, opName, now);
+            return FinishBackup(job, repo, done, passphrase, token, opName, now, gateSkipped);
         }
         catch (OperationCanceledException)
         {
@@ -1081,15 +1109,24 @@ public sealed class BackupScheduler
     /// </summary>
     private JobRunResult FinishBackup(
         BackupJobConfig job, BackupRepository repo,
-        IReadOnlyList<(BackupManifest Manifest, bool Batched)> done,
-        string passphrase, CancellationToken token, string opName, DateTime now)
+        IReadOnlyList<(BackupManifest Manifest, bool Batched,
+            IReadOnlyList<(string Target, string? Error)> Outcomes)> done,
+        string passphrase, CancellationToken token, string opName, DateTime now,
+        IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
     {
         bool autoUploadFailed = false;
         string? autoUploadError = null;
         bool verifyFailed = false;
         string? verifyError = null;
         int totalFiles = 0;
-        foreach (var (manifest, batched) in done)
+        // Per-target upload outcomes across all manifests, for the
+        // degraded (partial delivery) determination at the end. Batched
+        // runs report theirs per source; legacy runs fill this in below
+        // from their own UploadToTargets calls.
+        var uploadOutcomes = new List<(string Target, string? Error)>();
+        foreach (var d in done)
+            uploadOutcomes.AddRange(d.Outcomes);
+        foreach (var (manifest, batched, _) in done)
         {
             OperationLog.Append(job.Repo, opName,
                 $"job={job.Name} id={manifest.BackupId} type={manifest.Type} files={manifest.Files.Count}");
@@ -1105,7 +1142,7 @@ public sealed class BackupScheduler
                 try {
                     var _m2 = repo.LoadManifest(manifest.BackupId);
                     if (_m2 is not null) { StampYubiKeyChallenge(_m2); repo.SaveManifest(_m2); }
-                    UploadToTargets(job, manifest.BackupId, passphrase, token);
+                    UploadToTargets(job, manifest.BackupId, passphrase, token, uploadOutcomes);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -1151,6 +1188,33 @@ public sealed class BackupScheduler
             }
         }
 
+        // Degraded (partial delivery): the job has several locations, at
+        // least one received this backup, and at least one did not —
+        // gate-skipped or upload-failed. When NONE received it, the run
+        // stays plain AutoUploadFailed with no note.
+        string? degradedNote = null;
+        {
+            var failed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (target, error) in uploadOutcomes)
+                if (error is not null && !failed.ContainsKey(target))
+                    failed[target] = error.Length > 160 ? error.Substring(0, 157) + "…" : error;
+            int delivered = uploadOutcomes
+                .Where(o => o.Error is null)
+                .Select(o => o.Target)
+                .Where(t => !failed.ContainsKey(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            var skipped = gateSkipped ?? Array.Empty<(string Name, string Reason)>();
+            int totalTargets = job.EffectiveTargets.Count + skipped.Count;
+            if (totalTargets >= 2 && delivered >= 1 && failed.Count + skipped.Count >= 1)
+            {
+                var parts = skipped
+                    .Select(s => $"Location '{s.Name}' didn't receive this backup: {s.Reason}.")
+                    .Concat(failed.Select(f =>
+                        $"Location '{f.Key}' didn't receive this backup: {f.Value}"));
+                degradedNote = string.Join(" ", parts);
+            }
+        }
+
         return new JobRunResult
         {
             JobName = job.Name,
@@ -1160,6 +1224,7 @@ public sealed class BackupScheduler
             Files = totalFiles,
             AutoUploadFailed = autoUploadFailed,
             AutoUploadError = autoUploadError,
+            DegradedNote = degradedNote,
             VerifyFailed = verifyFailed,
             VerifyError = verifyError,
         };
@@ -1291,7 +1356,9 @@ public sealed class BackupScheduler
         }
     }
 
-    private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase, CancellationToken token = default)
+    private void UploadToTargets(BackupJobConfig job, string backupId, string passphrase,
+        CancellationToken token = default,
+        List<(string Target, string? Error)>? outcomes = null)
     {
         token.ThrowIfCancellationRequested();
         var targets = job.EffectiveTargets;
@@ -1316,8 +1383,13 @@ public sealed class BackupScheduler
                 else
                     throw new InvalidOperationException(
                         $"Unknown backup location '{targetName}'.");
+                outcomes?.Add((targetName, null));
             }
-            catch (Exception ex) { errors.Add($"{targetName}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                errors.Add($"{targetName}: {ex.Message}");
+                outcomes?.Add((targetName, ex.Message));
+            }
         }
         if (errors.Count > 0)
             throw new InvalidOperationException(
@@ -1485,7 +1557,7 @@ public sealed class BackupScheduler
     /// and the upload journal are never pruned. Returns the finalized
     /// manifest (already uploaded to NNTP targets when present).
     /// </summary>
-    private BackupManifest RunBatchedBackup(
+    private (BackupManifest Manifest, List<(string Target, string? Error)> Outcomes) RunBatchedBackup(
         BackupJobConfig job, BackupRepository repo, BackupManifest? parentManifest,
         ISnapshotProvider? snap, CancellationToken token)
     {
@@ -1494,7 +1566,23 @@ public sealed class BackupScheduler
         bool useVolumes = repo.UseVolumes;
         var localStore = repo.LocalChunkStore!; // guaranteed by ShouldUseBatchedStaging
 
-        var uploaders = new List<Nntp.NntpBatchUploader>();
+        // Per-target delivery tracking: a target that fails (connect,
+        // batch copy/upload, manifest/metadata) is marked with its first
+        // error and excluded from the rest of the run while the other
+        // targets continue — the run comes back degraded, not failed.
+        // Only a batch that reaches NO target at all fails the run.
+        var failedTargets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var deliveredTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void MarkFailed(string name, Exception ex)
+        {
+            if (!failedTargets.ContainsKey(name))
+            {
+                failedTargets[name] = ex.Message;
+                Log($"job '{job.Name}': backup location '{name}' failed and is out of this run: {ex.Message}");
+            }
+        }
+
+        var uploaders = new List<(string Target, Nntp.NntpBatchUploader Uploader)>();
         var smbConns = new List<(string Name, SmbShare Share)>();
         try
         {
@@ -1506,7 +1594,7 @@ public sealed class BackupScheduler
                 if (loc is null)
                 {
                     foreach (var provider in _nntpProviders)
-                        uploaders.Add(CreateBatchUploader(repo, backupId, job, provider));
+                        uploaders.Add((name, CreateBatchUploader(repo, backupId, job, provider)));
                 }
                 else
                 {
@@ -1522,7 +1610,7 @@ public sealed class BackupScheduler
                         PasswordProtected = loc.PasswordProtected,
                         RedundancyMode = loc.RedundancyMode,
                     };
-                    uploaders.Add(CreateBatchUploader(repo, backupId, job, provider));
+                    uploaders.Add((name, CreateBatchUploader(repo, backupId, job, provider)));
                 }
             }
 
@@ -1530,7 +1618,7 @@ public sealed class BackupScheduler
             // margin), else the 100 MB default volume size. SMB/USB-only
             // jobs use a single batch.
             long batchSize = uploaders.Count > 0
-                ? uploaders.Min(u => u.BatchSizeBytes)
+                ? uploaders.Min(u => u.Uploader.BatchSizeBytes)
                 : long.MaxValue;
             Log($"job '{job.Name}': batched staging (batch={FormatBatchSize(batchSize)}, " +
                 $"volumes={(useVolumes ? "on" : "off")}, targets={targets.Count})...");
@@ -1550,8 +1638,22 @@ public sealed class BackupScheduler
                 string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
                 if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
                     smbPassword = Dpapi.Unprotect(passwordProtected);
-                smbConns.Add((loc?.Name ?? name, SmbShare.Connect(share, user, smbPassword)));
+                try
+                {
+                    smbConns.Add((loc?.Name ?? name, SmbShare.Connect(share, user, smbPassword)));
+                }
+                catch (Exception ex)
+                {
+                    MarkFailed(loc?.Name ?? name, ex);
+                }
             }
+
+            // Every target already dead at setup and nothing else to
+            // deliver to: fail fast, exactly as an unguarded connect
+            // failure did before per-target isolation.
+            if (targets.Count > 0 && uploaders.Count == 0 &&
+                targets.All(t => failedTargets.ContainsKey(t.Item1)))
+                throw new InvalidOperationException(failedTargets.Values.First());
 
             var usbLocs = targets
                 .Where(t => t.Type == "usb" && t.Loc is not null)
@@ -1579,34 +1681,93 @@ public sealed class BackupScheduler
                 // 2. NNTP: upload the batch to every provider in parallel
                 //    (per-batch parity + retry inside the uploader). Volume
                 //    entries are deterministic across providers (same chunks,
-                //    same packing), so we take them from the first uploader.
+                //    same packing), so we take them from the first uploader
+                //    that succeeded. A failed provider is out of the run;
+                //    the remaining destinations still confirm the batch.
                 var entries = new List<VolumeEntry>();
-                if (uploaders.Count == 1)
+                bool batchDelivered = false;
+                var activeUploaders = uploaders
+                    .Where(u => !failedTargets.ContainsKey(u.Target)).ToList();
+                if (activeUploaders.Count == 1)
                 {
-                    entries.AddRange(uploaders[0].UploadBatch(chunkIds, batchIndex, useVolumes));
-                }
-                else if (uploaders.Count > 1)
-                {
-                    var uploaderEntries = new List<VolumeEntry>?[uploaders.Count];
-                    Parallel.For(0, uploaders.Count, i =>
+                    var (tName, up) = activeUploaders[0];
+                    try
                     {
-                        uploaderEntries[i] = uploaders[i].UploadBatch(chunkIds, batchIndex, useVolumes);
+                        entries.AddRange(up.UploadBatch(chunkIds, batchIndex, useVolumes));
+                        deliveredTargets.Add(tName);
+                        batchDelivered = true;
+                    }
+                    catch (Exception ex) { MarkFailed(tName, ex); }
+                }
+                else if (activeUploaders.Count > 1)
+                {
+                    var uploaderEntries = new List<VolumeEntry>?[activeUploaders.Count];
+                    var uploaderErrors = new Exception?[activeUploaders.Count];
+                    Parallel.For(0, activeUploaders.Count, i =>
+                    {
+                        try
+                        {
+                            uploaderEntries[i] = activeUploaders[i].Uploader
+                                .UploadBatch(chunkIds, batchIndex, useVolumes);
+                        }
+                        catch (Exception ex) { uploaderErrors[i] = ex; }
                     });
-                    // Deterministic: all providers produce identical entries.
-                    entries.AddRange(uploaderEntries[0]!);
+                    for (int i = 0; i < activeUploaders.Count; i++)
+                    {
+                        if (uploaderErrors[i] is not null)
+                        {
+                            MarkFailed(activeUploaders[i].Target, uploaderErrors[i]!);
+                            continue;
+                        }
+                        deliveredTargets.Add(activeUploaders[i].Target);
+                        batchDelivered = true;
+                        // Deterministic: all providers produce identical entries.
+                        if (entries.Count == 0 && uploaderEntries[i] is not null)
+                            entries.AddRange(uploaderEntries[i]!);
+                    }
                 }
                 lock (batchedVolumes)
                     batchedVolumes.AddRange(entries);
                 // 3. SMB: copy the batch's chunks.
                 foreach (var (shareName, share) in smbConns)
                 {
-                    int copied = smbSync.CopyChunks(chunkIds, job.Repo, share);
-                    Log($"job '{job.Name}': batch {batchIndex}: {copied} chunks copied to SMB '{shareName}'.");
+                    if (failedTargets.ContainsKey(shareName))
+                        continue;
+                    try
+                    {
+                        int copied = smbSync.CopyChunks(chunkIds, job.Repo, share);
+                        Log($"job '{job.Name}': batch {batchIndex}: {copied} chunks copied to SMB '{shareName}'.");
+                        deliveredTargets.Add(shareName);
+                        batchDelivered = true;
+                    }
+                    catch (Exception ex) { MarkFailed(shareName, ex); }
                 }
                 // 4. USB: copy the batch's chunks (graceful skip if unplugged).
                 foreach (var usbLoc in usbLocs)
-                    CopyBatchChunksToUsb(usbLoc, chunkIds, job);
-                // 5. Prune: the batch is confirmed at every destination.
+                {
+                    if (failedTargets.ContainsKey(usbLoc.Name))
+                        continue;
+                    try
+                    {
+                        if (CopyBatchChunksToUsb(usbLoc, chunkIds, job))
+                        {
+                            deliveredTargets.Add(usbLoc.Name);
+                            batchDelivered = true;
+                        }
+                    }
+                    catch (Exception ex) { MarkFailed(usbLoc.Name, ex); }
+                }
+                // 5. Prune: the batch is confirmed at ≥1 destination. A
+                //    destination that missed it gets nothing later (no
+                //    catch-up). If destinations existed and ALL of them
+                //    failed this batch, the run cannot honestly continue
+                //    — fail it. (A run whose targets resolve to no
+                //    concrete deliverer at all — e.g. a legacy bare
+                //    "nntp" with no providers configured — keeps the
+                //    historical vacuous behavior.)
+                if (!batchDelivered && failedTargets.Count > 0)
+                    throw new InvalidOperationException(
+                        $"Batch {batchIndex}: no backup location received it; the run cannot continue.");
                 foreach (string id in chunkIds)
                     localStore.Delete(id);
                 Log($"job '{job.Name}': batch {batchIndex} complete — " +
@@ -1657,32 +1818,58 @@ public sealed class BackupScheduler
             manifest = repo.FinalizeBatchedManifest(manifest);
 
             // NNTP: post the manifest + index per provider.
-            foreach (var uploader in uploaders)
+            foreach (var (tName, uploader) in uploaders)
             {
-                int articles = uploader.UploadManifest();
-                Log($"job '{job.Name}': manifest posted to {uploader.Host} ({articles} articles).");
-                OperationLog.Append(job.Repo, "auto-upload",
-                    $"job={job.Name} id={manifest.BackupId} host={uploader.Host} manifest_articles={articles}");
+                if (failedTargets.ContainsKey(tName))
+                    continue;
+                try
+                {
+                    int articles = uploader.UploadManifest();
+                    Log($"job '{job.Name}': manifest posted to {uploader.Host} ({articles} articles).");
+                    OperationLog.Append(job.Repo, "auto-upload",
+                        $"job={job.Name} id={manifest.BackupId} host={uploader.Host} manifest_articles={articles}");
+                    deliveredTargets.Add(tName);
+                }
+                catch (Exception ex) { MarkFailed(tName, ex); }
             }
 
             // SMB: final metadata sync (chunks were copied per batch).
             foreach (var (shareName, share) in smbConns)
             {
-                var result = smbSync.Sync(job.Repo, share);
-                Log($"job '{job.Name}': SMB metadata sync to '{shareName}' complete.");
+                if (failedTargets.ContainsKey(shareName))
+                    continue;
+                try
+                {
+                    var result = smbSync.Sync(job.Repo, share);
+                    Log($"job '{job.Name}': SMB metadata sync to '{shareName}' complete.");
+                    deliveredTargets.Add(shareName);
+                }
+                catch (Exception ex) { MarkFailed(shareName, ex); }
             }
 
             // USB: final metadata copy (chunks were copied per batch).
             foreach (var usbLoc in usbLocs)
-                CopyMetadataToUsb(usbLoc, job);
+            {
+                if (failedTargets.ContainsKey(usbLoc.Name))
+                    continue;
+                try
+                {
+                    if (CopyMetadataToUsb(usbLoc, job))
+                        deliveredTargets.Add(usbLoc.Name);
+                }
+                catch (Exception ex) { MarkFailed(usbLoc.Name, ex); }
+            }
 
             Log($"job '{job.Name}': batched backup {manifest.BackupId} complete " +
                 $"({manifest.Files.Count} files, {batchedVolumes.Count} new volumes).");
-            return manifest;
+            var outcomes = new List<(string Target, string? Error)>();
+            foreach (var (name, _, _) in targets)
+                outcomes.Add((name, failedTargets.TryGetValue(name, out var err) ? err : null));
+            return (manifest, outcomes);
         }
         finally
         {
-            foreach (var uploader in uploaders)
+            foreach (var (_, uploader) in uploaders)
                 uploader.Dispose();
             foreach (var (_, share) in smbConns)
                 share.Dispose();
@@ -1697,15 +1884,16 @@ public sealed class BackupScheduler
 
     /// <summary>
     /// Copies one batch's chunk blobs to a USB location. Graceful skip (not
-    /// failure) when the drive isn't currently plugged in.
+    /// failure) when the drive isn't currently plugged in. Returns true
+    /// when the drive was present and the copy ran.
     /// </summary>
-    private void CopyBatchChunksToUsb(BackupLocation usbLoc, IReadOnlyList<string> chunkIds, BackupJobConfig job)
+    private bool CopyBatchChunksToUsb(BackupLocation usbLoc, IReadOnlyList<string> chunkIds, BackupJobConfig job)
     {
         string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
         if (targetDir is null)
         {
             Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping batch USB copy.");
-            return;
+            return false;
         }
         int copied = 0;
         string chunksDir = Path.Combine(job.Repo, "chunks");
@@ -1720,19 +1908,21 @@ public sealed class BackupScheduler
                 copied++;
         }
         Log($"job '{job.Name}': {copied} chunks copied to USB '{usbLoc.Name}'.");
+        return true;
     }
 
     /// <summary>
     /// Copies manifests + repo.json to a USB location after all batches
-    /// (chunks were copied per batch). Never pruned locally.
+    /// (chunks were copied per batch). Never pruned locally. Returns true
+    /// when the drive was present and the copy ran.
     /// </summary>
-    private void CopyMetadataToUsb(BackupLocation usbLoc, BackupJobConfig job)
+    private bool CopyMetadataToUsb(BackupLocation usbLoc, BackupJobConfig job)
     {
         string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
         if (targetDir is null)
         {
             Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping metadata copy.");
-            return;
+            return false;
         }
         string manifestsDir = Path.Combine(job.Repo, "manifests");
         if (Directory.Exists(manifestsDir))
@@ -1742,6 +1932,7 @@ public sealed class BackupScheduler
         if (File.Exists(repoJson))
             CopyFileIfDifferent(repoJson, Path.Combine(targetDir, "repo.json"));
         Log($"job '{job.Name}': metadata copied to USB '{usbLoc.Name}'.");
+        return true;
     }
 
     private static bool CopyFileIfDifferent(string src, string dst)
