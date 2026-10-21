@@ -142,7 +142,8 @@ public sealed record ConfigJobDto(
     [property: JsonPropertyName("autoVerify")] bool AutoVerify,
     [property: JsonPropertyName("verificationMode")] string? VerificationMode,
     [property: JsonPropertyName("redundancyMode")] string? RedundancyMode,
-    [property: JsonPropertyName("sources")] List<string>? Sources);
+    [property: JsonPropertyName("sources")] List<string>? Sources,
+    [property: JsonPropertyName("paused")] bool Paused);
 
 /// <summary>NNTP config summary for /api/config response.</summary>
 public sealed record ConfigNntpDto(
@@ -208,7 +209,9 @@ public sealed record StatusJobDto(
     [property: JsonPropertyName("vss")] bool Vss,
     [property: JsonPropertyName("nextRunLocal")] DateTime? NextRunLocal,
     [property: JsonPropertyName("consecutiveFailures")] int ConsecutiveFailures,
-    [property: JsonPropertyName("lastResult")] StatusLastResultDto? LastResult);
+    [property: JsonPropertyName("lastResult")] StatusLastResultDto? LastResult,
+    // JobRunState name: Active | UserPaused | NeedsLocation | WaitingForDrive.
+    [property: JsonPropertyName("state")] string State);
 
 /// <summary>Response for GET /api/status.</summary>
 public sealed record StatusDto(

@@ -680,16 +680,49 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
+    /// The job's current run state, evaluated against the live config
+    /// (targets + attached USB drives). Single evaluation path used by
+    /// the due scan, manual runs and the dashboard's status feed.
+    /// </summary>
+    public JobRunState EvaluateJobState(BackupJobConfig job)
+    {
+        var cfg = _config;
+        if (cfg is null)
+            return job.Paused ? JobRunState.UserPaused : JobRunState.Active;
+        return JobStateEvaluator.Evaluate(job, JobStateEvaluator.BuildLookup(cfg));
+    }
+
+    /// <summary>
     /// Runs every job whose next-run time has passed. Exposed for tests.
+    /// A due job that cannot run (user-paused, no backup location, USB
+    /// drive away) is NOT run and NOT left due: its next run is advanced
+    /// past this occurrence. Missed occurrences are discarded, never
+    /// caught up — when the cause clears, the job simply re-arms for its
+    /// next scheduled time.
     /// </summary>
     public void RunDueJobs(DateTime now, CancellationToken stopping = default)
     {
         List<JobState> due;
         lock (_stateLock)
             due = _jobs.Where(j => j.NextRunLocal <= now).OrderBy(j => j.NextRunLocal).ToList();
+        var lookup = _config is null ? null : JobStateEvaluator.BuildLookup(_config);
         foreach (var job in due)
         {
             stopping.ThrowIfCancellationRequested();
+            JobRunState state = lookup is null
+                ? (job.Config.Paused ? JobRunState.UserPaused : JobRunState.Active)
+                : JobStateEvaluator.Evaluate(job.Config, lookup);
+            if (state != JobRunState.Active)
+            {
+                lock (_stateLock)
+                {
+                    if (_jobs.Contains(job))
+                        job.NextRunLocal = job.Schedule.NextAfter(now);
+                }
+                Log($"job '{job.Config.Name}' skipped ({JobStateEvaluator.Describe(state)}); " +
+                    $"next run {job.NextRunLocal:yyyy-MM-dd HH:mm}");
+                continue;
+            }
             RunOne(job, now, stopping);
         }
     }
@@ -707,6 +740,10 @@ public sealed class BackupScheduler
             config = _jobs.FirstOrDefault(j => j.Config.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
                 ?.Config ?? throw new InvalidOperationException($"Unknown job '{name}'.");
         }
+        JobRunState state = EvaluateJobState(config);
+        if (state != JobRunState.Active)
+            throw new InvalidOperationException(
+                $"Job '{name}' cannot run: {JobStateEvaluator.Describe(state)}.");
         JobRunResult result;
         lock (_operationLock)
         {

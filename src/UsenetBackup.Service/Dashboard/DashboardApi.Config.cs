@@ -208,11 +208,17 @@ public static partial class DashboardApi
         };
         try { test.Validate(); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
-        // Scheduled jobs must upload to at least one Usenet or network
-        // location. Local-only backups are only allowed as manual one-time
-        // runs, never on a schedule. This is the server-side enforcement;
-        // the dashboard form and the scheduler fail closed as well.
-        if (job.EffectiveTargets.Count == 0)
+        // A job may REMAIN without an upload target but may not be
+        // CREATED without one: scheduled jobs must upload to at least one
+        // Usenet or network location (local-only backups exist only as
+        // manual one-time runs). An existing job whose targets are all
+        // removed — directly, or by deleting its locations — is not an
+        // error; it becomes derived-paused (NeedsLocation) until a
+        // location is attached again. This is the server-side
+        // enforcement of the creation rule.
+        bool isCreate = !config.SnapshotJobs().Any(j =>
+            j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
+        if (isCreate && job.EffectiveTargets.Count == 0)
             return (400, new ErrorDto("Scheduled jobs must have at least one upload target (Usenet or network location)."));
 
         // Apply to the live config under the Jobs lock. Replace the object
@@ -359,29 +365,109 @@ public static partial class DashboardApi
     }
 
     /// <summary>
-    /// Deletes a location by name. Refuses if any job still targets it.
-    /// Returns (200, {}) or (400, error).
+    /// Deletes a location by name. Jobs that target it are NOT a
+    /// blocker: the location is stripped from their target lists. A job
+    /// left with no targets stays — it becomes derived-paused
+    /// (NeedsLocation) until a location is attached again, because a job
+    /// may remain without a location even though it may not be created
+    /// without one. Returns (200, {}) or (400, error).
     /// </summary>
     public static (int Status, object Payload) DeleteLocation(ServiceConfig config,
-        string configPath, string name, Action<string>? log = null)
+        BackupScheduler scheduler, string configPath, string name,
+        Action<string>? log = null)
     {
         var existing = config.Locations.FirstOrDefault(l =>
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
             return (400, new ErrorDto($"Unknown location '{name}'." ));
-        var usedBy = config.SnapshotJobs()
-            .Where(j => j.EffectiveTargets.Any(t =>
-                t.Equals(name, StringComparison.OrdinalIgnoreCase)))
-            .Select(j => j.Name).ToList();
-        if (usedBy.Count > 0)
-            return (400, new ErrorDto(
-                $"Location '{name}' is used by job(s): {string.Join(", ", usedBy)}. " +
-                "Remove it from those jobs first."));
+        var strippedFrom = new List<string>();
+        lock (config.JobsLock)
+        {
+            foreach (var job in config.Jobs)
+            {
+                var targets = job.EffectiveTargets
+                    .Where(t => !t.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (targets.Count != job.EffectiveTargets.Count)
+                {
+                    job.Targets = targets;
+                    strippedFrom.Add(job.Name);
+                }
+            }
+        }
         config.Locations.Remove(existing);
         try
         {
             config.Save(configPath);
-            log?.Invoke($"dashboard: location '{name}' deleted");
+            scheduler.ReloadJobs(config);
+            log?.Invoke(strippedFrom.Count > 0
+                ? $"dashboard: location '{name}' deleted; removed from job(s): {string.Join(", ", strippedFrom)}"
+                : $"dashboard: location '{name}' deleted");
+            return (200, new EmptyDto());
+        }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+    }
+
+    /// <summary>
+    /// Sets or clears a job's stored user pause. Resuming never triggers
+    /// a catch-up run: the scheduler discards occurrences that came due
+    /// while the job could not run and re-arms for the next one.
+    /// Returns (200, {}) or (400, error).
+    /// </summary>
+    public static (int Status, object Payload) SetJobPaused(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, string name, bool paused,
+        Action<string>? log = null)
+    {
+        lock (config.JobsLock)
+        {
+            var job = config.Jobs.FirstOrDefault(j =>
+                j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (job is null)
+                return (400, new ErrorDto($"Unknown job '{name}'." ));
+            job.Paused = paused;
+        }
+        try
+        {
+            config.Save(configPath);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: job '{name}' {(paused ? "paused" : "resumed")}");
+            return (200, new EmptyDto());
+        }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+    }
+
+    /// <summary>
+    /// Attaches an existing location to a job's targets (the repair path
+    /// for a job left without one). Adding the target is all it takes:
+    /// the job's derived NeedsLocation pause lifts on its own, and a
+    /// stored user pause, if any, is untouched. Returns (200, {}) or
+    /// (400, error).
+    /// </summary>
+    public static (int Status, object Payload) AttachLocation(ServiceConfig config,
+        BackupScheduler scheduler, string configPath, string jobName,
+        string locationName, Action<string>? log = null)
+    {
+        if (!config.Locations.Any(l =>
+                l.Name.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
+            return (400, new ErrorDto($"Unknown location '{locationName}'." ));
+        lock (config.JobsLock)
+        {
+            var job = config.Jobs.FirstOrDefault(j =>
+                j.Name.Equals(jobName, StringComparison.OrdinalIgnoreCase));
+            if (job is null)
+                return (400, new ErrorDto($"Unknown job '{jobName}'." ));
+            var targets = job.EffectiveTargets.ToList();
+            if (!targets.Any(t => t.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
+            {
+                targets.Add(locationName);
+                job.Targets = targets;
+            }
+        }
+        try
+        {
+            config.Save(configPath);
+            scheduler.ReloadJobs(config);
+            log?.Invoke($"dashboard: location '{locationName}' attached to job '{jobName}'");
             return (200, new EmptyDto());
         }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }

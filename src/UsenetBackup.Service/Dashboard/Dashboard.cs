@@ -465,7 +465,8 @@ public static class Dashboard
                     j.AutoVerify,
                     j.VerificationMode,
                     j.RedundancyMode,
-                    j.Sources)).ToList(),
+                    j.Sources,
+                    j.Paused)).ToList(),
                 // Never expose the encrypted password blob to the UI.
                 config.Nntp == null ? null : new ConfigNntpDto(
                     config.Nntp.Host,
@@ -581,7 +582,33 @@ public static class Dashboard
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var (status, payload) = DashboardApi.DeleteLocation(config, configPath, name, log);
+            var (status, payload) = DashboardApi.DeleteLocation(config, scheduler, configPath, name, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/jobs/{name}/pause", async (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            bool paused = body.TryGetProperty("paused", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.True;
+            var (status, payload) = DashboardApi.SetJobPaused(config, scheduler, configPath, name, paused, log);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/config/jobs/{name}/attach-location", async (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? location = body.TryGetProperty("location", out var l) ? l.GetString() : null;
+            if (string.IsNullOrWhiteSpace(location))
+                return Results.BadRequest(new ErrorDto("location is required."));
+            var (status, payload) = DashboardApi.AttachLocation(config, scheduler, configPath, name, location, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 

@@ -262,6 +262,18 @@ public sealed class BackupJobConfig
     public bool AutoUpload { get; set; }
 
     /// <summary>
+    /// User-controlled pause. A paused job never runs — scheduled or
+    /// manual — until resumed. This is the only STORED pause: the other
+    /// pauses (no backup location, USB drive away) are derived from the
+    /// job's targets and the attached drives, computed by
+    /// <see cref="JobStateEvaluator"/>, never persisted, so they lift on
+    /// their own when the cause clears. Resuming never triggers a
+    /// catch-up run; the job simply re-arms for its next scheduled time.
+    /// </summary>
+    [JsonPropertyName("paused")]
+    public bool Paused { get; set; }
+
+    /// <summary>
     /// Upload targets after a backup completes: any combination of
     /// <c>"nntp"</c> (Usenet) and <c>"smb"</c> (network share). Default is
     /// <c>["nntp"]</c> when <see cref="AutoUpload"/> is true, empty otherwise.
