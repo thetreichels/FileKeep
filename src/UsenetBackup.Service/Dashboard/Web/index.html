@@ -915,11 +915,9 @@
           <div class="card">
             <div style="border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px">
               <div style="font-weight:700;font-size:16px;margin-bottom:4px">FileKeep recovery sheet <span style="font-size:11px;font-weight:400;background:var(--bg-2);border-radius:10px;padding:2px 8px">YubiKey-only protection</span></div>
-              <div style="margin:16px 0;padding:20px;background:var(--bg-2);border-radius:6px;text-align:center;color:var(--text-2)">QR code (placeholder)</div>
               <div style="font-size:13px;font-weight:600;margin-bottom:4px">HMAC-SHA1 secret — 40 hex characters</div>
-              <div style="font-family:monospace;font-size:14px;letter-spacing:1px;margin-bottom:12px">a3f8 9c2e 1b7d 4f6a 8e2c 5d9b 3f1a 7c4e 2d8b 6a9f</div>
+              <div style="font-size:13px;color:var(--text-2);margin-bottom:12px">No secret is shown in this preview. The recovery secret is produced by setup — FileKeep generates it while your first key is programmed, and keeps no copy of its own.</div>
               <div style="font-size:12px;color:var(--text-2)">To recover: program this secret into a new YubiKey's HMAC-SHA1 challenge–response slot (slot 2), then open FileKeep and touch the key to restore from your Banked Vault. Keep this sheet somewhere safe — a fire safe or a safe-deposit box, not with your keys.</div>
-              <div style="font-size:12px;color:var(--text-2);margin-top:8px">Created October 17, 2026.</div>
             </div>
             <div style="margin-bottom:16px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">Store this somewhere safe and separate from your YubiKey.</div>
@@ -1503,14 +1501,18 @@ async function runAll() {
   for (const n of jobNames) await runJob(n);
   setTimeout(load, 2000);
 }
+let lastPassphraseSet = false;
 async function renderSetupCard(jobs, locations) {
   // Check if passphrase is configured FIRST — it must be part of the
   // change signature, or saving a passphrase never re-renders the card
   // and step 1 stays "incomplete" until a full page reload.
-  let passphraseSet = false;
+  // A failed status fetch keeps the last known value: a transient error
+  // must not flip step 1 back to "incomplete" until a successful poll.
+  let passphraseSet = lastPassphraseSet;
   try {
     const pp = await api('/api/config/passphrase-status');
     passphraseSet = pp.configured;
+    lastPassphraseSet = passphraseSet;
   } catch (e) { }
   const sig = jobs.length + ':' + locations.length + ':' + jobs.some(j => j.lastResult) + ':' + passphraseSet;
   if (sig === lastSetupSig) return;
@@ -1717,13 +1719,6 @@ function downloadNzb(backupId) {
   const repo = currentRepo();
   window.location = '/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId);
 }
-async function startAdhocBackup() {
-  const repo = currentRepo();
-  const sourceDir = document.getElementById('adhoc-source').value.trim();
-  if (!sourceDir) { toast('Enter a source folder.', 'err'); return; }
-  await api('/api/operations/backup-now', { method: 'POST', body: JSON.stringify({ repo, sourceDir }) });
-  toast('Backup started in the background. Watch the Operations log.');
-}
 // Tray icon setting (only available in the desktop GUI via NativeBridge)
 async function updateTrayVisibility() {
   try {
@@ -1873,17 +1868,6 @@ document.querySelector('[data-view="tools"]')?.addEventListener('click', () => {
   loadOneTimeDestinations();
   updateTrayVisibility();
 });
-async function startDiskBackup() {
-  const repo = currentRepo();
-  const device = document.getElementById('disk-device').value;
-  if (!device) { toast('Select a disk.', 'err'); return; }
-  // Image name is generated: disk<N>-<timestamp>.img — no typing needed.
-  const n = device.match(/(\d+)\s*$/)?.[1] ?? 'x';
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-  const imageName = `disk${n}-${stamp}.img`;
-  await api('/api/operations/disk-backup', { method: 'POST', body: JSON.stringify({ repo, device, imageName }) });
-  toast('Disk backup started in the background. Watch the Operations log.');
-}
 // Populate every disk picker from /api/operations/drives (no typing).
 // The restore-target picker never lists the running system disk.
 async function refreshDiskList() {
@@ -2042,32 +2026,6 @@ async function runRetentionCheck() {
   if (!dryRun && !confirm('Run a live retention check (may repost articles)?')) return;
   await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ dryRun }) });
   toast('Retention check started in the background. Watch the Operations log.', 'ok');
-}
-async function runDiagnose() {
-  const host = document.getElementById('op-host').value.trim();
-  if (!host) { toast('Enter a hostname.', 'err'); return; }
-  const box = document.getElementById('diagnoseResult');
-  box.innerHTML = '<p style="color:var(--text-2)">Probing…</p>';
-  try {
-    const r = await api('/api/operations/diagnose', { method: 'POST', body: JSON.stringify({ host }) });
-    box.innerHTML = '<table><tbody>' +
-      r.probes.map(p => `<tr><td><code>${esc(p.port)}</code></td><td>${esc(p.result)}</td></tr>`).join('') +
-      (r.fallback ? `<tr><td><code>${esc(r.fallback.host)}</code></td><td>${esc(r.fallback.result)}</td></tr>` : '') +
-      '</tbody></table><p>' + esc(r.diagnosis) + '</p>';
-  } catch (e) { box.innerHTML = `<p>${esc(e.message)}</p>`; }
-}
-async function checkWinRePrereqs() {
-  const el = document.getElementById('winre-prereq');
-  el.textContent = 'Checking…';
-  try {
-    const p = await api('/api/operations/winre-prerequisites');
-    if (p.ready) {
-      el.innerHTML = '<b style="color:green">Ready</b> — WinRE enabled, no ADK needed.';
-    } else {
-      const missing = (p.missing || []).map(esc).join(', ');
-      el.innerHTML = '<b style="color:red">Not ready:</b> ' + missing;
-    }
-  } catch (e) { el.textContent = e.message; }
 }
 function winreTargetChanged() {
   const target = document.getElementById('winre-target').value;
@@ -2262,72 +2220,7 @@ async function loadSettings() {
   // Load backup locations
   renderLocations(cfg.locations || []);
   renderVaultLocations(cfg.locations || []);
-  loadPassphraseStatus();
   updateUsbScanButtonVisibility();
-}
-async function loadPassphraseStatus() {
-  const el = document.getElementById('passphrase-status');
-  if (!el) return;
-  try {
-    const s = await api('/api/config/passphrase-status');
-    const form = document.getElementById('pp-form');
-    const configured = document.getElementById('pp-configured');
-    const actions = document.getElementById('pp-actions');
-    const detail = document.getElementById('pp-configured-detail');
-    if (s.configured) {
-      el.textContent = '✓ Passphrase ' + (s.source === 'environment' ? 'from environment variable' : 'stored (DPAPI-encrypted)') + (s.yubikey ? ' · YubiKey' : '');
-      el.style.color = 'var(--good)';
-      // Hide the form; show the configured summary instead.
-      if (form) form.style.display = 'none';
-      if (actions) actions.style.display = 'none';
-      if (configured) configured.style.display = '';
-      if (detail) detail.textContent = s.source === 'environment'
-        ? 'Using the passphrase from the environment variable.'
-        : 'Stored securely with Windows DPAPI' + (s.yubikey ? ' and YubiKey.' : '.');
-    } else {
-      el.textContent = '✗ No passphrase configured — scheduled jobs will fail.';
-      el.style.color = 'var(--bad)';
-      if (form) form.style.display = '';
-      if (actions) actions.style.display = '';
-      if (configured) configured.style.display = 'none';
-    }
-  } catch (e) { el.textContent = 'Could not check passphrase status.'; }
-  loadYubiKeyStatus();
-}
-function showPassphraseForm() {
-  document.getElementById('pp-form').style.display = '';
-  document.getElementById('pp-actions').style.display = '';
-  document.getElementById('pp-configured').style.display = 'none';
-  document.getElementById('pp-pass').focus();
-}
-async function loadYubiKeyStatus() {
-  const el = document.getElementById('pp-yubikey-status');
-  if (!el) return;
-  try {
-    const s = await api('/api/yubikey/status');
-    el.textContent = s.detected ? '✓ YubiKey detected: ' + s.devices.join(', ') : 'No YubiKey detected.';
-  } catch (e) { el.textContent = ''; }
-}
-async function savePassphrase() {
-  const err = document.getElementById('pp-error');
-  err.style.display = 'none';
-  const p1 = document.getElementById('pp-pass').value;
-  const p2 = document.getElementById('pp-confirm').value;
-  const yk = document.getElementById('pp-yubikey').checked;
-  if (!p1) { err.textContent = 'Enter a passphrase.'; err.style.display = ''; return; }
-  if (p1 !== p2) { err.textContent = 'Passphrases do not match.'; err.style.display = ''; return; }
-  if (yk && !confirm('This will program YubiKey slot 2 for FileKeep challenge-response (overwriting anything in that slot). You will touch the key twice: once to program it, once to wrap the passphrase. Continue?')) return;
-  const touch = document.getElementById('pp-touch');
-  try {
-    if (yk) { touch.classList.add('show'); document.getElementById('pp-touch-detail').textContent = 'Programming slot 2 — touch the key when it flashes.'; }
-    await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: p1, yubikey: yk }) });
-    document.getElementById('pp-pass').value = '';
-    document.getElementById('pp-confirm').value = '';
-    document.getElementById('pp-yubikey').checked = false;
-    toast(yk ? 'Passphrase saved — YubiKey setup complete. Restores will ask for a touch.' : 'Passphrase saved.', 'ok');
-    loadPassphraseStatus();
-  } catch (e) { err.textContent = e.message; err.style.display = ''; }
-  finally { touch.classList.remove('show'); }
 }
 async function programSpareKey() {
   if (!confirm('Insert the spare YubiKey and click OK. You will be prompted to touch it when it flashes.\n\nThis programs the spare with the same secret as your main key.')) return;
@@ -2346,7 +2239,6 @@ async function clearPassphrase() {
   if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
   try {
     await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: '' }) });
-    loadPassphraseStatus();
   } catch (e) { toast(e.message, 'err'); }
 }
 // ---- Vault storage locations (simplified list for Banked Vault tab) ----
@@ -2620,27 +2512,6 @@ async function testLocationConnection() {
   } catch (e) {
     resultEl.innerHTML = '<span style="color:var(--bad)">✗ ' + esc(e.message) + '</span>';
   }
-}
-async function testFreeServers() {
-  const resultEl = document.getElementById('freeServerResult');
-  resultEl.innerHTML = '<span style="color:var(--text-2)">Testing free servers…</span>';
-  const freeServers = [
-    { host: 'news.eternal-september.org', port: 119, name: 'Eternal September' },
-    { host: 'nntp.aioe.org', port: 119, name: 'AIOE' }
-  ];
-  let html = '';
-  for (const srv of freeServers) {
-    try {
-      const result = await api('/api/operations/nntp-test', {
-        method: 'POST',
-        body: JSON.stringify({ host: srv.host, port: srv.port })
-      });
-      html += '<div>' + (result.ok ? '<span style="color:var(--good)">✓</span>' : '<span style="color:var(--bad)">✗</span>') + ' ' + esc(srv.name) + ' (' + esc(srv.host) + ')' + (result.ok ? '' : ' — ' + esc(result.error || 'failed')) + '</div>';
-    } catch (e) {
-      html += '<div><span style="color:var(--bad)">✗</span> ' + esc(srv.name) + ' — ' + esc(e.message) + '</div>';
-    }
-  }
-  resultEl.innerHTML = html;
 }
 async function editLocation(name) {
   const cfg = await api('/api/config');
@@ -3011,12 +2882,6 @@ async function secSaveProfile() {
   } catch (e) { toast(e.message, 'err'); return false; }
 }
 
-// Passphrase setup
-function secShowPassphraseSetup() {
-  const el = document.getElementById('sec-passphrase-setup');
-  el.style.display = el.style.display === 'none' ? '' : 'none';
-}
-
 function secCheckPassphrase() {
   const p1 = document.getElementById('sec-pp-pass').value;
   const p2 = document.getElementById('sec-pp-confirm').value;
@@ -3113,20 +2978,6 @@ async function secNext() {
   secGoStep(secCurrentStep + 1);
 }
 
-// YubiKey setup
-function secShowYubiKeySetup() {
-  const el = document.getElementById('sec-yubikey-setup');
-  el.style.display = el.style.display === 'none' ? '' : 'none';
-}
-
-async function secStartYubiKeySetup() {
-  toast('Touch your YubiKey when it flashes…', '');
-  try {
-    document.getElementById('sec-yk-step-touch').style.display = 'none';
-    document.getElementById('sec-yk-step-sheet').style.display = '';
-  } catch (e) { toast(e.message, 'err'); }
-}
-
 function secSaveRecoverySheet(format) {
   const content = 'FileKeep YubiKey Recovery Sheet\n' +
     '================================\n\n' +
@@ -3153,21 +3004,6 @@ function secSaveRecoverySheet(format) {
     });
   }
   toast('Recovery sheet saved.', 'ok');
-}
-
-async function secFinishYubiKeySetup() {
-  try {
-    await api('/api/protection/profile', {
-      method: 'POST',
-      body: JSON.stringify({ ...secProfile, yubiKeyEnabled: true }),
-    });
-    secProfile.yubiKeyEnabled = true;
-    document.getElementById('sec-yubikey-toggle').checked = true;
-    document.getElementById('sec-yubikey-setup').style.display = 'none';
-    secUpdateLinkBand();
-    secUpdateInsight();
-    toast('YubiKey setup complete.', 'ok');
-  } catch (e) { toast(e.message, 'err'); }
 }
 
 // Wizard navigation

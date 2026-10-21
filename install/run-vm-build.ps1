@@ -191,7 +191,7 @@ Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
 # Branded Burn bootstrapper: stock WixStandardBootstrapperApplication with the
 # FileKeep logo (see install/Bundle.wxs). No custom theme, so no splash
-# copy is needed — the old FileKeepTheme files stay in install/ unreferenced.
+# copy is needed — the old FileKeepTheme files were unreferenced and are removed.
 # NOTE: the Bal NuGet package (WixToolset.Bal.wixext) ships its assembly as
 # WixToolset.BootstrapperApplications.wixext.dll, so the -ext moniker cannot
 # resolve it by name. Pass the assembly path explicitly.
