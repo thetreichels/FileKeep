@@ -112,6 +112,40 @@ public sealed class Catalog : IDisposable
     }
 
     /// <summary>
+    /// Total catalogued size in bytes of the given chunks. IDs that are not
+    /// in the catalog (e.g. a manifest referencing a chunk this repo never
+    /// staged) contribute 0. Batched like <see cref="HasChunks"/> to stay
+    /// under SQLite's variable limit.
+    /// </summary>
+    public long SumChunkSizes(IEnumerable<string> ids)
+    {
+        var idList = new List<string>(new HashSet<string>(ids, StringComparer.Ordinal));
+        if (idList.Count == 0)
+            return 0;
+
+        long total = 0;
+        lock (_lock)
+        {
+            const int batchSize = 500;
+            for (int i = 0; i < idList.Count; i += batchSize)
+            {
+                var batch = idList.Skip(i).Take(batchSize).ToList();
+                using var cmd = _conn.CreateCommand();
+                var paramNames = new string[batch.Count];
+                for (int j = 0; j < batch.Count; j++)
+                {
+                    paramNames[j] = "$p" + j;
+                    cmd.Parameters.AddWithValue(paramNames[j], batch[j]);
+                }
+                cmd.CommandText =
+                    "SELECT COALESCE(SUM(size_bytes), 0) FROM chunks WHERE id IN (" + string.Join(",", paramNames) + ")";
+                total += (long)cmd.ExecuteScalar()!;
+            }
+        }
+        return total;
+    }
+
+    /// <summary>
     /// Batched version of <see cref="RecordChunk"/>: inserts multiple chunks
     /// in a single transaction. Used with <see cref="HasChunks"/> to keep
     /// per-chunk SQLite round-trips down during backup.

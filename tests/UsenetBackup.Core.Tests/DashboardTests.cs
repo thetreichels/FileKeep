@@ -93,7 +93,9 @@ public sealed class DashboardTests : IDisposable
         Assert.Equal(200, status);
         using var doc = ToJson(payload);
         Assert.Equal(1, doc.RootElement.GetArrayLength());
-        Assert.Equal("full", doc.RootElement[0].GetProperty("Type").GetString());
+        Assert.Equal("full", doc.RootElement[0].GetProperty("type").GetString());
+        // a.txt is 4 bytes -> one catalogued chunk -> storedBytes 4.
+        Assert.Equal(4, doc.RootElement[0].GetProperty("storedBytes").GetInt64());
 
         var (bad, _) = DashboardApi.GetBackups(config, "/tmp");
         Assert.Equal(400, bad);

@@ -198,6 +198,18 @@ public sealed record ExpiringBackupDto(
     [property: JsonPropertyName("daysLeft")] int DaysLeft,
     [property: JsonPropertyName("retentionDays")] int RetentionDays);
 
+/// <summary>
+/// Backup entry for GET /api/backups. StoredBytes is the catalogued
+/// plaintext size of the distinct chunks the backup's manifest references
+/// (see BackupRepository.StoredBytes).
+/// </summary>
+public sealed record BackupDto(
+    [property: JsonPropertyName("backupId")] string BackupId,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("createdUtc")] DateTime CreatedUtc,
+    [property: JsonPropertyName("storedBytes")] long StoredBytes);
+
 /// <summary>A backup discovered on an SMB share or USB drive.</summary>
 public sealed record DiscoveredBackupDto(
     [property: JsonPropertyName("backupId")] string BackupId,

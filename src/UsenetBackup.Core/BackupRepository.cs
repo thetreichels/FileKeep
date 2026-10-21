@@ -1217,6 +1217,29 @@ public sealed class BackupRepository : IDisposable
 
     public IReadOnlyList<BackupSummary> ListBackups() => _catalog.ListBackups();
 
+    /// <summary>
+    /// Stored size of one backup in bytes: the catalogued plaintext sizes
+    /// of the distinct chunks its manifest references (file chunk lists
+    /// plus volume chunk lists). A chunk shared with another backup counts
+    /// in full toward this backup; sparse disk-image gaps are empty chunk
+    /// IDs and contribute 0. Source of truth is the catalog's chunks table,
+    /// which records every chunk this repo has staged.
+    /// </summary>
+    public long StoredBytes(BackupManifest manifest)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in manifest.Files)
+            foreach (string id in f.Chunks)
+                if (!string.IsNullOrEmpty(id))
+                    ids.Add(id);
+        if (manifest.Volumes is not null)
+            foreach (var v in manifest.Volumes)
+                foreach (string id in v.ChunkIds)
+                    if (!string.IsNullOrEmpty(id))
+                        ids.Add(id);
+        return _catalog.SumChunkSizes(ids);
+    }
+
     public long StoredChunkCount() => _blobs.StoredCount;
 
     /// <summary>

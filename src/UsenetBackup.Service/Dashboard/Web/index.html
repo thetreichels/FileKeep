@@ -1524,6 +1524,13 @@ async function runJob(name) {
   toast('Backup "' + name + '" is still running — check Backup jobs for its result.', '');
   load();
 }
+function fmtBytes(b) {
+  if (b >= 1099511627776) return (b / 1099511627776).toFixed(1) + ' TB';
+  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+  if (b >= 1048576) return Math.round(b / 1048576) + ' MB';
+  if (b >= 1024) return Math.round(b / 1024) + ' KB';
+  return b + ' B';
+}
 async function loadRepo() {
   const repo = currentRepo();
   if (!repo) return;
@@ -1544,6 +1551,16 @@ async function loadRepo() {
   if (vcEl) vcEl.textContent = bs.length;
   const ovEl = document.getElementById('ov-vault-count');
   if (ovEl) ovEl.textContent = bs.length;
+  // Stored totals: sum of the per-backup storedBytes from this same
+  // payload, written to both cards from the same computed value so
+  // Overview and Vault can never disagree. Empty vault keeps the "—".
+  const storedText = bs.length
+    ? fmtBytes(bs.reduce((sum, b) => sum + (b.storedBytes || 0), 0))
+    : '—';
+  const osEl = document.getElementById('ov-stored');
+  if (osEl) osEl.textContent = storedText;
+  const vsEl = document.getElementById('vault-stored');
+  if (vsEl) vsEl.textContent = storedText;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
   const rbEl = document.getElementById('remoteBackups');
   if (rbEl) rbEl.innerHTML = '';

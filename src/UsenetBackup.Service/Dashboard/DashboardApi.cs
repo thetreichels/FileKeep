@@ -252,12 +252,26 @@ public static partial class DashboardApi
         try
         {
             using var r = BackupRepository.Open(repo, passphrase);
-            return (200, r.ListBackups().OrderByDescending(b => b.CreatedUtc).ToArray());
+            var backups = r.ListBackups().OrderByDescending(b => b.CreatedUtc)
+                .Select(b => new BackupDto(b.BackupId, b.Type, b.Source, b.CreatedUtc,
+                    StoredBytesOf(r, b.BackupId)))
+                .ToArray();
+            return (200, backups);
         }
         catch (Exception ex)
         {
             return (500, new ErrorDto(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Catalogued stored bytes for one backup; 0 when its manifest can't be
+    /// read, so one corrupt manifest doesn't blank the whole vault list.
+    /// </summary>
+    private static long StoredBytesOf(BackupRepository repo, string backupId)
+    {
+        try { return repo.StoredBytes(repo.LoadManifest(backupId)); }
+        catch { return 0; }
     }
 
     /// <summary>

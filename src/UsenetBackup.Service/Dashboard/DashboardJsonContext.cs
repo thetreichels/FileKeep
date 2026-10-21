@@ -49,6 +49,8 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(StatusLastResultDto))]
 [JsonSerializable(typeof(ExpiringBackupDto))]
 [JsonSerializable(typeof(List<ExpiringBackupDto>))]
+[JsonSerializable(typeof(BackupDto))]
+[JsonSerializable(typeof(BackupDto[]))]
 [JsonSerializable(typeof(PhysicalDrives.PhysicalDrive))]
 [JsonSerializable(typeof(PhysicalDrives.PhysicalDrive[]))]
 [JsonSerializable(typeof(UsbDrives.UsbDrive))]
