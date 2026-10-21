@@ -324,4 +324,140 @@ public sealed class DashboardTests : IDisposable
         Assert.Throws<PlatformNotSupportedException>(() => Dpapi.Protect("test"));
         Assert.Throws<PlatformNotSupportedException>(() => Dpapi.Unprotect("dGVzdA=="));
     }
+
+    // ---- GET /api/browse-folders (server-backed folder picker) ----
+
+    [Fact]
+    public void BrowseFolders_ListsSubfoldersOnlyWithParent()
+    {
+        string root = Path.Combine(_workDir, "browse");
+        string subA = Path.Combine(root, "alpha");
+        string subB = Path.Combine(root, "Beta");
+        Directory.CreateDirectory(subA);
+        Directory.CreateDirectory(subB);
+        File.WriteAllText(Path.Combine(root, "file.txt"), "not a folder");
+
+        var (status, payload) = DashboardApi.BrowseFolders(root);
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        var el = doc.RootElement;
+        Assert.Equal(Path.GetFullPath(root), el.GetProperty("path").GetString());
+        Assert.Equal(Path.GetFullPath(_workDir), el.GetProperty("parent").GetString());
+        var folders = el.GetProperty("folders");
+        Assert.Equal(2, folders.GetArrayLength());
+        // Sorted by name (case-insensitive); files excluded.
+        Assert.Equal("alpha", folders[0].GetProperty("name").GetString());
+        Assert.Equal(Path.GetFullPath(subA), folders[0].GetProperty("path").GetString());
+        Assert.Equal("Beta", folders[1].GetProperty("name").GetString());
+        Assert.Equal(Path.GetFullPath(subB), folders[1].GetProperty("path").GetString());
+        Assert.Equal(0, el.GetProperty("drives").GetArrayLength());
+    }
+
+    [Fact]
+    public void BrowseFolders_NestedFolder_ParentIsImmediateParent()
+    {
+        string deep = Path.Combine(_workDir, "a", "b", "c");
+        Directory.CreateDirectory(deep);
+
+        var (status, payload) = DashboardApi.BrowseFolders(deep);
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        Assert.Equal(Path.GetFullPath(Path.Combine(_workDir, "a", "b")),
+            doc.RootElement.GetProperty("parent").GetString());
+        Assert.Equal(0, doc.RootElement.GetProperty("folders").GetArrayLength());
+    }
+
+    [Fact]
+    public void BrowseFolders_TrailingSeparator_IsNormalized()
+    {
+        string root = Path.Combine(_workDir, "browse2");
+        Directory.CreateDirectory(root);
+
+        var (status, payload) = DashboardApi.BrowseFolders(root + Path.DirectorySeparatorChar);
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        Assert.Equal(Path.GetFullPath(root), doc.RootElement.GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public void BrowseFolders_EmptyPath_ReturnsDrivesView()
+    {
+        var (status, payload) = DashboardApi.BrowseFolders("");
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        var el = doc.RootElement;
+        Assert.Equal("", el.GetProperty("path").GetString());
+        Assert.Equal(JsonValueKind.Null, el.GetProperty("parent").ValueKind);
+        Assert.Equal(0, el.GetProperty("folders").GetArrayLength());
+        var drives = el.GetProperty("drives");
+        Assert.True(drives.GetArrayLength() >= 1);
+        foreach (var d in drives.EnumerateArray())
+            Assert.True(Directory.Exists(d.GetProperty("path").GetString()));
+        // Home is the picker's default start folder; it exists on any
+        // machine with a user profile.
+        Assert.False(string.IsNullOrEmpty(el.GetProperty("home").GetString()));
+
+        var (nullStatus, _) = DashboardApi.BrowseFolders(null);
+        Assert.Equal(200, nullStatus);
+    }
+
+    [Fact]
+    public void BrowseFolders_DriveRoot_HasNoParent()
+    {
+        string root = Path.GetPathRoot(_workDir)!;
+        var (status, payload) = DashboardApi.BrowseFolders(root);
+        Assert.Equal(200, status);
+        using var doc = ToJson(payload);
+        Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("parent").ValueKind);
+        Assert.Equal(root, doc.RootElement.GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public void BrowseFolders_MissingFolder_ReturnsCleanError()
+    {
+        string missing = Path.Combine(_workDir, "no-such-folder");
+        var (status, payload) = DashboardApi.BrowseFolders(missing);
+        Assert.Equal(400, status);
+        using var doc = ToJson(payload);
+        Assert.Contains("not found", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void BrowseFolders_FilePath_ReturnsCleanError()
+    {
+        string file = Path.Combine(_workDir, "a-file.txt");
+        File.WriteAllText(file, "x");
+        var (status, payload) = DashboardApi.BrowseFolders(file);
+        Assert.Equal(400, status);
+        using var doc = ToJson(payload);
+        Assert.Contains("not a folder", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void BrowseFolders_AccessDenied_ReturnsCleanError()
+    {
+        if (OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip("chmod-based access denial is Unix-only.");
+        string locked = Path.Combine(_workDir, "locked");
+        Directory.CreateDirectory(Path.Combine(locked, "child"));
+        var prev = File.GetUnixFileMode(locked);
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        try
+        {
+            bool enforced;
+            try { Directory.GetDirectories(locked); enforced = false; }
+            catch (UnauthorizedAccessException) { enforced = true; }
+            if (!enforced)
+                throw Xunit.Sdk.SkipException.ForSkip(
+                    "Filesystem does not enforce permissions for this user (e.g. running as root).");
+            var (status, payload) = DashboardApi.BrowseFolders(locked);
+            Assert.Equal(400, status);
+            using var doc = ToJson(payload);
+            Assert.Contains("Access denied", doc.RootElement.GetProperty("error").GetString());
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, prev);
+        }
+    }
 }

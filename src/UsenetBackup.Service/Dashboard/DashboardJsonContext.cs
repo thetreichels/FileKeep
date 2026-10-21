@@ -32,6 +32,7 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(ImportedDto))]
 [JsonSerializable(typeof(FolderDto))]
 [JsonSerializable(typeof(List<FolderDto>))]
+[JsonSerializable(typeof(BrowseFoldersDto))]
 [JsonSerializable(typeof(NntpProbeResultDto))]
 [JsonSerializable(typeof(NntpProbeResponseDto))]
 [JsonSerializable(typeof(List<NntpProbeResultDto>))]

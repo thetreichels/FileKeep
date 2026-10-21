@@ -125,6 +125,17 @@ public static class Dashboard
             return Results.Json(folders);
         });
 
+        // Server-side folder listing for the dashboard's folder picker —
+        // the browser path when the GUI's native folder dialog is absent.
+        // Read-only GET like /api/user-folders, so no CSRF token. An empty
+        // path returns the drives view; errors are ErrorDto payloads the
+        // picker displays inline.
+        app.MapGet("/api/browse-folders", (string? path) =>
+        {
+            var (status, payload) = DashboardApi.BrowseFolders(path);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapPost("/api/jobs/{name}/run", (string name, HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

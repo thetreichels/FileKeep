@@ -31,6 +31,13 @@
   .folder-row { display: flex; gap: 6px; align-items: center; }
   .folder-row input { flex: 1; min-width: 0; }
   .browse-btn { white-space: nowrap; }
+  /* Server folder picker: full-width entry rows inside the picker modal. */
+  .fp-entry {
+    display: block; width: 100%; text-align: left; box-shadow: none;
+    border: none; background: none; padding: 8px 10px; border-radius: 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fp-entry:hover { background: #f5f5f5; }
   /* Multi-folder source list: explanation bar + rows. */
   .folder-list-msg { display:flex; gap:8px; align-items:flex-start; border:1px solid #b9cdf5; background:#eef4ff; color:#1d3a6e; border-radius:6px; padding:8px 10px; margin-bottom:8px; font-size:13px; }
   .folder-list-msg.err { border-color:#f0b3ac; background:#fdecea; color:#8f1d12; }
@@ -1078,16 +1085,137 @@
 
               </main>
 </div>
+<div id="folderPickerModal" class="modal" style="display:none">
+  <div class="modal-box">
+    <h2 style="margin-top:0" id="fpTitle">Select folder</h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button type="button" id="fpUp" onclick="folderPickerUp()">⬆ Up</button>
+      <button type="button" id="fpDrives" onclick="fpLoad('')">💽 Drives</button>
+      <span id="fpCurrent" style="flex:1;font-weight:600;word-break:break-all"></span>
+    </div>
+    <div id="fpError" style="display:none;color:var(--bad);margin-top:8px"></div>
+    <div id="fpList" style="margin-top:8px;max-height:320px;overflow-y:auto"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="closeFolderPicker()">Cancel</button>
+      <button class="accent" id="fpSelect" onclick="selectFolderPicker()">Select this folder</button>
+    </div>
+  </div>
+</div>
 <script>
-// Native folder picker: uses the FileKeep GUI's native dialog when available,
-// otherwise does nothing (user types the path manually in a plain browser).
+// Folder picker: in the desktop app this uses the GUI's native dialog;
+// in a plain browser it opens the server-backed picker (below), which
+// lists folders via GET /api/browse-folders. Either way a pick is
+// committed by setting the input's value before this promise resolves —
+// callers read input.value afterwards (the folder-row guard depends on
+// that contract) — and cancelling leaves the input exactly as it was.
 async function browseFolder(inputId, title) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
   if (typeof window.fileKeepPickFolder === 'function') {
     try {
       const path = await window.fileKeepPickFolder(title || 'Select a folder');
-      if (path) document.getElementById(inputId).value = path;
+      if (path) input.value = path;
     } catch (e) { /* dialog unavailable; leave the typed value */ }
+    return;
   }
+  await openFolderPicker(input, title);
+}
+
+// ---- Server-backed folder picker (browser path) ----
+// fpResolve settles the promise browseFolder() is awaiting: Select writes
+// the shown folder into the target input first; Cancel just closes, so a
+// cancelled pick can never disturb a row or its typed value.
+let fpResolve = null;
+let fpInput = null;
+let fpPath = '';     // folder currently shown ('' = drives view)
+let fpParent = null; // parent of fpPath (null at a drive root / drives view)
+let fpHome = '';     // user profile folder reported by the service
+
+async function fpFetch(path) {
+  return api('/api/browse-folders' + (path ? '?path=' + encodeURIComponent(path) : ''));
+}
+function fpSetError(msg) {
+  const el = document.getElementById('fpError');
+  el.textContent = msg || '';
+  el.style.display = msg ? '' : 'none';
+}
+// Navigates the picker; errors surface inline in the modal, never silently.
+async function fpLoad(path) {
+  try {
+    fpShow(await fpFetch(path));
+    return true;
+  } catch (e) {
+    fpSetError(e.message);
+    return false;
+  }
+}
+function fpShow(data) {
+  fpPath = data.path || '';
+  fpParent = data.parent ?? null;
+  if (data.home) fpHome = data.home;
+  fpSetError('');
+  document.getElementById('fpCurrent').textContent = fpPath || 'This PC';
+  document.getElementById('fpUp').disabled = fpPath === '';
+  document.getElementById('fpDrives').disabled = fpPath === '';
+  document.getElementById('fpSelect').disabled = fpPath === '';
+  const list = document.getElementById('fpList');
+  list.innerHTML = '';
+  const entries = fpPath === '' ? (data.drives || []) : (data.folders || []);
+  if (!entries.length) {
+    const p = document.createElement('p');
+    p.className = 'meta';
+    p.textContent = fpPath === ''
+      ? 'No drives available.'
+      : 'No subfolders here — use "Select this folder" to choose this folder.';
+    list.appendChild(p);
+    return;
+  }
+  for (const e of entries) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'fp-entry';
+    b.textContent = (fpPath === '' ? '💽 ' : '📁 ') + e.name;
+    b.title = e.path;
+    b.addEventListener('click', () => fpLoad(e.path));
+    list.appendChild(b);
+  }
+}
+function folderPickerUp() {
+  if (fpPath === '') return;
+  fpLoad(fpParent ?? '');
+}
+async function openFolderPicker(input, title) {
+  fpInput = input;
+  document.getElementById('fpTitle').textContent = title || 'Select a folder';
+  document.getElementById('folderPickerModal').style.display = '';
+  const done = new Promise(res => { fpResolve = res; });
+  const start = (input.value || '').trim();
+  if (start) {
+    try {
+      fpShow(await fpFetch(start));
+    } catch (e) {
+      // The typed path can't be listed (missing, a file, access denied):
+      // fall back to the drives view, keeping the reason visible.
+      const why = e.message;
+      if (await fpLoad('')) fpSetError('Could not open "' + start + '": ' + why);
+    }
+  } else if (await fpLoad('')) {
+    // Nothing typed yet: start at the user's home folder when the
+    // service reports one; the drives view stays as the fallback.
+    if (fpHome) await fpLoad(fpHome);
+  }
+  await done;
+}
+function selectFolderPicker() {
+  if (fpPath && fpInput) fpInput.value = fpPath;
+  closeFolderPicker();
+}
+function closeFolderPicker() {
+  document.getElementById('folderPickerModal').style.display = 'none';
+  const res = fpResolve;
+  fpResolve = null;
+  fpInput = null;
+  if (res) res();
 }
 async function browseSaveFile(inputId, title, filter, defaultName) {
   if (typeof window.fileKeepPickSaveFile === 'function') {
@@ -1173,10 +1301,13 @@ function makeFolderList(prefix) {
     row.className = 'folder-row';
     row.append(input, browseBtn, removeBtn);
     browseBtn.addEventListener('click', async () => {
-      const before = input.dataset.committed || '';
+      // Capture the exact box contents (uncommitted typing included): a
+      // cancelled pick restores them verbatim — the row and whatever the
+      // user typed survive a cancelled Browse.
+      const before = input.value;
       await browseFolder(input.id, 'Select folder to back up');
       const picked = input.value.trim();
-      if (!picked || picked === before) { input.value = before; return; }
+      if (!picked || picked === before.trim()) { input.value = before; return; }
       if (!applyPickedPath(input, picked)) input.value = before; // guard refused
     });
     // Typed paths go through the same guard.
@@ -1219,7 +1350,10 @@ function makeFolderList(prefix) {
     const input = addRow('');
     await browseFolder(input.id, 'Select folder to back up');
     const picked = input.value.trim();
-    if (!picked || !applyPickedPath(input, picked)) input.closest('.folder-row').remove();
+    // Cancelled pick: the new row stays (empty) for typing or manual
+    // removal — adding a row must never make it vanish again.
+    if (!picked) return;
+    if (!applyPickedPath(input, picked)) input.value = ''; // guard refused: keep the empty row
   });
   msgBox.querySelector('.folder-msg-x').addEventListener('click', hideMsg);
   return { getFolders, setFolders, addFolder, markInvalid };

@@ -85,6 +85,21 @@ public sealed record FolderDto(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("path")] string Path);
 
+/// <summary>
+/// Response for GET /api/browse-folders (server-backed folder picker).
+/// Path is the listed folder's full path, or "" for the drives view;
+/// Parent is null at a drive root (and in the drives view), where the
+/// picker's "up" target is the drives view. Folders holds the listed
+/// folder's subdirectories; Drives is populated only in the drives view.
+/// Home is the user's profile folder, the picker's default start.
+/// </summary>
+public sealed record BrowseFoldersDto(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("parent")] string? Parent,
+    [property: JsonPropertyName("home")] string Home,
+    [property: JsonPropertyName("folders")] List<FolderDto> Folders,
+    [property: JsonPropertyName("drives")] List<FolderDto> Drives);
+
 /// <summary>Snapshot of upload progress for /api/upload-progress.</summary>
 /// <summary>Single NNTP probe result for /api/config/nntp/probe.</summary>
 public sealed record NntpProbeResultDto(
