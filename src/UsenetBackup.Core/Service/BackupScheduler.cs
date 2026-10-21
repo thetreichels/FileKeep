@@ -482,7 +482,7 @@ public sealed class BackupScheduler
             CancellationToken token = BeginOperation();
             try
             {
-                string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+                string passphrase = GetPassphrase(_config) ?? "";
                 if (string.IsNullOrEmpty(passphrase))
                     throw new InvalidOperationException($"No passphrase (set {PassphraseEnvVar}).");
             // Reuse the per-job upload path with a synthetic job config.
@@ -593,7 +593,7 @@ public sealed class BackupScheduler
     private void RunRetentionForRepo(string repoPath, IReadOnlyList<NntpConfig> providers, bool dryRun = false, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
-        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+        string passphrase = GetPassphrase(_config) ?? "";
         if (string.IsNullOrEmpty(passphrase))
         {
             Log($"retention check skipped for '{repoPath}': no passphrase (set {PassphraseEnvVar})");
@@ -767,7 +767,7 @@ public sealed class BackupScheduler
             throw new ArgumentException("Source folders must be existing directories.", nameof(sourceDirs));
         if (string.IsNullOrWhiteSpace(repoPath))
             throw new ArgumentException("A destination folder is required.", nameof(repoPath));
-        string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+        string passphrase = GetPassphrase(_config) ?? "";
         if (string.IsNullOrEmpty(passphrase))
             throw new InvalidOperationException(
                 $"Cannot run a backup without a passphrase: set the {PassphraseEnvVar} " +
@@ -819,7 +819,7 @@ public sealed class BackupScheduler
         try
         {
             token.ThrowIfCancellationRequested();
-            string passphrase = Environment.GetEnvironmentVariable(PassphraseEnvVar) ?? "";
+            string passphrase = GetPassphrase(_config) ?? "";
             if (string.IsNullOrEmpty(passphrase))
                 throw new InvalidOperationException(
                     $"Cannot run scheduled backup without a passphrase: set the {PassphraseEnvVar} " +

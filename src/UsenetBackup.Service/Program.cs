@@ -71,7 +71,7 @@ Console.WriteLine(
     $"filekeep-service: {config.Jobs.Count} job(s); " +
     $"dashboard at http://{config.DashboardBind}:{config.DashboardPort}/");
 Console.WriteLine(
-    $"Scheduled backups need the {BackupScheduler.PassphraseEnvVar} environment variable.");
+    $"Scheduled backups use the stored repository secret, or the {BackupScheduler.PassphraseEnvVar} environment variable when set.");
 
 if (consoleMode)
 {

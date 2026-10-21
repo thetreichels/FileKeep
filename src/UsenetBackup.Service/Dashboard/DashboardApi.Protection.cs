@@ -29,13 +29,20 @@ public static partial class DashboardApi
             Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar)) ||
         !string.IsNullOrEmpty(config.PassphraseProtected);
 
-    /// <summary>Builds the current protection profile for the dashboard wizard.</summary>
+    /// <summary>
+    /// Builds the current protection profile for the dashboard wizard.
+    /// In generated-secret (YubiKey-only) mode the profile reports
+    /// Passphrase off and YubiKey on regardless of the stored copy: the
+    /// generated secret occupies the passphrase slot internally, but it
+    /// is not a user passphrase and must never be reported as one.
+    /// </summary>
     public static ProtectionProfileResponse GetProtectionProfile(ServiceConfig config) =>
         new()
         {
-            PassphraseEnabled = HasConfiguredPassphrase(config),
-            YubiKeyEnabled = config.PassphraseYubiKey,
+            PassphraseEnabled = !config.GeneratedSecretMode && HasConfiguredPassphrase(config),
+            YubiKeyEnabled = config.GeneratedSecretMode || config.PassphraseYubiKey,
             PhoneEnabled = config.PhoneAuthEnabled,
+            YubiKeyOnly = config.GeneratedSecretMode,
             LinkMode = string.IsNullOrEmpty(config.ProtectionLinkMode)
                 ? "or" : config.ProtectionLinkMode,
             YubiKeys = new List<string>(config.YubiKeys),
@@ -49,6 +56,10 @@ public static partial class DashboardApi
     /// settings). Enabling YubiKey requires YubiKey setup to be complete
     /// (programmed via the passphrase settings with a physical touch);
     /// disabling it only flips the mode flag so setup data survives.
+    /// In generated-secret (YubiKey-only) mode there is no user
+    /// passphrase, so the passphrase rules do not apply; YubiKey
+    /// enablement is accepted only when the setup data produced by
+    /// generated-secret setup is actually present.
     /// </summary>
     public static (int Status, object Payload) SetProtectionProfile(ServiceConfig config,
         string configPath, ProtectionProfileRequest request, Action<string>? log = null)
@@ -57,13 +68,23 @@ public static partial class DashboardApi
         if (linkMode is not ("or" or "and"))
             return (400, new ErrorDto("linkMode must be \"or\" or \"and\"."));
 
-        bool passphraseConfigured = HasConfiguredPassphrase(config);
-        if (request.PassphraseEnabled && !passphraseConfigured)
-            return (400, new ErrorDto("No passphrase is configured. Set a repository passphrase first."));
-        if (!request.PassphraseEnabled && passphraseConfigured)
-            return (400, new ErrorDto("A passphrase is configured. Clear it from the passphrase settings before turning Passphrase off."));
-        if (request.YubiKeyEnabled && !config.PassphraseYubiKey)
-            return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
+        if (config.GeneratedSecretMode)
+        {
+            bool setupPresent = !string.IsNullOrEmpty(config.YubiKeyChallenge) &&
+                                !string.IsNullOrEmpty(config.PassphraseYubiKeyWrapped);
+            if (request.YubiKeyEnabled && !setupPresent)
+                return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
+        }
+        else
+        {
+            bool passphraseConfigured = HasConfiguredPassphrase(config);
+            if (request.PassphraseEnabled && !passphraseConfigured)
+                return (400, new ErrorDto("No passphrase is configured. Set a repository passphrase first."));
+            if (!request.PassphraseEnabled && passphraseConfigured)
+                return (400, new ErrorDto("A passphrase is configured. Clear it from the passphrase settings before turning Passphrase off."));
+            if (request.YubiKeyEnabled && !config.PassphraseYubiKey)
+                return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
+        }
         if (linkMode == "and" && (!request.PassphraseEnabled || !request.YubiKeyEnabled))
             return (400, new ErrorDto("\"and\" link mode requires both Passphrase and YubiKey to be enabled."));
         if (!request.PassphraseEnabled && !request.YubiKeyEnabled)

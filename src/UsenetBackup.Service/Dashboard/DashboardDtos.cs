@@ -33,6 +33,16 @@ public sealed record OkYubiKeyDto(
     [property: JsonPropertyName("ok")] bool Ok,
     [property: JsonPropertyName("yubikey")] bool Yubikey);
 
+/// <summary>
+/// Response for <c>POST /api/yubikey/setup-generated</c>: the one and
+/// only time the generated repository secret is ever returned, in its
+/// grouped display form for the recovery sheet.
+/// </summary>
+public sealed record YubiKeySetupGeneratedDto(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("yubikey")] bool Yubikey,
+    [property: JsonPropertyName("recoverySecret")] string RecoverySecret);
+
 public sealed record AcceptedDto(
     [property: JsonPropertyName("accepted")] bool Accepted);
 

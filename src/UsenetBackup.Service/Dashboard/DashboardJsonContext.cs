@@ -17,6 +17,7 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(OkMessageDto))]
 [JsonSerializable(typeof(OkDetailDto))]
 [JsonSerializable(typeof(OkYubiKeyDto))]
+[JsonSerializable(typeof(YubiKeySetupGeneratedDto))]
 [JsonSerializable(typeof(AcceptedDto))]
 [JsonSerializable(typeof(AcceptedReposDto))]
 [JsonSerializable(typeof(ActiveDto))]

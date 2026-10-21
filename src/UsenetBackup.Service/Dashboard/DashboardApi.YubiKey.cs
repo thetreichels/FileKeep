@@ -42,10 +42,13 @@ public static partial class DashboardApi
         string configPath, string? passphrase, bool useYubiKey,
         IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null)
     {
+        if (!string.IsNullOrEmpty(passphrase) && config.GeneratedSecretMode)
+            return (400, new ErrorDto("YubiKey-only mode is active: the repository secret was generated, not typed. Clear the generated secret before setting a passphrase."));
         if (string.IsNullOrEmpty(passphrase))
         {
             config.PassphraseProtected = null;
             config.PassphraseYubiKey = false;
+            config.GeneratedSecretMode = false;
             config.YubiKeyChallenge = null;
             config.PassphraseYubiKeyWrapped = null;
             config.YubiKeySlotSecretProtected = null;
@@ -169,6 +172,73 @@ public static partial class DashboardApi
         {
             return (400, new ErrorDto(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Sets up passphrase-free YubiKey-only mode: generates a fresh
+    /// repository secret (see <see cref="GeneratedSecret"/>), runs the
+    /// standard YubiKey setup on it (program + wrap — two touches), and
+    /// stores a DPAPI copy so scheduled backups run unattended, exactly
+    /// like a typed passphrase. Generation is once-ever: it is rejected
+    /// while any passphrase or secret is already configured (including a
+    /// previously linked key's wrapped blob). The generated secret is
+    /// returned exactly once, in this response, in its grouped display
+    /// form for the recovery sheet; no endpoint ever returns it again
+    /// and it is never logged.
+    /// </summary>
+    public static (int Status, object Payload) SetupGeneratedSecret(ServiceConfig config,
+        string configPath, int? slot, IYubiKeyProvider? yubiKeyProvider,
+        Action<string>? log = null)
+    {
+        if (yubiKeyProvider is null)
+            return (400, new ErrorDto("YubiKey support is unavailable in this build."));
+        int useSlot = slot ?? config.YubiKeySlot;
+        if (useSlot is not 1 and not 2)
+            return (400, new ErrorDto("YubiKey slot must be 1 or 2."));
+        if (HasConfiguredPassphrase(config) ||
+            !string.IsNullOrEmpty(config.PassphraseYubiKeyWrapped))
+            return (400, new ErrorDto("A passphrase or secret is already configured. Clear it before generating a new secret."));
+        string secret = GeneratedSecret.Generate();
+        var error = SetupYubiKeyOnConfig(config, yubiKeyProvider, secret,
+            useSlot, storePassphraseCopy: true);
+        if (error is not null)
+            return error.Value;
+        config.GeneratedSecretMode = true;
+        try
+        {
+            config.Save(configPath);
+            log?.Invoke("dashboard: generated secret set up (YubiKey-only mode)");
+            return (200, new YubiKeySetupGeneratedDto(true, true,
+                GeneratedSecret.FormatForDisplay(secret)));
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Opens a restore session by typing the recovery-sheet secret
+    /// instead of touching the YubiKey. Generated-secret (YubiKey-only)
+    /// mode only: in passphrase mode there is deliberately no typed
+    /// unlock on the running system, and this endpoint must not become
+    /// one. The typed value is normalized to canonical form and held in
+    /// the same session the touch path fills. There is no verifier, so
+    /// the secret is accepted unverified — a wrong secret fails closed
+    /// at the first chunk decryption, exactly like the recovery wizard.
+    /// </summary>
+    public static (int Status, object Payload) UnlockRestoreSessionWithSecret(
+        ServiceConfig config, RestoreSession session, string? secret,
+        Action<string>? log = null)
+    {
+        if (!config.GeneratedSecretMode)
+            return (400, new ErrorDto("Typed-secret unlock is only available in YubiKey-only mode."));
+        string canonical = GeneratedSecret.Normalize(secret);
+        if (canonical.Length == 0)
+            return (400, new ErrorDto("A recovery secret is required."));
+        session.Unlock(canonical);
+        log?.Invoke("dashboard: restore session unlocked via recovery secret");
+        return (200, new OkDto(true));
     }
 
     /// <summary>

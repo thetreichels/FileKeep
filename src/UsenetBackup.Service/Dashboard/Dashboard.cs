@@ -769,6 +769,28 @@ public static class Dashboard
                 "application/json");
         });
 
+        app.MapPost("/api/yubikey/setup-generated", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            YubiKeyLinkRequest? body;
+            try
+            {
+                body = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
+                    FileKeepJsonOptions.Default, FileKeepJsonContext.Default.YubiKeyLinkRequest);
+            }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            // The setup blocks until the user touches the key twice
+            // (program + wrap, 60s timeout each). The generated secret is
+            // returned in this response only — never again.
+            var (status, payload) = DashboardApi.SetupGeneratedSecret(config, configPath, body?.Slot, yubiKeyProvider, log);
+            if (status != 200)
+                return Results.BadRequest(payload);
+            return Results.Content(
+                JsonSerializer.Serialize((YubiKeySetupGeneratedDto)payload, DashboardJsonContext.Default.YubiKeySetupGeneratedDto),
+                "application/json");
+        });
+
         app.MapPost("/api/restore/unlock", (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -776,6 +798,22 @@ public static class Dashboard
             // The touch blocks until the user presses the key (or 60s timeout).
             var (status, payload) = DashboardApi.UnlockRestoreSession(config, restoreSession, yubiKeyProvider, log);
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
+        app.MapPost("/api/restore/unlock-secret", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? secret = body.TryGetProperty("secret", out var s) ? s.GetString() : null;
+            var (status, payload) = DashboardApi.UnlockRestoreSessionWithSecret(config, restoreSession, secret, log);
+            if (status != 200)
+                return Results.BadRequest(payload);
+            return Results.Content(
+                JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
+                "application/json");
         });
 
         app.MapPost("/api/restore/lock", (HttpRequest request) =>
