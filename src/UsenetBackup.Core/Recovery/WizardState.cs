@@ -187,7 +187,101 @@ public sealed class WizardState : IDisposable
     /// wrong passphrase, and (true, "unverified") when there are no local
     /// chunks to check against (passphrase will be verified at download).
     /// </summary>
+    /// <remarks>
+    /// Generated-secret fallback: when the as-typed value fails chunk
+    /// verification and it normalizes (<see cref="Security.GeneratedSecret.Normalize"/>)
+    /// to a plausible canonical recovery-sheet secret different from what
+    /// was typed — the grouped/lowercase form a user copies from the
+    /// printed sheet — the normalized string is tried once. On success it
+    /// replaces <see cref="Passphrase"/> for the whole session, so the
+    /// re-opened repo and every later consumer use it. The as-typed value
+    /// is always tried first, untouched, so ordinary passphrases (with
+    /// spaces, lowercase, anything) behave exactly as before; a value
+    /// that already works is never transformed, and a value whose
+    /// normalized form is not canonical-shaped is never retried. If the
+    /// retry also fails, the as-typed state is restored, leaving no
+    /// trace of the attempt. The unverified success (no local chunks to
+    /// check against — the common Usenet-restore case) gets the same
+    /// treatment for the opposite reason: nothing proved the as-typed
+    /// value, so if it is a sheet secret typed in display form, the
+    /// canonical string is adopted immediately; otherwise the grouped
+    /// form would stay in force and the restore would fail later, at
+    /// the first downloaded chunk, with the wrong derived key. This
+    /// method is the single funnel: the
+    /// wizard's credentials page validates only through here (and
+    /// <see cref="ValidateCredentials"/> delegates here), and only this
+    /// class owns the cached repo whose derived key must be rebuilt when
+    /// the credential changes.
+    /// </remarks>
     public (bool ok, string note) ValidatePassphrase()
+    {
+        var result = ValidatePassphraseOnce();
+        if (result.ok)
+        {
+            if (result.note == "unverified")
+                AdoptNormalizedSheetSecret();
+            return result;
+        }
+
+        string typed = Passphrase;
+        string normalized = Security.GeneratedSecret.Normalize(typed);
+        if (normalized == typed || !Security.GeneratedSecret.IsCanonicalForm(normalized))
+            return result;
+
+        // The cached repo holds the key derived from the as-typed value;
+        // drop it so the retry (and, on success, the whole session) runs
+        // on the normalized string.
+        ResetRepo();
+        Passphrase = normalized;
+        var retry = ValidatePassphraseOnce();
+        if (retry.ok)
+            return retry;
+
+        // Both forms failed: restore the as-typed state verbatim.
+        ResetRepo();
+        Passphrase = typed;
+        return result;
+    }
+
+    /// <summary>Drops the cached repo so the next <see cref="OpenRepo"/> re-derives the key from the current <see cref="Passphrase"/>.</summary>
+    private void ResetRepo()
+    {
+        _repo?.Dispose();
+        _repo = null;
+    }
+
+    /// <summary>
+    /// Companion to the failure retry in <see cref="ValidatePassphrase"/>
+    /// for the unverified-success branch: when the typed value normalizes
+    /// to a canonical recovery-sheet secret different from itself, adopt
+    /// the canonical string as the session passphrase and rebuild the
+    /// cached repo on it (same reset/re-open mechanics as the retry), so
+    /// chunks downloaded later derive — and verify — under the right key.
+    /// A value that cannot normalize to canonical form (an ordinary
+    /// passphrase) is left exactly as typed.
+    /// </summary>
+    private void AdoptNormalizedSheetSecret()
+    {
+        string typed = Passphrase;
+        string normalized = Security.GeneratedSecret.Normalize(typed);
+        if (normalized == typed || !Security.GeneratedSecret.IsCanonicalForm(normalized))
+            return;
+
+        ResetRepo();
+        Passphrase = normalized;
+        // Nothing can be verified here (that is why this is the
+        // unverified branch), but if the re-open under the canonical
+        // string unexpectedly fails, restore the as-typed state rather
+        // than keep a broken session.
+        if (!ValidatePassphraseOnce().ok)
+        {
+            ResetRepo();
+            Passphrase = typed;
+        }
+    }
+
+    /// <summary>One as-is verification attempt against the current <see cref="Passphrase"/>.</summary>
+    private (bool ok, string note) ValidatePassphraseOnce()
     {
         var repo = OpenRepo();
         string chunksDir = Path.Combine(RepoPath, "chunks");

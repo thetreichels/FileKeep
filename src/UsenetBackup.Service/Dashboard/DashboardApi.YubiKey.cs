@@ -341,10 +341,17 @@ public static partial class DashboardApi
         return (200, new OkDto(true));
     }
 
-    /// <summary>Reports whether YubiKey mode is on and the session is unlocked.</summary>
+    /// <summary>
+    /// Reports whether YubiKey mode is on, the session is unlocked, and
+    /// whether this is generated-secret (YubiKey-only) mode — the restore
+    /// view reads all three from this one payload to decide which unlock
+    /// affordances to render (typed-secret unlock exists only in
+    /// generated mode).
+    /// </summary>
     public static (int Status, object Payload) GetRestoreSessionStatus(
         ServiceConfig config, RestoreSession session) =>
-        (200, new YubiKeyUnlockDto(config.PassphraseYubiKey, session.IsUnlocked));
+        (200, new YubiKeyUnlockDto(config.PassphraseYubiKey, session.IsUnlocked,
+            config.GeneratedSecretMode));
 
     /// <summary>
     /// Resolves the passphrase for restore-side operations. When YubiKey

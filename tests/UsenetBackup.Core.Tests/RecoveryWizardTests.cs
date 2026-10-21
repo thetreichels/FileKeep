@@ -1,5 +1,6 @@
 using UsenetBackup.Core;
 using UsenetBackup.Core.Recovery;
+using UsenetBackup.Core.Security;
 using Xunit;
 
 namespace UsenetBackup.Core.Tests;
@@ -88,6 +89,85 @@ public sealed class RecoveryWizardTests : IDisposable
         Assert.True(ok, note);
     }
 
+    /// <summary>Creates a repo (with one local chunk, so verification is real) keyed by <paramref name="secret"/>.</summary>
+    private string CreateRepoWithChunks(string name, string secret)
+    {
+        string dir = Path.Combine(_repoDir, name);
+        string src = Path.Combine(dir, "src");
+        Directory.CreateDirectory(src);
+        File.WriteAllText(Path.Combine(src, "a.txt"), "hello");
+        BackupRepository.Init(dir, secret, ChunkSize, KdfIterations).Dispose();
+        using var repo = BackupRepository.Open(dir, secret);
+        repo.BackupDirectory(src);
+        return dir;
+    }
+
+    [Fact]
+    public void ValidatePassphrase_GroupedLowercaseSheetSecret_FallsBackToCanonical()
+    {
+        string canonical = GeneratedSecret.Generate();
+        string dir = CreateRepoWithChunks("gen-fallback", canonical);
+        // The sheet shows the grouped form; the user types it back lowercase.
+        string typed = GeneratedSecret.FormatForDisplay(canonical).ToLowerInvariant();
+        using var s = new WizardState { RepoPath = dir, Passphrase = typed };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.True(ok, note);
+        // The canonical string became the session credential, and the
+        // re-opened repo keeps validating with it.
+        Assert.Equal(canonical, s.Passphrase);
+        var (okAgain, noteAgain) = s.ValidatePassphrase();
+        Assert.True(okAgain, noteAgain);
+    }
+
+    [Fact]
+    public void ValidatePassphrase_CanonicalSheetSecret_AsTypedPasses()
+    {
+        string canonical = GeneratedSecret.Generate();
+        string dir = CreateRepoWithChunks("gen-exact", canonical);
+        using var s = new WizardState { RepoPath = dir, Passphrase = canonical };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.True(ok, note);
+        Assert.Equal(canonical, s.Passphrase);
+    }
+
+    [Fact]
+    public void ValidatePassphrase_PassphraseWithSpaces_NeverTransformed()
+    {
+        const string spaced = "a passphrase with spaces and lowercase";
+        string dir = CreateRepoWithChunks("spaced", spaced);
+        using var s = new WizardState { RepoPath = dir, Passphrase = spaced };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.True(ok, note);
+        Assert.Equal(spaced, s.Passphrase);
+    }
+
+    [Fact]
+    public void ValidatePassphrase_WrongSheetSecret_FailsAndRestoresTypedValue()
+    {
+        string canonical = GeneratedSecret.Generate();
+        string dir = CreateRepoWithChunks("gen-wrong", canonical);
+        // A different secret's sheet form: plausible shape, wrong value —
+        // both the as-typed and the normalized attempt must fail.
+        string wrongTyped = GeneratedSecret.FormatForDisplay(GeneratedSecret.Generate()).ToLowerInvariant();
+        using var s = new WizardState { RepoPath = dir, Passphrase = wrongTyped };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.False(ok);
+        Assert.Contains("incorrect", note);
+        // The failed fallback leaves no trace: the typed value is restored.
+        Assert.Equal(wrongTyped, s.Passphrase);
+    }
+
+    /// <summary>Creates a repo keyed by <paramref name="secret"/> with a source dir ready to back up, but stores NO chunks (validation stays unverified — the Usenet-restore case).</summary>
+    private string CreateRepoWithoutChunks(string name, string secret)
+    {
+        string dir = Path.Combine(_repoDir, name);
+        string src = Path.Combine(dir, "src");
+        Directory.CreateDirectory(src);
+        File.WriteAllText(Path.Combine(src, "a.txt"), "hello");
+        BackupRepository.Init(dir, secret, ChunkSize, KdfIterations).Dispose();
+        return dir;
+    }
+
     [Fact]
     public void ValidatePassphrase_NoChunks_ReturnsUnverified()
     {
@@ -95,6 +175,43 @@ public sealed class RecoveryWizardTests : IDisposable
         var (ok, note) = s.ValidatePassphrase();
         Assert.True(ok);
         Assert.Equal("unverified", note);
+    }
+
+    [Fact]
+    public void ValidatePassphrase_NoChunks_GroupedSheetSecret_AdoptsCanonical()
+    {
+        string canonical = GeneratedSecret.Generate();
+        string dir = CreateRepoWithoutChunks("gen-unverified", canonical);
+        // No local chunks: the as-typed grouped/lowercase sheet form is
+        // accepted unverified — and must be adopted in canonical form, or
+        // the session would keep deriving keys from the display string.
+        string typed = GeneratedSecret.FormatForDisplay(canonical).ToLowerInvariant();
+        using var s = new WizardState { RepoPath = dir, Passphrase = typed };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.True(ok, note);
+        Assert.Equal("unverified", note);
+        Assert.Equal(canonical, s.Passphrase);
+        // The session repo now derives from the canonical string: chunks
+        // stored through it verify under it on a second validation.
+        using var repo = s.OpenRepo();
+        repo.BackupDirectory(Path.Combine(dir, "src"));
+        var (okAgain, noteAgain) = s.ValidatePassphrase();
+        Assert.True(okAgain, noteAgain);
+        Assert.Equal("", noteAgain);
+        Assert.Equal(canonical, s.Passphrase);
+    }
+
+    [Fact]
+    public void ValidatePassphrase_NoChunks_OrdinaryPassphrase_StaysAsTyped()
+    {
+        const string spaced = "a passphrase with spaces and lowercase";
+        string dir = CreateRepoWithoutChunks("plain-unverified", spaced);
+        using var s = new WizardState { RepoPath = dir, Passphrase = spaced };
+        var (ok, note) = s.ValidatePassphrase();
+        Assert.True(ok, note);
+        Assert.Equal("unverified", note);
+        // Not canonical-shaped after normalization: never touched.
+        Assert.Equal(spaced, s.Passphrase);
     }
 
     [Fact]

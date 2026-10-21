@@ -457,6 +457,12 @@
           <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
           <button onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto">Lock</button>
         </div>
+        <div class="row" id="restore-secret-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span style="color:var(--text-2);font-size:13px">Or enter the recovery secret from your recovery sheet:</span>
+          <input id="restore-secret-input" type="text" autocomplete="off" spellcheck="false" placeholder="Recovery secret" style="flex:1;font-family:monospace" onkeydown="if (event.key === 'Enter') unlockRestoreWithSecret()">
+          <button class="accent" onclick="unlockRestoreWithSecret()">Unlock with recovery secret</button>
+        </div>
+        <div id="restore-secret-error" style="display:none;color:var(--bad);font-size:13px;margin-bottom:8px"></div>
         <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
       </div>
       <div id="restoreModal" class="modal" style="display:none">
@@ -1931,15 +1937,40 @@ async function lockRestoreSession() {
 async function refreshRestoreSession() {
   const row = document.getElementById('restore-session-row');
   const st = document.getElementById('restore-session-status');
+  const srow = document.getElementById('restore-secret-row');
   if (!row || !st) return;
   try {
     const s = await api('/api/restore/session');
-    if (!s.yubikey) { row.style.display = 'none'; return; }
+    if (!s.yubikey) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; return; }
     row.style.display = '';
     st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
     st.innerHTML = s.unlocked ? '&#128275; Unlocked' : '&#128273; Locked';
     st.style.color = s.unlocked ? 'var(--good)' : 'var(--text-2)';
-  } catch (e) { row.style.display = 'none'; }
+    // Typed-secret unlock exists only in YubiKey-only (generated-secret)
+    // mode, and only while the session is locked — in passphrase mode
+    // the endpoint refuses by design, so the control never renders.
+    if (srow) srow.style.display = (s.yubiKeyOnly && !s.unlocked) ? '' : 'none';
+  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; }
+}
+async function unlockRestoreWithSecret() {
+  const input = document.getElementById('restore-secret-input');
+  const errEl = document.getElementById('restore-secret-error');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = msg ? '' : 'none'; };
+  showErr('');
+  if (!input.value.trim()) { showErr('Enter the recovery secret from your recovery sheet.'); input.focus(); return; }
+  try {
+    // The raw typed value goes as-is; the server normalizes it to the
+    // canonical form (grouping spaces and case don't matter).
+    await api('/api/restore/unlock-secret', {
+      method: 'POST',
+      body: JSON.stringify({ secret: input.value })
+    });
+    input.value = '';
+    toast('Restore session unlocked.', 'ok');
+    refreshRestoreSession();
+  } catch (e) {
+    showErr(e.message);
+  }
 }
 async function ensureRestoreSession() {
   // Returns true when restores may proceed. In YubiKey mode this
@@ -1948,7 +1979,9 @@ async function ensureRestoreSession() {
   try { s = await api('/api/restore/session'); }
   catch (e) { toast('Could not check restore session: ' + e.message, 'err'); return false; }
   if (!s.yubikey || s.unlocked) return true;
-  if (!confirm('Restores require your YubiKey. Touch the key when it flashes. Continue?')) return false;
+  if (!confirm(s.yubiKeyOnly
+    ? 'Restores are locked. Touch your YubiKey when it flashes to unlock — or Cancel and use "Unlock with recovery secret" above the backup list instead. Continue?'
+    : 'Restores require your YubiKey. Touch the key when it flashes. Continue?')) return false;
   toast('Touch your YubiKey…');
   try {
     await api('/api/restore/unlock', { method: 'POST' });

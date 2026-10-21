@@ -63,7 +63,8 @@ public sealed record YubiKeyStatusDto(
 
 public sealed record YubiKeyUnlockDto(
     [property: JsonPropertyName("yubikey")] bool Yubikey,
-    [property: JsonPropertyName("unlocked")] bool Unlocked);
+    [property: JsonPropertyName("unlocked")] bool Unlocked,
+    [property: JsonPropertyName("yubiKeyOnly")] bool YubiKeyOnly);
 
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);

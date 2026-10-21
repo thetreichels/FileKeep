@@ -83,6 +83,23 @@ public sealed class GeneratedSecretModeTests : IDisposable
     }
 
     [Fact]
+    public void IsCanonicalForm_OnlyAcceptsCanonicalSecrets()
+    {
+        string canonical = GeneratedSecret.Generate();
+        Assert.True(GeneratedSecret.IsCanonicalForm(canonical));
+        // Mangled sheet forms are not canonical (they normalize to it).
+        Assert.False(GeneratedSecret.IsCanonicalForm(canonical.ToLowerInvariant()));
+        Assert.False(GeneratedSecret.IsCanonicalForm(GeneratedSecret.FormatForDisplay(canonical)));
+        // Wrong length, either way.
+        Assert.False(GeneratedSecret.IsCanonicalForm(canonical[..^1]));
+        Assert.False(GeneratedSecret.IsCanonicalForm(canonical + "A"));
+        // Right length but '0' is outside the base32 alphabet.
+        Assert.False(GeneratedSecret.IsCanonicalForm(new string('A', GeneratedSecret.CanonicalLength - 1) + "0"));
+        Assert.False(GeneratedSecret.IsCanonicalForm(""));
+        Assert.False(GeneratedSecret.IsCanonicalForm(null));
+    }
+
+    [Fact]
     public void Normalize_RoundTripsTypedForms()
     {
         string canonical = GeneratedSecret.Generate();

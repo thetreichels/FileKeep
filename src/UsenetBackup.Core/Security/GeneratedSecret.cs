@@ -68,6 +68,22 @@ public static class GeneratedSecret
         return sb.ToString();
     }
 
+    /// <summary>
+    /// True when <paramref name="value"/> is exactly a canonical secret:
+    /// <see cref="CanonicalLength"/> characters, all in the base32
+    /// alphabet (uppercase letters and digits 2–7). Used to decide
+    /// whether a failed typed value is plausibly a mangled recovery-sheet
+    /// secret worth one normalized retry — anything else (an ordinary
+    /// passphrase, a wrong-length string) is not.
+    /// </summary>
+    public static bool IsCanonicalForm(string? value)
+    {
+        if (value is null || value.Length != CanonicalLength) return false;
+        foreach (char c in value)
+            if (Base32Alphabet.IndexOf(c) < 0) return false;
+        return true;
+    }
+
     /// <summary>RFC 4648 base32 encoding, uppercase, padding stripped.</summary>
     private static string ToBase32(byte[] bytes)
     {
