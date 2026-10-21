@@ -144,6 +144,35 @@
   .toggle input:disabled + .track { opacity: .5; cursor: default; }
   /* Security tab: method cards, tooltips, checklist */
   .sec-method { transition: border-color 0.2s; }
+  /* "What this means" infographic — ported from the YubiKey
+     walkthrough mockup; replaces the former Security/Redundancy
+     meter bars. A row of the enabled methods, then one
+     mini-diagram below: what happens to you if you lose one
+     method. (Mockup vars mapped: --text-secondary -> --text-2,
+     --success -> --ok, --danger -> --bad, --accent-tint ->
+     a color-mix of --accent.) */
+  .ig-keys { display: flex; align-items: flex-start; gap: 4px; margin-top: 12px; }
+  .ig-key { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 54px; color: var(--text); border-radius: 6px; cursor: pointer; transition: background 0.1s ease; }
+  .ig-key:hover, .ig-key.previewing { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .ig-key svg { width: 22px; height: 22px; }
+  .ig-kname { font-size: 10.5px; line-height: 1.15; color: var(--text-2); text-align: center; }
+  .ig-join { display: inline-flex; margin-top: 4px; color: var(--accent); }
+  .ig-join svg { width: 13px; height: 13px; }
+  .ig-views { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .ig-svg { margin-top: 2px; }
+  .ig-svg svg { display: block; width: 100%; height: auto; }
+  .ig-svg .m-ic { color: var(--text-2); }
+  .ig-svg .m-ic.lost { opacity: 0.35; }
+  .ig-svg .m-chain { color: var(--accent); }
+  .ig-svg .m-chain.broken { color: var(--text-2); opacity: 0.4; }
+  .ig-svg .arr-good { fill: none; stroke: var(--ok); stroke-width: 2.2; }
+  .ig-svg .arr-blocked { fill: none; stroke: var(--text-2); stroke-width: 1.3; stroke-dasharray: 3 3; opacity: 0.55; }
+  .ig-svg .head-good { fill: var(--ok); }
+  .ig-svg .arr-usb-blocked { fill: none; stroke: var(--bad); stroke-width: 1.6; stroke-dasharray: 3 3; opacity: 0.85; }
+  .ig-svg .usb-ic { color: var(--bad); opacity: 0.8; }
+  .ig-svg .lock-bad { color: var(--bad); }
+  .ig-svg .lock-good { color: var(--ok); }
+  .ig-svg .x-mark { stroke: var(--bad); stroke-width: 2; stroke-linecap: round; fill: none; }
   /* Delayed tooltips (2s hover, immediate on keyboard focus) */
   [data-tooltip] { position: relative; }
   [data-tooltip]::after {
@@ -729,27 +758,13 @@
             <!-- Insight panel -->
             <div class="card" style="width:280px;flex-shrink:0">
               <h2 style="margin-top:0">What this means</h2>
-              <div style="margin-bottom:16px">
-                <div style="font-size:13px;font-weight:600;margin-bottom:6px">Security</div>
-                <div style="display:flex;gap:4px;margin-bottom:6px" id="sec-meter-security-segs">
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
+              <div class="ig" id="igPanel" role="img" aria-label="Protection summary">
+                <div class="ig-keys" id="igKeys" aria-hidden="true"></div>
+                <div class="ig-views">
+                  <div class="ig-view">
+                    <div class="ig-svg" id="igYou" aria-hidden="true"></div>
+                  </div>
                 </div>
-                <div id="sec-security-label" style="font-size:12px;color:var(--text-2)">Maximum</div>
-                <div id="sec-security-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">Easiest way in: Passphrase and YubiKey together</div>
-              </div>
-              <div>
-                <div style="font-size:13px;font-weight:600;margin-bottom:6px">Redundancy</div>
-                <div style="display:flex;gap:4px;margin-bottom:6px" id="sec-meter-redundancy-segs">
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                  <div class="seg" style="flex:1;height:8px;border-radius:4px;background:var(--bg-2)"></div>
-                </div>
-                <div id="sec-redundancy-label" style="font-size:12px;color:var(--text-2)">Low</div>
-                <div id="sec-redundancy-desc" style="font-size:12px;color:var(--text-2);margin-top:4px">No other way in if a member is lost</div>
               </div>
             </div>
           </div>
@@ -3249,40 +3264,323 @@ function secUpdateLinkBand() {
   if (ykNote) ykNote.style.display = (!isLinked && secProfile.yubiKeyEnabled && secProfile.passphraseEnabled) ? '' : 'none';
 }
 
-// Both insight meters share one color ramp, so the same rating always
-// reads the same color: weakest = warning orange, middle = accent, best = green.
-function meterColor(level, max) {
-  const f = max ? level / max : 0;
-  return f <= 0.25 ? '#ca5010' : f <= 0.6 ? 'var(--accent)' : 'var(--ok)';
+/* ---------- "What this means" insight panel ----------
+   Ported from the YubiKey walkthrough mockup: a visual
+   infographic replaces the former Security / Redundancy
+   meter bars. Top row: the enabled methods as icons. Below,
+   one mini-diagram. By default the diagram is the healthy
+   picture: nothing lost, no ✕ anywhere — each way in (a
+   linked pair counts as one) gets a solid green arrow to
+   the open padlock, and the USB path never shows. Every
+   loss picture is a hover preview, and the diagram reverts
+   when the pointer leaves. Hovering a method's icon — in
+   the top row, or its card in the builder — previews losing
+   just that method: it greys out and is crossed, each way
+   in that survives whole keeps its green arrow to the open
+   lock, and if the lost method was one half of a linked
+   pair, the other half is stranded — it gets a grey dashed
+   attempt line toward the padlock that stops short at an
+   ✕, because one half of a pair can't open the lock alone.
+   Hovering the "Linked — AND" band between the two cards
+   previews losing the whole pair: both greyed out and
+   crossed, and nothing comes out of the pair at all — no
+   chain between the two icons and no attempt line, since
+   both are gone and there is no path to even try. Only a
+   method outside the pair that survives whole gets its
+   arrow; if nothing survives, the diagram is just the
+   crossed icons and the locked red padlock. Only enabled
+   methods preview. The diagram carries no caption; the
+   full Security / Redundancy reading lives in the panel's
+   aria-label, set by secUpdateInsight below. While
+   previewing, if the Authenticator App is the only way
+   back in, its arrow to the padlock is a solid green line
+   (the Windows app — that path works) and a second, red
+   dashed line runs from its icon to a USB drive and stops
+   short at an ✕: the app never unlocks the recovery USB. */
+
+/* State adapters: the mockup's methods / passYubiLinked()
+   model mapped onto secProfile. Method order is fixed —
+   Passphrase, YubiKey, Phone — and Phone is never part of
+   the linked pair (OR-only, standing product rule). */
+const SEC_IG_ORDER = ['pass', 'yubi', 'totp'];
+const SEC_IG_NAMES = { pass: 'Passphrase', yubi: 'YubiKey', totp: 'Phone' };
+function secIgEnabled(k) {
+  return k === 'pass' ? secProfile.passphraseEnabled
+       : k === 'yubi' ? secProfile.yubiKeyEnabled
+       : secProfile.phoneEnabled;
 }
-// Update insight meters (5-seg security, 3-seg redundancy)
+function secIgKeys() { return SEC_IG_ORDER.filter(secIgEnabled); }
+function secIgLinked() {
+  return secProfile.linkMode === 'and' && secProfile.passphraseEnabled && secProfile.yubiKeyEnabled;
+}
+/* Ways in: the linked Passphrase+YubiKey pair is one way in;
+   every other enabled method is a way in on its own. Phone
+   is always its own way in. */
+function secIgGroups() {
+  const gs = [];
+  if (secIgLinked()) gs.push(['pass', 'yubi']);
+  else {
+    if (secProfile.passphraseEnabled) gs.push(['pass']);
+    if (secProfile.yubiKeyEnabled) gs.push(['yubi']);
+  }
+  if (secProfile.phoneEnabled) gs.push(['totp']);
+  return gs;
+}
+function secIgName(k) { return SEC_IG_NAMES[k]; }
+
+const CUE_ICONS = {
+  pass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M8 10.3V13.7M6.53 11.15L9.47 12.85M9.47 11.15L6.53 12.85"/><path d="M12 10.3V13.7M10.53 11.15L13.47 12.85M13.47 11.15L10.53 12.85"/><path d="M16 10.3V13.7M14.53 11.15L17.47 12.85M17.47 11.15L14.53 12.85"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9.8" y="2" width="4.4" height="4" rx="0.8"/><path d="M8 6h8v12.5A3.5 3.5 0 0 1 12.5 22h-1A3.5 3.5 0 0 1 8 18.5V6z"/><circle cx="12" cy="13.5" r="2.4"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.8 18.8h2.4"/></svg>',
+  chain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.1"/><path d="M14 10a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.1"/></svg>'
+};
+const METHOD_ICON = { pass: 'pass', yubi: 'key', totp: 'phone' };
+/* Same glyphs as CUE_ICONS, as bare path data so the
+   mini-diagrams can place them inside one SVG each. */
+const GLYPHS = {
+  pass: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M8 10.3V13.7M6.53 11.15L9.47 12.85M9.47 11.15L6.53 12.85"/><path d="M12 10.3V13.7M10.53 11.15L13.47 12.85M13.47 11.15L10.53 12.85"/><path d="M16 10.3V13.7M14.53 11.15L17.47 12.85M17.47 11.15L14.53 12.85"/>',
+  key: '<rect x="9.8" y="2" width="4.4" height="4" rx="0.8"/><path d="M8 6h8v12.5A3.5 3.5 0 0 1 12.5 22h-1A3.5 3.5 0 0 1 8 18.5V6z"/><circle cx="12" cy="13.5" r="2.4"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.8 18.8h2.4"/>',
+  usb: '<rect x="9" y="2.5" width="6" height="5" rx="0.7"/><circle cx="11" cy="5" r="0.4"/><circle cx="13" cy="5" r="0.4"/><rect x="8" y="7.5" width="8" height="13.5" rx="2"/><path d="M10.5 11h3"/>',
+  chain: '<path d="M10 14a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.1"/><path d="M14 10a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.1"/>'
+};
+/* Mini-diagram geometry: 120×66 viewBox, method icons
+   stacked at x-centre 11, the lock centred at (103, 33). */
+const IG_LOCK = { x: 103, y: 33 };
+function igY(keys, k) {
+  const centers = keys.length === 1 ? [33] : keys.length === 2 ? [21, 45] : [13, 33, 53];
+  return centers[keys.indexOf(k)];
+}
+function groupMidY(g, keys) {
+  let sum = 0;
+  g.forEach(k => { sum += igY(keys, k); });
+  return sum / g.length;
+}
+function igIconAt(key, cy, cls) {
+  const size = 16, s = size / 24;
+  return '<g transform="translate(' + (11 - size / 2) + ' ' + (cy - size / 2) + ') scale(' + s + ')" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="' + cls + '">' + GLYPHS[METHOD_ICON[key]] + '</g>';
+}
+function igChainAt(cy, broken) {
+  const size = 10, s = size / 24;
+  return '<g transform="translate(' + (11 - size / 2) + ' ' + (cy - size / 2) + ') scale(' + s + ')" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="m-chain' + (broken ? ' broken' : '') + '">' + GLYPHS.chain + '</g>';
+}
+function igPadlock(open, cls) {
+  const size = 26, s = size / 24;
+  /* Locked: the shackle arc sits closed, both legs in
+     the body. Open: the same arc is swung up and out
+     around its left hinge (rotate about the left leg's
+     base), so the right leg lifts clear of the body and
+     the lock reads as unmistakably unlocked at a glance. */
+  const shackle = open
+    ? '<g transform="rotate(-42 8 11)"><path d="M8 11V7a4 4 0 0 1 8 0v4"/></g>'
+    : '<path d="M8 11V7a4 4 0 0 1 8 0v4"/>';
+  return '<g transform="translate(' + (IG_LOCK.x - size / 2) + ' ' + (IG_LOCK.y - size / 2) + ') scale(' + s + ')" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="' + cls + '">'
+    + '<rect x="5" y="11" width="14" height="9.5" rx="2"/>' + shackle + '<circle cx="12" cy="15.3" r="1.5"/><path d="M12 16.6v1.5"/></g>';
+}
+function igArrow(y0, cls, headCls) {
+  return '<path class="' + cls + '" d="M21 ' + y0 + ' C 48 ' + y0 + ', 60 ' + IG_LOCK.y + ', 86 ' + IG_LOCK.y + '"/>'
+    + '<polygon class="' + headCls + '" points="88,' + IG_LOCK.y + ' 80,' + (IG_LOCK.y - 3.4) + ' 80,' + (IG_LOCK.y + 3.4) + '"/>';
+}
+function igX(cx, cy, r) {
+  return '<path class="x-mark" d="M' + (cx - r) + ' ' + (cy - r) + ' L' + (cx + r) + ' ' + (cy + r) + ' M' + (cx + r) + ' ' + (cy - r) + ' L' + (cx - r) + ' ' + (cy + r) + '"/>';
+}
+/* USB recovery environment, drawn only while
+   previewing a loss whose sole surviving way in is
+   the Authenticator App: alongside the solid green
+   arrow to the padlock (the Windows app — that path
+   works), a red dashed line leaves the phone icon for
+   a USB drive at the bottom right and stops short at
+   an ✕ — that path never connects, because the app
+   can't unlock the recovery USB. */
+function igUsbBlocked(y0) {
+  const uy = 56, size = 15, s = size / 24;
+  return '<path class="arr-usb-blocked" d="M21 ' + y0 + ' C 48 ' + y0 + ', 58 ' + uy + ', 84 ' + uy + '"/>'
+    + igX(89, uy, 2.8)
+    + '<g transform="translate(' + (103 - size / 2) + ' ' + (uy - size / 2) + ') scale(' + s + ')" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="usb-ic">' + GLYPHS.usb + '</g>';
+}
+
+/* lostKeys is a list: empty for the healthy default,
+   one method for a single-method preview, or both
+   halves of the pair for the band's both-lost
+   preview. */
+function youDiagram(keys, gs, lostKeys, usbLimit) {
+  function isLost(k) { return lostKeys.indexOf(k) !== -1; }
+  const survivors = gs.filter(g => g.every(k => !isLost(k)));
+  const recoverable = survivors.length > 0;
+  const parts = ['<svg viewBox="0 0 120 66" aria-hidden="true">'];
+  survivors.forEach(g => {
+    const y0 = groupMidY(g, keys);
+    if (usbLimit && g.length === 1 && g[0] === 'totp') {
+      parts.push(igArrow(y0, 'arr-good', 'head-good'));
+      parts.push(igUsbBlocked(y0));
+    } else {
+      parts.push(igArrow(y0, 'arr-good', 'head-good'));
+    }
+  });
+  /* A method left over from a broken linked pair can't
+     open the lock on its own: dashed arrow, stopped
+     short at an ✕. A group lost whole — the linked
+     pair with both halves gone — draws nothing at
+     all: no stranded-survivor arrow, since there is
+     no survivor left to strand. */
+  gs.forEach(g => {
+    if (!g.some(isLost)) return;
+    if (g.every(isLost)) return;
+    g.forEach(k => {
+      if (isLost(k)) return;
+      const y = igY(keys, k);
+      parts.push('<path class="arr-blocked" d="M21 ' + y + ' C 42 ' + y + ', 54 ' + IG_LOCK.y + ', 72 ' + IG_LOCK.y + '"/>');
+      parts.push(igX(77, IG_LOCK.y, 3.2));
+    });
+  });
+  /* The chain between the pair is drawn while at
+     least one half survives. With both halves lost
+     there is no link left to show — both are simply
+     gone, crossed out, with nothing coming from
+     either of them. */
+  if (secIgLinked() && !['pass', 'yubi'].every(isLost)) {
+    parts.push(igChainAt(groupMidY(['pass', 'yubi'], keys), ['pass', 'yubi'].some(isLost)));
+  }
+  keys.forEach(k => {
+    parts.push(igIconAt(k, igY(keys, k), isLost(k) ? 'm-ic lost' : 'm-ic'));
+    if (isLost(k)) parts.push(igX(11, igY(keys, k), 5.5));
+  });
+  parts.push(igPadlock(recoverable, recoverable ? 'lock-good' : 'lock-bad'));
+  if (!recoverable) parts.push(igX(IG_LOCK.x + 12, IG_LOCK.y - 13, 3.4));
+  parts.push('</svg>');
+  return { svg: parts.join(''), recoverable: recoverable, survivors: survivors };
+}
+
+/* What the diagram currently previews losing via
+   hover: a method key, "pair" while the pointer rests
+   on the Linked — AND band (both halves of the pair
+   lost), or null for the default healthy picture.
+   renderYouDiagram falls back to the default whenever
+   the hovered method is no longer enabled. Unlike the
+   mockup, it does not rewrite the panel's aria-label:
+   in the app that label carries the full Security /
+   Redundancy reading and is owned by secUpdateInsight. */
+let igHoverKey = null;
+function renderYouDiagram() {
+  const keys = secIgKeys();
+  const gs = secIgGroups();
+  /* No hover: nothing is lost — the healthy picture,
+     every way in whole with its green arrow. Hovering
+     a method previews losing just that method, even
+     one half of a linked pair: the pair breaks and
+     the surviving half is left stranded with its grey
+     attempt line. The "pair" hover state — set by the
+     Linked — AND band — previews losing both halves:
+     both crossed, nothing drawn from either. */
+  let lostKeys = [];
+  if (igHoverKey === 'pair') {
+    if (secIgLinked()) {
+      lostKeys = ['pass', 'yubi'].filter(k => keys.indexOf(k) !== -1);
+    }
+  } else if (igHoverKey && keys.indexOf(igHoverKey) !== -1) {
+    lostKeys = [igHoverKey];
+  }
+  /* USB caveat: while a hover preview is up, if the
+     Authenticator App is the only way back in, its
+     arrow to the padlock is solid green (Windows
+     app — works) and a red dashed line to a USB drive
+     stops short at an ✕ (recovery USB — blocked). The
+     default diagram never shows it. */
+  const soleSurvivors = gs.filter(g => g.every(k => lostKeys.indexOf(k) === -1));
+  const usbLimit = !!igHoverKey
+    && soleSurvivors.length === 1
+    && soleSurvivors[0].length === 1
+    && soleSurvivors[0][0] === 'totp';
+  const you = youDiagram(keys, gs, lostKeys, usbLimit);
+  document.getElementById('igYou').innerHTML = you.svg;
+
+  /* Mark the top-row icons whose loss is being previewed
+     — both halves while a linked pair is hovered. */
+  const keyEls = document.getElementById('igKeys').children;
+  for (let i = 0; i < keyEls.length; i++) {
+    keyEls[i].classList.toggle('previewing', !!igHoverKey && lostKeys.indexOf(keyEls[i].getAttribute('data-k')) !== -1);
+  }
+}
+
+/* Hover preview: hovering a method's icon — in the top
+   row above, or its card in the builder — re-renders the
+   diagram with that method as the lost one, immediately;
+   moving the pointer away restores the default. Only
+   enabled methods preview: the top row only ever shows
+   enabled methods, and a switched-off method's card is
+   ignored, so hovering a greyed-out icon changes
+   nothing. */
+function igSetHover(k) {
+  if (igHoverKey === k) return;
+  igHoverKey = k;
+  renderYouDiagram();
+}
+const igKeysEl = document.getElementById('igKeys');
+igKeysEl.addEventListener('mouseover', e => {
+  if (!e.target.closest) { igSetHover(null); return; }
+  const el = e.target.closest('.ig-key');
+  if (el) { igSetHover(el.getAttribute('data-k')); return; }
+  /* The chain glyph between a linked pair is inert:
+     it carries no hover handler, so resting on the
+     link indicator itself changes nothing — only the
+     method icons on either side preview. */
+  igSetHover(null);
+});
+igKeysEl.addEventListener('mouseleave', () => { igSetHover(null); });
+const SEC_IG_CARDS = {
+  pass: document.getElementById('sec-card-passphrase'),
+  yubi: document.getElementById('sec-card-yubikey'),
+  totp: document.getElementById('sec-card-phone')
+};
+SEC_IG_ORDER.forEach(k => {
+  const el = SEC_IG_CARDS[k];
+  el.addEventListener('mouseenter', () => {
+    if (secIgEnabled(k)) igSetHover(k);
+  });
+  el.addEventListener('mouseleave', () => {
+    if (igHoverKey === k) igSetHover(null);
+  });
+});
+/* The "Linked — AND" band between the Passphrase and
+   YubiKey cards previews losing the whole pair: while
+   the two are linked, resting on the band crosses both
+   halves and draws nothing from either — distinct
+   from hovering one method's icon or card, which loses
+   only that half and strands the other with its grey
+   attempt line. Unlinked, the band is hidden (the OR /
+   Link band shows instead) and hovering previews
+   nothing. Clicking it still toggles the link, as
+   before. */
+const secIgBand = document.getElementById('sec-link-band');
+secIgBand.addEventListener('mouseenter', () => {
+  if (secIgLinked()) igSetHover('pair');
+});
+secIgBand.addEventListener('mouseleave', () => {
+  if (igHoverKey === 'pair') igSetHover(null);
+});
+
+// Update the "What this means" insight panel: render the
+// infograph from secProfile and set the panel's aria-label
+// to the full Security / Redundancy reading.
 function secUpdateInsight() {
   const p = secProfile;
   // Security rating uses the weakest-group principle: an attacker only needs
   // ONE way in, so the rating is set by the weakest enabled group.
   // Method strength (weakest to strongest): Phone (Low) < Passphrase (Medium) < YubiKey (High).
   // A linked Passphrase+YubiKey pair (AND mode) requires both, so it rates Maximum.
-  let level = 0; // 0-4: Low, Medium, High, Very High, Maximum
   let label = 'Low';
   let desc = 'No protection method enabled';
 
   if (p.passphraseEnabled && p.yubiKeyEnabled && p.linkMode === 'and') {
-    level = 4; label = 'Maximum'; desc = 'Easiest way in: Passphrase and YubiKey together';
+    label = 'Maximum'; desc = 'Easiest way in: Passphrase and YubiKey together';
   } else if (p.phoneEnabled) {
     // Phone is the weakest method — in OR mode the attacker takes the easiest path.
-    level = 0; label = 'Low'; desc = 'Easiest way in: Phone code';
+    label = 'Low'; desc = 'Easiest way in: Phone code';
   } else if (p.passphraseEnabled) {
-    level = 1; label = 'Medium'; desc = 'Easiest way in: Passphrase';
+    label = 'Medium'; desc = 'Easiest way in: Passphrase';
   } else if (p.yubiKeyEnabled) {
-    level = 2; label = 'High'; desc = 'Easiest way in: YubiKey touch';
+    label = 'High'; desc = 'Easiest way in: YubiKey touch';
   }
-
-  const segs = document.querySelectorAll('#sec-meter-security-segs .seg');
-  segs.forEach((s, i) => {
-    s.style.background = i <= level ? meterColor(level, 4) : 'var(--bg-2)';
-  });
-  document.getElementById('sec-security-label').textContent = label;
-  document.getElementById('sec-security-desc').textContent = desc;
 
   // Redundancy counts groups, not methods. A group is a standalone method or a
   // linked Passphrase+YubiKey pair. A single group means no other way in if a member is lost.
@@ -3297,13 +3595,21 @@ function secUpdateInsight() {
   const rLevel = groups >= 3 ? 2 : groups >= 2 ? 1 : 0;
   const rLabels = ['Low', 'Good', 'Best'];
   const rDescs = ['No other way in if a member is lost', 'Two ways in', 'Three ways in'];
-  
-  const rSegs = document.querySelectorAll('#sec-meter-redundancy-segs .seg');
-  rSegs.forEach((s, i) => {
-    s.style.background = i <= rLevel ? meterColor(rLevel, 2) : 'var(--bg-2)';
+
+  // Top row: the enabled methods as icons, a chain glyph
+  // between Passphrase and YubiKey while they're linked.
+  const keys = secIgKeys();
+  let rowHtml = '';
+  keys.forEach((k, i) => {
+    if (i > 0 && secIgLinked() && keys[i - 1] === 'pass' && k === 'yubi') {
+      rowHtml += '<span class="ig-join" aria-hidden="true">' + CUE_ICONS.chain + '</span>';
+    }
+    rowHtml += '<span class="ig-key" data-k="' + k + '">' + CUE_ICONS[METHOD_ICON[k]] + '<span class="ig-kname">' + secIgName(k) + '</span></span>';
   });
-  document.getElementById('sec-redundancy-label').textContent = rLabels[rLevel];
-  document.getElementById('sec-redundancy-desc').textContent = rDescs[rLevel];
+  document.getElementById('igKeys').innerHTML = rowHtml;
+  renderYouDiagram();
+  document.getElementById('igPanel').setAttribute('aria-label',
+    'Security: ' + label + '. ' + desc + '. Redundancy: ' + rLabels[rLevel] + '. ' + rDescs[rLevel] + '.');
 }
 
 // Load security tab when opened
