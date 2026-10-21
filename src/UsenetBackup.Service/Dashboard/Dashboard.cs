@@ -748,6 +748,27 @@ public static class Dashboard
             return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
         });
 
+        app.MapPost("/api/yubikey/link", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            YubiKeyLinkRequest? body;
+            try
+            {
+                body = FileKeepJsonOptions.Deserialize(await ReadBodyStringAsync(request),
+                    FileKeepJsonOptions.Default, FileKeepJsonContext.Default.YubiKeyLinkRequest);
+            }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            // The setup blocks until the user touches the key twice
+            // (program + wrap, 60s timeout each).
+            var (status, payload) = DashboardApi.LinkYubiKey(config, configPath, body?.Slot, yubiKeyProvider, log);
+            if (status != 200)
+                return Results.BadRequest(payload);
+            return Results.Content(
+                JsonSerializer.Serialize((OkYubiKeyDto)payload, DashboardJsonContext.Default.OkYubiKeyDto),
+                "application/json");
+        });
+
         app.MapPost("/api/restore/unlock", (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

@@ -54,36 +54,10 @@ public static partial class DashboardApi
         {
             if (yubiKeyProvider is null)
                 return (400, new ErrorDto("YubiKey support is unavailable in this build."));
-            try
-            {
-                var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(
-                    yubiKeyProvider, passphrase, config.YubiKeySlot);
-                try
-                {
-                    config.PassphraseProtected = Dpapi.Protect(passphrase);
-                    config.YubiKeyChallenge = challenge;
-                    config.PassphraseYubiKeyWrapped = wrapped;
-                    config.YubiKeySlotSecretProtected = Dpapi.Protect(
-                        Convert.ToBase64String(slotSecret));
-                    config.PassphraseYubiKey = true;
-                }
-                finally
-                {
-                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(slotSecret);
-                }
-            }
-            catch (InvalidOperationException ex)
-            {
-                return (400, new ErrorDto(ex.Message));
-            }
-            catch (TimeoutException)
-            {
-                return (400, new ErrorDto("Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes."));
-            }
-            catch (Exception ex)
-            {
-                return (400, new ErrorDto("YubiKey setup failed: " + ex.Message));
-            }
+            var error = SetupYubiKeyOnConfig(config, yubiKeyProvider, passphrase,
+                config.YubiKeySlot, storePassphraseCopy: true);
+            if (error is not null)
+                return error.Value;
         }
         else
         {
@@ -99,6 +73,97 @@ public static partial class DashboardApi
                 (string.IsNullOrEmpty(passphrase) ? "cleared" :
                  useYubiKey ? "saved (DPAPI + YubiKey-wrapped)" : "saved (DPAPI-encrypted)"));
             return (200, new OkYubiKeyDto(true, useYubiKey && !string.IsNullOrEmpty(passphrase)));
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Runs YubiKey setup (program the slot with a fresh secret, then wrap
+    /// <paramref name="passphrase"/> under the challenge-response-derived
+    /// KEK — two touches) and writes the resulting challenge / wrapped
+    /// passphrase / slot secret onto <paramref name="config"/>. Does NOT
+    /// save the config. Returns null on success, or the error result.
+    /// Shared by <see cref="SetPassphrase"/> (passphrase typed in Settings)
+    /// and <see cref="LinkYubiKey"/> (the wizard's link step, where the
+    /// passphrase was already saved by an earlier step).
+    /// </summary>
+    private static (int Status, object Payload)? SetupYubiKeyOnConfig(
+        ServiceConfig config, IYubiKeyProvider yubiKeyProvider, string passphrase,
+        int slot, bool storePassphraseCopy)
+    {
+        try
+        {
+            var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(
+                yubiKeyProvider, passphrase, slot);
+            try
+            {
+                if (storePassphraseCopy)
+                    config.PassphraseProtected = Dpapi.Protect(passphrase);
+                config.YubiKeyChallenge = challenge;
+                config.PassphraseYubiKeyWrapped = wrapped;
+                config.YubiKeySlotSecretProtected = Dpapi.Protect(
+                    Convert.ToBase64String(slotSecret));
+                config.YubiKeySlot = slot;
+                config.PassphraseYubiKey = true;
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(slotSecret);
+            }
+            return null;
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (400, new ErrorDto(ex.Message));
+        }
+        catch (TimeoutException)
+        {
+            return (400, new ErrorDto("Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes."));
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto("YubiKey setup failed: " + ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Links a YubiKey to the already-configured repository passphrase:
+    /// the same setup as <see cref="SetPassphrase"/> with the YubiKey
+    /// option, except the passphrase is resolved server-side (environment
+    /// variable or the stored DPAPI copy) instead of being supplied by the
+    /// caller. This is the security wizard's "Link your YubiKey" step —
+    /// the wizard saved the passphrase in its own step, so it is never
+    /// sent back through the browser. On success the config has YubiKey
+    /// mode fully set up (<see cref="ServiceConfig.PassphraseYubiKey"/>),
+    /// so a protection-profile save with YubiKeyEnabled passes validation.
+    /// An existing DPAPI passphrase copy is left untouched; when the
+    /// passphrase comes only from the environment variable, no copy is
+    /// created (env-only mode stays env-only).
+    /// </summary>
+    public static (int Status, object Payload) LinkYubiKey(ServiceConfig config,
+        string configPath, int? slot, IYubiKeyProvider? yubiKeyProvider,
+        Action<string>? log = null)
+    {
+        if (yubiKeyProvider is null)
+            return (400, new ErrorDto("YubiKey support is unavailable in this build."));
+        int useSlot = slot ?? config.YubiKeySlot;
+        if (useSlot is not 1 and not 2)
+            return (400, new ErrorDto("YubiKey slot must be 1 or 2."));
+        string? passphrase = BackupScheduler.GetPassphrase(config);
+        if (string.IsNullOrEmpty(passphrase))
+            return (400, new ErrorDto("No passphrase is configured. Set a repository passphrase first."));
+        var error = SetupYubiKeyOnConfig(config, yubiKeyProvider, passphrase,
+            useSlot, storePassphraseCopy: false);
+        if (error is not null)
+            return error.Value;
+        try
+        {
+            config.Save(configPath);
+            log?.Invoke("dashboard: YubiKey linked to the repository passphrase");
+            return (200, new OkYubiKeyDto(true, true));
         }
         catch (Exception ex)
         {

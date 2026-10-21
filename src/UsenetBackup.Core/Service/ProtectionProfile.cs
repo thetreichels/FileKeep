@@ -58,6 +58,18 @@ public sealed class AddYubiKeyRequest
 }
 
 /// <summary>
+/// Dashboard request body for <c>POST /api/yubikey/link</c>: the slot to
+/// program when linking a YubiKey to the already-configured repository
+/// passphrase (the security wizard's link step). Optional — when absent,
+/// the config's current slot is used.
+/// </summary>
+public sealed class YubiKeyLinkRequest
+{
+    [JsonPropertyName("slot")]
+    public int? Slot { get; set; }
+}
+
+/// <summary>
 /// Dashboard response body for <c>POST /api/protection/yubikey/add</c>.
 /// </summary>
 public sealed class AddYubiKeyResponse

@@ -28,6 +28,7 @@ namespace UsenetBackup.Core.Json;
 [JsonSerializable(typeof(ProtectionProfileResponse))]
 [JsonSerializable(typeof(AddYubiKeyRequest))]
 [JsonSerializable(typeof(AddYubiKeyResponse))]
+[JsonSerializable(typeof(YubiKeyLinkRequest))]
 [JsonSerializable(typeof(RepositoryConfig))]
 [JsonSerializable(typeof(BackupManifest))]
 public partial class FileKeepJsonContext : JsonSerializerContext

@@ -845,13 +845,15 @@
           <div class="card" style="text-align:center;padding:40px 20px">
             <div style="font-size:64px;margin-bottom:16px">🔑</div>
             <div id="sec-yk-waiting">
-              <div style="font-weight:600;margin-bottom:8px">Waiting for touch…</div>
-              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Your YubiKey is blinking. Touch the gold contact to confirm.</div>
-              <button class="accent" onclick="secSimulateYubiKeyTouch()">Simulate touch (demo)</button>
+              <div style="font-weight:600;margin-bottom:8px" id="sec-yk-status">Waiting for touch…</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Press the button, then touch the key's gold contact when it starts blinking. Setup takes two touches: the first programs the slot, the second wraps your passphrase.</div>
+              <button class="accent" id="sec-yk-link-btn" onclick="secLinkYubiKey()">Set up this YubiKey</button>
+              <div id="sec-yk-error" style="display:none;color:var(--bad);font-size:13px;margin-top:12px"></div>
             </div>
             <div id="sec-yk-linked" style="display:none">
               <div style="font-weight:600;color:var(--ok);margin-bottom:8px">✓ YubiKey linked</div>
-              <div style="color:var(--text-2);font-size:13px">The key answered the challenge and your passphrase is now wrapped to slot 2. Touch required on every restore unlock.</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px" id="sec-yk-linked-msg">The key answered the challenge and your passphrase is now wrapped to slot 2. Touch required on every restore unlock.</div>
+              <button onclick="secRelinkYubiKey()">Set up a key again</button>
             </div>
           </div>
           <div id="sec-yk-unlinked-note" style="display:none" class="card">
@@ -885,9 +887,10 @@
           <div class="card" style="text-align:center;padding:40px 20px">
             <div style="font-size:64px;margin-bottom:16px">🔑</div>
             <div id="sec-yk-prog-waiting">
-              <div style="font-weight:600;margin-bottom:8px">Waiting for touch…</div>
-              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Your YubiKey is blinking. Touch the gold contact to program it with the secret.</div>
-              <button class="accent" onclick="secSimulateKeyProgram()">Simulate touch (demo)</button>
+              <div style="font-weight:600;margin-bottom:8px" id="sec-yk-prog-status">Waiting for touch…</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Press the button, then touch the key's gold contact when it starts blinking to program it with the secret.</div>
+              <button class="accent" id="sec-yk-prog-btn" onclick="secProgramKey()">Program this key</button>
+              <div id="sec-yk-prog-error" style="display:none;color:var(--bad);font-size:13px;margin-top:12px"></div>
             </div>
             <div id="sec-yk-prog-done" style="display:none">
               <div style="font-weight:600;color:var(--ok);margin-bottom:8px" id="sec-yk-prog-msg">Key 1 programmed</div>
@@ -3210,6 +3213,8 @@ function secGoStep(n) {
     if (el) el.style.display = 'none';
   });
   document.getElementById('sec-step-' + stepId).style.display = '';
+  if (stepId === 3) secRefreshLinkStep();
+  if (stepId === '3b') secRefreshProgramStep();
   if (stepId === '4b' && !secPhoneVerified) secLoadPhoneSetup();
   
   // Update footer
@@ -3278,11 +3283,65 @@ let secYubiKeyLinked = false;
 let secProgrammedKeys = [];
 let secPhoneVerified = false;
 
-function secSimulateYubiKeyTouch() {
+// Step 3 (link): run the real YubiKey setup against the passphrase the
+// wizard already saved — POST /api/yubikey/link resolves it server-side
+// and programs + wraps with two touches. The response drives the UI:
+// in-flight "waiting", success shows the linked panel, failure shows the
+// backend's error in the step (never a silent no-op).
+async function secLinkYubiKey() {
+  const btn = document.getElementById('sec-yk-link-btn');
+  const err = document.getElementById('sec-yk-error');
+  const status = document.getElementById('sec-yk-status');
+  const slot = parseInt(document.getElementById('sec-yk-slot').value, 10) || 2;
+  err.style.display = 'none';
+  btn.disabled = true;
+  status.textContent = 'Waiting for touch — touch the key when it blinks…';
+  try {
+    await api('/api/yubikey/link', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    secYubiKeyLinked = true;
+    secProfile.yubiKeyEnabled = true;
+    document.getElementById('sec-yk-linked-msg').textContent =
+      'The key answered the challenge and your passphrase is now wrapped to slot ' + slot + '. Touch required on every restore unlock.';
+    document.getElementById('sec-yk-waiting').style.display = 'none';
+    document.getElementById('sec-yk-linked').style.display = '';
+    secUpdateInsight();
+    secUpdateWizardNext();
+  } catch (e) {
+    status.textContent = 'Waiting for touch…';
+    err.textContent = e.message;
+    err.style.display = '';
+    btn.disabled = false;
+  }
+}
+
+// Re-run setup (e.g. with a different key): show the touch panel again.
+// The existing setup stays in force server-side until a new one succeeds.
+function secRelinkYubiKey() {
+  document.getElementById('sec-yk-linked').style.display = 'none';
+  document.getElementById('sec-yk-waiting').style.display = '';
+  document.getElementById('sec-yk-link-btn').disabled = false;
+  document.getElementById('sec-yk-error').style.display = 'none';
+  document.getElementById('sec-yk-status').textContent = 'Waiting for touch…';
+}
+
+// Entering step 3 with YubiKey mode already set up (e.g. returning to
+// the wizard): show the linked state instead of asking for setup again.
+function secRefreshLinkStep() {
+  if (!secProfile.yubiKeyEnabled) return;
   secYubiKeyLinked = true;
   document.getElementById('sec-yk-waiting').style.display = 'none';
   document.getElementById('sec-yk-linked').style.display = '';
-  secUpdateWizardNext();
+}
+
+// The step-3 slot selector's warning names the slot that programming
+// will overwrite.
+function secUpdateSlotWarning() {
+  const slot = document.getElementById('sec-yk-slot').value;
+  document.getElementById('sec-yk-slot-warn-title').textContent =
+    'Slot ' + slot + ' will be overwritten.';
 }
 
 function secLinkFromNote() {
@@ -3291,20 +3350,70 @@ function secLinkFromNote() {
   document.getElementById('sec-yk-unlinked-note').style.display = 'none';
 }
 
-function secSimulateKeyProgram() {
-  const n = secProgrammedKeys.length + 1;
-  secProgrammedKeys.push('Key ' + n);
-  document.getElementById('sec-yk-prog-waiting').style.display = 'none';
-  document.getElementById('sec-yk-prog-done').style.display = '';
-  document.getElementById('sec-yk-prog-msg').textContent = 'Key ' + n + ' programmed';
+// Step 3b (program keys): program the inserted key with the stored slot
+// secret via the real program-spare endpoint, then register its label —
+// the same pair of calls as the Tools tab's "Add another YubiKey". The
+// backend refuses when YubiKey setup has not been completed yet; that
+// error is shown in the step rather than simulated away.
+async function secProgramKey() {
+  const btn = document.getElementById('sec-yk-prog-btn');
+  const err = document.getElementById('sec-yk-prog-error');
+  const status = document.getElementById('sec-yk-prog-status');
+  err.style.display = 'none';
+  btn.disabled = true;
+  status.textContent = 'Waiting for touch — touch the key when it blinks…';
+  try {
+    await api('/api/yubikey/program-spare', { method: 'POST' });
+    const name = 'YubiKey ' + ((secProfile.yubiKeys || []).length + 1);
+    try {
+      const r = await api('/api/protection/yubikey/add', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      secProfile.yubiKeys = r.yubiKeys || [name];
+    } catch (e2) {
+      // The key IS programmed; only its label failed to register.
+      toast('Key programmed, but its name could not be saved: ' + e2.message, 'err');
+      if (!secProfile.yubiKeys) secProfile.yubiKeys = [];
+      secProfile.yubiKeys.push(name);
+    }
+    if (!secProgrammedKeys.includes(name)) secProgrammedKeys.push(name);
+    document.getElementById('sec-yk-prog-waiting').style.display = 'none';
+    document.getElementById('sec-yk-prog-done').style.display = '';
+    document.getElementById('sec-yk-prog-msg').textContent = name + ' programmed';
+    secRenderProgrammedKeys();
+    secUpdateWizardNext();
+  } catch (e) {
+    status.textContent = 'Waiting for touch…';
+    err.textContent = e.message;
+    err.style.display = '';
+    btn.disabled = false;
+  }
+}
+
+function secRenderProgrammedKeys() {
   const list = document.getElementById('sec-yk-key-list');
+  if (!secProgrammedKeys.length) {
+    list.innerHTML = '<div style="color:var(--text-2);font-size:13px">No keys programmed yet — touch a key to program the first one.</div>';
+    return;
+  }
   list.innerHTML = secProgrammedKeys.map(k => `<div style="padding:8px;border-bottom:1px solid var(--border)">${esc(k)} — programmed ✓</div>`).join('');
-  secUpdateWizardNext();
+}
+
+// Entering step 3b: keys registered in earlier sessions already hold
+// the secret, so they count toward the "program at least one key" gate.
+function secRefreshProgramStep() {
+  if (!secProgrammedKeys.length && secProfile.yubiKeys && secProfile.yubiKeys.length)
+    secProgrammedKeys = [...secProfile.yubiKeys];
+  secRenderProgrammedKeys();
 }
 
 function secProgramAnotherKey() {
   document.getElementById('sec-yk-prog-waiting').style.display = '';
   document.getElementById('sec-yk-prog-done').style.display = 'none';
+  document.getElementById('sec-yk-prog-btn').disabled = false;
+  document.getElementById('sec-yk-prog-error').style.display = 'none';
+  document.getElementById('sec-yk-prog-status').textContent = 'Waiting for touch…';
 }
 
 function secTogglePwVisibility(inputId, btn) {
