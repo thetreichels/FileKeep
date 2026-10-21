@@ -1707,6 +1707,7 @@ public sealed class BackupScheduler
                 Port = nntpLoc.Port,
                 Ssl = nntpLoc.Ssl,
                 Username = nntpLoc.Username ?? "",
+                PasswordProtected = nntpLoc.PasswordProtected,
             };
             newsgroup = nntpLoc.Newsgroup ?? provider.Newsgroup;
         }
@@ -1715,8 +1716,15 @@ public sealed class BackupScheduler
 
         Log($"job '{job.Name}': streaming disk image to Usenet " +
             $"(sparse={job.Sparse}, volumes=100MB)...");
+        // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
+        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
+        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
+            nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
+
         using var client = new Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
-        // TODO: Authenticate with provider.Username/Password if configured.
+        client.Connect();
+        if (!string.IsNullOrEmpty(provider.Username))
+            client.Authenticate(provider.Username, nntpPassword ?? "");
         using var nntp = new NntpBlobStore(
             client, newsgroup, repo.RepoId, repo.CatalogPath,
             from: repo.GetOrCreatePoster());
