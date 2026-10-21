@@ -3233,7 +3233,15 @@ async function secFinishWizard() {
   }
   // Only claim success when the profile actually persisted — the save can
   // be rejected (e.g. a selected method whose setup never completed).
-  if (await secSaveProfile()) toast('Protection settings saved.', 'ok');
+  if (await secSaveProfile()) {
+    toast('Protection settings saved.', 'ok');
+    // Exit the wizard to the Security view's normal saved state (the same
+    // sequence as opening the tab): reload the profile from the server so
+    // every panel reflects what was saved, and return to the first step.
+    await secLoadProfile();
+    secCurrentStep = 1;
+    secGoStep(1);
+  }
 }
 
 // Update link band for wizard (simplified)
