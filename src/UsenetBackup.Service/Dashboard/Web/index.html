@@ -821,19 +821,42 @@
           </div>
         </div>
 
-        <!-- Step 2b: YubiKey-only key secret -->
+        <!-- Step 2b: YubiKey-only generated secret -->
         <div class="sec-step" id="sec-step-2b" style="display:none">
-          <h1>Generate key secret</h1>
-          <p style="color:var(--text-2);margin:-12px 0 20px">There's no passphrase in this mode. Instead, FileKeep generates a random 20-byte secret and programs it into your YubiKey's HMAC-SHA1 challenge–response slot. The answers the key computes from that secret are what encrypt your backups.</p>
+          <h1>Generate your secret</h1>
+          <p style="color:var(--text-2);margin:-12px 0 20px">There's no passphrase in this mode. Instead, FileKeep generates a random 256-bit secret and your inserted YubiKey wraps it — the secret is what encrypts your backups, and the key is how you unlock them. Setup takes two touches: the first programs the key, the second wraps the secret.</p>
+          <div class="card" style="text-align:center;padding:40px 20px">
+            <div style="font-size:64px;margin-bottom:16px">🔑</div>
+            <div id="sec-yk-gen-waiting">
+              <div style="font-weight:600;margin-bottom:8px" id="sec-yk-gen-status">Waiting for touch…</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Insert the YubiKey you want as your first key, press the button, then touch its gold contact when it starts blinking.</div>
+              <button class="accent" id="sec-yk-gen-btn" onclick="secGenerateSecret()">Generate secret and set up this YubiKey</button>
+              <div id="sec-yk-gen-error" style="display:none;color:var(--bad);font-size:13px;margin-top:12px"></div>
+            </div>
+            <div id="sec-yk-gen-done" style="display:none">
+              <div style="font-weight:600;color:var(--ok);margin-bottom:8px">✓ Secret generated — key set up</div>
+              <div style="color:var(--text-2);font-size:13px" id="sec-yk-gen-done-msg">Your first key is programmed and wraps the secret. The secret itself is shown once, on the recovery-sheet step — keep going to save it.</div>
+            </div>
+          </div>
           <div class="card">
             <div style="margin-bottom:16px;padding:12px;background:var(--bg-2);border:1px solid var(--border);border-radius:6px;font-size:13px">
-              <div style="font-weight:600;margin-bottom:4px">Generated during programming — never typed.</div>
-              <div style="color:var(--text-2)">FileKeep creates the secret with a cryptographic random generator and writes it into each key when you program it. FileKeep itself keeps no copy. After programming, you'll print the secret on a recovery sheet — the only copy that exists outside your keys.</div>
+              <div style="font-weight:600;margin-bottom:4px">Shown once — on your recovery sheet.</div>
+              <div style="color:var(--text-2)">When setup finishes, the recovery-sheet step ahead shows the secret so you can save or print it. Anyone with that sheet — or any programmed key — can restore your backups. FileKeep also keeps a protected copy of the secret on this PC, so scheduled backups run unattended; it never displays that copy.</div>
             </div>
-            <div class="meta" style="text-align:center">You never type this day to day — it's shown on your recovery sheet so you can recognize it.</div>
-            <div style="margin-top:16px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
+            <label>Slot
+              <select id="sec-yk-gen-slot" onchange="secUpdateGenSlotWarning()">
+                <option value="1">Slot 1</option>
+                <option value="2" selected>Slot 2</option>
+              </select>
+            </label>
+            <div class="meta">Slot 2 is the usual choice — slot 1 is often used by other sign-in features.</div>
+            <div style="margin-top:12px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
+              <div style="font-weight:600;color:var(--bad)" id="sec-yk-gen-slot-warn-title">Slot 2 will be overwritten.</div>
+              <div>Programming the challenge–response secret replaces whatever is currently stored in that slot. If another app uses this slot on this key, it will stop working with that app.</div>
+            </div>
+            <div style="margin-top:12px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">No passphrase means no other way in.</div>
-              <div>If every programmed key is lost and the recovery sheet is gone, these backups cannot be decrypted — by anyone, including you. That's why the next steps let you program a spare and print the sheet.</div>
+              <div>If every programmed key is lost and the recovery sheet is gone, these backups cannot be decrypted — by anyone, including you. That's why the next steps let you program a spare and save the sheet.</div>
             </div>
           </div>
         </div>
@@ -883,27 +906,27 @@
         <!-- Step 3b: Program keys (YubiKey-only) -->
         <div class="sec-step" id="sec-step-3b" style="display:none">
           <h1>Program your keys</h1>
-          <p style="color:var(--text-2);margin:-12px 0 20px">Insert a YubiKey and touch its metal contact when it blinks — FileKeep writes the secret from the previous step into the key. Every key gets the same secret, so any programmed key can unlock your backups. One key is enough to get started. You can program a spare as a backup if you like — store it somewhere separate from your main key.</p>
+          <p style="color:var(--text-2);margin:-12px 0 20px">Your first key was programmed at the previous step. Here you can program spare keys: insert another YubiKey and touch its metal contact when it blinks — FileKeep writes the same challenge–response secret into it, so any programmed key can unlock your backups. One key is enough to get started. Program a spare as a backup if you like — store it somewhere separate from your main key.</p>
           <div class="card" style="text-align:center;padding:40px 20px">
             <div style="font-size:64px;margin-bottom:16px">🔑</div>
             <div id="sec-yk-prog-waiting">
               <div style="font-weight:600;margin-bottom:8px" id="sec-yk-prog-status">Waiting for touch…</div>
-              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Press the button, then touch the key's gold contact when it starts blinking to program it with the secret.</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">Press the button, then touch the key's gold contact when it starts blinking to program it as a spare.</div>
               <button class="accent" id="sec-yk-prog-btn" onclick="secProgramKey()">Program this key</button>
               <div id="sec-yk-prog-error" style="display:none;color:var(--bad);font-size:13px;margin-top:12px"></div>
             </div>
             <div id="sec-yk-prog-done" style="display:none">
               <div style="font-weight:600;color:var(--ok);margin-bottom:8px" id="sec-yk-prog-msg">Key 1 programmed</div>
-              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">The secret is now in this key's slot 2. Program a spare key the same way, or continue.</div>
+              <div style="color:var(--text-2);font-size:13px;margin-bottom:16px">This key now unlocks your backups just like your first key. Program another spare the same way, or continue.</div>
               <button onclick="secProgramAnotherKey()">Program another key</button>
             </div>
           </div>
           <div class="card">
             <div style="font-weight:600;margin-bottom:8px">Programmed keys</div>
-            <div id="sec-yk-key-list"><div style="color:var(--text-2);font-size:13px">No keys programmed yet — touch a key to program the first one.</div></div>
+            <div id="sec-yk-key-list"><div style="color:var(--text-2);font-size:13px">No keys programmed yet.</div></div>
           </div>
           <div class="card">
-            <div style="font-size:13px;color:var(--text-2)">Slot 2 will be overwritten on each key.</div>
+            <div style="font-size:13px;color:var(--text-2)">Programming uses the same slot as your first key, and overwrites it on each spare.</div>
             <div style="font-size:13px;color:var(--text-2)">Programming replaces whatever is currently stored in that slot. If another app uses this slot on one of these keys, it will stop working with that app.</div>
           </div>
         </div>
@@ -911,17 +934,21 @@
         <!-- Step 4: Recovery sheet (YubiKey-only) -->
         <div class="sec-step" id="sec-step-4" style="display:none">
           <h1>Save your recovery sheet</h1>
-          <p style="color:var(--text-2);margin:-12px 0 20px">This sheet holds the same 20-byte secret that's now inside your keys. It's the backup for the day every key is lost, broken, or somewhere you can't get to.</p>
+          <p style="color:var(--text-2);margin:-12px 0 20px">This sheet holds the recovery secret for your backups — the same secret your keys wrap. It's the backup for the day every key is lost, broken, or somewhere you can't get to: type it in when you restore, and FileKeep opens your vault without a key.</p>
           <div class="card">
             <div style="border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px">
               <div style="font-weight:700;font-size:16px;margin-bottom:4px">FileKeep recovery sheet <span style="font-size:11px;font-weight:400;background:var(--bg-2);border-radius:10px;padding:2px 8px">YubiKey-only protection</span></div>
-              <div style="font-size:13px;font-weight:600;margin-bottom:4px">HMAC-SHA1 secret — 40 hex characters</div>
-              <div style="font-size:13px;color:var(--text-2);margin-bottom:12px">No secret is shown in this preview. The recovery secret is produced by setup — FileKeep generates it while your first key is programmed, and keeps no copy of its own.</div>
-              <div style="font-size:12px;color:var(--text-2)">To recover: program this secret into a new YubiKey's HMAC-SHA1 challenge–response slot (slot 2), then open FileKeep and touch the key to restore from your Banked Vault. Keep this sheet somewhere safe — a fire safe or a safe-deposit box, not with your keys.</div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:4px">Recovery secret — keep this sheet safe</div>
+              <div id="sec-sheet-secret-held" style="display:none;margin-bottom:12px">
+                <code id="sec-sheet-secret-value" style="display:block;font-size:16px;letter-spacing:2px;background:var(--bg-2);padding:12px 16px;border-radius:6px;word-break:break-all;text-align:center"></code>
+                <div style="font-size:12px;color:var(--text-2);margin-top:8px">This is the one time the secret is shown — save or print this sheet before you finish. It is not displayed again.</div>
+              </div>
+              <div id="sec-sheet-secret-none" style="font-size:13px;color:var(--text-2);margin-bottom:12px">No secret is shown in this preview. The recovery secret was shown once, when your first key was set up — FileKeep never displays it again.</div>
+              <div style="font-size:12px;color:var(--text-2)">To recover: start a restore and type this secret when FileKeep asks, instead of touching a key — it opens your Banked Vault on its own. Keep this sheet somewhere safe — a fire safe or a safe-deposit box, not with your keys.</div>
             </div>
             <div style="margin-bottom:16px;padding:12px;background:color-mix(in srgb, var(--bad) 10%, var(--card));border:1px solid var(--bad);border-radius:6px;font-size:13px">
               <div style="font-weight:600;color:var(--bad);margin-bottom:4px">Store this somewhere safe and separate from your YubiKey.</div>
-              <div>Anyone with this code can access your backups. If all keys are lost, this secret programs a new key and restores access.</div>
+              <div>Anyone with this secret can access your backups. If all keys are lost, it is the only other way in.</div>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:16px">
               <button onclick="secSaveRecoverySheet('txt')">Save as text file .txt</button>
@@ -2800,9 +2827,15 @@ document.querySelector('[data-view="tools"]').addEventListener('click', loadSett
 document.querySelector('[data-view="jobs"]').addEventListener('click', loadSettings);
 document.querySelector('[data-view="vault"]').addEventListener('click', loadSettings);
 // ---- Security tab: protection wizard ----
-let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, linkMode: 'or', yubiKeys: [] };
+let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, yubiKeyOnly: false, linkMode: 'or', yubiKeys: [] };
 
 async function secLoadProfile() {
+  // A generated recovery secret lives only for one wizard run: any fresh
+  // profile load (opening the tab, finishing the wizard) drops it. It is
+  // held in memory only — never persisted, and the server never returns
+  // it again after the setup response.
+  secGeneratedSecret = '';
+  secGeneratedSetup = false;
   try {
     const p = await api('/api/protection/profile');
     secProfile = p;
@@ -2875,6 +2908,9 @@ async function secSaveProfile() {
         passphraseEnabled: secProfile.passphraseEnabled,
         yubiKeyEnabled: secProfile.yubiKeyEnabled,
         phoneEnabled: secProfile.phoneEnabled,
+        // Informational: the server decides the mode from its own config,
+        // but keep the wire honest about what the wizard is saving.
+        yubiKeyOnly: !!secProfile.yubiKeyOnly,
         linkMode: secProfile.linkMode,
       }),
     });
@@ -2979,10 +3015,24 @@ async function secNext() {
 }
 
 function secSaveRecoverySheet(format) {
-  const content = 'FileKeep YubiKey Recovery Sheet\n' +
-    '================================\n\n' +
-    'Date: ' + new Date().toISOString() + '\n\n' +
-    'Keep this sheet in a safe place. You will need it if you lose your YubiKey.\n';
+  // The sheet's content IS the secret when this wizard run generated one.
+  // When no secret is held (setup finished in an earlier session), the
+  // sheet says so honestly — the secret was shown once, at setup, and
+  // can never be re-fetched.
+  let content = 'FileKeep recovery sheet — YubiKey-only protection\n' +
+    '====================================================\n\n' +
+    'Date saved: ' + new Date().toISOString() + '\n\n';
+  if (secGeneratedSecret) {
+    content += 'Recovery secret — keep this sheet safe:\n\n' +
+      secGeneratedSecret + '\n\n' +
+      'To recover: start a restore and type this secret when FileKeep\n' +
+      'asks, instead of touching a YubiKey.\n\n';
+  } else {
+    content += 'The recovery secret was shown once, when the first key was\n' +
+      'set up, and is not included here — it cannot be displayed again.\n\n';
+  }
+  content += 'Anyone with this secret can open your backups. Store this\n' +
+    'sheet somewhere safe, separate from your YubiKeys.\n';
   if (format === 'txt') {
     const blob = new Blob([content], { type: 'text/plain' });
     const a = document.createElement('a');
@@ -3004,6 +3054,22 @@ function secSaveRecoverySheet(format) {
     });
   }
   toast('Recovery sheet saved.', 'ok');
+}
+
+// Entering step 4: render the generated secret when this wizard run
+// holds it; otherwise keep the honest "shown once, at setup" state —
+// the server never returns the secret again by design.
+function secRenderRecoverySheet() {
+  const held = document.getElementById('sec-sheet-secret-held');
+  const none = document.getElementById('sec-sheet-secret-none');
+  if (secGeneratedSecret) {
+    document.getElementById('sec-sheet-secret-value').textContent = secGeneratedSecret;
+    held.style.display = '';
+    none.style.display = 'none';
+  } else {
+    held.style.display = 'none';
+    none.style.display = '';
+  }
 }
 
 // Wizard navigation
@@ -3049,8 +3115,10 @@ function secGoStep(n) {
     if (el) el.style.display = 'none';
   });
   document.getElementById('sec-step-' + stepId).style.display = '';
+  if (stepId === '2b') secRefreshGenStep();
   if (stepId === 3) secRefreshLinkStep();
   if (stepId === '3b') secRefreshProgramStep();
+  if (stepId === 4) secRenderRecoverySheet();
   if (stepId === '4b' && !secPhoneVerified) secLoadPhoneSetup();
   
   // Update footer
@@ -3089,6 +3157,11 @@ function secUpdateWizardNext() {
       if (p1 && p1 !== p2) reason = "Your passphrases don't match yet.";
       else if (missing.length) reason = 'Your passphrase still needs: ' + missing.join(', ') + '.';
     }
+  } else if (stepId === '2b') {
+    // Generate-secret step: require setup completed — either just now
+    // in this wizard run, or already configured (returning user).
+    enabled = secGeneratedSetup;
+    if (!enabled) reason = 'Generate the secret and set up your YubiKey to continue.';
   } else if (stepId === 3) {
     // YubiKey link step: require linked
     enabled = secYubiKeyLinked;
@@ -3118,6 +3191,12 @@ function secUpdateWizardNext() {
 let secYubiKeyLinked = false;
 let secProgrammedKeys = [];
 let secPhoneVerified = false;
+let secGeneratedSetup = false;
+// The generated recovery secret (grouped display form), held only in
+// memory for this wizard run so the recovery-sheet step can show it.
+// The server returns it exactly once, in the setup response; it is
+// never persisted (no localStorage) and is cleared on profile reload.
+let secGeneratedSecret = '';
 
 // Step 3 (link): run the real YubiKey setup against the passphrase the
 // wizard already saved — POST /api/yubikey/link resolves it server-side
@@ -3186,6 +3265,86 @@ function secLinkFromNote() {
   document.getElementById('sec-yk-unlinked-note').style.display = 'none';
 }
 
+// The step-2b slot selector's warning names the slot that programming
+// will overwrite.
+function secUpdateGenSlotWarning() {
+  const slot = document.getElementById('sec-yk-gen-slot').value;
+  document.getElementById('sec-yk-gen-slot-warn-title').textContent =
+    'Slot ' + slot + ' will be overwritten.';
+}
+
+// Step 2b (generate secret): YubiKey-only setup. POST
+// /api/yubikey/setup-generated generates the 256-bit secret
+// server-side, programs the inserted key (two touches) and wraps the
+// secret to it. The response carries the recovery secret exactly once —
+// it is held in memory for the recovery-sheet step and never stored
+// or re-fetched. UI states mirror the step-3 link step: in-flight
+// "waiting", success shows the done panel, failure shows the backend's
+// error in the step.
+async function secGenerateSecret() {
+  const btn = document.getElementById('sec-yk-gen-btn');
+  const err = document.getElementById('sec-yk-gen-error');
+  const status = document.getElementById('sec-yk-gen-status');
+  const slot = parseInt(document.getElementById('sec-yk-gen-slot').value, 10) || 2;
+  err.style.display = 'none';
+  btn.disabled = true;
+  status.textContent = 'Waiting for touch — touch the key when it blinks…';
+  try {
+    const r = await api('/api/yubikey/setup-generated', {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    });
+    secGeneratedSecret = r.recoverySecret || '';
+    secGeneratedSetup = true;
+    secProfile.yubiKeyEnabled = true;
+    secProfile.yubiKeyOnly = true;
+    // Register the first key's label, the same way step 3b registers
+    // spares: the programmed-keys list (and step 3b's gate) count
+    // registered keys, and this key is programmed now.
+    const name = 'YubiKey ' + ((secProfile.yubiKeys || []).length + 1);
+    try {
+      const reg = await api('/api/protection/yubikey/add', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      });
+      secProfile.yubiKeys = reg.yubiKeys || [name];
+    } catch (e2) {
+      // The key IS set up; only its label failed to register.
+      toast('Key set up, but its name could not be saved: ' + e2.message, 'err');
+      if (!secProfile.yubiKeys) secProfile.yubiKeys = [];
+      secProfile.yubiKeys.push(name);
+    }
+    if (!secProgrammedKeys.includes(name)) secProgrammedKeys.push(name);
+    document.getElementById('sec-yk-gen-done-msg').textContent =
+      'Your first key (' + name + ') is programmed and wraps the secret in slot ' + slot + '. The secret itself is shown once, on the recovery-sheet step — keep going to save it.';
+    document.getElementById('sec-yk-gen-waiting').style.display = 'none';
+    document.getElementById('sec-yk-gen-done').style.display = '';
+    secUpdateInsight();
+    secUpdateWizardNext();
+  } catch (e) {
+    status.textContent = 'Waiting for touch…';
+    err.textContent = e.message;
+    err.style.display = '';
+    btn.disabled = false;
+  }
+}
+
+// Entering step 2b when generated-secret mode is already configured
+// (returning user): show the set-up state instead of offering to
+// generate — the server rejects a second generation anyway, and the
+// secret itself was shown once, at setup. When this wizard run just
+// generated the secret, the success handler already arranged the
+// panels, so there is nothing to refresh.
+function secRefreshGenStep() {
+  if (secGeneratedSecret) return;
+  if (!secProfile.yubiKeyOnly) return;
+  secGeneratedSetup = true;
+  document.getElementById('sec-yk-gen-waiting').style.display = 'none';
+  document.getElementById('sec-yk-gen-done').style.display = '';
+  document.getElementById('sec-yk-gen-done-msg').textContent =
+    'YubiKey-only protection is already set up on this PC — your first key wraps the secret. The secret itself was shown once, at setup; it is not shown again.';
+}
+
 // Step 3b (program keys): program the inserted key with the stored slot
 // secret via the real program-spare endpoint, then register its label —
 // the same pair of calls as the Tools tab's "Add another YubiKey". The
@@ -3230,7 +3389,7 @@ async function secProgramKey() {
 function secRenderProgrammedKeys() {
   const list = document.getElementById('sec-yk-key-list');
   if (!secProgrammedKeys.length) {
-    list.innerHTML = '<div style="color:var(--text-2);font-size:13px">No keys programmed yet — touch a key to program the first one.</div>';
+    list.innerHTML = '<div style="color:var(--text-2);font-size:13px">No keys programmed yet.</div>';
     return;
   }
   list.innerHTML = secProgrammedKeys.map(k => `<div style="padding:8px;border-bottom:1px solid var(--border)">${esc(k)} — programmed ✓</div>`).join('');
