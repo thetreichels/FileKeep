@@ -150,6 +150,23 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void HtmlPage_BakesBuildTokenAndSidebarCheck()
+    {
+        string html = DashboardHtml.Page("test-csrf-token");
+        // The build placeholder must be fully substituted: an unsubstituted
+        // "{{APP_VERSION}}" would bake in as a literal build token and the
+        // sidebar stale-page check would reload on every navigation.
+        Assert.Contains("name=\"app-build\"", html);
+        Assert.False(html.Contains("{{APP_VERSION}}"), "APP_VERSION placeholder was not substituted");
+        // The sidebar stale-page gate ships in the page.
+        Assert.Contains("reloadIfBuildChanged", html);
+        // The build token resolves without throwing and is stable across calls.
+        string token = DashboardApi.GetBuildToken();
+        Assert.NotNull(token);
+        Assert.Equal(token, DashboardApi.GetBuildToken());
+    }
+
+    [Fact]
     public void ValidateCsrfToken_AcceptsOnlyExactMatch()
     {
         Assert.True(DashboardApi.ValidateCsrfToken("abc123", "abc123"));

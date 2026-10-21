@@ -64,7 +64,15 @@ public static class Dashboard
         });
         var app = builder.Build();
 
-        app.MapGet("/", () => Results.Content(DashboardHtml.Page(csrfToken), "text/html; charset=utf-8"));
+        app.MapGet("/", (HttpContext ctx) =>
+        {
+            // The page must never come from a browser/WebView2 cache: a cached
+            // page keeps running the old build's code against a newer service
+            // after an upgrade (the stale-page trap). no-store makes every
+            // load and reload fetch the page the running service serves.
+            ctx.Response.Headers.CacheControl = "no-store";
+            return Results.Content(DashboardHtml.Page(csrfToken), "text/html; charset=utf-8");
+        });
 
         app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
 
@@ -75,9 +83,13 @@ public static class Dashboard
             try
             {
                 string v = DashboardApi.GetAppVersion().Replace("\"", "");
-                return Results.Content("{\"version\":\"" + v + "\"}", "application/json");
+                // "build" is the full token (git SHA included) the served page
+                // compares against its baked-in copy to detect that the app
+                // was upgraded while the window stayed open.
+                string b = DashboardApi.GetBuildToken().Replace("\"", "");
+                return Results.Content("{\"version\":\"" + v + "\",\"build\":\"" + b + "\"}", "application/json");
             }
-            catch { return Results.Content("{\"version\":\"0.0.0\"}", "application/json"); }
+            catch { return Results.Content("{\"version\":\"0.0.0\",\"build\":\"\"}", "application/json"); }
         });
 
         // Update check: compares the installed version against the VERSION

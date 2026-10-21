@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="csrf-token" content="{{CSRF_TOKEN}}">
+<meta name="app-build" content="{{APP_VERSION}}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FileKeep</title>
 <style>
@@ -1501,7 +1502,28 @@ function toast(msg, kind) {
 }
 let jobNames = [];
 let jobRepos = [];
-document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', () => {
+// Stale-page check, run when a sidebar item is selected: if the app was
+// upgraded while this window stayed open, this page is the old build's code
+// talking to a new service (and its CSRF token is dead, so saves would fail
+// silently). Navigation is a boundary the user chose, so reload there —
+// the fresh page is the whole app at the service's build. Any uncertainty
+// (service mid-restart, unstamped dev build) navigates normally instead.
+const pageBuild = document.querySelector('meta[name="app-build"]')?.content || '';
+async function reloadIfBuildChanged() {
+  if (!pageBuild || pageBuild === '0.0.0') return false;
+  try {
+    const r = await fetch('/api/version', { cache: 'no-store' });
+    if (!r.ok) return false;
+    const svcBuild = (await r.json())?.build || '';
+    if (svcBuild && svcBuild !== '0.0.0' && svcBuild !== pageBuild) {
+      location.reload();
+      return true;
+    }
+  } catch { /* service unreachable: navigate normally */ }
+  return false;
+}
+document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', async () => {
+  if (await reloadIfBuildChanged()) return; // reloading; abandon this navigation
   document.querySelectorAll('.nav-item').forEach(x => x.classList.remove('active'));
   a.classList.add('active');
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));

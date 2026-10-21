@@ -64,6 +64,42 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// The full build token: the informational version exactly as stamped,
+    /// INCLUDING any "+gitsha" suffix that <see cref="GetAppVersion"/> strips
+    /// for display. Two builds with the same display version but different
+    /// commits produce different tokens, so the dashboard's stale-page check
+    /// (page build vs. service build) catches same-version rebuilds too.
+    /// Never throws; returns "" when no version can be determined, which
+    /// callers must treat as "unknown — do not enforce".
+    /// </summary>
+    public static string GetBuildToken()
+    {
+        try
+        {
+            string? path = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                string? product = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductVersion;
+                if (!string.IsNullOrWhiteSpace(product))
+                    return product.Trim();
+            }
+        }
+        catch { }
+        try
+        {
+            var asm = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+            string? info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(info))
+                return info.Trim();
+            return asm.GetName().Version?.ToString() ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>
     /// Checks the GitHub repo for the most recent released version by reading
     /// the VERSION file committed and pushed to main. Returns the installed
     /// version, the latest pushed version, whether an update is available,
