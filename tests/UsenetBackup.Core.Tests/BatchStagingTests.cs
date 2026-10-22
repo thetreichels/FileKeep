@@ -1,3 +1,4 @@
+using System.Threading;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
 using UsenetBackup.Core.Service;
@@ -144,6 +145,79 @@ public sealed class BatchStagingTests : IDisposable
     }
 
     // ---------- flush context ----------
+
+    [Fact]
+    public void TrackingStore_PutRacingClaim_DeliveredChunkNotResurrected()
+    {
+        // Mirror of the FlushUnderLock wipe race: a Put whose local
+        // write is in flight while a flush claims the batch. If the
+        // chunk was DELIVERED meanwhile (a twin file staged it first
+        // and that batch flushed), this Put must not track it again —
+        // it would be uploaded a second time in the next batch. (The
+        // pre-fix tracker tracked unconditionally after the write.)
+        using var repo = BackupRepository.Init(_repoDir, Passphrase);
+        var inner = repo.LocalChunkStore!;
+        var delivered = new HashSet<string>();
+        bool Delivered(string id) { lock (delivered) return delivered.Contains(id); }
+        var tracker = new BatchTrackingBlobStore(inner, Delivered);
+        string id = new string('7', 64);
+        // Large enough that the atomic temp-write is observable in flight.
+        byte[] blob = new byte[64 * 1024 * 1024];
+        var putThread = new Thread(() => tracker.Put(id, blob));
+        putThread.Start();
+        string chunkDir = Path.GetDirectoryName(inner.PathFor(id))!;
+        bool inFlight = SpinWait.SpinUntil(() =>
+            Directory.Exists(chunkDir) &&
+            Directory.GetFiles(chunkDir, "*.tmp-*").Length > 0,
+            TimeSpan.FromSeconds(15));
+        Assert.True(inFlight, "inner write never became observable");
+        // The flush claims whatever is tracked so far; the chunk is
+        // then delivered (by the twin that staged it first).
+        tracker.CaptureAndReset();
+        lock (delivered) delivered.Add(id);
+        putThread.Join();
+        // Whether this Put's tracking landed before the claim (the
+        // claim took it — staged exactly once) or after (the delivery
+        // re-check must have kept it out), it must NOT be sitting in
+        // the next batch now.
+        Assert.Empty(tracker.StagedIds);
+        Assert.Equal(0, tracker.StagedBytesThisBatch);
+    }
+
+    [Fact]
+    public void BatchContext_ChunkStagedDuringFlush_SurvivesForNextBatch()
+    {
+        // Regression: FlushUnderLock used to snapshot, run the flush
+        // callback, THEN ResetBatch — a chunk tracked during the
+        // callback (the parallel staging loop does exactly that while
+        // an upload is in flight) was wiped: in the manifest, never
+        // delivered. The batch must be CLAIMED before the callback.
+        using var repo = BackupRepository.Init(_repoDir, Passphrase);
+        var inner = repo.LocalChunkStore!;
+        var tracker = new BatchTrackingBlobStore(inner, _ => false);
+        string lateId = new string('9', 64);
+        var flushed = new List<IReadOnlyList<string>>();
+        var ctx = new BatchedBackupContext(tracker, batchSizeBytes: 100,
+            (ids, idx) =>
+            {
+                flushed.Add(ids);
+                if (idx == 0)
+                    // Simulate the staging loop landing a chunk while
+                    // this flush's upload is in flight.
+                    tracker.Put(lateId, new byte[60]);
+                return true;
+            });
+
+        tracker.Put(new string('8', 64), new byte[120]);
+        ctx.CheckFlush(); // 120 >= 100: flush batch 0
+        Assert.Single(flushed);
+        Assert.DoesNotContain(lateId, flushed[0]);
+        // The late chunk survived the flush — it is the next batch.
+        Assert.Equal(new[] { lateId }, tracker.StagedIds);
+        ctx.FlushRemainder();
+        Assert.Equal(2, flushed.Count);
+        Assert.Equal(new[] { lateId }, flushed[1]);
+    }
 
     [Fact]
     public void BatchContext_FlushesWhenFull_AndRemainder()
@@ -379,7 +453,16 @@ public sealed class BatchStagingTests : IDisposable
         manifest = repo.FinalizeBatchedManifest(manifest);
 
         Assert.Equal(3, manifest.Files.Count);
-        Assert.True(flushes >= 2, $"expected multiple batches, got {flushes}");
+        // Files stage in PARALLEL, so how the chunks group into batches
+        // is timing-dependent: one flush can legitimately sweep all
+        // three files if their staging lands before the first
+        // CheckFlush. (This asserted >= 2 and flaked on Windows —
+        // failed, passed, failed across identical runs.) The product
+        // guarantees are: >= 1 flush, every chunk flushed exactly once,
+        // pruned, manifest verifies — asserted below. Deterministic
+        // multi-flush mechanics are covered by the direct-context
+        // tests above.
+        Assert.True(flushes >= 1, $"expected at least one batch flush, got {flushes}");
         // All staged chunks were flushed...
         var manifestChunks = manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
         Assert.Equal(flushedChunks.Distinct().Count(), manifestChunks.Count);

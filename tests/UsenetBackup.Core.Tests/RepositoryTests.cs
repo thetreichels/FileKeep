@@ -357,7 +357,9 @@ public sealed class RepositoryTests : IDisposable
         // sensitive, README.txt and Readme.txt are two legitimate
         // files and both must restore (the claim is Windows-gated).
         if (OperatingSystem.IsWindows())
-            throw Xunit.Sdk.SkipException.ForSkip("case-distinct files cannot be created on Windows");
+            return; // Case-distinct files cannot be created on Windows. (Early
+                    // return, not SkipException: dynamic skips report as failures
+                    // under this suite's dotnet-test runner.)
         WriteSrc("README.txt", "upper"u8.ToArray());
         WriteSrc("Readme.txt", "mixed"u8.ToArray());
         string backupId;

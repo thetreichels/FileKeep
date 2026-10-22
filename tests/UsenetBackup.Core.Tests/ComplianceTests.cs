@@ -284,6 +284,10 @@ public sealed class ComplianceTests : IDisposable
     [Fact]
     public void Directives_DiskImageOperationsAreLogged()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         string disk = Path.Combine(_workDir, "disk.bin");
         File.WriteAllBytes(disk, "img"u8.ToArray());
         string backupId;

@@ -172,6 +172,10 @@ public sealed class SnapshotAndImageTests : IDisposable
     [Fact]
     public void DiskImage_BackupAndRestore_RoundTrips()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         // Deliberately not a multiple of the chunk size.
         byte[] diskBytes = RandomBytes(2 * ChunkSize + 12345);
         string disk = Path.Combine(_workDir, "disk.bin");
@@ -208,6 +212,10 @@ public sealed class SnapshotAndImageTests : IDisposable
     [Fact]
     public void RestoreDiskImage_RefusesDirectoryBackup()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         File.WriteAllBytes(Path.Combine(_srcDir, "a.txt"), "x"u8.ToArray());
         string backupId;
         using (var repo = InitRepo())
@@ -222,6 +230,10 @@ public sealed class SnapshotAndImageTests : IDisposable
     [Fact]
     public void RestoreDiskImage_RefusesUndersizedTarget()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         byte[] diskBytes = RandomBytes(ChunkSize + 7);
         string disk = Path.Combine(_workDir, "disk.bin");
         File.WriteAllBytes(disk, diskBytes);
@@ -239,6 +251,10 @@ public sealed class SnapshotAndImageTests : IDisposable
     [Fact]
     public void RestoreDiskImage_RejectsCorruptedChunk()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         byte[] diskBytes = RandomBytes(ChunkSize + 7);
         string disk = Path.Combine(_workDir, "disk.bin");
         File.WriteAllBytes(disk, diskBytes);
@@ -346,6 +362,10 @@ public sealed class SnapshotAndImageTests : IDisposable
     [Fact]
     public void BackupDiskImageSparse_SkipsZeroChunks_RestoresCorrectly()
     {
+        if (OperatingSystem.IsWindows())
+            return; // RestoreDiskImage refuses non-physical-drive targets on
+                    // Windows by design (ValidateDevicePath) — a file target
+                    // cannot run there. Covered fully on Linux.
         // Sparse backup: a disk with zero regions only stores non-zero chunks.
         // Restore reconstructs the full image with zeros for skipped positions.
         byte[] diskBytes = new byte[2 * ChunkSize + 1000];

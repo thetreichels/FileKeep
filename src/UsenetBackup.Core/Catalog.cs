@@ -58,7 +58,27 @@ public sealed class Catalog : IDisposable
         // These are short-lived per-operation connections; the pool buys
         // nothing and the lingering lock is a correctness bug.
         var conn = new SqliteConnection($"Data Source={dbPath};Pooling=false");
-        conn.Open();
+        try
+        {
+            conn.Open();
+            InitSchema(conn);
+            return conn;
+        }
+        catch
+        {
+            // Dispose before the exception propagates: the ctor's
+            // corruption path renames the database file, and on Windows
+            // this connection's open handle would block the rename
+            // (the quarantine then silently no-ops and the fresh init
+            // fails on the same corrupt file). Linux's unlink semantics
+            // masked this entirely.
+            conn.Dispose();
+            throw;
+        }
+    }
+
+    private static void InitSchema(SqliteConnection conn)
+    {
         using var cmd = conn.CreateCommand();
         // NS-4: two processes can hold a repo (service + CLI). WAL lets
         // readers and a writer coexist, and busy_timeout makes lock
@@ -90,7 +110,6 @@ public sealed class Catalog : IDisposable
             """;
         cmd.ExecuteNonQuery();
         MigrateUploadsToProviderScope(conn);
-        return conn;
     }
 
     /// <summary>

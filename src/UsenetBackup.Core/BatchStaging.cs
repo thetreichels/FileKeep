@@ -136,9 +136,16 @@ public sealed class BatchedBackupContext : IBatchedBackupContext
 
     private void FlushUnderLock()
     {
-        var ids = Tracker.StagedIds.ToList();
+        // Claim the batch ATOMICALLY, before the callback. The old
+        // order — snapshot StagedIds, run the (slow: verify + upload +
+        // prune) callback, then ResetBatch — wiped any chunk the
+        // parallel staging loop tracked DURING the callback: staged
+        // and catalogued, referenced by the manifest, but never
+        // flushed to a destination and never pruned. A silent hole in
+        // the backup, visible only under load. Chunks tracked during
+        // the callback now simply belong to the next batch.
+        var ids = Tracker.CaptureAndReset();
         bool ok = OnFlushBatch(ids, _batchIndex);
-        Tracker.ResetBatch();
         if (!ok)
             throw new OperationCanceledException("Batched backup aborted during flush.");
         _batchIndex++;
@@ -294,6 +301,13 @@ public sealed class BatchTrackingBlobStore : IBlobStore
     private readonly List<string> _stagedIds = new();
     private readonly object _lock = new();
     private long _stagedBytes;
+    // Bumped by every claim/reset. A Put snapshots it before its
+    // (unlocked) write; if a flush claimed a batch while the write was
+    // in flight, the Put re-checks delivery evidence before tracking —
+    // otherwise it would resurrect a chunk the flush already delivered
+    // into the next batch (double upload), the mirror image of the
+    // wipe race CaptureAndReset fixed in FlushUnderLock.
+    private int _claimEpoch;
 
     public BatchTrackingBlobStore(LocalBlobStore inner, Func<string, bool> isDeliveredAtAllTargets)
     {
@@ -333,31 +347,44 @@ public sealed class BatchTrackingBlobStore : IBlobStore
         // concurrent Puts of the same chunk are harmless.
         if (_isDeliveredAtAllTargets(chunkIdHex))
             return; // evidenced at every destination: nothing to stage or send
+        int epoch = ClaimEpoch;
         if (!_inner.Exists(chunkIdHex))
             _inner.Put(chunkIdHex, blob);
-        lock (_lock)
-        {
-            if (!_stagedIds.Contains(chunkIdHex))
-            {
-                _stagedIds.Add(chunkIdHex);
-                _stagedBytes += blob.Length;
-            }
-        }
+        Track(chunkIdHex, blob.Length, epoch);
     }
 
     public void Put(string chunkIdHex, ReadOnlySpan<byte> blob)
     {
         if (_isDeliveredAtAllTargets(chunkIdHex))
             return; // evidenced at every destination: nothing to stage or send
+        int epoch = ClaimEpoch;
         if (!_inner.Exists(chunkIdHex))
             _inner.Put(chunkIdHex, blob);
+        Track(chunkIdHex, blob.Length, epoch);
+    }
+
+    private int ClaimEpoch
+    {
+        get { lock (_lock) return _claimEpoch; }
+    }
+
+    private void Track(string chunkIdHex, long blobLength, int epochAtWriteStart)
+    {
         lock (_lock)
         {
-            if (!_stagedIds.Contains(chunkIdHex))
-            {
-                _stagedIds.Add(chunkIdHex);
-                _stagedBytes += blob.Length;
-            }
+            if (_stagedIds.Contains(chunkIdHex))
+                return;
+            // A flush claimed a batch while this Put's write was in
+            // flight. If that flush DELIVERED this chunk (a twin file
+            // staged it first), tracking it now would resurrect it
+            // into the next batch and upload it twice. If it was not
+            // delivered, it is a genuinely new chunk and must be
+            // tracked — dropping it here was the wipe race.
+            if (epochAtWriteStart != _claimEpoch &&
+                _isDeliveredAtAllTargets(chunkIdHex))
+                return;
+            _stagedIds.Add(chunkIdHex);
+            _stagedBytes += blobLength;
         }
     }
 
@@ -372,6 +399,7 @@ public sealed class BatchTrackingBlobStore : IBlobStore
         {
             _stagedIds.Clear();
             _stagedBytes = 0;
+            _claimEpoch++;
         }
     }
 
@@ -386,6 +414,7 @@ public sealed class BatchTrackingBlobStore : IBlobStore
             var ids = new List<string>(_stagedIds);
             _stagedIds.Clear();
             _stagedBytes = 0;
+            _claimEpoch++;
             return ids;
         }
     }

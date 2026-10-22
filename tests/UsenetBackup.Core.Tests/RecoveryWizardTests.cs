@@ -361,6 +361,11 @@ public sealed class RecoveryWizardTests : IDisposable
     [Fact]
     public void EnsureLocalChunks_SparseDiskImage_PullsRealChunksSkipsSparse()
     {
+        if (OperatingSystem.IsWindows())
+            return; // The wizard's disk restore ultimately writes through
+                    // RestoreDiskImage, whose target must be a physical drive
+                    // on Windows (ValidateDevicePath) — a file target cannot
+                    // run there. Covered fully on Linux.
         // NS-9: sparse disk images record zero regions as "" chunk IDs.
         // The pull used to turn "" into a path to the chunks DIRECTORY
         // and throw "Chunk  not found", blocking the restore entirely.

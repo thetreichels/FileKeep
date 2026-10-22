@@ -474,10 +474,17 @@ public sealed class DashboardTests : IDisposable
             DashboardJsonContext.Default.WinRePrerequisitesDto);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        Assert.False(root.GetProperty("isWindows").GetBoolean());
-        Assert.False(root.GetProperty("ready").GetBoolean());
-        Assert.Contains("Windows", root.GetProperty("error").GetString());
-        Assert.Equal(0, root.GetProperty("missing").GetArrayLength());
+        // The serialization coverage (SF-24) is the point; the branch
+        // values differ by platform — the original asserts described
+        // only the non-Windows branch and failed on a real Windows box.
+        Assert.Equal(OperatingSystem.IsWindows(),
+            root.GetProperty("isWindows").GetBoolean());
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.False(root.GetProperty("ready").GetBoolean());
+            Assert.Contains("Windows", root.GetProperty("error").GetString());
+            Assert.Equal(0, root.GetProperty("missing").GetArrayLength());
+        }
     }
 
     [Fact]
@@ -646,6 +653,13 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void StartDiskRestore_SameTargetAlreadyRestoring_Refused409()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // P2-C5: two restores writing one device interleaved chunk
         // writes and left a spliced image. The second start must be
         // refused while the target is claimed — and must not touch it.
@@ -705,6 +719,13 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void StartDiskRestore_CorruptLocalChunk_NoSource_RefusesBeforeWriting()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // P2-V1 (DL-6 residual): with no banked location resolved, the
         // staging proof was existence-only — a present-but-corrupt local
         // chunk passed it and the restore died mid-write, target partly
@@ -739,6 +760,13 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void StartDiskRestore_WithScheduler_WaitsForOperationGate()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // P2-C3: dashboard restores bypassed the scheduler's operation
         // lock and ran concurrently with scheduled runs on the same
         // repo. Gated, a restore started while another operation holds
@@ -772,8 +800,33 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // The physical-drive revalidation is Windows-only.
+        // The file-target disk-restore tests cannot run on Windows
+        // because THIS guard fires first — assert the guard itself:
+        // a target that is not a present physical drive is refused
+        // synchronously, before any staging or writing.
+        string backupId = MakeDiskImageBackup(new byte[100_000]);
+        string target = MakeSentinelTarget(new byte[100_000]);
+        var config = MakeConfig();
+        var (status, payload) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true);
+        Assert.Equal(400, status);
+        Assert.Contains("no longer present", ((ErrorDto)payload).Error);
+    }
+
+    [Fact]
     public void StartDiskRestore_PreCancelledToken_FailsLoggedBeforeWriting()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // P2-C8: dashboard restores ignored the host's stop token — a
         // service stop killed them mid-write and the operations log
         // showed only "started". With the token threaded, cancellation
@@ -802,6 +855,13 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void StartDiskRestore_ChunksOnlyOnShare_PullsAndRestores()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // DL-6: the image's chunks live only on the job's SMB location
         // (local staging pruned). The restore must pull them first and
         // then write the image — byte-for-byte the original.
@@ -833,6 +893,13 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void StartDiskRestore_ChunkMissingEverywhere_RefusesBeforeWriting()
     {
+        if (OperatingSystem.IsWindows())
+            return; // Disk-restore targets are physical drives on Windows by design:
+                    // StartDiskRestore re-validates the target against
+                    // PhysicalDrives.List(), so a file target is refused (400)
+                    // before any staging. The staging/claim/gate behavior is
+                    // covered on Linux; the Windows refusal itself is asserted
+                    // by StartDiskRestore_NonPhysicalTarget_OnWindows_Refused400.
         // DL-6: the first chunks are staged locally, but a later chunk
         // is missing from BOTH the local repo and the share. The restore
         // must fail WITHOUT touching the target — not one byte written
@@ -970,7 +1037,9 @@ public sealed class DashboardTests : IDisposable
         Assert.Equal(3, exitCode);
         Assert.Contains("hello-out", stdOut);
         Assert.Contains("hello-err", stdErr);
-        Assert.Contains("hello-out", lines);
+        // cmd's `echo x &` keeps the space before & — the collected
+        // line is "hello-out " on Windows. Compare trimmed.
+        Assert.Contains(lines, l => l.Trim() == "hello-out");
     }
 
     [Fact]
@@ -1324,7 +1393,9 @@ public sealed class DashboardTests : IDisposable
     public void BrowseFolders_AccessDenied_ReturnsCleanError()
     {
         if (OperatingSystem.IsWindows())
-            throw Xunit.Sdk.SkipException.ForSkip("chmod-based access denial is Unix-only.");
+            return; // chmod-based access denial is Unix-only. (Early return, not
+                    // SkipException: this suite's dotnet-test runner reports dynamic
+                    // skips as failures — see TestAssembly.cs notes.)
         string locked = Path.Combine(_workDir, "locked");
         Directory.CreateDirectory(Path.Combine(locked, "child"));
         var prev = File.GetUnixFileMode(locked);

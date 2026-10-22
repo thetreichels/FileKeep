@@ -111,6 +111,11 @@ public sealed class VssSnapshotTests : IDisposable
         string path = Path.Combine(_workDir, name);
         if (OperatingSystem.IsWindows())
         {
+            // The NS-10 stubs were named without an extension
+            // ("fail-stub"); Windows cannot execute an extensionless
+            // batch file (Win32Exception at Process.Start). The class's
+            // own .bat stub works — match it.
+            path += ".bat";
             File.WriteAllText(path, windowsBody);
         }
         else
