@@ -262,6 +262,17 @@ public sealed record RemovableDriveDto(
     [property: JsonPropertyName("label")] string Label,
     [property: JsonPropertyName("serial")] string Serial);
 
+/// <summary>
+/// Disk usage for one backup location, GET /api/config/location-disk.
+/// Only locations with a disk the service can currently see appear —
+/// a plugged-in USB drive, or a network share reachable as the service
+/// account. Usenet locations have no disk to measure and never appear.
+/// </summary>
+public sealed record LocationDiskDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("totalBytes")] long TotalBytes,
+    [property: JsonPropertyName("freeBytes")] long FreeBytes);
+
 /// <summary>Response for POST /api/protection/phone/setup: enrollment data.</summary>
 public sealed record PhoneSetupDto(
     [property: JsonPropertyName("otpauthUri")] string OtpauthUri,

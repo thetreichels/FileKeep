@@ -506,6 +506,15 @@ public static class Dashboard
                             t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
                         .Select(j => j.Name).ToList())).ToList())));
 
+        // Disk usage for disk-backed locations (USB drives, network
+        // shares), fetched by the locations card after it renders —
+        // probing a dead share can block, so it never rides /api/config.
+        app.MapGet("/api/config/location-disk", () =>
+        {
+            var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
+            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+        });
+
         app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
         {
             try

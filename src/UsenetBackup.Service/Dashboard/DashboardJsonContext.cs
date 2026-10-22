@@ -59,6 +59,8 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(UsbDrives.UsbDrive[]))]
 [JsonSerializable(typeof(RemovableDriveDto))]
 [JsonSerializable(typeof(RemovableDriveDto[]))]
+[JsonSerializable(typeof(LocationDiskDto))]
+[JsonSerializable(typeof(LocationDiskDto[]))]
 [JsonSerializable(typeof(PhoneSetupDto))]
 [JsonSerializable(typeof(WinReBuildStatusDto))]
 [JsonSerializable(typeof(WinReBuildStepDto))]

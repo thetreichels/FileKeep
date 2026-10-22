@@ -166,6 +166,67 @@ public static partial class DashboardApi
         }
     }
 
+    /// <summary>
+    /// Total/free bytes for a drive root (a local root like "E:\" or a
+    /// UNC share root), or null when the drive can't be read — not
+    /// ready, unreachable, or not a real root. Never throws.
+    /// </summary>
+    public static (long Total, long Free)? ProbeDiskUsage(string rootPath)
+    {
+        if (string.IsNullOrWhiteSpace(rootPath))
+            return null;
+        try
+        {
+            var drive = new DriveInfo(rootPath);
+            if (!drive.IsReady || drive.TotalSize <= 0)
+                return null;
+            return (drive.TotalSize, drive.AvailableFreeSpace);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Disk usage for the backup locations that have a disk to measure:
+    /// USB locations resolve by volume serial (absent drive = no entry)
+    /// and network shares probe their UNC root as the service account
+    /// (unreachable or auth-gated = no entry). Usenet locations have no
+    /// disk and are skipped. Probes run in parallel under a bounded
+    /// wait so one dead share can't hang the locations card — this is
+    /// its own endpoint, fetched after the card renders, never part of
+    /// /api/config.
+    /// </summary>
+    public static (int Status, object Payload) GetLocationDiskUsage(ServiceConfig config)
+    {
+        try
+        {
+            var probes = config.Locations
+                .Where(l => l.Type is not null &&
+                    (l.Type.Equals("usb", StringComparison.OrdinalIgnoreCase) ||
+                     l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase)))
+                .Select(l => Task.Run(() =>
+                {
+                    string? root = l.Type!.Equals("usb", StringComparison.OrdinalIgnoreCase)
+                        ? UsenetBackup.Core.UsbDriveResolver.ResolveDriveLetter(l.VolumeSerial)
+                        : l.Share;
+                    var usage = root is null ? null : ProbeDiskUsage(root);
+                    return usage is null
+                        ? null
+                        : new LocationDiskDto(l.Name ?? "", usage.Value.Total, usage.Value.Free);
+                }))
+                .ToArray();
+            Task.WaitAll(probes, TimeSpan.FromSeconds(10));
+            var result = probes
+                .Where(t => t.IsCompletedSuccessfully && t.Result is not null)
+                .Select(t => t.Result!)
+                .ToArray();
+            return (200, result);
+        }
+        catch (Exception ex)
+        {
+            return (500, new ErrorDto(ex.Message));
+        }
+    }
+
     /// <summary>Returns (200, log lines) or (400, error payload).</summary>
     public static (int Status, object Payload) GetLog(ServiceConfig config, string repo, int lines = 100)
     {

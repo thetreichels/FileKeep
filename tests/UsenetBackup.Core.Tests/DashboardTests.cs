@@ -309,6 +309,41 @@ public sealed class DashboardTests : IDisposable
         if (len > 400) len = 400;
         Assert.False(html.Substring(h1, len).Contains("New backup job"),
             "An add-job button sits by the jobs page heading; it belongs in the jobs list");
+        // The locations card carries a disk-usage meter slot per row,
+        // filled lazily from the location-disk endpoint.
+        Assert.Contains("data-locmeter", html);
+        Assert.Contains("/api/config/location-disk", html);
+    }
+
+    [Fact]
+    public void ProbeDiskUsage_RealRootReportsSpace_BogusPathReturnsNull()
+    {
+        string root = Path.GetPathRoot(Environment.CurrentDirectory)!;
+        var usage = DashboardApi.ProbeDiskUsage(root);
+        Assert.NotNull(usage);
+        Assert.True(usage.Value.Total > 0);
+        Assert.InRange(usage.Value.Free, 0, usage.Value.Total);
+        Assert.Null(DashboardApi.ProbeDiskUsage("/definitely-not-a-real-drive-xyz/"));
+        Assert.Null(DashboardApi.ProbeDiskUsage(""));
+    }
+
+    [Fact]
+    public void GetLocationDiskUsage_NonDiskLocations_ReturnsEmpty()
+    {
+        // A Usenet location has no disk to measure, and an unplugged
+        // USB location resolves to nothing: both stay off the list,
+        // which is what keeps their meters hidden in the card.
+        var config = new ServiceConfig
+        {
+            Locations = new List<BackupLocation>
+            {
+                new() { Name = "Usenet", Type = "nntp" },
+                new() { Name = "Stick", Type = "usb", VolumeSerial = "DEADBEEF" },
+            },
+        };
+        var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
+        Assert.Equal(200, status);
+        Assert.Empty((LocationDiskDto[])payload);
     }
 
     [Fact]

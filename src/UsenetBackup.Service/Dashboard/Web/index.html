@@ -149,6 +149,12 @@
   .job-progress { margin-top: 10px; }
   .job-progress .track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
   .job-progress .fill { height: 100%; background: var(--ok); width: 0; transition: width .3s ease; }
+  /* Location disk-usage meter: filled in lazily from
+     /api/config/location-disk once the locations card has rendered;
+     stays hidden for locations with no measurable disk. */
+  .loc-meter { margin-top: 8px; max-width: 340px; }
+  .loc-meter .track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .loc-meter .fill { height: 100%; width: 0; background: var(--ok); transition: width .3s ease; }
   .summary-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--text-2); padding: 12px 20px; }
   .summary-strip .dot { font-size: 10px; }
   .jobs-empty { text-align: center; padding: 36px 20px; }
@@ -2720,6 +2726,7 @@ async function loadSettings() {
   }
   // Load backup locations
   renderLocations(cfg.locations || []);
+  loadLocationDisk();
   renderVaultLocations(cfg.locations || []);
   updateUsbScanButtonVisibility();
 }
@@ -2905,12 +2912,39 @@ function renderLocations(locations) {
         <div class="name">${esc(l.name)} <span style="font-size:11px;color:var(--text-2);text-transform:uppercase">${l.type}</span></div>
         <div class="meta" style="font-family:monospace">${detail}</div>
         <div class="meta">${usedBy}${pw}</div>
+        <div class="loc-meter" data-locmeter="${esc(l.name)}" style="display:none">
+          <div class="track"><div class="fill" data-locmeter-fill></div></div>
+          <div class="meta" data-locmeter-label></div>
+        </div>
       </div>
       <button onclick='editLocation(${JSON.stringify(l.name)})'>Edit</button>
       <button onclick='testLocation(${JSON.stringify(l.name)})'>Test</button>
       <button onclick='deleteLocation(${JSON.stringify(l.name)})'>Remove</button>
     </div>`;
   }).join('');
+}
+// Fill in the location disk-usage meters. Separate fetch on purpose:
+// probing a network share can block for seconds, so usage loads after
+// the locations card has rendered and only where the service could
+// actually measure a disk (plugged-in USB, reachable share). No entry
+// for a location = its meter simply stays hidden.
+async function loadLocationDisk() {
+  let list;
+  try { list = await api('/api/config/location-disk'); } catch (e) { return; }
+  const slots = document.querySelectorAll('[data-locmeter]');
+  (list || []).forEach(d => {
+    if (!(d.totalBytes > 0)) return;
+    slots.forEach(slot => {
+      if (slot.dataset.locmeter !== d.name) return;
+      const usedPct = Math.max(0, Math.min(100, Math.round((1 - d.freeBytes / d.totalBytes) * 100)));
+      const fill = slot.querySelector('[data-locmeter-fill]');
+      fill.style.width = usedPct + '%';
+      fill.style.background = usedPct >= 95 ? 'var(--bad)' : usedPct >= 85 ? 'var(--warn)' : 'var(--ok)';
+      slot.querySelector('[data-locmeter-label]').textContent =
+        fmtBytes(d.freeBytes) + ' free of ' + fmtBytes(d.totalBytes) + ' · ' + usedPct + '% used';
+      slot.style.display = '';
+    });
+  });
 }
 async function loadUsbDrivesForLocationForm(loc) {
   const sel = document.getElementById('lf-usbdrive');
