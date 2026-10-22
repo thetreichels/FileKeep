@@ -46,6 +46,44 @@ public sealed class DownloadTests : IDisposable
         return client;
     }
 
+    [Fact]
+    public void DownloadChunkIds_CorruptLocalChunk_IsRefetched()
+    {
+        // SF-13: a present-but-corrupt local blob used to count as
+        // "already present" and was never re-fetched — the download
+        // reported success with data that failed only at restore time.
+        using var repo = BackupRepository.Init(_repoDir, Passphrase, ChunkSize, KdfIterations,
+            chunkingScheme: BackupRepository.ChunkingSchemeFixed);
+        var data = new byte[40 * 1024];
+        for (int i = 0; i < data.Length; i++) data[i] = (byte)(i % 251);
+        File.WriteAllBytes(Path.Combine(_srcDir, "a.bin"), data);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string[] chunkIds = manifest.Files.SelectMany(f => f.Chunks).ToArray();
+        Assert.True(chunkIds.Length >= 2);
+
+        // The "remote": a plain blob store holding pristine copies.
+        var remote = new LocalBlobStore(Path.Combine(_workDir, "remote"));
+        foreach (string id in chunkIds)
+            remote.Put(id, repo.GetChunkBlob(id));
+
+        // Corrupt every local blob in place (same length, wrong bytes).
+        // Written directly: LocalBlobStore.Put is a dedup no-op when a
+        // file already exists.
+        foreach (string id in chunkIds)
+        {
+            string path = Path.Combine(_repoDir, "chunks", id[..2], id[2..]);
+            byte[] bad = File.ReadAllBytes(path);
+            bad[0] ^= 0xFF;
+            File.WriteAllBytes(path, bad);
+        }
+
+        var result = repo.DownloadChunkIds(chunkIds, remote);
+        Assert.Equal(0, result.AlreadyPresent);
+        Assert.Equal(chunkIds.Length, result.Downloaded);
+        foreach (string id in chunkIds)
+            repo.VerifyChunk(id); // whole again
+    }
+
     private sealed record Fixture(
         BackupRepository Repo,
         BackupManifest Manifest,

@@ -33,6 +33,43 @@ public sealed class RecoveryWizardTests : IDisposable
     }
 
     [Fact]
+    public void ManifestProbes_CorruptManifestThrows_MissingReturnsFalse()
+    {
+        // MU-13: the wizard's manifest probes used to swallow every
+        // exception as "feature absent," so a tampered manifest was
+        // presented as "no YubiKey challenge / not a disk image."
+        string backupId;
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            var manifest = repo.BackupDirectory(_srcDir, snapshotProvider: null);
+            backupId = manifest.BackupId;
+        }
+
+        using var state = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+
+        // Intact manifest without a challenge: plain false, no throw.
+        state.SelectedBackupId = backupId;
+        Assert.False(state.LoadYubiKeyChallenge());
+        Assert.False(state.SelectedBackupHasYubiKeyChallenge());
+        Assert.False(state.SelectedIsDiskImage());
+
+        // Missing manifest (well-formed but unknown ID): still false.
+        state.SelectedBackupId = new string('a', 32);
+        Assert.False(state.LoadYubiKeyChallenge());
+        Assert.False(state.SelectedIsDiskImage());
+
+        // Corrupt the manifest (root hash no longer verifies): the
+        // probes must throw, not report the features as absent.
+        state.SelectedBackupId = backupId;
+        string manifestPath = Path.Combine(_repoDir, "manifests", backupId + ".json");
+        string json = File.ReadAllText(manifestPath);
+        File.WriteAllText(manifestPath, json.Replace("a.txt", "b.txt"));
+        Assert.Throws<InvalidDataException>(() => state.LoadYubiKeyChallenge());
+        Assert.Throws<InvalidDataException>(() => state.SelectedBackupHasYubiKeyChallenge());
+        Assert.Throws<InvalidDataException>(() => state.SelectedIsDiskImage());
+    }
+
+    [Fact]
     public void ValidateRepoPath_RejectsEmpty()
     {
         using var s = new WizardState { RepoPath = "" };
@@ -322,6 +359,60 @@ public sealed class RecoveryWizardTests : IDisposable
     }
 
     [Fact]
+    public void EnsureLocalChunks_SparseDiskImage_PullsRealChunksSkipsSparse()
+    {
+        // NS-9: sparse disk images record zero regions as "" chunk IDs.
+        // The pull used to turn "" into a path to the chunks DIRECTORY
+        // and throw "Chunk  not found", blocking the restore entirely.
+        byte[] diskBytes = new byte[2 * ChunkSize + 1000];
+        Random.Shared.NextBytes(diskBytes.AsSpan(0, ChunkSize));
+        Random.Shared.NextBytes(diskBytes.AsSpan(2 * ChunkSize, 1000));
+        string disk = Path.Combine(_repoDir, "sparse-disk.bin");
+        File.WriteAllBytes(disk, diskBytes);
+
+        string shareDir = Path.Combine(Path.GetTempPath(), "ub-sparse-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(shareDir);
+        try
+        {
+            string backupId;
+            using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            {
+                var share = SmbShare.Connect(shareDir, null, null);
+                var store = new SmbBlobStore(share);
+                var manifest = repo.BackupDiskImageStreaming(disk, store, "disk.img",
+                    sparse: true, volumeLetter: null);
+                backupId = manifest.BackupId;
+                Assert.Equal("", manifest.Files[0].Chunks[1]); // sparse middle
+            }
+            // The chunks live only on the "share"; nothing is local.
+            string localChunks = Path.Combine(_repoDir, "chunks");
+            if (Directory.Exists(localChunks))
+                Directory.Delete(localChunks, recursive: true);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = backupId,
+            };
+            s.EnsureLocalChunks(shareDir); // must not throw on the "" ID
+
+            Assert.True(Directory.EnumerateFiles(localChunks, "*", SearchOption.AllDirectories).Any());
+
+            // And the image restores correctly from the pulled chunks.
+            string restored = Path.Combine(_repoDir, "restored.bin");
+            File.WriteAllBytes(restored, new byte[diskBytes.Length]);
+            using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+                repo.RestoreDiskImage(backupId, restored);
+            Assert.Equal(diskBytes, File.ReadAllBytes(restored));
+        }
+        finally
+        {
+            try { Directory.Delete(shareDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void EnsureSmbChunks_PullsMissingChunksFromShare()
     {
         // Simulate: full repo on the "SMB share" (a local dir acts as the
@@ -357,6 +448,84 @@ public sealed class RecoveryWizardTests : IDisposable
             {
                 try { Directory.Delete(dest, recursive: true); } catch { }
             }
+        }
+        finally
+        {
+            try { Directory.Delete(shareDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void EnsureSmbChunks_CorruptLocalChunk_IsRepulled()
+    {
+        // SF-13: a corrupt local chunk used to be trusted by existence
+        // alone and never re-pulled; the restore then failed on data
+        // the wizard claimed to have ensured.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string shareDir = Path.Combine(Path.GetTempPath(), "ub-smb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CopyDir(_repoDir, shareDir);
+            // Corrupt the local chunk in place (same length).
+            string chunkFile = Directory.GetFiles(
+                Path.Combine(_repoDir, "chunks"), "*", SearchOption.AllDirectories).Single();
+            byte[] bad = File.ReadAllBytes(chunkFile);
+            bad[0] ^= 0xFF;
+            File.WriteAllBytes(chunkFile, bad);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+                SmbShare = shareDir,
+            };
+            s.EnsureSmbChunks();
+
+            // The local blob was replaced with the share's good copy.
+            string shareChunk = Directory.GetFiles(
+                Path.Combine(shareDir, "chunks"), "*", SearchOption.AllDirectories).Single();
+            Assert.Equal(File.ReadAllBytes(shareChunk), File.ReadAllBytes(chunkFile));
+        }
+        finally
+        {
+            try { Directory.Delete(shareDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void EnsureSmbChunks_CorruptShareCopy_ThrowsAndStoresNothing()
+    {
+        // SF-13: the pull used to copy straight to the final chunk path
+        // with no verification, so a corrupt source copy became the
+        // local copy. Now a bad pull fails loudly and stores nothing.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string chunkId = manifest.Files.SelectMany(f => f.Chunks).Single();
+        string shareDir = Path.Combine(Path.GetTempPath(), "ub-smb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CopyDir(_repoDir, shareDir);
+            // Corrupt the share's copy; delete the local one so a pull
+            // is required.
+            string shareChunk = Directory.GetFiles(
+                Path.Combine(shareDir, "chunks"), "*", SearchOption.AllDirectories).Single();
+            byte[] bad = File.ReadAllBytes(shareChunk);
+            bad[0] ^= 0xFF;
+            File.WriteAllBytes(shareChunk, bad);
+            string localChunk = Path.Combine(_repoDir, "chunks", chunkId[..2], chunkId[2..]);
+            File.Delete(localChunk);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+                SmbShare = shareDir,
+            };
+            Assert.Throws<InvalidDataException>(() => s.EnsureSmbChunks());
+            Assert.False(File.Exists(localChunk));
         }
         finally
         {

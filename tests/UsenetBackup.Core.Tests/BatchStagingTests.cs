@@ -1,5 +1,6 @@
 using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
+using UsenetBackup.Core.Service;
 using Xunit;
 
 namespace UsenetBackup.Core.Tests;
@@ -12,6 +13,20 @@ namespace UsenetBackup.Core.Tests;
 /// </summary>
 public sealed class BatchStagingTests : IDisposable
 {
+    [Fact]
+    public void ComputePruneSet_ExcludesChunksStagedInLaterBatch()
+    {
+        // P2-R2/C10: a chunk duplicated across files can be staged into
+        // batch N+1 while batch N is still uploading; N's prune must
+        // keep its blob for N+1's flush.
+        var flushed = new List<string> { "a", "b", "c" };
+        Assert.Equal(new List<string> { "a", "c" },
+            BackupScheduler.ComputePruneSet(flushed, new List<string> { "b" }));
+        Assert.Equal(flushed,
+            BackupScheduler.ComputePruneSet(flushed, new List<string>()));
+        Assert.Empty(BackupScheduler.ComputePruneSet(flushed, flushed));
+    }
+
     private const string Passphrase = "correct horse battery staple";
 
     private readonly string _workDir;
@@ -78,7 +93,10 @@ public sealed class BatchStagingTests : IDisposable
         tracker.Put(id, blob);
         Assert.Equal(new[] { id }, tracker.StagedIds);
         Assert.Equal(100, tracker.StagedBytesThisBatch);
-        Assert.True(tracker.Exists(id));
+        // Exists is delivery evidence now (DL-1): the predicate says the
+        // chunk is NOT delivered anywhere, so it must not read as
+        // skippable just because it was staged a moment ago.
+        Assert.False(tracker.Exists(id));
         tracker.ResetBatch();
         Assert.Empty(tracker.StagedIds);
         Assert.Equal(0, tracker.StagedBytesThisBatch);
@@ -92,27 +110,37 @@ public sealed class BatchStagingTests : IDisposable
         using var repo = BackupRepository.Init(_repoDir, Passphrase);
         var inner = repo.LocalChunkStore!;
         string id = new string('b', 64);
-        // Not local, but known remotely (e.g. uploaded + pruned earlier).
+        // Not local, but delivery to every destination is evidenced
+        // (e.g. flushed earlier in the run, or journal/presence proof).
         var tracker = new BatchTrackingBlobStore(inner, known => known == id);
         Assert.True(tracker.Exists(id));
         Assert.False(inner.Exists(id));
-        // Put is a no-op for dedup purposes from the caller's view, but the
-        // store still records it locally (BackupStream checks Exists first).
+        // Put is a complete no-op when delivery is already evidenced:
+        // nothing staged, nothing even stored locally.
+        tracker.Put(id, new byte[10]);
         Assert.Empty(tracker.StagedIds);
+        Assert.False(inner.Exists(id));
     }
 
     [Fact]
-    public void TrackingStore_DedupHit_NotCountedAsStaged()
+    public void TrackingStore_LocalButUndelivered_IsStagedForFlush()
     {
+        // DL-1 regression: a chunk whose blob sits in the local store
+        // (staged by a failed run, restored, or written by a non-batched
+        // backup) but was never delivered must still go through a
+        // flush. The old semantics treated local presence as "exists"
+        // and skipped it forever — the manifest referenced a chunk no
+        // destination had.
         using var repo = BackupRepository.Init(_repoDir, Passphrase);
         var inner = repo.LocalChunkStore!;
         string id = new string('c', 64);
         inner.Put(id, new byte[10]);
         var tracker = new BatchTrackingBlobStore(inner, _ => false);
-        Assert.True(tracker.Exists(id));
-        tracker.Put(id, new byte[10]); // already local: not "new"
-        Assert.Empty(tracker.StagedIds);
-        Assert.Equal(0, tracker.StagedBytesThisBatch);
+        Assert.False(tracker.Exists(id)); // local ≠ delivered
+        tracker.Put(id, new byte[10]);
+        Assert.Equal(new[] { id }, tracker.StagedIds);
+        Assert.Equal(10, tracker.StagedBytesThisBatch);
+        Assert.True(inner.Exists(id)); // the same local copy is what flushes
     }
 
     // ---------- flush context ----------
@@ -394,6 +422,30 @@ public sealed class BatchStagingTests : IDisposable
         Assert.Equal(chunksA, chunksB); // identical content → identical chunks
         // Second file's chunks were NOT re-staged (dedup via catalog).
         Assert.Equal(chunksA.Distinct().Count(), totalStaged);
+    }
+
+    private sealed class ThrowingDeleteStore : IBlobStore
+    {
+        public bool Exists(string chunkIdHex) => false;
+        public void Put(string chunkIdHex, byte[] blob) { }
+        public byte[] Get(string chunkIdHex) => throw new FileNotFoundException(chunkIdHex);
+        public long StoredCount => 0;
+        public void Delete(string chunkIdHex) =>
+            throw new IOException("The process cannot access the file because it is being used by another process.");
+    }
+
+    [Fact]
+    public void PruneStagedChunks_DeleteFailures_AreLoggedNotThrown()
+    {
+        // NS-12: prune runs AFTER delivery is confirmed; a locked staged
+        // chunk used to propagate out of the flush and fail the whole
+        // run. Now failures are counted + logged, never thrown.
+        var logs = new List<string>();
+        int failures = BackupScheduler.PruneStagedChunks(
+            new ThrowingDeleteStore(), new[] { "aa", "bb" }, logs.Add);
+        Assert.Equal(2, failures);
+        Assert.Contains(logs, l => l.Contains("could not prune staged chunk aa"));
+        Assert.Contains(logs, l => l.Contains("2 staged chunk(s) could not be pruned"));
     }
 
     [Fact]

@@ -25,6 +25,7 @@ public sealed class ServiceTests : IDisposable
         _repoDir = Path.Combine(_workDir, "repo");
         _srcDir = Path.Combine(_workDir, "src");
         Directory.CreateDirectory(_srcDir);
+        Directory.CreateDirectory(Path.Combine(_workDir, "share"));
         _savedPassphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, Passphrase);
     }
@@ -47,15 +48,23 @@ public sealed class ServiceTests : IDisposable
         return path;
     }
 
+    // The job targets a local-folder share ("vault") so scheduler runs
+    // really deliver. (It used to target a bare "nntp" with no providers
+    // configured and "succeed" vacuously — DL-3 removed that path; a
+    // provider-less run now fails, as it should.)
     private string ValidConfigJson(string schedule = "interval 60", string mode = "incremental") => $$"""
         {
           "dashboardPort": 15789,
           "dashboardBind": "127.0.0.1",
+          "locations": [
+            { "name": "vault", "type": "smb",
+              "share": "{{Path.Combine(_workDir, "share").Replace("\\", "\\\\")}}" }
+          ],
           "jobs": [
             { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
               "source": "{{_srcDir.Replace("\\", "\\\\")}}",
               "schedule": "{{schedule}}", "mode": "{{mode}}", "backupPrivilege": false,
-              "targets": ["nntp"] }
+              "targets": ["vault"] }
           ]
         }
         """;
@@ -122,6 +131,177 @@ public sealed class ServiceTests : IDisposable
         string noJobs = """{ "jobs": [] }""";
         var config = ServiceConfig.Load(WriteConfig(_workDir, noJobs));
         Assert.Empty(config.Jobs);
+    }
+
+    // ---------- SF-21/SF-22: locations, providers, numeric/enum fields ----------
+
+    private static ServiceConfig ValidObjectConfig() => new()
+    {
+        Jobs = new List<BackupJobConfig>
+        {
+            new() { Name = "docs", Repo = "r", Source = "s", Schedule = "interval 60" },
+        },
+    };
+
+    private static BackupLocation SmbLocation(string name) =>
+        new() { Name = name, Type = "smb", Share = @"\\server\share" };
+
+    [Fact]
+    public void TryGetPassphrase_UndecryptableStoredBlob_ReportsTheRealProblem()
+    {
+        // MU-12: a stored passphrase that no longer decrypts (service
+        // account/machine changed) must not be reported as "no
+        // passphrase configured" — the remedy is different.
+        string? saved = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
+        try
+        {
+            // Nothing configured at all: no passphrase, NO problem —
+            // callers phrase the not-configured case themselves.
+            var empty = new ServiceConfig();
+            Assert.False(BackupScheduler.TryGetPassphrase(empty, out string? p0, out string? problem0));
+            Assert.Null(p0);
+            Assert.Null(problem0);
+
+            // A stored blob that cannot be decrypted here: still no
+            // passphrase, but now WITH the honest problem.
+            var broken = new ServiceConfig
+            {
+                PassphraseProtected = Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }),
+            };
+            Assert.False(BackupScheduler.TryGetPassphrase(broken, out string? p1, out string? problem1));
+            Assert.Null(p1);
+            Assert.NotNull(problem1);
+            Assert.Contains("cannot be decrypted", problem1);
+            Assert.Contains("Re-enter the passphrase", problem1);
+            // And the legacy wrapper keeps its null contract.
+            Assert.Null(BackupScheduler.GetPassphrase(broken));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, saved);
+        }
+    }
+
+    [Fact]
+    public void Validate_DuplicateLocationNames_Rejected()
+    {
+        // SF-21: resolution is FirstOrDefault — a duplicate silently
+        // shadowed the first location.
+        var config = ValidObjectConfig();
+        config.Locations = new List<BackupLocation> { SmbLocation("nas"), SmbLocation("NAS") };
+        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
+        Assert.Contains("Duplicate location name", ex.Message);
+    }
+
+    [Fact]
+    public void Validate_LocationMissingFields_Rejected()
+    {
+        var unknownType = ValidObjectConfig();
+        unknownType.Locations = new List<BackupLocation>
+            { new() { Name = "x", Type = "ftp", Share = @"\\s\x" } };
+        Assert.Throws<InvalidOperationException>(() => unknownType.Validate());
+
+        var smbNoShare = ValidObjectConfig();
+        smbNoShare.Locations = new List<BackupLocation>
+            { new() { Name = "x", Type = "smb", Share = "" } };
+        Assert.Throws<InvalidOperationException>(() => smbNoShare.Validate());
+
+        var usbNoSerial = ValidObjectConfig();
+        usbNoSerial.Locations = new List<BackupLocation>
+            { new() { Name = "x", Type = "usb", VolumeSerial = "" } };
+        Assert.Throws<InvalidOperationException>(() => usbNoSerial.Validate());
+
+        var nntpNoHost = ValidObjectConfig();
+        nntpNoHost.Locations = new List<BackupLocation>
+            { new() { Name = "x", Type = "nntp", Host = "" } };
+        Assert.Throws<InvalidOperationException>(() => nntpNoHost.Validate());
+    }
+
+    [Fact]
+    public void Validate_JobTargets_MustBeBareOrDefinedLocations()
+    {
+        // SF-21: an unknown target name was treated as Active by the
+        // gate and silently dropped whenever another target resolved.
+        var bad = ValidObjectConfig();
+        bad.Locations = new List<BackupLocation> { SmbLocation("nas") };
+        bad.Jobs[0].Targets = new List<string> { "nas", "typo-location" };
+        var ex = Assert.Throws<InvalidOperationException>(() => bad.Validate());
+        Assert.Contains("typo-location", ex.Message);
+
+        // Defined locations and legacy bare targets validate fine.
+        var ok = ValidObjectConfig();
+        ok.Locations = new List<BackupLocation> { SmbLocation("nas") };
+        ok.Jobs[0].Targets = new List<string> { "nas" };
+        ok.Validate();
+
+        var bare = ValidObjectConfig();
+        bare.Jobs[0].Targets = new List<string> { "nntp" };
+        bare.Validate();
+    }
+
+    [Fact]
+    public void Validate_JobEnumAndNumericFields_Rejected()
+    {
+        // SF-22: unknown redundancyMode silently behaved as "none";
+        // unknown verificationMode surfaced only at backup start;
+        // parityGroupSize < 2 with xor hung or silently made no parity.
+        var badRedundancy = ValidObjectConfig();
+        badRedundancy.Jobs[0].RedundancyMode = "raid6";
+        Assert.Throws<InvalidOperationException>(() => badRedundancy.Validate());
+
+        var badVerify = ValidObjectConfig();
+        badVerify.Jobs[0].VerificationMode = "thorough";
+        Assert.Throws<InvalidOperationException>(() => badVerify.Validate());
+
+        var xorTooSmall = ValidObjectConfig();
+        xorTooSmall.Jobs[0].RedundancyMode = "xor";
+        xorTooSmall.Jobs[0].ParityGroupSize = 1;
+        Assert.Throws<InvalidOperationException>(() => xorTooSmall.Validate());
+
+        var xorZero = ValidObjectConfig();
+        xorZero.Jobs[0].RedundancyMode = "xor";
+        xorZero.Jobs[0].ParityGroupSize = 0;
+        Assert.Throws<InvalidOperationException>(() => xorZero.Validate());
+
+        // Dormant values are fine when xor is not in play.
+        var dormant = ValidObjectConfig();
+        dormant.Jobs[0].ParityGroupSize = 0;
+        dormant.Validate();
+
+        var xorOk = ValidObjectConfig();
+        xorOk.Jobs[0].RedundancyMode = "xor";
+        xorOk.Jobs[0].ParityGroupSize = 10;
+        xorOk.Validate();
+    }
+
+    [Fact]
+    public void Validate_ProvidersCheckedLikeTheLegacySingleton()
+    {
+        var badPort = ValidObjectConfig();
+        badPort.NntpProviders = new List<NntpConfig>
+            { new() { Host = "news.example.com", Port = 0 } };
+        Assert.Throws<InvalidOperationException>(() => badPort.Validate());
+
+        var badRedundancy = ValidObjectConfig();
+        badRedundancy.NntpProviders = new List<NntpConfig>
+            { new() { Host = "news.example.com", RedundancyMode = "raid6" } };
+        Assert.Throws<InvalidOperationException>(() => badRedundancy.Validate());
+
+        // A blank-host placeholder entry is tolerated (uploads skip it
+        // with a log line — SF-14), even with dormant bad fields.
+        var placeholder = ValidObjectConfig();
+        placeholder.NntpProviders = new List<NntpConfig>
+            { new() { Host = "", Port = 0 } };
+        placeholder.Validate();
+    }
+
+    [Fact]
+    public void Validate_NegativeRetentionInterval_Rejected()
+    {
+        var config = ValidObjectConfig();
+        config.RetentionCheckIntervalHours = -5;
+        Assert.Throws<InvalidOperationException>(() => config.Validate());
     }
 
     [Fact]

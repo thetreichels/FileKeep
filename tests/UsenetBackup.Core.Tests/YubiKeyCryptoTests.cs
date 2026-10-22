@@ -132,6 +132,94 @@ public sealed class YubiKeyCryptoTests
             () => YubiKeySetup.Unlock(provider, challenge, wrapped, slot: 2));
     }
 
+    /// <summary>
+    /// Wraps the simulated provider with fault injection: the wrap
+    /// touch can be made to time out, and a chosen Program call can be
+    /// made to fail (SF-16 scenarios).
+    /// </summary>
+    private sealed class FlakyProvider : IYubiKeyProvider
+    {
+        private readonly SimulatedYubiKeyProvider _inner = new();
+        public bool FailNextChallenge;
+        /// <summary>Absolute Program-call number to fail (0 = never).</summary>
+        public int FailOnProgramCall;
+        public int ProgramCalls;
+
+        public IReadOnlyList<YubiKeyInfo> FindDevices() => _inner.FindDevices();
+
+        public byte[] CalculateHmacSha1(byte[] challenge, int slot, TimeSpan timeout)
+        {
+            if (FailNextChallenge)
+            {
+                FailNextChallenge = false;
+                throw new TimeoutException("no touch (simulated)");
+            }
+            return _inner.CalculateHmacSha1(challenge, slot, timeout);
+        }
+
+        public void ProgramHmacSha1Slot(int slot, byte[] secret, bool requireTouch)
+        {
+            ProgramCalls++;
+            if (ProgramCalls == FailOnProgramCall)
+                throw new InvalidOperationException("program failed (simulated)");
+            _inner.ProgramHmacSha1Slot(slot, secret, requireTouch);
+        }
+    }
+
+    [Fact]
+    public void Setup_WrapTouchFails_PreviousSecretRestored()
+    {
+        // SF-16: re-setup used to program the slot with a fresh secret
+        // BEFORE the wrap touch — a missed touch left the key unable
+        // to answer the stored (old) challenge/wrapped pair, silently
+        // breaking the working unlock path. With the previous secret
+        // supplied, the failed setup rolls the slot back.
+        var provider = new FlakyProvider();
+        var (challenge1, wrapped1, secret1) = YubiKeySetup.Setup(provider, "pass-one", slot: 2);
+
+        provider.FailNextChallenge = true; // the wrap touch never comes
+        Assert.Throws<TimeoutException>(() =>
+            YubiKeySetup.Setup(provider, "pass-two", slot: 2, previousSlotSecret: secret1));
+
+        // The old pair still unlocks: rollback restored the old secret.
+        Assert.Equal("pass-one", YubiKeySetup.Unlock(provider, challenge1, wrapped1, slot: 2));
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret1);
+    }
+
+    [Fact]
+    public void Setup_WrapTouchFails_RollbackFails_HonestError()
+    {
+        // If the rollback re-program ALSO fails, the error must say
+        // the key no longer matches the saved settings — not a plain
+        // "try again" while the old pair is silently dead.
+        var provider = new FlakyProvider();
+        var (challenge1, wrapped1, secret1) = YubiKeySetup.Setup(provider, "pass-one", slot: 2);
+
+        provider.FailNextChallenge = true;
+        // Program calls so far: 1 (first setup). The re-setup's own
+        // program is call 2 (succeeds); the rollback is call 3 (fails).
+        provider.FailOnProgramCall = 3;
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            YubiKeySetup.Setup(provider, "pass-two", slot: 2, previousSlotSecret: secret1));
+        Assert.Contains("could not be restored", ex.Message);
+        Assert.Contains("no longer matches", ex.Message);
+        // And the state really is broken (the message is honest):
+        Assert.ThrowsAny<CryptographicException>(() =>
+            YubiKeySetup.Unlock(provider, challenge1, wrapped1, slot: 2));
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret1);
+    }
+
+    [Fact]
+    public void Setup_WrapTouchFails_NoPreviousSecret_OriginalError()
+    {
+        // First-time setup has nothing to roll back to: the original
+        // timeout simply propagates.
+        var provider = new FlakyProvider();
+        provider.FailNextChallenge = true;
+        Assert.Throws<TimeoutException>(() =>
+            YubiKeySetup.Setup(provider, "pass", slot: 2));
+    }
+
     [Fact]
     public void Setup_NoDevice_Throws()
     {

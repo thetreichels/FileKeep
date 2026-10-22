@@ -34,37 +34,47 @@ public sealed class WizardState : IDisposable
     public byte[]? YubiKeyHmacResponse { get; set; }
 
     /// <summary>
+    /// Loads the selected backup's manifest for a state probe (MU-13).
+    /// Returns null ONLY when no backup is selected or the manifest
+    /// genuinely doesn't exist. A present-but-corrupt manifest (bad
+    /// JSON, root-hash verification failure) THROWS: the probes below
+    /// used to swallow every exception as "feature absent," so a
+    /// tampered manifest steered the wizard to the wrong unlock path
+    /// with no error shown.
+    /// </summary>
+    private BackupManifest? LoadSelectedManifestForProbe()
+    {
+        if (SelectedBackupId is null)
+            return null;
+        try { return OpenRepo().LoadManifest(SelectedBackupId); }
+        catch (FileNotFoundException) { return null; }
+    }
+
+    /// <summary>
     /// True if the selected backup's manifest carries a YubiKey challenge
-    /// (i.e. YubiKey unlock is available for this backup).
+    /// (i.e. YubiKey unlock is available for this backup). Throws when
+    /// the manifest exists but is corrupt — see the probe contract on
+    /// <see cref="LoadSelectedManifestForProbe"/>.
     /// </summary>
     public bool SelectedBackupHasYubiKeyChallenge()
     {
-        if (SelectedBackupId is null)
-            return false;
-        try
-        {
-            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
-            return !string.IsNullOrEmpty(manifest.YubiKeyChallenge);
-        }
-        catch { return false; }
+        var manifest = LoadSelectedManifestForProbe();
+        return manifest is not null && !string.IsNullOrEmpty(manifest.YubiKeyChallenge);
     }
 
     /// <summary>
     /// Loads the YubiKey challenge from the selected backup's manifest into
     /// <see cref="YubiKeyChallenge"/>. Returns false if none is present.
+    /// Throws when the manifest exists but is corrupt (MU-13).
     /// </summary>
     public bool LoadYubiKeyChallenge()
     {
-        if (SelectedBackupId is null)
+        var manifest = LoadSelectedManifestForProbe();
+        if (manifest is null)
             return false;
-        try
-        {
-            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
-            YubiKeyChallenge = string.IsNullOrEmpty(manifest.YubiKeyChallenge)
-                ? null : manifest.YubiKeyChallenge;
-            return YubiKeyChallenge is not null;
-        }
-        catch { return false; }
+        YubiKeyChallenge = string.IsNullOrEmpty(manifest.YubiKeyChallenge)
+            ? null : manifest.YubiKeyChallenge;
+        return YubiKeyChallenge is not null;
     }
 
     /// <summary>
@@ -438,13 +448,17 @@ public sealed class WizardState : IDisposable
         {
             foreach (var v in manifest.Volumes)
                 foreach (string id in v.ChunkIds)
-                    chunkIds.Add(id);
+                    // Sparse positions are recorded as "" — there is no
+                    // chunk to pull; they restore as zeros (NS-9).
+                    if (!string.IsNullOrEmpty(id))
+                        chunkIds.Add(id);
         }
         else
         {
             foreach (var f in manifest.Files)
                 foreach (string id in f.Chunks)
-                    chunkIds.Add(id);
+                    if (!string.IsNullOrEmpty(id))
+                        chunkIds.Add(id);
         }
         string localChunks = Path.Combine(RepoPath, "chunks");
         int done = 0;
@@ -457,13 +471,31 @@ public sealed class WizardState : IDisposable
             string shard = id.Length >= 2 ? id[..2] : id;
             string fileName = id.Length >= 2 ? id[2..] : id;
             string localPath = Path.Combine(localChunks, shard, fileName);
-            if (!File.Exists(localPath))
+            // SF-13: an existing local file counts only if it VERIFIES —
+            // a corrupt local chunk used to be trusted forever and the
+            // pull below copied straight to the final path, so a torn
+            // copy became permanent too. Pull to a temp file, verify,
+            // then move into place.
+            bool haveGoodLocal = File.Exists(localPath) && repo.VerifyChunkBlobAt(localPath, id);
+            if (!haveGoodLocal)
             {
                 string remotePath = Path.Combine(remoteChunks, shard, fileName);
                 if (!File.Exists(remotePath))
                     throw new FileNotFoundException(notFoundMessage(id));
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                File.Copy(remotePath, localPath);
+                string tmpPath = localPath + ".tmp-" + Guid.NewGuid().ToString("N");
+                try
+                {
+                    File.Copy(remotePath, tmpPath);
+                    if (!repo.VerifyChunkBlobAt(tmpPath, id))
+                        throw new InvalidDataException(
+                            $"Chunk {id} pulled from {remoteChunks} failed verification; it was not stored.");
+                    File.Move(tmpPath, localPath, overwrite: true);
+                }
+                finally
+                {
+                    try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
+                }
             }
             done++;
             if (done % 25 == 0) progress?.Invoke(done, total);
@@ -530,19 +562,14 @@ public sealed class WizardState : IDisposable
             repo.ImportManifest(m.Manifest);
     }
 
-    /// <summary>True if the selected backup is a disk image.</summary>
+    /// <summary>
+    /// True if the selected backup is a disk image. Throws when the
+    /// manifest exists but is corrupt (MU-13) — a corrupt manifest must
+    /// not be steered down the file-restore path as "not a disk image."
+    /// </summary>
     public bool SelectedIsDiskImage()
     {
-        if (SelectedBackupId is null)
-            return false;
-        try
-        {
-            var manifest = OpenRepo().LoadManifest(SelectedBackupId);
-            return manifest.IsDiskImage;
-        }
-        catch
-        {
-            return false;
-        }
+        var manifest = LoadSelectedManifestForProbe();
+        return manifest?.IsDiskImage ?? false;
     }
 }

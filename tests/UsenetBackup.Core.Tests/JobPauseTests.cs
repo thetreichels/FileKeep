@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using UsenetBackup.Core;
 using UsenetBackup.Core.Service;
 using UsenetBackup.Service;
@@ -190,9 +191,29 @@ public sealed class JobPauseTests : IDisposable
     [Fact]
     public void Scheduler_PausedDueJob_SkipsAndRearms_ResumeDoesNotCatchUp()
     {
+        // The job targets a local-folder share so its resumed run
+        // really delivers. (It used to target a bare "nntp" with no
+        // providers configured and "succeed" vacuously — DL-3 removed
+        // that path; a provider-less run now fails, as it should.)
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
-        var config = ServiceConfig.Load(WriteConfigJson(
-            "\"paused\": true, \"targets\": [\"nntp\"]"));
+        string shareDir = Path.Combine(_workDir, "share");
+        Directory.CreateDirectory(shareDir);
+        var config = new ServiceConfig
+        {
+            DashboardBind = "127.0.0.1",
+            DashboardPort = 15789,
+            Locations = new List<BackupLocation>
+            {
+                new() { Name = "vault", Type = "smb", Share = shareDir },
+            },
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "interval 60", Mode = "incremental",
+                        Paused = true,
+                        Targets = new List<string> { "vault" } },
+            },
+        };
         var scheduler = new BackupScheduler(config, clock);
         var job = Assert.Single(scheduler.Jobs);
         Assert.Equal(new DateTime(2026, 10, 5, 11, 0, 0), job.NextRunLocal);
@@ -200,14 +221,20 @@ public sealed class JobPauseTests : IDisposable
         // Due (and then some) while paused: not run, occurrence discarded.
         clock.Now = new DateTime(2026, 10, 5, 12, 30, 0);
         scheduler.RunDueJobs(clock.Now);
-        Assert.Null(job.LastResult);
+        // MU-16: the skip itself is the recorded outcome — the previous
+        // behaviour (no record at all) left the dashboard showing the
+        // last success as if current. A skip is not a failure.
+        Assert.NotNull(job.LastResult);
+        Assert.True(job.LastResult.Skipped);
+        Assert.False(job.LastResult.Success);
+        Assert.Equal(0, job.ConsecutiveFailures);
         Assert.Equal(new DateTime(2026, 10, 5, 13, 30, 0), job.NextRunLocal);
 
         // Resume: the missed 11:00 and 12:00 occurrences do NOT catch up.
         job.Config.Paused = false;
         clock.Now = new DateTime(2026, 10, 5, 12, 45, 0);
         scheduler.RunDueJobs(clock.Now);
-        Assert.Null(job.LastResult);
+        Assert.True(job.LastResult.Skipped); // the skip record stands until a real run
 
         // The next scheduled occurrence runs normally.
         clock.Now = new DateTime(2026, 10, 5, 13, 30, 0);
@@ -226,7 +253,8 @@ public sealed class JobPauseTests : IDisposable
 
         clock.Now = new DateTime(2026, 10, 5, 12, 30, 0);
         scheduler.RunDueJobs(clock.Now);
-        Assert.Null(job.LastResult);
+        Assert.NotNull(job.LastResult);
+        Assert.True(job.LastResult.Skipped);
         Assert.Equal(new DateTime(2026, 10, 5, 13, 30, 0), job.NextRunLocal);
     }
 
@@ -281,7 +309,8 @@ public sealed class JobPauseTests : IDisposable
         // pause is recorded and the occurrence is discarded.
         clock.Now = new DateTime(2026, 10, 5, 11, 0, 0);
         scheduler.RunDueJobs(clock.Now);
-        Assert.Null(job.LastResult);
+        Assert.NotNull(job.LastResult);
+        Assert.True(job.LastResult.Skipped);
         Assert.True(job.NetworkAway);
         Assert.Equal(new DateTime(2026, 10, 5, 12, 0, 0), job.NextRunLocal);
         Assert.Equal(JobRunState.WaitingForNetwork,
@@ -364,6 +393,155 @@ public sealed class JobPauseTests : IDisposable
     }
 
     [Fact]
+    public void Run_SmbOnlyBatched_ManifestVolumesCoverEveryChunk()
+    {
+        // MU-18: volume entries used to come only from NNTP uploaders,
+        // so an SMB-only batched job produced a manifest whose Volumes
+        // list was empty even though every chunk was packed, delivered,
+        // and pruned. The packing is deterministic — the manifest must
+        // record it in full.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(LocalShare("vault"));
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success, result.Error);
+
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.LoadManifest(result.BackupId!);
+        Assert.NotNull(manifest);
+        Assert.NotNull(manifest!.Volumes);
+        Assert.NotEmpty(manifest.Volumes!);
+        var packedChunks = manifest.Volumes.SelectMany(v => v.ChunkIds).ToHashSet();
+        var fileChunks = manifest.Files.SelectMany(f => f.Chunks)
+            .Where(c => !string.IsNullOrEmpty(c)).ToHashSet();
+        Assert.NotEmpty(fileChunks);
+        Assert.Equal(fileChunks, packedChunks);
+    }
+
+    [Fact]
+    public void RunState_SurvivesSchedulerRestart()
+    {
+        // MU-16: run history used to be memory-only — after a service
+        // restart every job showed "never run" regardless of its real
+        // history. With a state file, a new scheduler over the same
+        // config restores the last outcome.
+        string statePath = Path.Combine(_workDir, "job-state.json");
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(LocalShare("vault"), BrokenShare("broken"));
+
+        var first = new BackupScheduler(config, clock, networkReachable: _ => true,
+            runStateFilePath: statePath);
+        var result = first.RunJobNow("docs");
+        Assert.True(result.Success); // degraded: one location delivered
+        Assert.True(File.Exists(statePath));
+
+        var second = new BackupScheduler(config, clock, networkReachable: _ => true,
+            runStateFilePath: statePath);
+        var restored = Assert.Single(second.Jobs).LastResult;
+        Assert.NotNull(restored);
+        Assert.True(restored!.Success);
+        Assert.Equal(result.BackupId, restored.BackupId);
+        Assert.NotNull(restored.DegradedNote);
+        Assert.False(restored.Skipped);
+
+        // The dashboard status carries the restored history too.
+        var status = DashboardApi.GetStatus(second);
+        Assert.Equal(result.BackupId, Assert.Single(status.Jobs).LastResult!.BackupId);
+    }
+
+    [Fact]
+    public void RunState_RoundTrips_ThroughSourceGenContext()
+    {
+        // P2-R1 guard: the run-state map must serialize through the
+        // source-generated context. Reflection-based (de)serialization
+        // throws in the trimmed published service — this test pins the
+        // context registration the feature now depends on.
+        var map = new Dictionary<string, BackupScheduler.PersistedJobRun>
+        {
+            ["docs"] = new()
+            {
+                ConsecutiveFailures = 2,
+                LastResult = new JobRunResult
+                {
+                    JobName = "docs",
+                    StartedLocal = new DateTime(2026, 10, 5, 10, 0, 0),
+                    Success = false,
+                    Error = "boom",
+                    Skipped = true,
+                },
+            },
+        };
+        string json = System.Text.Json.JsonSerializer.Serialize(map,
+            RunStateJsonContext.Default.DictionaryStringPersistedJobRun);
+        var back = System.Text.Json.JsonSerializer.Deserialize(json,
+            RunStateJsonContext.Default.DictionaryStringPersistedJobRun);
+        var entry = Assert.Single(back!);
+        Assert.Equal("docs", entry.Key);
+        Assert.Equal(2, entry.Value.ConsecutiveFailures);
+        Assert.Equal("boom", entry.Value.LastResult!.Error);
+        Assert.True(entry.Value.LastResult.Skipped);
+    }
+
+    [Fact]
+    public void Run_AutoVerify_SeesVerifyFindings_FailsRun()
+    {
+        // P2-D6: scheduled auto-verify called repo.Verify and DISCARDED
+        // the returned error list, logging "auto-verify OK" no matter
+        // what. Seed a chunk-mode parent, corrupt one of its chunk
+        // blobs in place (blob present, catalog knows it, content bad):
+        // the incremental run dedups against it, and auto-verify must
+        // fail the run.
+        string chunkPath;
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            var parent = repo.BackupDirectory(_srcDir, snapshotProvider: null);
+            string chunkId = parent.Files[0].Chunks[0];
+            chunkPath = Path.Combine(_repoDir, "chunks", chunkId[..2], chunkId[2..]);
+        }
+        byte[] blob = File.ReadAllBytes(chunkPath);
+        blob[20] ^= 0xFF;
+        File.WriteAllBytes(chunkPath, blob);
+
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(LocalShare("vault"));
+        config.Jobs[0].AutoVerify = true;
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.False(result.Success);
+        Assert.NotNull(result.Error);
+        Assert.Contains("Auto-verify", result.Error);
+    }
+
+    [Fact]
+    public void Run_LegacyPath_TotalUploadFailure_IsAFailedRun()
+    {
+        // MU-19: a legacy (non-batched) run whose only target fails
+        // used to report Success, with the failure parked in the
+        // AutoUploadFailed side flag the status surface never showed.
+        // Seed a chunk-mode parent backup directly: its chunks live
+        // outside volumes, which is exactly what routes the next
+        // scheduled run down the legacy path.
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            repo.BackupDirectory(_srcDir, snapshotProvider: null);
+
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = MakeMultiTargetConfig(BrokenShare("broken"));
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.False(result.Success);
+        Assert.NotNull(result.Error);
+        Assert.Contains("broken", result.Error);
+
+        // The status feed reports the failure too (the pill keys on it).
+        var status = DashboardApi.GetStatus(scheduler);
+        var lr = Assert.Single(status.Jobs).LastResult!;
+        Assert.False(lr.Success);
+    }
+
+    [Fact]
     public void Run_GateSkippedTarget_SucceedsWithDegradedNote()
     {
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
@@ -395,6 +573,316 @@ public sealed class JobPauseTests : IDisposable
         var result = scheduler.RunJobNow("docs");
         Assert.False(result.Success);
         Assert.Null(result.DegradedNote);
+    }
+
+    [Fact]
+    public void Run_BareNntpTargetWithoutProviders_FailsAndKeepsChunks()
+    {
+        // DL-3 (error-handling audit 2026-10-21): a legacy bare "nntp"
+        // target with no providers configured resolves to no deliverer
+        // at all. The batched path used to prune every batch
+        // "successfully" into the void — the staged chunks (the only
+        // copy) were deleted and the run reported success. The run
+        // must now fail and the chunks must survive.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        var config = new ServiceConfig
+        {
+            DashboardBind = "127.0.0.1",
+            DashboardPort = 15789,
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "interval 60", Mode = "incremental",
+                        Targets = new List<string> { "nntp" } },
+            },
+        };
+        var scheduler = new BackupScheduler(config, clock);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.False(result.Success);
+        string chunksDir = Path.Combine(_repoDir, "chunks");
+        Assert.True(Directory.Exists(chunksDir));
+        Assert.NotEmpty(Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void Run_ManifestStageFails_SingleTarget_FailsTheRun()
+    {
+        // DL-5 (error-handling audit 2026-10-21): chunks reach the
+        // share per batch, but the final metadata sync cannot run (a
+        // file sits where its manifests folder must be created). The
+        // destination ends up holding chunks it cannot discover — the
+        // run must report failure, not the plain success it used to.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        string shareDir = Path.Combine(_workDir, "vault");
+        Directory.CreateDirectory(shareDir);
+        File.WriteAllBytes(Path.Combine(shareDir, "manifests"), "not a folder"u8.ToArray());
+        var config = MakeMultiTargetConfig(
+            new BackupLocation { Name = "vault", Type = "smb", Share = shareDir });
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.False(result.Success);
+        Assert.NotNull(result.Error);
+        Assert.Contains("vault", result.Error);
+        // The chunks really did arrive — moving the data was not the
+        // problem; the undiscoverable backup was.
+        Assert.NotEmpty(Directory.GetFiles(
+            Path.Combine(shareDir, "chunks"), "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void Run_ManifestStageFails_OneOfTwoTargets_SucceedsDegraded()
+    {
+        // DL-5: with a second location fully receiving the backup, the
+        // same manifest-stage failure is a degraded success naming the
+        // location that missed out — not a failed run.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        string badDir = Path.Combine(_workDir, "brokenmeta");
+        Directory.CreateDirectory(badDir);
+        File.WriteAllBytes(Path.Combine(badDir, "manifests"), "not a folder"u8.ToArray());
+        var config = MakeMultiTargetConfig(
+            LocalShare("vault"),
+            new BackupLocation { Name = "brokenmeta", Type = "smb", Share = badDir });
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success);
+        Assert.NotNull(result.DegradedNote);
+        Assert.Contains("brokenmeta", result.DegradedNote);
+    }
+
+    [Fact]
+    public void Run_SameLengthCorruptChunkOnShare_IsRecopiedAndVerifies()
+    {
+        // DL-4 (error-handling audit 2026-10-21): the share already
+        // holds a file at the chunk's path with the right LENGTH but
+        // garbage bytes. Size-only confirmation would count it as
+        // delivered, prune the only good copy, and leave a corrupt
+        // backup behind a green success. The run must recopy it — and
+        // the share-side repo must verify clean afterwards.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        string shareDir = Path.Combine(_workDir, "vault");
+        Directory.CreateDirectory(shareDir);
+        // The fixture source is a.txt = "pause" (5 bytes) → one chunk
+        // whose ID is the SHA-256 of those bytes; its blob is
+        // nonce(12) + ciphertext(5) + tag(16) = 33 bytes.
+        string chunkId = Hashing.Sha256Hex("pause"u8);
+        string destChunk = Path.Combine(shareDir, "chunks", chunkId[..2], chunkId[2..]);
+        Directory.CreateDirectory(Path.GetDirectoryName(destChunk)!);
+        File.WriteAllBytes(destChunk, new byte[33]);
+        var config = MakeMultiTargetConfig(
+            new BackupLocation { Name = "vault", Type = "smb", Share = shareDir });
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success);
+
+        // The destination is a usable repo layout (chunks + manifests +
+        // repo.json): open it and verify the backup end to end.
+        using var shareRepo = BackupRepository.Open(shareDir, Passphrase);
+        Assert.Empty(shareRepo.Verify(result.BackupId!));
+    }
+
+    [Fact]
+    public void Run_RetargetedJob_RestagesChunksTheCatalogOnlyKnows()
+    {
+        // DL-1 (error-handling audit 2026-10-21): run 1 delivers to
+        // share "one" and prunes locally; the catalog still "knows"
+        // every chunk. Run 2 targets share "two" instead, over a file
+        // whose first chunk is unchanged. Staging used to skip that
+        // chunk on catalog knowledge alone, so share two never received
+        // it — while the run reported success. Now the chunk is only
+        // skippable with delivery evidence for THIS run's targets, so
+        // it is re-staged, delivered, and share two verifies clean.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        string bigFile = Path.Combine(_srcDir, "big.bin");
+        byte[] head = new byte[64 * 1024];
+        Array.Fill(head, (byte)'a');
+        byte[] v1 = head.Concat(new byte[100]).ToArray();
+        Array.Fill(v1, (byte)'b', 64 * 1024, 100);
+        File.WriteAllBytes(bigFile, v1);
+
+        var config1 = MakeMultiTargetConfig(LocalShare("one"));
+        var scheduler1 = new BackupScheduler(config1, clock, networkReachable: _ => true);
+        var run1 = scheduler1.RunJobNow("docs");
+        Assert.True(run1.Success);
+        // Everything delivered and pruned: the local repo holds no
+        // chunk blobs at all — only the catalog "knows" them.
+        string localChunks = Path.Combine(_repoDir, "chunks");
+        Assert.Empty(Directory.GetFiles(localChunks, "*", SearchOption.AllDirectories));
+
+        // Change only the tail: the first 64 KiB chunk is identical
+        // (same chunk ID), the tail chunk is new.
+        byte[] v2 = head.Concat(new byte[100]).ToArray();
+        Array.Fill(v2, (byte)'c', 64 * 1024, 100);
+        File.WriteAllBytes(bigFile, v2);
+
+        // Full mode for run 2: the assertion is about THIS backup's
+        // chunks being complete on share two (an incremental's parent
+        // chain legitimately still lives on share one).
+        var config2 = MakeMultiTargetConfig(LocalShare("two"));
+        config2.Jobs[0].Mode = "full";
+        var scheduler2 = new BackupScheduler(config2, clock, networkReachable: _ => true);
+        var run2 = scheduler2.RunJobNow("docs");
+        Assert.True(run2.Success);
+
+        string shareTwo = Path.Combine(_workDir, "two");
+        using var shareRepo = BackupRepository.Open(shareTwo, Passphrase);
+        Assert.Empty(shareRepo.Verify(run2.BackupId!));
+    }
+
+    [Fact]
+    public async Task RunAsync_ScanFault_LogsAndKeepsSchedulerAlive()
+    {
+        // SF-18: one faulting due-job scan must not kill the scheduler
+        // loop. Here the reachability probe throws (standing in for the
+        // audit's trigger: the dashboard mutating the config's
+        // collections while the scan enumerates them).
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 8, 0, 0) };
+        var logs = new ConcurrentQueue<string>();
+        var config = MakeMultiTargetConfig(LocalShare("one"));
+        var scheduler = new BackupScheduler(config, clock,
+            pollInterval: TimeSpan.FromMilliseconds(50),
+            log: logs.Enqueue,
+            networkReachable: _ => throw new InvalidOperationException("probe blew up"));
+        clock.Now = new DateTime(2026, 10, 5, 9, 1, 0); // job due (interval 60)
+        using var cts = new CancellationTokenSource();
+        Task run = scheduler.RunAsync(cts.Token);
+        for (int i = 0; i < 100 && !logs.Any(m => m.Contains("due-job scan failed")); i++)
+            await Task.Delay(50);
+        Assert.Contains(logs, m => m.Contains("due-job scan failed"));
+        cts.Cancel();
+        // The loop ends cleanly on cancellation instead of faulting.
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains(logs, m => m.Contains("scheduler stopped"));
+    }
+
+    [Fact]
+    public void RetentionIfDue_FailedPass_RetriesAfterShortDelay_NotFullInterval()
+    {
+        // SF-12: the check timestamp used to be stamped BEFORE the pass
+        // ran, so one transient failure suppressed retention checks for
+        // the whole 24h interval. The stamp now advances only on
+        // success; a failure retries after ~15 minutes.
+        var logs = new List<string>();
+        var config = MakeMultiTargetConfig(LocalShare("one"));
+        config.RetentionEnabled = true;
+        config.RetentionCheckIntervalHours = 24;
+        config.Nntp = new NntpConfig { Host = "unused.invalid", Port = 119 };
+        config.Jobs[0].Repo = Path.Combine(_workDir, "missing-repo");
+        var t0 = new DateTime(2026, 10, 5, 10, 0, 0);
+        var scheduler = new BackupScheduler(config, new ManualClock { Now = t0 },
+            log: logs.Add, networkReachable: _ => true);
+
+        scheduler.RunRetentionIfDue(t0);
+        Assert.Equal(1, logs.Count(m => m.Contains("retention check failed for repo")));
+
+        scheduler.RunRetentionIfDue(t0.AddMinutes(14));
+        Assert.Equal(1, logs.Count(m => m.Contains("retention check failed for repo")));
+
+        scheduler.RunRetentionIfDue(t0.AddMinutes(16));
+        Assert.Equal(2, logs.Count(m => m.Contains("retention check failed for repo")));
+    }
+
+    [Fact]
+    public void RetentionIfDue_NothingToCheck_StampsTheInterval()
+    {
+        // A no-providers pass is a no-op SUCCESS: it stamps, so the
+        // "skipped" note appears once per interval, not every cycle —
+        // and the pass runs again once the interval has elapsed.
+        var logs = new List<string>();
+        var config = MakeMultiTargetConfig(LocalShare("one"));
+        config.RetentionEnabled = true;
+        config.RetentionCheckIntervalHours = 24;
+        var t0 = new DateTime(2026, 10, 5, 10, 0, 0);
+        var scheduler = new BackupScheduler(config, new ManualClock { Now = t0 },
+            log: logs.Add, networkReachable: _ => true);
+
+        scheduler.RunRetentionIfDue(t0);
+        scheduler.RunRetentionIfDue(t0.AddHours(1));
+        Assert.Equal(1, logs.Count(m => m.Contains("retention check skipped")));
+
+        scheduler.RunRetentionIfDue(t0.AddHours(25));
+        Assert.Equal(2, logs.Count(m => m.Contains("retention check skipped")));
+    }
+
+    [Fact]
+    public void UploadBackup_PartialProviderFailure_ThrowsNamingTheFailure()
+    {
+        // SF-14: providers [blank host, password-missing]. The old rule
+        // threw only when errors == ALL configured entries, blank hosts
+        // included — 1 error vs 2 entries meant the upload "succeeded"
+        // while the only real provider never received the backup.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        var config = new ServiceConfig
+        {
+            NntpProviders = new List<NntpConfig>
+            {
+                new() { Host = "" },
+                new() { Host = "news.invalid", Port = 119, Username = "user" },
+            },
+        };
+        var scheduler = new BackupScheduler(config,
+            new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) },
+            networkReachable: _ => true);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            scheduler.UploadBackup(_repoDir, manifest.BackupId));
+        Assert.Contains("1 of 1 provider(s)", ex.Message);
+        Assert.Contains("password not configured", ex.Message);
+    }
+
+    [Fact]
+    public void UploadBackup_AllProvidersBlankHost_Throws()
+    {
+        // SF-14's limiting case: every provider blank used to
+        // "succeed" while uploading nothing at all.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        var config = new ServiceConfig
+        {
+            NntpProviders = new List<NntpConfig> { new() { Host = "" } },
+        };
+        var scheduler = new BackupScheduler(config,
+            new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) },
+            networkReachable: _ => true);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            scheduler.UploadBackup(_repoDir, manifest.BackupId));
+        Assert.Contains("blank host", ex.Message);
+    }
+
+    [Fact]
+    public void Run_ProviderlessNntpAlongsideShare_SucceedsDegraded_NamesNntp()
+    {
+        // DL-3: the share really receives the backup (the prune is
+        // earned), but the provider-less "nntp" target must appear as
+        // a miss in the degraded note instead of counting as delivered.
+        var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        string shareDir = Path.Combine(_workDir, "vault");
+        Directory.CreateDirectory(shareDir);
+        var config = new ServiceConfig
+        {
+            DashboardBind = "127.0.0.1",
+            DashboardPort = 15789,
+            Locations = new List<BackupLocation>
+            {
+                new() { Name = "vault", Type = "smb", Share = shareDir },
+            },
+            Jobs = new List<BackupJobConfig>
+            {
+                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                        Schedule = "interval 60", Mode = "incremental",
+                        Targets = new List<string> { "vault", "nntp" } },
+            },
+        };
+        var scheduler = new BackupScheduler(config, clock, networkReachable: _ => true);
+
+        var result = scheduler.RunJobNow("docs");
+        Assert.True(result.Success);
+        Assert.NotNull(result.DegradedNote);
+        Assert.Contains("nntp", result.DegradedNote);
+        Assert.Contains("didn't receive", result.DegradedNote);
     }
 
     // ---------- the dashboard operations ----------
@@ -530,5 +1018,30 @@ public sealed class JobPauseTests : IDisposable
         scheduler.ReloadJobs(config);
         var status2 = DashboardApi.GetStatus(scheduler);
         Assert.Equal("NeedsLocation", Assert.Single(status2.Jobs).State);
+    }
+}
+
+public sealed class ScheduleAnchorTests
+{
+    [Fact]
+    public void AnchorAfter_FallBackOccurrenceAlreadyRan_SkipsToNextDay()
+    {
+        // P2-D9: a daily 01:30 job ran at 01:30 (first pass through the
+        // repeated hour). A restart at 01:10 wall (second pass) must
+        // not select today's 01:30 again.
+        var daily = new Schedule.Daily(1, 30);
+        var restart = new DateTime(2026, 11, 1, 1, 10, 0);
+        var lastRun = new DateTime(2026, 11, 1, 1, 30, 0);
+        Assert.Equal(new DateTime(2026, 11, 2, 1, 30, 0),
+            daily.AnchorAfter(restart, lastRun));
+        // No prior run: the occurrence stands.
+        Assert.Equal(new DateTime(2026, 11, 1, 1, 30, 0),
+            daily.AnchorAfter(restart, null));
+        // A run EARLIER today doesn't consume a later occurrence.
+        Assert.Equal(new DateTime(2026, 11, 1, 1, 30, 0),
+            daily.AnchorAfter(restart, new DateTime(2026, 11, 1, 0, 15, 0)));
+        // Interval schedules are exempt (no date identity).
+        var interval = new Schedule.Interval(30);
+        Assert.Equal(restart.AddMinutes(30), interval.AnchorAfter(restart, lastRun));
     }
 }

@@ -20,6 +20,10 @@
 </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="UsenetBackup.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\UsenetBackup.Core\UsenetBackup.Core.csproj" />
   </ItemGroup>
 

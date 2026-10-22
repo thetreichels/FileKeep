@@ -16,6 +16,26 @@ namespace UsenetBackup.Service;
 /// </summary>
 public static partial class DashboardApi
 {
+    // P2-C5: restore targets currently being written. Two restores
+    // aimed at the same destination (a double-clicked disk restore, or
+    // the same backup picked twice) interleaved their writes and left
+    // a spliced result both reported on only at the end. Claims are
+    // per-target: different destinations restore in parallel freely.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
+        ActiveRestoreTargets = new(StringComparer.OrdinalIgnoreCase);
+
+    internal static string FileRestoreTargetKey(string destDir) =>
+        "file:" + Path.GetFullPath(destDir.Trim());
+
+    internal static string DiskRestoreTargetKey(string device) =>
+        "disk:" + device.Trim();
+
+    internal static bool TryClaimRestoreTarget(string key) =>
+        ActiveRestoreTargets.TryAdd(key, 0);
+
+    internal static void ReleaseRestoreTarget(string key) =>
+        ActiveRestoreTargets.TryRemove(key, out _);
+
     /// <summary>
     /// The installed app version, from the assembly informational version
     /// stamped at build time (run-vm-build.ps1 /p:InformationalVersion=).
@@ -219,7 +239,12 @@ public static partial class DashboardApi
                 j.LastResult.BackupId,
                 j.LastResult.Files,
                 j.LastResult.Error,
-                j.LastResult.DegradedNote),
+                j.LastResult.DegradedNote,
+                j.LastResult.AutoUploadFailed,
+                j.LastResult.AutoUploadError,
+                j.LastResult.VerifyFailed,
+                j.LastResult.VerifyError,
+                j.LastResult.Skipped),
             scheduler.EvaluateJobState(j.Config, j.NetworkAway).ToString())).ToList());
 
     public static bool IsKnownJob(BackupScheduler scheduler, string name) =>
@@ -286,30 +311,38 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
+                : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
         try
         {
             using var r = BackupRepository.Open(repo, passphrase);
-            var backups = r.ListBackups().OrderByDescending(b => b.CreatedUtc)
-                .Select(b => new BackupDto(b.BackupId, b.Type, b.Source, b.CreatedUtc,
-                    StoredBytesOf(r, b.BackupId)))
-                .ToArray();
-            return (200, backups);
+            var backups = new List<BackupDto>();
+            foreach (var b in r.ListBackups().OrderByDescending(b => b.CreatedUtc))
+            {
+                BackupManifest manifest;
+                try
+                {
+                    manifest = r.LoadManifest(b.BackupId);
+                }
+                catch (Exception ex)
+                {
+                    // P2-D4: an unreadable/corrupt manifest used to be
+                    // masked as a real backup with 0 stored bytes. Skip
+                    // it in the list and leave the reason in the log —
+                    // the backup is not restorable in this state and
+                    // presenting it as healthy inventory misleads.
+                    OperationLog.Append(repo, "vault-list",
+                        $"backupId={b.BackupId} excluded: manifest unreadable ({ex.Message})");
+                    continue;
+                }
+                backups.Add(new BackupDto(b.BackupId, b.Type, b.Source, b.CreatedUtc,
+                    r.StoredBytes(manifest)));
+            }
+            return (200, backups.ToArray());
         }
         catch (Exception ex)
         {
             return (500, new ErrorDto(ex.Message));
         }
-    }
-
-    /// <summary>
-    /// Catalogued stored bytes for one backup; 0 when its manifest can't be
-    /// read, so one corrupt manifest doesn't blank the whole vault list.
-    /// </summary>
-    private static long StoredBytesOf(BackupRepository repo, string backupId)
-    {
-        try { return repo.StoredBytes(repo.LoadManifest(backupId)); }
-        catch { return 0; }
     }
 
     /// <summary>
@@ -345,7 +378,7 @@ public static partial class DashboardApi
     public static (int Status, object Payload) ScanLocationForBackups(
         ServiceConfig config, string name, Action<string>? log = null)
     {
-        var loc = config.Locations.FirstOrDefault(l =>
+        var loc = config.SnapshotLocations().FirstOrDefault(l =>
             l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (loc is null)
             return (400, new ErrorDto($"Unknown location '{name}'."));
@@ -426,21 +459,71 @@ public static partial class DashboardApi
         if (string.IsNullOrWhiteSpace(sourcePath))
             return (400, new ErrorDto("Source path is required."));
 
-        // Sanitize backupId to prevent path traversal
-        if (backupId.Contains("..") || backupId.Contains("/") || backupId.Contains("\\"))
+        // P2-D3: the old import raw-copied the manifest file — no parse,
+        // no root-hash verification, no catalog registration — so the
+        // "imported" backup never appeared in the catalog-based vault
+        // list yet was filtered out of future discovery scans, and a
+        // tampered share manifest silently replaced a good local one.
+        // Validate the ID by the same 32-hex rule LoadManifest enforces.
+        if (backupId.Length != 32 || !backupId.All(Uri.IsHexDigit))
             return (400, new ErrorDto("Invalid backup ID."));
 
         string sourceManifest = Path.Combine(sourcePath, "manifests", backupId + ".json");
         if (!File.Exists(sourceManifest))
             return (400, new ErrorDto($"Manifest not found at {sourceManifest}."));
 
+        BackupManifest manifest;
+        try
+        {
+            manifest = System.Text.Json.JsonSerializer.Deserialize(
+                File.ReadAllText(sourceManifest),
+                UsenetBackup.Core.Json.FileKeepJsonContext.Default.BackupManifest)
+                ?? throw new InvalidDataException("The manifest file is empty or invalid.");
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto($"The discovered manifest is not readable: {ex.Message}"));
+        }
+        if (!string.Equals(manifest.BackupId, backupId, StringComparison.OrdinalIgnoreCase))
+            return (400, new ErrorDto("The discovered manifest's ID does not match the requested backup ID."));
+        if (!manifest.VerifyRootHash())
+            return (400, new ErrorDto(
+                "The discovered manifest failed its integrity check (root hash mismatch) and was not imported."));
+
         string destDir = Path.Combine(repo, "manifests");
         string destManifest = Path.Combine(destDir, backupId + ".json");
-
         try
         {
             Directory.CreateDirectory(destDir);
-            File.Copy(sourceManifest, destManifest, overwrite: true);
+            if (File.Exists(destManifest))
+            {
+                // Never silently replace a local manifest: identical is
+                // an idempotent no-op; different content is a conflict
+                // the user must resolve, not an overwrite.
+                var existing = System.Text.Json.JsonSerializer.Deserialize(
+                    File.ReadAllText(destManifest),
+                    UsenetBackup.Core.Json.FileKeepJsonContext.Default.BackupManifest);
+                if (existing is null ||
+                    !string.Equals(existing.RootSha256, manifest.RootSha256, StringComparison.OrdinalIgnoreCase))
+                    return (409, new ErrorDto(
+                        "A different manifest with this backup ID already exists locally; the discovered one was not imported."));
+                // Identical: fall through to registration (idempotent).
+            }
+            else
+            {
+                // Temp + move, like WriteManifest, so a crash can't leave
+                // a torn manifest behind.
+                string tmp = destManifest + ".tmp-" + Guid.NewGuid().ToString("N");
+                File.Copy(sourceManifest, tmp);
+                File.Move(tmp, destManifest);
+            }
+            // Register in the catalog so the backup actually appears in
+            // the vault list (BackupRepository.ImportManifest's contract,
+            // applied without opening the repo — import is metadata-only
+            // and the root hash above is the integrity gate).
+            using (var catalog = new UsenetBackup.Core.Catalog(Path.Combine(repo, "catalog.db")))
+                catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source ?? "",
+                    manifest.CreatedUtc);
             log?.Invoke($"dashboard: imported discovered backup '{backupId}' from '{sourcePath}' into repo '{repo}'.");
             return (200, new EmptyDto());
         }
@@ -466,7 +549,7 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
+                : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -521,7 +604,7 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto($"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})." ));
+                : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
         try
         {
             string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
@@ -595,7 +678,8 @@ public static partial class DashboardApi
     /// it. Returns (202, accepted) or (400, error).
     /// </summary>
     public static (int Status, object Payload) StartSmbSync(
-        ServiceConfig config, string share, string user)
+        ServiceConfig config, string share, string user,
+        BackupScheduler? scheduler = null)
     {
         if (string.IsNullOrWhiteSpace(share))
             return (400, new ErrorDto("SMB share path is required."));
@@ -611,6 +695,9 @@ public static partial class DashboardApi
         string effectiveUser = string.IsNullOrWhiteSpace(user) ? job?.SmbUser ?? "" : user;
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
             foreach (string repo in repos)
             {
                 try
@@ -638,7 +725,7 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) StartVerify(
         ServiceConfig config, string repo, string backupId,
-        RestoreSession? session = null)
+        RestoreSession? session = null, BackupScheduler? scheduler = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -648,9 +735,12 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto("Service passphrase is not configured."));
+                : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
             try
             {
                 using var r = BackupRepository.Open(repo, passphrase);
@@ -683,6 +773,11 @@ public static partial class DashboardApi
                 try
                 {
                     scheduler.RunRetentionCheck(repo, dryRun);
+                    // MU-5: a completion line — success used to leave
+                    // no operations-log trace at all, so the outcome
+                    // was indistinguishable from "still running."
+                    OperationLog.Append(repo, "manual-retention",
+                        $"dryRun={dryRun} complete");
                 }
                 catch (Exception ex)
                 {
@@ -716,7 +811,7 @@ public static partial class DashboardApi
         BackupLocation? smbLoc = null;
         if (job is not null)
         {
-            var locByName = config.Locations.ToDictionary(
+            var locByName = config.SnapshotLocations().ToDictionary(
                 l => l.Name, StringComparer.OrdinalIgnoreCase);
             smbLoc = job.EffectiveTargets
                 .Select(t => locByName.TryGetValue(t, out var l) ? l : null)
@@ -756,7 +851,7 @@ public static partial class DashboardApi
             j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
         if (job is null)
             return null;
-        var locByName = config.Locations.ToDictionary(
+        var locByName = config.SnapshotLocations().ToDictionary(
             l => l.Name, StringComparer.OrdinalIgnoreCase);
         foreach (string target in job.EffectiveTargets)
         {
@@ -779,7 +874,8 @@ public static partial class DashboardApi
         ServiceConfig config, string repo, string backupId, string destDir,
         UsenetBackup.Core.MergePolicy mergePolicy,
         string? smbShare = null, string? smbUser = null,
-        RestoreSession? session = null)
+        RestoreSession? session = null, CancellationToken cancellationToken = default,
+        BackupScheduler? scheduler = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -791,7 +887,7 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto("Service passphrase is not configured."));
+                : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         // SMB source and credentials: the job's SMB target location is
         // the credential home; see ResolveRestoreSmb.
         var (resolvedShare, resolvedUser, smbPassword) =
@@ -801,8 +897,22 @@ public static partial class DashboardApi
         // USB source: the job's USB target location, if its drive is
         // plugged in now; see ResolveRestoreUsb.
         string? usbFolder = ResolveRestoreUsb(config, repo);
+        string targetKey = FileRestoreTargetKey(destDir);
+        if (!TryClaimRestoreTarget(targetKey))
+            return (409, new ErrorDto(
+                "A restore is already writing to that destination. " +
+                "Wait for it to finish before starting another one there."));
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
+            // The restore honors both stop signals: the dashboard host
+            // token (P2-C8) and the operation gate's token (service stop
+            // via CancelActiveOperation).
+            using var linked = op is null ? null :
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, op.Token);
+            var effectiveToken = linked?.Token ?? cancellationToken;
             try
             {
                 // Pull missing chunks from the job's banked locations
@@ -827,7 +937,11 @@ public static partial class DashboardApi
                 }
                 using var r = BackupRepository.Open(repo, passphrase);
                 var restoreOptions = new UsenetBackup.Core.RestoreOptions { MergePolicy = mergePolicy };
-                var restoreResult = r.Restore(backupId, destDir, restoreOptions);
+                var restoreResult = r.Restore(backupId, destDir, restoreOptions, effectiveToken);
+                // MU-15: a successful restore is the deferred proof for
+                // a typed-secret (unverified) session unlock.
+                if (config.PassphraseYubiKey)
+                    session?.MarkVerified();
                 OperationLog.Append(repo, "manual-restore",
                     $"backupId={backupId} dest={destDir} policy={mergePolicy} " +
                     $"restored={restoreResult.RestoredFiles} " +
@@ -838,6 +952,10 @@ public static partial class DashboardApi
                 OperationLog.Append(repo, "manual-restore",
                     $"backupId={backupId} FAILED: {ex.Message}");
             }
+            finally
+            {
+                ReleaseRestoreTarget(targetKey);
+            }
         });
         OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} started");
         return (202, new AcceptedDto(true));
@@ -847,7 +965,8 @@ public static partial class DashboardApi
     /// Starts an ad-hoc backup of a source directory in the background.
     /// </summary>
     public static (int Status, object Payload) StartAdhocBackup(
-        ServiceConfig config, string repo, string sourceDir)
+        ServiceConfig config, string repo, string sourceDir,
+        BackupScheduler? scheduler = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -855,9 +974,12 @@ public static partial class DashboardApi
             return (400, new ErrorDto("sourceDir must be an existing directory."));
         string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new ErrorDto("Service passphrase is not configured."));
+            return (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
             try
             {
                 using var r = BackupRepository.Open(repo, passphrase);
@@ -972,18 +1094,23 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."), "")
-                : (500, new ErrorDto("Service passphrase is not configured."), "");
+                : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."), "");
         try
         {
             var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
             string newsgroup = provider?.Newsgroup ?? "alt.binaries.test";
+            // P2-D16: NZB dates come from the journal of the provider
+            // this NZB is for — unscoped, another provider's (or a
+            // legacy) row stamped dates onto articles it never posted.
+            string? providerKey = provider is null ? null :
+                UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, newsgroup);
             using var r = BackupRepository.Open(repo, passphrase);
             var manifest = r.LoadManifest(backupId);
             using var catalog = new Catalog(r.CatalogPath);
             string xml = NzbGenerator.Generate(
                 manifest,
                 chunkId => r.GetChunkBlob(chunkId),
-                chunkId => catalog.GetUploadTimeUtc(chunkId),
+                chunkId => catalog.GetUploadTimeUtc(chunkId, providerKey),
                 new NzbGenerator.Options(newsgroup, "filekeep", r.RepoId));
             byte[] bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(xml);
             return (200, bytes, $"filekeep-{backupId}.nzb");
@@ -1012,7 +1139,7 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto("Service passphrase is not configured."));
+                : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
             try
@@ -1041,7 +1168,8 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) StartDiskBackup(
         ServiceConfig config, string repo, string device, string imageName,
-        string? smbShare = null, bool sparse = true)
+        string? smbShare = null, bool sparse = true,
+        BackupScheduler? scheduler = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -1049,9 +1177,12 @@ public static partial class DashboardApi
             return (400, new ErrorDto("device is required."));
         string? passphrase = BackupScheduler.GetPassphrase(config);
         if (string.IsNullOrEmpty(passphrase))
-            return (500, new ErrorDto("Service passphrase is not configured."));
+            return (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
             try
             {
                 using var r = BackupRepository.Open(repo, passphrase);
@@ -1060,13 +1191,15 @@ public static partial class DashboardApi
                 {
                     using var smb = SmbShare.Connect(smbShare, null, null);
                     var store = new SmbBlobStore(smb);
-                    manifest = r.BackupDiskImageStreaming(device, store, imageName, sparse: sparse, volumeLetter: null);
+                    manifest = r.BackupDiskImageStreaming(device, store, imageName, sparse: sparse, volumeLetter: null,
+                        cancellationToken: op?.Token ?? default);
                     OperationLog.Append(repo, "manual-disk-backup",
                         $"id={manifest.BackupId} device={device} smb={smbShare} sparse={sparse} OK");
                 }
                 else
                 {
-                    manifest = r.BackupDiskImage(device, imageName);
+                    manifest = r.BackupDiskImage(device, imageName,
+                        cancellationToken: op?.Token ?? default);
                     OperationLog.Append(repo, "manual-disk-backup",
                         $"id={manifest.BackupId} device={device} OK");
                 }
@@ -1088,10 +1221,15 @@ public static partial class DashboardApi
     /// The target is re-validated against the currently installed drives:
     /// if the disk is gone, or a different disk now sits at that device path
     /// (USB shuffle between pick and confirm), the restore is refused.
+    /// Before anything is written, every chunk the image needs is staged
+    /// locally — pulled from the job's banked locations, exactly as for a
+    /// file restore; if any chunk cannot be obtained, the restore is
+    /// refused with the target untouched (DL-6).
     /// </summary>
     public static (int Status, object Payload) StartDiskRestore(
         ServiceConfig config, string repo, string backupId, string device, bool confirmed,
-        RestoreSession? session = null, string? expectedModel = null, long? expectedSizeBytes = null)
+        RestoreSession? session = null, string? expectedModel = null, long? expectedSizeBytes = null,
+        CancellationToken cancellationToken = default, BackupScheduler? scheduler = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -1123,13 +1261,40 @@ public static partial class DashboardApi
         if (string.IsNullOrEmpty(passphrase))
             return config.PassphraseYubiKey
                 ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, new ErrorDto("Service passphrase is not configured."));
+                : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
+        // Chunk sources, resolved exactly as for a file restore: the
+        // job's banked SMB location (the credential home; see
+        // ResolveRestoreSmb) and its USB location when the drive is
+        // plugged in now (see ResolveRestoreUsb).
+        var (resolvedShare, resolvedUser, smbPassword) =
+            ResolveRestoreSmb(config, repo, null, null);
+        string? usbFolder = ResolveRestoreUsb(config, repo);
+        string targetKey = DiskRestoreTargetKey(device);
+        if (!TryClaimRestoreTarget(targetKey))
+            return (409, new ErrorDto(
+                "A restore is already writing to that disk. " +
+                "Wait for it to finish before starting another one there."));
         Task.Run(() =>
         {
+            // P2-C3: serialize against scheduled runs and every other
+            // long operation through the scheduler's operation gate.
+            using var op = scheduler?.BeginDashboardOperation();
+            using var linked = op is null ? null :
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, op.Token);
+            var effectiveToken = linked?.Token ?? cancellationToken;
             try
             {
+                // DL-6: stage and prove every chunk BEFORE the first
+                // byte is written. Local staging is pruned after upload,
+                // so without this the restore died on the first pruned
+                // chunk — with the target already partly overwritten.
+                EnsureDiskImageChunksStaged(repo, backupId, passphrase,
+                    resolvedShare, resolvedUser, smbPassword, usbFolder);
                 using var r = BackupRepository.Open(repo, passphrase);
-                r.RestoreDiskImage(backupId, device);
+                r.RestoreDiskImage(backupId, device, effectiveToken);
+                // MU-15: deferred proof for a typed-secret unlock.
+                if (config.PassphraseYubiKey)
+                    session?.MarkVerified();
                 OperationLog.Append(repo, "manual-disk-restore",
                     $"backupId={backupId} device={device} OK");
             }
@@ -1138,8 +1303,118 @@ public static partial class DashboardApi
                 OperationLog.Append(repo, "manual-disk-restore",
                     $"backupId={backupId} device={device} FAILED: {ex.Message}");
             }
+            finally
+            {
+                ReleaseRestoreTarget(targetKey);
+            }
         });
         OperationLog.Append(repo, "manual-disk-restore", $"backupId={backupId} device={device} started");
         return (202, new AcceptedDto(true));
+    }
+
+    /// <summary>
+    /// DL-6: makes sure every chunk a disk-image backup needs is staged in
+    /// the local repo, and throws if any cannot be obtained. Called before
+    /// RestoreDiskImage writes anything, so a restore that cannot complete
+    /// never touches the target device. The pulls mirror the file-restore
+    /// path (WizardState over the job's banked SMB location, then its USB
+    /// location when plugged in — both idempotent, skipping chunks already
+    /// staged); a closing presence check over the manifest's chunk list
+    /// then proves the local repo holds them all, which also covers the
+    /// case where no location resolved at all.
+    /// Sparse images (empty chunk IDs, which restore as zeros) skip the
+    /// pulls: the shared chunk pull enumerates a sparse slot as if it were
+    /// a chunk ID and would refuse it, so a sparse backup's real chunks
+    /// must already be staged locally — the presence check still refuses
+    /// up front when they are not, instead of failing mid-write.
+    /// </summary>
+    private static void EnsureDiskImageChunksStaged(
+        string repo, string backupId, string passphrase,
+        string? smbShare, string? smbUser, string? smbPassword, string? usbFolder)
+    {
+        // The chunk set the manifest declares — volumes or per-file chunk
+        // lists, the same enumeration the chunk pull uses.
+        var chunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var r = BackupRepository.Open(repo, passphrase))
+        {
+            var manifest = r.LoadManifest(backupId);
+            if (manifest.Volumes is { Count: > 0 })
+            {
+                foreach (var v in manifest.Volumes)
+                    foreach (string id in v.ChunkIds)
+                        chunkIds.Add(id);
+            }
+            else
+            {
+                foreach (var f in manifest.Files)
+                    foreach (string id in f.Chunks)
+                        chunkIds.Add(id);
+            }
+        }
+        // Pull missing chunks from the job's banked locations first: the
+        // SMB share if one resolved, and the USB drive if it is plugged
+        // in. Either pull throws when a chunk it is asked for is absent
+        // from that source too. Sparse positions ("") are skipped by the
+        // pull itself (NS-9), so sparse images pull their real chunks too.
+        if (!string.IsNullOrWhiteSpace(smbShare) || usbFolder is not null)
+        {
+            using var ws = new UsenetBackup.Core.Recovery.WizardState
+            {
+                RepoPath = repo,
+                Passphrase = passphrase,
+                SelectedBackupId = backupId,
+                SmbShare = smbShare ?? "",
+                SmbUser = smbUser ?? "",
+                SmbPassword = smbPassword ?? "",
+            };
+            if (!string.IsNullOrWhiteSpace(smbShare))
+                ws.EnsureSmbChunks();
+            if (usbFolder is not null)
+                ws.EnsureLocalChunks(usbFolder);
+        }
+
+        // Presence proof: every non-sparse chunk must now be a local
+        // chunk file (chunks/<first 2 hex>/<remaining 62> — the
+        // LocalBlobStore layout). Anything still missing cannot be
+        // obtained: refuse before the destructive write begins.
+        string localChunks = Path.Combine(repo, "chunks");
+        foreach (string id in chunkIds)
+        {
+            if (string.IsNullOrEmpty(id))
+                continue; // sparse position: restores as zeros, no chunk
+            string shard = id.Length >= 2 ? id[..2] : id;
+            string fileName = id.Length >= 2 ? id[2..] : id;
+            if (!File.Exists(Path.Combine(localChunks, shard, fileName)))
+                throw new FileNotFoundException(
+                    $"Chunk {id} is not available in the local repo or from any " +
+                    "backup location; disk restore aborted before writing to the target.");
+        }
+
+        // P2-V1: the proof above is existence-only. When a source
+        // resolved, the pull has already content-verified (and repaired)
+        // the chunks it staged; when NO source resolved, nothing has
+        // checked the local chunks at all — a present-but-corrupt chunk
+        // would fail only mid-write, after earlier chunks already
+        // overwrote the target. Verify each chunk cryptographically
+        // now, while refusing is still free.
+        if (string.IsNullOrWhiteSpace(smbShare) && usbFolder is null)
+        {
+            using var r = BackupRepository.Open(repo, passphrase);
+            foreach (string id in chunkIds)
+            {
+                if (string.IsNullOrEmpty(id))
+                    continue; // sparse position
+                try
+                {
+                    r.VerifyChunk(id);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidDataException(
+                        $"Chunk {id} is present locally but damaged ({ex.Message}); " +
+                        "disk restore aborted before writing to the target.", ex);
+                }
+            }
+        }
     }
 }

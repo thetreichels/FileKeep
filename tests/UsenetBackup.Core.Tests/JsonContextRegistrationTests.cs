@@ -25,4 +25,15 @@ public class JsonContextRegistrationTests
         Assert.NotNull(FileKeepJsonContext.Default.NntpConfig);
         Assert.NotNull(FileKeepJsonContext.Default.ListNntpConfig);
     }
+
+    [Fact]
+    public void DashboardResponseTypes_HaveSourceGenMetadata()
+    {
+        // SF-1/SF-24: response DTOs need registration too — the scan
+        // endpoints' ScanBackupsResultDto was missing, so the trimmed
+        // build 500'd both "Check for backups" buttons (WALK-9's class).
+        Assert.NotNull(DashboardJsonContext.Default.ScanBackupsResultDto);
+        Assert.NotNull(DashboardJsonContext.Default.DiscoveredBackupDto);
+        Assert.NotNull(DashboardJsonContext.Default.WinRePrerequisitesDto);
+    }
 }

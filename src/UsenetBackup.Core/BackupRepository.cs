@@ -96,6 +96,7 @@ public sealed class BackupRepository : IDisposable
         _key = key;
         _blobs = new LocalBlobStore(root);
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
+        RebuildCatalogIfNeeded();
     }
 
     /// <summary>
@@ -109,6 +110,85 @@ public sealed class BackupRepository : IDisposable
         _key = key;
         _blobs = blobs;
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
+        RebuildCatalogIfNeeded();
+    }
+
+    /// <summary>
+    /// P2-D1: the catalog is a rebuildable index (its own contract), but
+    /// nothing ever rebuilt it. Destination repos never receive
+    /// catalog.db (SMB sync excludes it; USB copies carry manifests and
+    /// repo.json only), so a destination listed ZERO backups although
+    /// its manifests and chunks were intact — and a deleted or corrupt
+    /// catalog lost the listing everywhere. When the catalog knows no
+    /// backups but manifests exist on disk, reconstruct it: backup rows
+    /// from the manifests (each one root-hash verified by LoadManifest),
+    /// chunk rows from the chunk files. Upload/download journals are
+    /// NOT reconstructed — NNTP delivery evidence re-adopts through the
+    /// stores' STAT probes. Best-effort: a rebuild failure is logged,
+    /// never a reason to refuse opening the repo.
+    /// </summary>
+    private void RebuildCatalogIfNeeded()
+    {
+        try
+        {
+            if (_catalog.CountBackups() > 0)
+                return;
+            string manifestsDir = Path.Combine(_root, "manifests");
+            if (!Directory.Exists(manifestsDir))
+                return;
+            var manifestFiles = Directory.EnumerateFiles(manifestsDir, "*.json").ToList();
+            if (manifestFiles.Count == 0)
+                return;
+
+            int rebuilt = 0;
+            foreach (string file in manifestFiles)
+            {
+                try
+                {
+                    var m = LoadManifest(Path.GetFileNameWithoutExtension(file));
+                    _catalog.RecordBackup(m.BackupId, m.Type, m.Source, m.CreatedUtc);
+                    rebuilt++;
+                }
+                catch
+                {
+                    // One unreadable manifest must not block the rest.
+                }
+            }
+
+            string chunksDir = Path.Combine(_root, "chunks");
+            if (Directory.Exists(chunksDir))
+            {
+                const int overhead = ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes;
+                var rows = new List<(string id, long sizeBytes)>();
+                foreach (string file in Directory.EnumerateFiles(
+                             chunksDir, "*", SearchOption.AllDirectories))
+                {
+                    string name = Path.GetFileName(file);
+                    string prefix = Path.GetFileName(Path.GetDirectoryName(file)!);
+                    if (prefix.Length != 2 || name.Length != 62)
+                        continue;
+                    long len = new FileInfo(file).Length;
+                    if (len < overhead)
+                        continue;
+                    // Catalog sizes are plaintext lengths; the blob on
+                    // disk carries the fixed crypto overhead.
+                    rows.Add((prefix + name, len - overhead));
+                    if (rows.Count >= 512)
+                    {
+                        _catalog.RecordChunks(rows);
+                        rows.Clear();
+                    }
+                }
+                if (rows.Count > 0)
+                    _catalog.RecordChunks(rows);
+            }
+            OperationLog.Append(_root, "catalog-rebuild",
+                $"backups={rebuilt} source=manifests+chunks");
+        }
+        catch (Exception ex)
+        {
+            OperationLog.Append(_root, "catalog-rebuild", $"FAILED: {ex.Message}");
+        }
     }
 
     // ---------- lifecycle ----------
@@ -230,10 +310,12 @@ public sealed class BackupRepository : IDisposable
     /// tree (e.g. with Windows backup privilege to bypass exclusive locks);
     /// the caller owns and disposes the provider. Null reads the live tree directly.
     /// </summary>
-    public BackupManifest BackupDirectory(string sourceDir, ISnapshotProvider? snapshotProvider = null)
+    public BackupManifest BackupDirectory(string sourceDir, ISnapshotProvider? snapshotProvider = null,
+        CancellationToken cancellationToken = default)
     {
         StorageGuard.EnsureRepoNotInSource(_root, sourceDir);
-        var manifest = BackupDirectoryInternal(sourceDir, parent: null, snapshotProvider);
+        var manifest = BackupDirectoryInternal(sourceDir, parent: null, snapshotProvider,
+            cancellationToken: cancellationToken);
         manifest.Type = "full";
         return FinalizeManifest(manifest);
     }
@@ -255,7 +337,8 @@ public sealed class BackupRepository : IDisposable
         string sourceDir,
         string parentBackupId,
         ISnapshotProvider? snapshotProvider = null,
-        VerificationMode verificationMode = VerificationMode.Fast)
+        VerificationMode verificationMode = VerificationMode.Fast,
+        CancellationToken cancellationToken = default)
     {
         var parent = LoadManifest(parentBackupId); // validates parent root hash
         if (parent.ChunkSize != _config.ChunkSize)
@@ -267,7 +350,8 @@ public sealed class BackupRepository : IDisposable
             throw new InvalidOperationException(
                 $"Parent backup {parentBackupId} uses chunking '{parentScheme}', " +
                 $"but this repository uses '{_config.ChunkingScheme}'.");
-        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode);
+        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode,
+            cancellationToken: cancellationToken);
         manifest.Type = "inc";
         manifest.ParentId = parentBackupId;
         return FinalizeManifest(manifest);
@@ -295,7 +379,8 @@ public sealed class BackupRepository : IDisposable
         BackupManifest? parent,
         ISnapshotProvider? snapshotProvider,
         VerificationMode verificationMode = VerificationMode.Fast,
-        IBatchedBackupContext? batch = null)
+        IBatchedBackupContext? batch = null,
+        CancellationToken cancellationToken = default)
     {
         string fullSource = Path.GetFullPath(sourceDir);
         if (!Directory.Exists(fullSource))
@@ -306,7 +391,8 @@ public sealed class BackupRepository : IDisposable
         ISnapshotProvider snap = snapshotProvider ?? (owned = new NullSnapshotProvider(fullSource));
         try
         {
-            return BackupDirectoryFromRoot(fullSource, snap, parent, verificationMode, batch);
+            return BackupDirectoryFromRoot(fullSource, snap, parent, verificationMode, batch,
+                cancellationToken);
         }
         finally
         {
@@ -328,11 +414,13 @@ public sealed class BackupRepository : IDisposable
         ISnapshotProvider? snapshotProvider,
         IBatchedBackupContext batch,
         VerificationMode verificationMode = VerificationMode.Fast,
-        string? backupId = null)
+        string? backupId = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batch);
         StorageGuard.EnsureRepoNotInSource(_root, sourceDir);
-        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode, batch);
+        var manifest = BackupDirectoryInternal(sourceDir, parent, snapshotProvider, verificationMode, batch,
+            cancellationToken);
         manifest.BackupId = backupId ?? manifest.BackupId;
         manifest.Type = parent is null ? "full" : "inc";
         if (parent is not null)
@@ -363,7 +451,8 @@ public sealed class BackupRepository : IDisposable
         bool sparse,
         string? volumeLetter,
         IBatchedBackupContext batch,
-        string? backupId = null)
+        string? backupId = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batch);
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
@@ -377,10 +466,10 @@ public sealed class BackupRepository : IDisposable
             FileEntry entry;
             if (sparse)
                 entry = BackupStreamSparse(stream, imageName, DateTime.UtcNow, buffer,
-                    batch.Tracker, volumeLetter, batch);
+                    batch.Tracker, volumeLetter, batch, cancellationToken);
             else
                 entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer,
-                    batch.Tracker, batch);
+                    batch.Tracker, batch, cancellationToken);
             var manifest = new BackupManifest
             {
                 BackupId = backupId ?? Guid.NewGuid().ToString("N"),
@@ -400,7 +489,7 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode, IBatchedBackupContext? batch = null)
+    private BackupManifest BackupDirectoryFromRoot(string fullSource, ISnapshotProvider snap, BackupManifest? parent, VerificationMode verificationMode, IBatchedBackupContext? batch = null, CancellationToken cancellationToken = default)
     {
         string readRoot = snap.SnapshotRoot;
         if (!Directory.Exists(readRoot))
@@ -417,13 +506,18 @@ public sealed class BackupRepository : IDisposable
         };
 
         Dictionary<string, FileEntry>? parentByPath = parent?.Files
-            .ToDictionary(f => f.Path, StringComparer.Ordinal);
+            .ToDictionary(f => NormalizeManifestPath(f.Path), StringComparer.Ordinal);
 
         string[] files = Directory
             .EnumerateFiles(readRoot, "*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(readRoot, f).Replace(Path.DirectorySeparatorChar, '/'))
             .OrderBy(p => p, StringComparer.Ordinal)
             .ToArray();
+        // NOTE (P2-D13): the enumerated spelling is the DISK path and
+        // stays untouched for file IO (byte-exact filesystems would not
+        // find the file under a normalized name). Normalization applies
+        // to what the manifest records (FileEntry creation) and to the
+        // parent-lookup keys below.
 
         // Record every directory (including empty ones) so restore
         // reproduces the source tree exactly, not just the files.
@@ -435,6 +529,17 @@ public sealed class BackupRepository : IDisposable
         if (dirs.Length > 0)
             manifest.Directories = new List<string>(dirs);
 
+        // NS-13 preflight (non-batched runs only): staged chunks pile up
+        // in the local repo until the run finishes, so a source bigger
+        // than the free space used to burn the whole run before failing
+        // with a raw IOException mid-chunk. Estimate the bytes that will
+        // actually be chunked (changed files; unchanged incremental
+        // files reuse the parent's chunks) and refuse up front when the
+        // repo volume cannot hold them. Batched runs stage ~one batch
+        // by design and skip this check.
+        if (batch is null && LocalChunkStore is not null)
+            EnsureStagingSpace(files, readRoot, parentByPath);
+
         // Parallel file processing: hash/chunk/encrypt across CPU cores.
         // Each file is independent (content-addressed chunk IDs); results are
         // collected by index and added to the manifest in sorted path order
@@ -443,14 +548,18 @@ public sealed class BackupRepository : IDisposable
         var parallelOptions = new ParallelOptions
         {
             // Leave one core for the upload pipeline and OS.
-            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1)
+            MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 1),
+            // NS-3/NS-5: a stop request now reaches INTO the backup —
+            // the parallel file loop aborts at the next file boundary
+            // instead of the stop waiting for the whole operation.
+            CancellationToken = cancellationToken,
         };
         Parallel.For(0, files.Length, parallelOptions, i =>
         {
             string rel = files[i];
             string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
             if (parentByPath is not null &&
-                parentByPath.TryGetValue(rel, out var parentEntry) &&
+                parentByPath.TryGetValue(NormalizeManifestPath(rel), out var parentEntry) &&
                 IsUnchangedForMode(full, parentEntry, snap, verificationMode))
             {
                 entries[i] = parentEntry;
@@ -549,6 +658,61 @@ public sealed class BackupRepository : IDisposable
     /// </description></item>
     /// </list>
     /// </summary>
+    /// <summary>
+    /// NS-13: throws before any chunk is written when the volume holding
+    /// the local staging area has less free space than the bytes this
+    /// (non-batched) run is about to stage. Metadata-unchanged files
+    /// count as zero — they reuse the parent's chunks.
+    /// </summary>
+    private void EnsureStagingSpace(
+        string[] files, string readRoot,
+        Dictionary<string, FileEntry>? parentByPath)
+    {
+        long needed = 0;
+        foreach (string rel in files)
+        {
+            string full = Path.Combine(readRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+            try
+            {
+                if (parentByPath is not null &&
+                    parentByPath.TryGetValue(NormalizeManifestPath(rel), out var parentEntry) &&
+                    IsUnchanged(full, parentEntry))
+                    continue;
+                needed += new FileInfo(full).Length;
+            }
+            catch { /* vanished/unreadable: chunking surfaces the real error */ }
+        }
+        if (needed == 0)
+            return;
+        string? root = Path.GetPathRoot(Path.GetFullPath(_root));
+        if (root is null)
+            return;
+        long free;
+        try { free = new DriveInfo(root).AvailableFreeSpace; }
+        catch { return; } // cannot tell — don't block the backup
+        string? error = StagingSpaceError(needed, free, root);
+        if (error is not null)
+            throw new InvalidOperationException(error);
+    }
+
+    /// <summary>The NS-13 verdict: an error sentence when the staging
+    /// volume cannot hold the run's new data, else null.</summary>
+    internal static string? StagingSpaceError(long needed, long free, string root) =>
+        free < needed
+            ? $"Not enough free space where FileKeep stages backups: this backup needs " +
+              $"about {FormatBytes(needed)} for new data, but only {FormatBytes(free)} is free " +
+              $"on {root}. Free up space, then try again."
+            : null;
+
+    internal static string FormatBytes(long bytes)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double value = bytes;
+        int unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.#} {units[unit]}";
+    }
+
     private bool IsUnchangedForMode(
         string fullPath,
         FileEntry parentEntry,
@@ -600,6 +764,19 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
+    /// <summary>
+    /// P2-D13: canonicalizes a manifest path to Unicode NFC. The same
+    /// logical file can be spelled NFD (macOS-sourced backups) or NFC;
+    /// without one canonical form, incremental parent matching missed
+    /// (Ordinal compare), merge-restores wrote twins, and later backups
+    /// treated the twins as distinct files. Applied where paths are
+    /// RECORDED and where parent lookups are keyed — never on manifest
+    /// load, where it would change the root-hash canonical form of
+    /// existing manifests.
+    /// </summary>
+    internal static string NormalizeManifestPath(string path) =>
+        path.Normalize(System.Text.NormalizationForm.FormC);
+
     private FileEntry BackupOneFile(ISnapshotProvider snap, string fullPath, string relPath, byte[] buffer,
         IBatchedBackupContext? batch = null)
     {
@@ -607,7 +784,7 @@ public sealed class BackupRepository : IDisposable
         {
             return new FileEntry
             {
-                Path = relPath,
+                Path = NormalizeManifestPath(relPath),
                 MtimeUtc = File.GetLastWriteTimeUtc(fullPath),
                 SymlinkTarget = File.ResolveLinkTarget(fullPath, returnFinalTarget: false)?.ToString(),
                 Size = 0,
@@ -631,7 +808,8 @@ public sealed class BackupRepository : IDisposable
     /// chunks (v1 behavior) or content-defined chunking.
     /// </summary>
     private FileEntry BackupStream(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore? destination = null, IBatchedBackupContext? batch = null)
+        IBlobStore? destination = null, IBatchedBackupContext? batch = null,
+        CancellationToken cancellationToken = default)
     {
         // Destination for chunk blobs: local repo by default, or a remote
         // store (SMB/NNTP) for streaming backups where local staging of the
@@ -641,7 +819,7 @@ public sealed class BackupRepository : IDisposable
 
         var entry = new FileEntry
         {
-            Path = relPath,
+            Path = NormalizeManifestPath(relPath),
             MtimeUtc = mtimeUtc,
         };
 
@@ -652,8 +830,8 @@ public sealed class BackupRepository : IDisposable
 
         using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long total = _config.ChunkingScheme == ChunkingSchemeCdc
-            ? ChunkStreamCdc(stream, entry, fileHash, blobs, batch)
-            : ChunkStreamFixed(stream, entry, fileHash, buffer, blobs, batch);
+            ? ChunkStreamCdc(stream, entry, fileHash, blobs, batch, cancellationToken)
+            : ChunkStreamFixed(stream, entry, fileHash, buffer, blobs, batch, cancellationToken);
 
         entry.Size = size >= 0 ? size : total;
         if (size >= 0 && size != total)
@@ -664,11 +842,12 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
-    /// Batches chunk dedup checks to reduce SQLite round-trips. Accumulates
-    /// (chunkId, plaintext) pairs; on <see cref="Flush"/>, does a single
-    /// <see cref="Catalog.HasChunks"/> query, encrypts+stores only unknown
-    /// chunks, records all in a single transaction, and updates file entries
-    /// and hashes in order. Bounds memory to <see cref="MaxPendingChunks"/>
+    /// Batches chunk dedup checks to reduce per-chunk store round-trips.
+    /// Accumulates (chunkId, plaintext) pairs; on <see cref="Flush"/>,
+    /// encrypts+stores only the chunks the store doesn't already have
+    /// (P2-D5: the store's own Exists is the only skip test), records all
+    /// in a single transaction, and updates file entries and hashes in
+    /// order. Bounds memory to <see cref="MaxPendingChunks"/>
     /// chunks (64MB max for 1MB chunks).
     /// </summary>
     private sealed class BatchedChunkStager : IDisposable
@@ -707,28 +886,29 @@ public sealed class BackupRepository : IDisposable
         }
 
         /// <summary>
-        /// Processes all pending chunks: single HasChunks query, encrypt+store
-        /// unknowns, record all in one transaction, update entries/hashes in
-        /// order. Calls <paramref name="batch"/>.CheckFlush() afterwards.
+        /// Processes all pending chunks: encrypt+store the ones the store
+        /// doesn't already have, record all in one transaction, update
+        /// entries/hashes in order. Calls <paramref name="batch"/>.CheckFlush()
+        /// afterwards.
         /// </summary>
         public void Flush(IBatchedBackupContext? batch)
         {
             if (_pending.Count == 0)
                 return;
 
-            // Single DB round-trip for the whole batch.
-            var ids = new List<string>(_pending.Count);
-            foreach (var p in _pending)
-                ids.Add(p.Id);
-            HashSet<string> known = _repo._catalog.HasChunks(ids);
-
             var toRecord = new List<(string id, long sizeBytes)>(_pending.Count);
             foreach (var p in _pending)
             {
-                // Skip encrypt+store if catalog knows it OR local store has it
-                // (covers crash-recovery edge where Put succeeded but
-                // RecordChunk didn't).
-                if (!known.Contains(p.Id) && !p.Blobs.Exists(p.Id))
+                // Skip encrypt+store ONLY when the store itself has the
+                // chunk: for the local store that's file presence, for the
+                // batched tracking store it's this run's delivery evidence
+                // (DL-1), for NNTP it's the provider journal. Catalog
+                // knowledge alone must NOT skip (P2-D5): batched runs
+                // prune blobs but never catalog rows, so a catalog-known
+                // chunk may exist nowhere — trusting the catalog here
+                // finalized manifests referencing missing chunks.
+                bool skipStore = p.Blobs.Exists(p.Id);
+                if (!skipStore)
                 {
                     var blobSpan = _blobBuf.AsSpan(0,
                         p.Plaintext.Length + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
@@ -778,9 +958,9 @@ public sealed class BackupRepository : IDisposable
 
     /// <summary>Fixed-size chunking path (v1 behavior).</summary>
     private long ChunkStreamFixed(Stream stream, FileEntry entry, IncrementalHash fileHash, byte[] buffer,
-        IBlobStore blobs, IBatchedBackupContext? batch)
+        IBlobStore blobs, IBatchedBackupContext? batch, CancellationToken cancellationToken = default)
     {
-        // Batched dedup: accumulate chunks, single HasChunks query per batch.
+        // Dedup: accumulate chunks, flush per batch of pending chunks.
         using var stager = new BatchedChunkStager(this);
         try
         {
@@ -788,6 +968,9 @@ public sealed class BackupRepository : IDisposable
             int read;
             while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
             {
+                // P2-V5: a stop used to wait for the WHOLE image; now
+                // it lands within one chunk.
+                cancellationToken.ThrowIfCancellationRequested();
                 stager.AddChunk(buffer.AsSpan(0, read), entry, fileHash, blobs, batch);
                 total += read;
                 // Note: CheckFlush is called by stager.Flush (every 64 chunks
@@ -810,7 +993,7 @@ public sealed class BackupRepository : IDisposable
     /// the buffer never overflows.
     /// </summary>
     private long ChunkStreamCdc(Stream stream, FileEntry entry, IncrementalHash fileHash,
-        IBlobStore blobs, IBatchedBackupContext? batch)
+        IBlobStore blobs, IBatchedBackupContext? batch, CancellationToken cancellationToken = default)
     {
         int maxChunk = EffectiveMaxChunkSize;
         int avgChunk = _config.ChunkSize; // CDC target average; min = avg/4, max = avg*4
@@ -818,7 +1001,7 @@ public sealed class BackupRepository : IDisposable
         byte[] accum = ArrayPool<byte>.Shared.Rent(maxChunk);
         var completed = new List<int>();
         long total = 0;
-        // Batched dedup: accumulate chunks, single HasChunks query per batch.
+        // Dedup: accumulate chunks, flush per batch of pending chunks.
         using var stager = new BatchedChunkStager(this);
         try
         {
@@ -836,6 +1019,7 @@ public sealed class BackupRepository : IDisposable
             int read;
             while ((read = stream.Read(accum, accumLen, accum.Length - accumLen)) > 0)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 chunker.Feed(accum.AsSpan(accumLen, read), completed);
                 accumLen += read;
                 foreach (int chunkLen in completed)
@@ -873,7 +1057,8 @@ public sealed class BackupRepository : IDisposable
     /// volume can be imaged. Note the image is of the live volume, not a
     /// point-in-time copy.
     /// </summary>
-    public BackupManifest BackupDiskImage(string devicePath, string imageName = "disk.img")
+    public BackupManifest BackupDiskImage(string devicePath, string imageName = "disk.img",
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
             throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
@@ -883,7 +1068,8 @@ public sealed class BackupRepository : IDisposable
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
         try
         {
-            var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer);
+            var entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer,
+                cancellationToken: cancellationToken);
             var manifest = new BackupManifest
             {
                 BackupId = Guid.NewGuid().ToString("N"),
@@ -912,9 +1098,10 @@ public sealed class BackupRepository : IDisposable
     /// that much free local disk. The manifest and catalog (tiny) still go to
     /// the local repo; the bulk payload lives only on the destination.
     /// </summary>
-    public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName = "disk.img")
+    public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName = "disk.img",
+        CancellationToken cancellationToken = default)
     {
-        return BackupDiskImageStreaming(devicePath, destination, imageName, sparse: false, volumeLetter: null);
+        return BackupDiskImageStreaming(devicePath, destination, imageName, sparse: false, volumeLetter: null, cancellationToken);
     }
 
     /// <summary>
@@ -927,7 +1114,7 @@ public sealed class BackupRepository : IDisposable
     /// chunks that are all zeros are skipped.
     /// </summary>
     public BackupManifest BackupDiskImageStreaming(string devicePath, IBlobStore destination, string imageName,
-        bool sparse, string? volumeLetter)
+        bool sparse, string? volumeLetter, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(imageName) || imageName.Contains('/') || imageName.Contains('\\'))
             throw new ArgumentException("Image name must be a plain file name.", nameof(imageName));
@@ -941,9 +1128,11 @@ public sealed class BackupRepository : IDisposable
         {
             FileEntry entry;
             if (sparse)
-                entry = BackupStreamSparse(stream, imageName, DateTime.UtcNow, buffer, destination, volumeLetter);
+                entry = BackupStreamSparse(stream, imageName, DateTime.UtcNow, buffer, destination, volumeLetter,
+                    cancellationToken: cancellationToken);
             else
-                entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer, destination);
+                entry = BackupStream(stream, imageName, DateTime.UtcNow, buffer, destination,
+                    cancellationToken: cancellationToken);
             var manifest = new BackupManifest
             {
                 BackupId = Guid.NewGuid().ToString("N"),
@@ -970,11 +1159,12 @@ public sealed class BackupRepository : IDisposable
     /// over the full image with zeros for skipped chunks.
     /// </summary>
     private FileEntry BackupStreamSparse(Stream stream, string relPath, DateTime mtimeUtc, byte[] buffer,
-        IBlobStore destination, string? volumeLetter, IBatchedBackupContext? batch = null)
+        IBlobStore destination, string? volumeLetter, IBatchedBackupContext? batch = null,
+        CancellationToken cancellationToken = default)
     {
         var entry = new FileEntry
         {
-            Path = relPath,
+            Path = NormalizeManifestPath(relPath),
             MtimeUtc = mtimeUtc,
         };
 
@@ -1010,6 +1200,7 @@ public sealed class BackupRepository : IDisposable
             int read;
             while ((read = stream.Read(buffer, 0, _config.ChunkSize)) > 0)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var span = buffer.AsSpan(0, read);
                 bool shouldBackup;
 
@@ -1097,9 +1288,10 @@ public sealed class BackupRepository : IDisposable
     /// checked against the chunk ID, and the whole-image SHA-256 must match
     /// the manifest — any mismatch aborts the restore with an exception.
     /// </summary>
-    public void RestoreDiskImage(string backupId, string devicePath)
+    public void RestoreDiskImage(string backupId, string devicePath,
+        CancellationToken cancellationToken = default)
     {
-        RestoreDiskImage(backupId, devicePath, _blobs);
+        RestoreDiskImage(backupId, devicePath, _blobs, cancellationToken);
     }
 
     /// <summary>
@@ -1122,7 +1314,8 @@ public sealed class BackupRepository : IDisposable
                 @"(expected \\.\PhysicalDriveN).", nameof(devicePath));
     }
 
-    public void RestoreDiskImage(string backupId, string devicePath, IBlobStore source)
+    public void RestoreDiskImage(string backupId, string devicePath, IBlobStore source,
+        CancellationToken cancellationToken = default)
     {
         ValidateDevicePath(devicePath);
         var manifest = LoadManifest(backupId); // validates root hash
@@ -1156,6 +1349,11 @@ public sealed class BackupRepository : IDisposable
             long position = 0;
             foreach (string chunkId in entry.Chunks)
             {
+                // P2-C8: a service stop must be able to interrupt the
+                // write between chunks (the caller logs the outcome);
+                // without a token the process was killed mid-write and
+                // the log showed only "started".
+                cancellationToken.ThrowIfCancellationRequested();
                 int chunkLen;
                 if (string.IsNullOrEmpty(chunkId))
                 {
@@ -1215,7 +1413,19 @@ public sealed class BackupRepository : IDisposable
         return manifest;
     }
 
-    public IReadOnlyList<BackupSummary> ListBackups() => _catalog.ListBackups();
+    public IReadOnlyList<BackupSummary> ListBackups()
+    {
+        // P2-D4: the catalog can outlive its manifests (external
+        // deletion, a partial copy of the repo). A row without a
+        // manifest file is a phantom — nothing can load, verify, or
+        // restore it — so it is not listed. (Rows whose manifest EXISTS
+        // but fails verification still list; opening them reports the
+        // corruption honestly.)
+        string manifestsDir = Path.Combine(_root, "manifests");
+        return _catalog.ListBackups()
+            .Where(b => File.Exists(Path.Combine(manifestsDir, b.BackupId + ".json")))
+            .ToList();
+    }
 
     /// <summary>
     /// Stored size of one backup in bytes: the catalogued plaintext sizes
@@ -1303,7 +1513,7 @@ public sealed class BackupRepository : IDisposable
             }
             return true;
         }
-        if (wantVolumes && ChunkUploadRecorded(chunkIds))
+        if (wantVolumes && AnyChunkUploadRecorded(chunkIds))
         {
             refusal = $"backup {manifest.BackupId} was already uploaded per-chunk; volume " +
                 "packing cannot be enabled retroactively. Re-backup or keep chunk mode.";
@@ -1312,7 +1522,12 @@ public sealed class BackupRepository : IDisposable
         return wantVolumes;
     }
 
-    private bool ChunkUploadRecorded(string[] chunkIds)
+    // Any-provider ON PURPOSE (P2-D16): mode stickiness must refuse
+    // retroactive volume packing if the backup was uploaded per-chunk
+    // to ANY provider (legacy ''-scope rows included — they prove a
+    // chunk-mode upload happened). Over-counting is the safe direction
+    // for a refusal guard; delivery decisions never read this.
+    private bool AnyChunkUploadRecorded(string[] chunkIds)
     {
         using var catalog = new Catalog(CatalogPath);
         return chunkIds.Any(id => catalog.GetUploadTimeUtc(id) is not null);
@@ -1422,10 +1637,91 @@ public sealed class BackupRepository : IDisposable
     /// </summary>
     internal LocalBlobStore? LocalChunkStore => _blobs as LocalBlobStore;
 
-    /// <summary>Catalog chunk-known query, for batched cross-batch dedup.</summary>
+    /// <summary>
+    /// Catalog chunk-known query: the chunk was staged in this repo at
+    /// some point. NOT delivery evidence for any destination (DL-1) —
+    /// batched staging dedup must not skip on this alone.
+    /// </summary>
     internal bool CatalogHasChunk(string chunkIdHex) => _catalog.HasChunk(chunkIdHex);
 
+    /// <summary>
+    /// DL-1/DL-2 delivery evidence for one NNTP provider: true when the
+    /// provider-scoped upload journal records this chunk's current
+    /// message ID as posted to that provider. Volume-packed uploads
+    /// journal volumes rather than chunks, so this is false for chunks
+    /// only ever sent inside volumes — callers treat false as "stage
+    /// it"; the batch uploader's own per-volume dedup then prevents an
+    /// actual repost.
+    /// </summary>
+    internal bool IsChunkUploadedToProvider(string chunkIdHex, string providerKey)
+    {
+        string messageId = _messageIndex?.GetMessageId(providerKey, chunkIdHex, RepoId)
+            ?? ArticleCodec.MakeMessageId(chunkIdHex, RepoId);
+        return _catalog.IsUploaded(messageId, providerKey);
+    }
+
+    /// <summary>
+    /// SF-13: true only when the chunk is present locally AND verifies
+    /// (decrypt + hash). Download paths used to count a chunk as
+    /// already-present on existence alone, so a truncated or corrupt
+    /// local blob was never re-fetched — "download complete" with data
+    /// that only failed later, at restore time.
+    /// </summary>
+    private bool LocalChunkVerified(string chunkIdHex)
+    {
+        if (!_blobs.Exists(chunkIdHex))
+            return false;
+        try
+        {
+            VerifyChunk(chunkIdHex);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Stores a freshly fetched, verified download — replacing a corrupt
+    /// local copy occupying the slot (file stores' Put is a dedup no-op
+    /// when a file exists, so without the delete the bad bytes would
+    /// survive the "repair" — SF-13).
+    /// </summary>
+    private void StoreVerifiedDownload(string chunkId, byte[] blob)
+    {
+        if (_blobs.Exists(chunkId))
+            _blobs.Delete(chunkId);
+        _blobs.Put(chunkId, blob);
+    }
+
+    /// <summary>
+    /// DL-1 delivery evidence for file-based destinations (SMB/USB):
+    /// true when the blob file at <paramref name="blobPath"/> decrypts
+    /// under this repo's key to plaintext whose SHA-256 is the chunk ID
+    /// — the same check <see cref="VerifyChunk"/> runs locally. Mere
+    /// presence or size at the destination is never evidence (DL-4: a
+    /// same-length corrupt file must not let staging skip a chunk).
+    /// Any read/decrypt/hash failure simply means "not evidenced".
+    /// </summary>
+    internal bool VerifyChunkBlobAt(string blobPath, string chunkIdHex)
+    {
+        try
+        {
+            byte[] blob = File.ReadAllBytes(blobPath);
+            byte[] chunkId = Hashing.HexToBytes(chunkIdHex);
+            byte[] plaintext = ChunkCrypto.Decrypt(blob, _key, chunkId); // AES-GCM authenticates
+            byte[] actual = Hashing.Sha256Bytes(plaintext);
+            return CryptographicOperations.FixedTimeEquals(actual, chunkId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private ChunkMessageIndex? _messageIndex;
+    private readonly object _messageIndexLock = new();
 
     /// <summary>
     /// Maps chunk IDs to their live NNTP message IDs, tracking republications
@@ -1433,7 +1729,16 @@ public sealed class BackupRepository : IDisposable
     /// receive this index — otherwise refreshed identities are posted but
     /// forgotten, and later reads resolve to the expired original IDs.
     /// </summary>
-    public ChunkMessageIndex MessageIndex => _messageIndex ??= new ChunkMessageIndex(_root);
+    public ChunkMessageIndex MessageIndex
+    {
+        get
+        {
+            // Locked lazy init (P2-C4): the bare ??= let two threads
+            // create competing instances of the same index.
+            lock (_messageIndexLock)
+                return _messageIndex ??= new ChunkMessageIndex(_root);
+        }
+    }
 
     /// <summary>
     /// Milestone 5: download every chunk referenced by an NZB index from an
@@ -1492,7 +1797,7 @@ public sealed class BackupRepository : IDisposable
             string chunkId = allChunkIds[i];
             string messageId = ArticleCodec.MakeMessageId(chunkId, RepoId);
 
-            if (_blobs.Exists(chunkId))
+            if (LocalChunkVerified(chunkId))
             {
                 _catalog.RecordDownload(messageId, chunkId); // adopt into journal
                 alreadyPresent++;
@@ -1514,8 +1819,13 @@ public sealed class BackupRepository : IDisposable
                         throw; // Reconstruction failed, rethrow original
                     reconstructed++;
                 }
-                _blobs.Put(chunkId, blob);
-                _catalog.RecordChunk(chunkId, blob.Length);
+                StoreVerifiedDownload(chunkId, blob);
+                // P2-D15: size_bytes is PLAINTEXT length everywhere
+                // (backup paths record it that way); the download path
+                // recorded the encrypted blob length (+28 nonce/tag),
+                // so StoredBytes differed by provenance.
+                _catalog.RecordChunk(chunkId,
+                    blob.Length - ChunkCrypto.NonceSizeBytes - ChunkCrypto.TagSizeBytes);
                 _catalog.RecordDownload(messageId, chunkId);
                 downloaded++;
             }
@@ -1606,7 +1916,7 @@ public sealed class BackupRepository : IDisposable
             IReadOnlyList<string>? wanted = null;
             plan?.TryGetValue(volumeId, out wanted);
 
-            if (wanted is not null && wanted.All(c => _blobs.Exists(c)))
+            if (wanted is not null && wanted.All(c => LocalChunkVerified(c)))
             {
                 _catalog.RecordDownload(messageId, volumeId); // adopt into journal
                 alreadyPresent += wanted.Count;
@@ -1629,14 +1939,15 @@ public sealed class BackupRepository : IDisposable
                 }
                 foreach (var (chunkId, blob) in VolumePacker.Unpack(volumeBytes))
                 {
-                    if (_blobs.Exists(chunkId))
+                    if (LocalChunkVerified(chunkId))
                     {
                         alreadyPresent++;
                         continue;
                     }
                     VerifyDownloadedBlob(chunkId, blob);
-                    _blobs.Put(chunkId, blob);
-                    _catalog.RecordChunk(chunkId, blob.Length);
+                    StoreVerifiedDownload(chunkId, blob);
+                    _catalog.RecordChunk(chunkId,
+                        blob.Length - ChunkCrypto.NonceSizeBytes - ChunkCrypto.TagSizeBytes); // P2-D15: plaintext length
                     downloaded++;
                 }
                 _catalog.RecordDownload(messageId, volumeId);
@@ -1860,11 +2171,60 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
+    /// SF-10: re-posts the backup's encrypted manifest article when —
+    /// and only when — the server no longer has it (the store STATs the
+    /// server, deliberately not trusting the upload journal, whose
+    /// entries never expire). Without the manifest article a backup is
+    /// undiscoverable remotely no matter how fresh its data articles
+    /// are, and before this, nothing ever reposted one. Returns true
+    /// when an article was actually posted. A manifest that is still
+    /// present cannot have its retention clock reset: its message ID is
+    /// deterministic (remote discovery fetches by it) and servers
+    /// reject duplicate IDs — the honest limit of this mechanism.
+    /// Does not touch the monthly manifest index; see
+    /// <see cref="RefreshManifestIndex"/>.
+    /// </summary>
+    public bool RepublishManifest(string backupId, NntpBlobStore remote)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        string manifestPath = Path.Combine(_root, "manifests", backupId + ".json");
+        if (!File.Exists(manifestPath))
+            throw new InvalidOperationException($"No local manifest for backup {backupId}.");
+        byte[] plaintext = File.ReadAllBytes(manifestPath);
+        byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
+        byte[] encrypted = ChunkCrypto.Encrypt(plaintext, _key, aad);
+        try
+        {
+            bool posted = remote.PostManifest(backupId, encrypted, recheckServer: true);
+            if (posted)
+                OperationLog.Append(_root, "manifest-republish", $"id={backupId}");
+            return posted;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(encrypted);
+        }
+    }
+
+    /// <summary>
+    /// SF-10: republishes the versioned monthly manifest index (the
+    /// discovery list) for the current month, forcing a NEW version —
+    /// unlike the manifest article, the index CAN be genuinely
+    /// refreshed (each version is a new message ID), and restarting
+    /// its retention clock is the point of the retention pass.
+    /// Returns false when there is nothing to advertise for this
+    /// provider.
+    /// </summary>
+    public bool RefreshManifestIndex(NntpBlobStore remote) =>
+        UpdateManifestIndex(remote, forceNewVersion: true);
+
+    /// <summary>
     /// Posts/updates the versioned monthly manifest index listing all local
     /// backup IDs for the current year-month. Each upload creates a new
     /// version; discovery fetches the latest via STAT probing.
     /// </summary>
-    private bool UpdateManifestIndex(NntpBlobStore remote)
+    private bool UpdateManifestIndex(NntpBlobStore remote, bool forceNewVersion = false)
     {
         string yearMonth = DateTime.UtcNow.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture);
         string manifestsDir = Path.Combine(_root, "manifests");
@@ -1873,11 +2233,17 @@ public sealed class BackupRepository : IDisposable
         var backupIds = Directory.GetFiles(manifestsDir, "*.json")
             .Select(f => Path.GetFileNameWithoutExtension(f))
             .Where(id => id.Length == 32 && id.All(Uri.IsHexDigit))
+            // SF-15: advertise only backups DELIVERED TO THIS provider
+            // (their manifest is in its provider-scoped journal). The
+            // index used to list every local manifest, so discovery on
+            // a provider showed backups whose manifest article it never
+            // had — they then vanished silently when selected.
+            .Where(id => remote.IsManifestUploaded(id))
             .OrderBy(id => id, StringComparer.Ordinal)
             .ToList();
         if (backupIds.Count == 0)
             return false;
-        int version = remote.PostManifestIndex(yearMonth, backupIds);
+        int version = remote.PostManifestIndex(yearMonth, backupIds, forceNewVersion);
         OperationLog.Append(_root, "manifest-index-upload", $"ym={yearMonth} v={version} count={backupIds.Count}");
         return true;
     }
@@ -2043,7 +2409,8 @@ public sealed class BackupRepository : IDisposable
     /// file already exists in the destination: overwrite it, skip it when it
     /// differs, or keep whichever copy is newer.
     /// </summary>
-    public RestoreResult Restore(string backupId, string destDir, RestoreOptions options)
+    public RestoreResult Restore(string backupId, string destDir, RestoreOptions options,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
         StorageGuard.EnsureRestoreDestNotInRepo(_root, destDir);
@@ -2053,13 +2420,20 @@ public sealed class BackupRepository : IDisposable
                 $"Backup {backupId} is a disk image; use RestoreDiskImage to write it to a device, not file restore.");
         var errors = new List<string>();
         var result = new RestoreResult();
-        RestoreOrVerify(manifest, destDir, verifyOnly: false, errors, options, result);
+        RestoreOrVerify(manifest, destDir, verifyOnly: false, errors, options, result, cancellationToken);
         OperationLog.Append(_root, "restore",
             $"id={backupId} dest={destDir} files={manifest.Files.Count} errors={errors.Count} " +
             $"policy={options.MergePolicy} restored={result.RestoredFiles} " +
-            $"skippedIdentical={result.SkippedIdentical} skippedDiffering={result.SkippedDiffering.Count}");
+            $"skippedIdentical={result.SkippedIdentical} skippedDiffering={result.SkippedDiffering.Count} " +
+            $"warnings={result.Warnings.Count}");
         if (errors.Count > 0)
-            throw new InvalidDataException("Restore failed:\n" + string.Join("\n", errors));
+            // NS-11: the counts ride along — the caller (and the user
+            // reading the failure) can tell what DID restore before the
+            // failure instead of facing an undifferentiated error list.
+            throw new InvalidDataException(
+                $"Restore finished with {errors.Count} error(s): {result.RestoredFiles} file(s) restored, " +
+                $"{result.SkippedIdentical} skipped (identical), {result.SkippedDiffering.Count} skipped (differing).\n" +
+                string.Join("\n", errors));
         return result;
     }
 
@@ -2106,6 +2480,7 @@ public sealed class BackupRepository : IDisposable
             return;
         }
         var entry = manifest.Files[0];
+        int cryptoFailures = 0;
         foreach (string chunkId in entry.Chunks)
         {
             if (string.IsNullOrEmpty(chunkId))
@@ -2114,11 +2489,19 @@ public sealed class BackupRepository : IDisposable
             {
                 VerifyChunk(chunkId);
             }
+            catch (CryptographicException)
+            {
+                cryptoFailures++; // NS-1: collapse, don't spam per chunk.
+            }
             catch (Exception ex)
             {
                 errors.Add($"Chunk {chunkId}: {ex.Message}");
             }
         }
+        if (cryptoFailures > 0)
+            errors.Add(
+                $"{cryptoFailures} chunk(s) could not be decrypted — the passphrase " +
+                "is wrong, or the backup data is corrupted.");
     }
 
     /// <summary>
@@ -2137,8 +2520,53 @@ public sealed class BackupRepository : IDisposable
     /// <see cref="AssertNoReparsePoints"/> before writing.
     /// </para>
     /// </summary>
+    private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    /// <summary>
+    /// P2-D11: rejects manifest path segments Windows cannot store
+    /// under their real names — a reserved device stem (CON, NUL,
+    /// COM1...) resolves to a device, a ':' turns the leaf into an
+    /// NTFS alternate data stream, and a trailing dot/space is stripped
+    /// by Win32 so the file lands under a DIFFERENT name than the
+    /// manifest's (silently colliding with a stripped twin). Such names
+    /// are legal on the filesystems a backup may have been taken on;
+    /// on Windows the honest outcome is a per-file restore error, not
+    /// a quiet write to the wrong place. Internal for tests.
+    /// </summary>
+    internal static void ValidateWindowsPathSegments(string manifestPath)
+    {
+        foreach (string segment in manifestPath.Split('/'))
+        {
+            if (segment.Length == 0 || segment == "." || segment == "..")
+                continue;
+            if (segment.Contains(':'))
+                throw new InvalidDataException(
+                    $"Manifest path '{manifestPath}' contains ':' in '{segment}': on Windows " +
+                    "that writes an NTFS alternate data stream instead of a file of that name, " +
+                    "so the file was skipped.");
+            if (segment.EndsWith('.') || segment.EndsWith(' '))
+                throw new InvalidDataException(
+                    $"Manifest path '{manifestPath}' has a segment ('{segment}') ending in a dot " +
+                    "or space: Windows strips those, so the file would land under a different " +
+                    "name than the manifest's. The file was skipped.");
+            string stem = segment.Split('.')[0];
+            if (WindowsReservedNames.Contains(stem))
+                throw new InvalidDataException(
+                    $"Manifest path '{manifestPath}' uses the reserved Windows device name " +
+                    $"'{stem}': files with that name cannot be created on Windows, " +
+                    "so the file was skipped.");
+        }
+    }
+
     private static string ResolveRestorePath(string destDir, string manifestPath)
     {
+        if (OperatingSystem.IsWindows())
+            ValidateWindowsPathSegments(manifestPath);
         string root = Path.GetFullPath(destDir);
         string combined = Path.Combine(
             destDir, manifestPath.Replace('/', Path.DirectorySeparatorChar));
@@ -2254,7 +2682,8 @@ public sealed class BackupRepository : IDisposable
     }
 
     private void RestoreOrVerify(BackupManifest manifest, string? destDir, bool verifyOnly,
-        List<string> errors, RestoreOptions? options, RestoreResult? result)
+        List<string> errors, RestoreOptions? options, RestoreResult? result,
+        CancellationToken cancellationToken = default)
     {
         // Selective restore: narrow the manifest down to the entries the
         // include/exclude globs select. Verification always covers the
@@ -2300,7 +2729,55 @@ public sealed class BackupRepository : IDisposable
             }
         }
 
+        // P2-D10: on Windows, two manifest paths that differ only by
+        // case (README.txt / Readme.txt — legal on the Linux filesystem
+        // the backup may have come from) resolve to the SAME output
+        // path; the second silently overwrote the first while both
+        // counted as restored. RestoreOneFile claims each path it is
+        // about to write; a second claim is a reported skip instead.
+        HashSet<string>? claimedPaths = !verifyOnly && destDir is not null &&
+            OperatingSystem.IsWindows()
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : null;
+
         byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.ChunkSize);
+        // NS-1: in verify mode, a wrong passphrase makes EVERY file fail
+        // with the raw AES-GCM message ("The computed authentication tag
+        // did not match") — a wall of identical crypto errors with no
+        // hint of the actual cause. Collapse them into one plain entry.
+        int cryptoFailures = 0;
+        void RecordError(FileEntry entry, Exception ex)
+        {
+            // ReadChunkPlaintext wraps AES-GCM failures in
+            // InvalidDataException — look through the chain.
+            bool crypto = false;
+            for (Exception? e = ex; e is not null; e = e.InnerException)
+                if (e is CryptographicException) { crypto = true; break; }
+            if (verifyOnly && crypto)
+            {
+                cryptoFailures++;
+                return;
+            }
+            // P2-D12: a too-long destination path otherwise surfaces as
+            // the runtime's raw PathTooLong text (or fails at the temp
+            // file, 13 chars longer than the final path). Name the
+            // actual length and the actionable fix.
+            bool tooLong = false;
+            for (Exception? e = ex; e is not null; e = e.InnerException)
+                if (e is PathTooLongException) { tooLong = true; break; }
+            if (tooLong)
+            {
+                int length = destDir is not null
+                    ? Path.GetFullPath(Path.Combine(destDir,
+                        entry.Path.Replace('/', Path.DirectorySeparatorChar))).Length
+                    : entry.Path.Length;
+                errors.Add($"{entry.Path}: the destination path is too long for Windows " +
+                    $"({length} characters; the classic limit is 260). Restore to a " +
+                    "shorter destination folder, or enable long paths on this PC.");
+                return;
+            }
+            errors.Add($"{entry.Path}: {ex.Message}");
+        }
         try
         {
             // Two-pass restore: regular files first, symlinks last. A symlink
@@ -2310,13 +2787,18 @@ public sealed class BackupRepository : IDisposable
             {
                 if (entry.SymlinkTarget is not null)
                     continue;
+                // NS-5: restores honor cancellation between files
+                // (already-restored files stay; the temp file of the
+                // in-flight file is cleaned by RestoreOneFile's catch).
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result);
+                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result,
+                        claimedPaths);
                 }
                 catch (Exception ex)
                 {
-                    errors.Add($"{entry.Path}: {ex.Message}");
+                    RecordError(entry, ex);
                 }
             }
             foreach (var entry in filesToRestore)
@@ -2325,13 +2807,18 @@ public sealed class BackupRepository : IDisposable
                     continue;
                 try
                 {
-                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result);
+                    RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result,
+                        claimedPaths);
                 }
                 catch (Exception ex)
                 {
-                    errors.Add($"{entry.Path}: {ex.Message}");
+                    RecordError(entry, ex);
                 }
             }
+            if (cryptoFailures > 0)
+                errors.Add(
+                    $"{cryptoFailures} file(s) could not be decrypted — the passphrase " +
+                    "is wrong, or the backup data is corrupted.");
         }
         finally
         {
@@ -2372,8 +2859,25 @@ public sealed class BackupRepository : IDisposable
         return GlobMatcher.IsMatch(manifestPath, pattern, ignoreCase);
     }
 
+    /// <summary>
+    /// P2-D10: records a restore output path as written. A second file
+    /// claiming the same path (case-insensitively, on Windows) would
+    /// silently overwrite the first — refuse it as a per-file error so
+    /// the restore reports the loss instead of hiding it.
+    /// </summary>
+    internal static void ClaimRestorePath(
+        HashSet<string>? claimedPaths, string resolvedPath, string manifestPath)
+    {
+        if (claimedPaths is not null && !claimedPaths.Add(resolvedPath))
+            throw new InvalidDataException(
+                $"'{manifestPath}' restores to the same path as another file in this backup " +
+                $"('{resolvedPath}') — names that differ only by case cannot both exist " +
+                "on Windows. The first file was kept; this one was skipped.");
+    }
+
     private void RestoreOneFile(FileEntry entry, BackupManifest manifest, string? destDir,
-        bool verifyOnly, byte[] buffer, RestoreOptions? options, RestoreResult? result)
+        bool verifyOnly, byte[] buffer, RestoreOptions? options, RestoreResult? result,
+        HashSet<string>? claimedPaths = null)
     {
         if (entry.SymlinkTarget is not null)
         {
@@ -2396,6 +2900,7 @@ public sealed class BackupRepository : IDisposable
                         result.SkippedDiffering.Add(entry.Path);
                     return;
                 }
+                ClaimRestorePath(claimedPaths, linkPath, entry.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
                 if (File.Exists(linkPath) || Directory.Exists(linkPath))
                     File.Delete(linkPath);
@@ -2439,6 +2944,7 @@ public sealed class BackupRepository : IDisposable
                     }
                     // Backup is newer: fall through and overwrite.
                 }
+                ClaimRestorePath(claimedPaths, outPath, entry.Path);
                 Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
                 // Write to temp file first; rename to final path only after
                 // hash verification succeeds. This is atomic on the same
@@ -2490,7 +2996,21 @@ public sealed class BackupRepository : IDisposable
         }
 
         if (!verifyOnly && outPath is not null)
-            File.SetLastWriteTimeUtc(outPath, entry.MtimeUtc);
+        {
+            // NS-11: the content is restored and hash-verified at this
+            // point. A timestamp failure used to escape and be recorded
+            // as a restore ERROR for a fully restored file — it's a
+            // warning, not a failure.
+            try
+            {
+                File.SetLastWriteTimeUtc(outPath, entry.MtimeUtc);
+            }
+            catch (Exception ex)
+            {
+                result?.Warnings.Add(
+                    $"{entry.Path}: restored, but setting its modification time failed: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>

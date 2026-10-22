@@ -45,8 +45,16 @@ public static partial class DashboardApi
             YubiKeyOnly = config.GeneratedSecretMode,
             LinkMode = string.IsNullOrEmpty(config.ProtectionLinkMode)
                 ? "or" : config.ProtectionLinkMode,
-            YubiKeys = new List<string>(config.YubiKeys),
+            YubiKeys = SnapshotYubiKeys(config),
         };
+
+    // P2-C2: YubiKeys is a live list other handlers mutate; copying it
+    // unlocked could throw mid-enumeration (a 500 on a plain GET).
+    private static List<string> SnapshotYubiKeys(ServiceConfig config)
+    {
+        lock (config.JobsLock)
+            return new List<string>(config.YubiKeys);
+    }
 
     /// <summary>
     /// Saves the protection profile from the wizard. The Passphrase toggle
@@ -68,6 +76,12 @@ public static partial class DashboardApi
         if (linkMode is not ("or" or "and"))
             return (400, new ErrorDto("linkMode must be \"or\" or \"and\"."));
 
+        // P2-C2: profile validation reads config fields that other
+        // handlers mutate; the whole validate → mutate → save sequence
+        // holds the config lock so the saved profile is a state one
+        // request actually asked for.
+        lock (config.JobsLock)
+        {
         if (config.GeneratedSecretMode)
         {
             bool setupPresent = !string.IsNullOrEmpty(config.YubiKeyChallenge) &&
@@ -109,6 +123,7 @@ public static partial class DashboardApi
         {
             return (400, new ErrorDto(ex.Message));
         }
+        }
     }
 
     /// <summary>
@@ -125,29 +140,37 @@ public static partial class DashboardApi
             return (400, new ErrorDto("A YubiKey name is required."));
         if (clean.Length > MaxYubiKeyNameLength)
             return (400, new ErrorDto($"YubiKey name is too long (max {MaxYubiKeyNameLength} characters)." ));
-        if (config.YubiKeys.Any(n => n.Equals(clean, StringComparison.OrdinalIgnoreCase)))
-            return (400, new ErrorDto($"A YubiKey named \"{clean}\" is already registered." ));
-        if (config.YubiKeys.Count >= MaxYubiKeyNames)
-            return (400, new ErrorDto($"Too many YubiKeys registered (max {MaxYubiKeyNames})." ));
-        config.YubiKeys.Add(clean);
-        try
+        lock (config.JobsLock)
         {
-            config.Save(configPath);
-            log?.Invoke($"dashboard: registered YubiKey \"{clean}\"");
-            return (200, new AddYubiKeyResponse { Ok = true, YubiKeys = new List<string>(config.YubiKeys) });
-        }
-        catch (Exception ex)
-        {
-            return (400, new ErrorDto(ex.Message));
+            if (config.YubiKeys.Any(n => n.Equals(clean, StringComparison.OrdinalIgnoreCase)))
+                return (400, new ErrorDto($"A YubiKey named \"{clean}\" is already registered." ));
+            if (config.YubiKeys.Count >= MaxYubiKeyNames)
+                return (400, new ErrorDto($"Too many YubiKeys registered (max {MaxYubiKeyNames})." ));
+            config.YubiKeys.Add(clean);
+            try
+            {
+                config.Save(configPath);
+                log?.Invoke($"dashboard: registered YubiKey \"{clean}\"");
+                return (200, new AddYubiKeyResponse { Ok = true, YubiKeys = new List<string>(config.YubiKeys) });
+            }
+            catch (Exception ex)
+            {
+                return (400, new ErrorDto(ex.Message));
+            }
         }
     }
 
     /// <summary>
     /// Starts phone-authenticator enrollment: generates a fresh 160-bit TOTP
-    /// secret, stores it DPAPI-protected, and returns the otpauth URI, the
-    /// grouped base32 secret for manual entry, and a QR-code SVG for
-    /// scanning. The phone method is NOT enabled by this call — the wizard
-    /// must verify a code first, then save the profile with PhoneEnabled.
+    /// secret, stages it DPAPI-protected as the PENDING secret, and returns
+    /// the otpauth URI, the grouped base32 secret for manual entry, and a
+    /// QR-code SVG for scanning. The phone method is NOT enabled by this
+    /// call — the wizard must verify a code first, then save the profile
+    /// with PhoneEnabled. SF-17: the live secret is deliberately NOT
+    /// touched here — re-enrollment used to overwrite it immediately, so
+    /// abandoning the wizard silently invalidated the authenticator that
+    /// already worked. Only a verified code promotes the pending secret
+    /// (see <see cref="VerifyPhoneTotp"/>).
     /// </summary>
     public static (int Status, object Payload) SetupPhoneTotp(ServiceConfig config,
         string configPath, Action<string>? log = null)
@@ -160,8 +183,11 @@ public static partial class DashboardApi
             {
                 base32 = TotpCrypto.ToBase32(secret);
                 string protected32 = UsenetBackup.Core.Dpapi.Protect(base32);
-                config.PhoneTotpSecretProtected = protected32;
-                config.Save(configPath);
+                lock (config.JobsLock)
+                {
+                    config.PendingPhoneTotpSecretProtected = protected32;
+                    config.Save(configPath);
+                }
             }
             finally
             {
@@ -180,7 +206,7 @@ public static partial class DashboardApi
                     .Select(i => base32.Substring(i * 4,
                         Math.Min(4, base32.Length - i * 4))));
 
-            log?.Invoke("dashboard: phone authenticator enrollment started (new TOTP secret)");
+            log?.Invoke("dashboard: phone authenticator enrollment started (new TOTP secret staged, pending verification)");
             return (200, new PhoneSetupDto(uri, grouped, qrSvg));
         }
         catch (Exception ex)
@@ -190,19 +216,28 @@ public static partial class DashboardApi
     }
 
     /// <summary>
-    /// Verifies a 6-digit TOTP code against the enrolled secret (RFC 6238,
-    /// ±1 step skew). Returns (200, ok) — the caller enables the phone
+    /// Verifies a 6-digit TOTP code (RFC 6238, ±1 step skew). When an
+    /// enrollment is in progress the code is checked against the PENDING
+    /// secret, and success promotes it to the live secret (SF-17) —
+    /// persisted immediately when <paramref name="configPath"/> is
+    /// supplied. With no enrollment pending, the code is checked against
+    /// the live secret. Returns (200, ok) — the caller enables the phone
     /// method via <c>SetProtectionProfile</c> after a successful verify.
     /// </summary>
-    public static (int Status, object Payload) VerifyPhoneTotp(ServiceConfig config, string? code)
+    public static (int Status, object Payload) VerifyPhoneTotp(ServiceConfig config, string? code,
+        string? configPath = null, Action<string>? log = null)
     {
-        if (string.IsNullOrWhiteSpace(config.PhoneTotpSecretProtected))
+        bool hasPending = !string.IsNullOrWhiteSpace(config.PendingPhoneTotpSecretProtected);
+        string? target = hasPending
+            ? config.PendingPhoneTotpSecretProtected
+            : config.PhoneTotpSecretProtected;
+        if (string.IsNullOrWhiteSpace(target))
             return (400, new ErrorDto("No phone authenticator secret is enrolled. Start setup first."));
         if (string.IsNullOrWhiteSpace(code) || code.Trim().Length != TotpCrypto.CodeDigits)
             return (200, new OkDto(false));
         try
         {
-            string base32 = UsenetBackup.Core.Dpapi.Unprotect(config.PhoneTotpSecretProtected);
+            string base32 = UsenetBackup.Core.Dpapi.Unprotect(target);
             byte[] secret;
             try
             {
@@ -221,6 +256,40 @@ public static partial class DashboardApi
             finally
             {
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+            if (ok && hasPending)
+            {
+                // SF-17: verified — the staged secret becomes the live
+                // one. Until this moment the previously enrolled
+                // authenticator kept working, and a failed or abandoned
+                // enrollment never touched it.
+                // P2-C2: promotion + save under the config lock (with
+                // P2-R3's rollback on save failure inside it).
+                lock (config.JobsLock)
+                {
+                string? previousLive = config.PhoneTotpSecretProtected;
+                string? pending = config.PendingPhoneTotpSecretProtected;
+                config.PhoneTotpSecretProtected = pending;
+                config.PendingPhoneTotpSecretProtected = null;
+                if (configPath is not null)
+                {
+                    try { config.Save(configPath); }
+                    catch (Exception ex)
+                    {
+                        // P2-R3: roll the promotion back. Leaving it in
+                        // memory while the disk kept the old secret
+                        // diverged the two permanently: a retry verified
+                        // against the NEW secret, reported success, and
+                        // never re-saved — so the next restart silently
+                        // reverted to the old authenticator.
+                        config.PhoneTotpSecretProtected = previousLive;
+                        config.PendingPhoneTotpSecretProtected = pending;
+                        return (400, new ErrorDto(
+                            "The code was correct, but the new phone secret could not be saved: " + ex.Message));
+                    }
+                }
+                log?.Invoke("dashboard: phone authenticator secret promoted after verified enrollment");
+                }
             }
             return (200, new OkDto(ok));
         }

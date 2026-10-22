@@ -22,6 +22,7 @@ public static class WindowsServiceHost
     private const int SERVICE_CONTROL_STOP = 0x00000001;
     private const int SERVICE_CONTROL_SHUTDOWN = 0x00000005;
     private const int NO_ERROR = 0;
+    private const int ERROR_SERVICE_SPECIFIC_ERROR = 1066;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SERVICE_STATUS
@@ -111,7 +112,15 @@ public static class WindowsServiceHost
         }
         finally
         {
-            ReportStatus(SERVICE_STOPPED, crashed ? 1 : 0, 0);
+            // MU-1: the crash flag used to be passed as controlsAccepted
+            // and dwWin32ExitCode stayed NO_ERROR, so every host crash
+            // looked like a clean stop to the SCM (no failure event, no
+            // recovery action). A crash now stops with
+            // ERROR_SERVICE_SPECIFIC_ERROR + specific code 1; the
+            // installer's ServiceConfig recovery actions restart it.
+            ReportStatus(SERVICE_STOPPED, 0, 0,
+                win32ExitCode: crashed ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR,
+                serviceSpecificExitCode: crashed ? 1 : 0);
         }
     }
 
@@ -125,7 +134,8 @@ public static class WindowsServiceHost
         return NO_ERROR;
     }
 
-    private static void ReportStatus(int state, int controlsAccepted, int waitHint)
+    private static void ReportStatus(int state, int controlsAccepted, int waitHint,
+        int win32ExitCode = NO_ERROR, int serviceSpecificExitCode = 0)
     {
         if (_statusHandle == IntPtr.Zero)
             return;
@@ -134,8 +144,8 @@ public static class WindowsServiceHost
             dwServiceType = SERVICE_WIN32_OWN_PROCESS,
             dwCurrentState = state,
             dwControlsAccepted = controlsAccepted,
-            dwWin32ExitCode = NO_ERROR,
-            dwServiceSpecificExitCode = 0,
+            dwWin32ExitCode = win32ExitCode,
+            dwServiceSpecificExitCode = serviceSpecificExitCode,
             dwCheckPoint = 0,
             dwWaitHint = waitHint,
         };

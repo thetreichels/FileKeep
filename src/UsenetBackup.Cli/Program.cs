@@ -45,7 +45,8 @@ catch (Exception ex)
 
 static void PrintUsage()
 {
-    Console.WriteLine("""
+    // CX-1: usage is only printed on error paths (exit 2) — stderr.
+    Console.Error.WriteLine("""
         usenet-backup — local repository engine (milestones 1-2) + NNTP backend (milestone 3)
 
         Usage:
@@ -173,7 +174,72 @@ static string PromptInteractive(string prompt, string flagName, string envName)
         throw new InvalidOperationException(
             $"A secret is required but stdin is not interactive. Pass {flagName} or set {envName}.");
     Console.Write(prompt);
-    return Console.ReadLine() ?? "";
+    return ReadSecretMasked();
+}
+
+/// <summary>
+/// Reads a secret from the console WITHOUT echoing it (MU-8): the
+/// prompts used Console.ReadLine, so passphrases and passwords
+/// appeared on screen and in terminal scrollback despite looking
+/// like password prompts. Backspace edits; Enter ends input.
+/// </summary>
+static string ReadSecretMasked()
+{
+    var secret = new System.Text.StringBuilder();
+    try
+    {
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                return secret.ToString();
+            }
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (secret.Length > 0)
+                    secret.Length--;
+                continue;
+            }
+            if (key.KeyChar == '\0' || char.IsControl(key.KeyChar))
+                continue; // arrows, function keys, escape, etc.
+            secret.Append(key.KeyChar);
+        }
+    }
+    catch (InvalidOperationException)
+    {
+        // No real console handle (rare hosting): fall back to a line.
+        return Console.ReadLine() ?? "";
+    }
+}
+
+/// <summary>
+/// Parses an integer option (MU-9): a value that was SUPPLIED but
+/// doesn't parse used to be silently replaced with the default — a
+/// typo at `init` created a repository with default chunk/volume
+/// parameters (permanent repo properties) with no warning anywhere.
+/// An absent option still gets the default; a garbage one is an error.
+/// </summary>
+static int ParseIntOption(string[] args, string name, int defaultValue)
+{
+    string? raw = GetOption(args, name);
+    if (raw is null)
+        return defaultValue;
+    if (!int.TryParse(raw, out int value))
+        throw new InvalidOperationException($"Invalid value for {name}: '{raw}' is not a number.");
+    return value;
+}
+
+/// <summary>Long-valued counterpart of <see cref="ParseIntOption"/> (MU-9).</summary>
+static long ParseLongOption(string[] args, string name, long defaultValue)
+{
+    string? raw = GetOption(args, name);
+    if (raw is null)
+        return defaultValue;
+    if (!long.TryParse(raw, out long value))
+        throw new InvalidOperationException($"Invalid value for {name}: '{raw}' is not a number.");
+    return value;
 }
 
 static string? GetOption(string[] args, string name)
@@ -211,8 +277,8 @@ static int Init(string[] args)
 {
     var pos = Positionals(args);
     if (pos.Length < 1) { Console.Error.WriteLine("error: init <repo>"); return 2; }
-    int chunkSize = int.TryParse(GetOption(args, "--chunk-size"), out int cs) ? cs : BackupRepository.DefaultChunkSize;
-    long volumeSize = long.TryParse(GetOption(args, "--volume-size"), out long vs) ? vs : BackupRepository.DefaultVolumeSizeBytes;
+    int chunkSize = ParseIntOption(args, "--chunk-size", BackupRepository.DefaultChunkSize);
+    long volumeSize = ParseLongOption(args, "--volume-size", BackupRepository.DefaultVolumeSizeBytes);
     string chunking = GetOption(args, "--chunking") ?? BackupRepository.ChunkingSchemeCdc;
     using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize, volumeSizeBytes: volumeSize, chunkingScheme: chunking);
     Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}, chunking {chunking}, volume size {volumeSize}).");
@@ -401,7 +467,7 @@ static NntpClient ConnectNntp(string[] args)
     if (string.IsNullOrEmpty(host))
         throw new InvalidOperationException("--host is required.");
     bool ssl = args.Contains("--ssl");
-    int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : (ssl ? 563 : 119);
+    int port = ParseIntOption(args, "--port", ssl ? 563 : 119);
 
     var client = new NntpClient(host, port, ssl);
     try
@@ -477,8 +543,8 @@ static int NntpProbePostSize(string[] args, string sizeArg)
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"POST failed: {ex.Message}");
-        Console.WriteLine($"The provider does NOT accept {mb} MB articles — " +
+        Console.Error.WriteLine($"POST failed: {ex.Message}");
+        Console.Error.WriteLine($"The provider does NOT accept {mb} MB articles — " +
             "use a smaller volume_size_bytes in repo.json.");
         return 1;
     }
@@ -503,7 +569,7 @@ static int NntpProbePostSizeAuto(string[] args)
     // First verify the floor is accepted at all.
     if (!TryPostProbe(args, newsgroup, loBytes, quiet: true))
     {
-        Console.WriteLine("Even 1 MB probes are rejected — the provider or " +
+        Console.Error.WriteLine("Even 1 MB probes are rejected — the provider or " +
             "credentials may be wrong. Fix connectivity first (nntp-check --diagnose).");
         return 1;
     }
@@ -583,7 +649,7 @@ static void PreflightVolumeSize(
     if (string.IsNullOrEmpty(host))
         return; // --host is validated later by ConnectNntp
     bool ssl = args.Contains("--ssl");
-    int port = int.TryParse(GetOption(args, "--port"), out int p) ? p : (ssl ? 563 : 119);
+    int port = ParseIntOption(args, "--port", ssl ? 563 : 119);
 
     // Find the largest group by total blob bytes, then build exactly that
     // volume and measure the real posted article size (yEnc + headers).
@@ -913,10 +979,17 @@ static int NzbGenerate(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 3)
     {
-        Console.Error.WriteLine("error: nzb-generate <repo> <backup-id> <output.nzb> [--newsgroup GROUP] [--poster POSTER]");
+        Console.Error.WriteLine("error: nzb-generate <repo> <backup-id> <output.nzb> [--newsgroup GROUP] [--poster POSTER] [--provider-host HOST]");
         return 2;
     }
     string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    // P2-D16: with a provider host, NZB dates come from THAT provider's
+    // journal only (another provider's rows say nothing about the
+    // articles this NZB describes). Without one, dates fall back to
+    // any-provider (informational only).
+    string? providerHost = GetOption(args, "--provider-host");
+    string? providerKey = providerHost is null ? null :
+        UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(providerHost, newsgroup);
     string poster = GetOption(args, "--poster") ?? "usenet-backup";
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
@@ -936,7 +1009,7 @@ static int NzbGenerate(string[] args)
         chunkId => repo.GetChunkBlob(chunkId),
         id =>
         {
-            var t = catalog.GetUploadTimeUtc(id);
+            var t = catalog.GetUploadTimeUtc(id, providerKey);
             if (t is null)
                 notUploaded++;
             return t;
@@ -1030,8 +1103,8 @@ static int ExpirationCheck(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 1) { Console.Error.WriteLine("error: expiration-check <repo> [--warn-days DAYS]"); return 2; }
     string repoPath = Path.GetFullPath(pos[0]);
-    int warnDays = int.TryParse(GetOption(args, "--warn-days"), out int w) ? w : 90;
-    int defaultRetention = int.TryParse(GetOption(args, "--retention-days"), out int r) ? r : 1095;
+    int warnDays = ParseIntOption(args, "--warn-days", 90);
+    int defaultRetention = ParseIntOption(args, "--retention-days", 1095);
 
     // Build per-provider retention map from service config if provided.
     // Otherwise fall back to the default for all hosts.
@@ -1083,8 +1156,8 @@ static int RetentionCheck(string[] args)
     var pos = Positionals(args);
     if (pos.Length < 1) { Console.Error.WriteLine("error: retention-check <repo> [--warn-days DAYS] [--repost-threshold DAYS] [--dry-run]"); return 2; }
     string repoPath = Path.GetFullPath(pos[0]);
-    int warnDays = int.TryParse(GetOption(args, "--warn-days"), out int w) ? w : 90;
-    int repostThreshold = int.TryParse(GetOption(args, "--repost-threshold"), out int r) ? r : 30;
+    int warnDays = ParseIntOption(args, "--warn-days", 90);
+    int repostThreshold = ParseIntOption(args, "--repost-threshold", 30);
     bool dryRun = HasFlag(args, "--dry-run");
 
     using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));

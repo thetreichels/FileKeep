@@ -11,6 +11,21 @@ namespace UsenetBackup.Core.Tests;
 /// </summary>
 public sealed class SnapshotAndImageTests : IDisposable
 {
+    [Fact]
+    public void BackupDiskImage_PreCancelledToken_AbortsBeforeManifest()
+    {
+        // P2-V5: the disk-image chunkers took no token — a stop waited
+        // for the whole image. Now the token is honored per chunk.
+        string device = Path.Combine(_workDir, "device.bin");
+        File.WriteAllBytes(device, new byte[256 * 1024]);
+        using var repo = InitRepo();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() =>
+            repo.BackupDiskImage(device, "disk.img", cts.Token));
+        Assert.Empty(repo.ListBackups());
+    }
+
     private const string Passphrase = "correct horse battery staple";
     private const int ChunkSize = 64 * 1024;
     private const int KdfIterations = 10_000;

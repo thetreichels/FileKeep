@@ -81,8 +81,10 @@ public sealed class RetentionManager
         int warnDays = 90,
         int repostThresholdDays = 30,
         int sampleSize = 10,
-        bool dryRun = false) =>
-        CheckAndRepost(repo, _ => remote, warnDays, repostThresholdDays, sampleSize, dryRun);
+        bool dryRun = false,
+        CancellationToken cancellationToken = default) =>
+        CheckAndRepost(repo, _ => remote, warnDays, repostThresholdDays, sampleSize, dryRun,
+            cancellationToken);
 
     /// <summary>
     /// Checks retention health for all tracked uploads and refreshes
@@ -118,8 +120,13 @@ public sealed class RetentionManager
         int warnDays = 90,
         int repostThresholdDays = 30,
         int sampleSize = 10,
-        bool dryRun = false)
+        bool dryRun = false,
+        CancellationToken cancellationToken = default)
     {
+        // P2-C7: the operation token used to be checked only between
+        // REPOS by the caller — a stop during a long pass (hundreds of
+        // STATs and reposts across many backups) waited for the whole
+        // pass. The token is now checked per backup and per article.
         ArgumentNullException.ThrowIfNull(storeFactory);
         var report = new RetentionReport { DryRun = dryRun };
         var tracker = new UsenetUploadTracker(repo.RepoRoot);
@@ -130,6 +137,7 @@ public sealed class RetentionManager
 
         foreach (var (record, expiresUtc, daysLeft) in expiring)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             report.BackupsChecked++;
             try
             {
@@ -137,7 +145,7 @@ public sealed class RetentionManager
                 // articles through provider A's connection.
                 NntpBlobStore remote = storeFactory(record);
                 var outcome = CheckBackup(repo, remote, tracker, record, daysLeft,
-                    repostThresholdDays, sampleSize, report, dryRun);
+                    repostThresholdDays, sampleSize, report, dryRun, cancellationToken);
                 switch (outcome)
                 {
                     case BackupOutcome.Healthy:
@@ -150,6 +158,10 @@ public sealed class RetentionManager
                     case BackupOutcome.Failed:
                         break; // error already recorded
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // a stop is not a per-backup error (P2-C7)
             }
             catch (Exception ex)
             {
@@ -173,7 +185,8 @@ public sealed class RetentionManager
         int repostThresholdDays,
         int sampleSize,
         RetentionReport report,
-        bool dryRun)
+        bool dryRun,
+        CancellationToken cancellationToken = default)
     {
         BackupManifest manifest;
         try
@@ -204,11 +217,15 @@ public sealed class RetentionManager
         }
 
         // Live STAT checks — never trust the local journal for retention.
-        var sample = SampleChunks(articleIds, sampleSize);
+        // SF-11: the sample window rotates daily per backup, so successive
+        // checks sweep the whole list instead of re-checking the same
+        // first window forever while the rest expires unobserved.
+        var sample = SampleChunks(articleIds, sampleSize, StableSampleSeed(record.BackupId));
         var missingArticles = new List<string>();
 
         foreach (string articleId in sample)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             report.ArticlesChecked++;
             bool exists;
             try
@@ -227,15 +244,33 @@ public sealed class RetentionManager
             }
         }
 
+        // SF-10: the manifest article is health-checked too. It used to
+        // be invisible to retention: it could expire while every data
+        // article refreshed, leaving the backup undiscoverable remotely
+        // (discovery fetches the manifest by its deterministic ID).
+        bool manifestMissing;
+        report.ArticlesChecked++;
+        try
+        {
+            manifestMissing = !remote.ManifestExistsOnServer(record.BackupId);
+        }
+        catch
+        {
+            manifestMissing = true; // conservative, like article STATs
+        }
+        if (manifestMissing)
+            report.ArticlesMissing++;
+
         _log($"Backup {record.BackupId}: {sample.Count - missingArticles.Count}/{sample.Count} " +
-             $"sampled articles present on server, {daysLeft} days retention remaining");
+             $"sampled articles present on server, {daysLeft} days retention remaining" +
+             (manifestMissing ? "; manifest article MISSING" : ""));
 
         // Outcome 1: present and healthy — nothing to do.
-        if (missingArticles.Count == 0 && daysLeft > repostThresholdDays)
+        if (missingArticles.Count == 0 && !manifestMissing && daysLeft > repostThresholdDays)
             return BackupOutcome.Healthy;
 
         // Outcome 2 vs 3: missing articles, or merely approaching expiry.
-        bool isMissing = missingArticles.Count > 0;
+        bool isMissing = missingArticles.Count > 0 || manifestMissing;
         // A missing sampled article proves the backup is degrading, but the
         // sample is only a window (default 10) into potentially hundreds of
         // articles. Republishing just the missing samples and then resetting
@@ -249,9 +284,11 @@ public sealed class RetentionManager
         // refresh is never allowed to move the backup-level clock.
         List<string> toRepublish = articleIds;
 
-        string reason = isMissing
+        string reason = missingArticles.Count > 0
             ? $"{missingArticles.Count} sampled articles missing from server"
-            : $"only {daysLeft} days retention remaining (threshold: {repostThresholdDays})";
+            : manifestMissing
+                ? "manifest article missing from server"
+                : $"only {daysLeft} days retention remaining (threshold: {repostThresholdDays})";
         _log($"{(dryRun ? "Would republish" : "Republishing")} {toRepublish.Count} article(s) " +
              $"for backup {record.BackupId}: {reason}");
 
@@ -263,6 +300,7 @@ public sealed class RetentionManager
         int republished = 0;
         foreach (string articleId in toRepublish)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 // New message identity: the ONLY way to get a fresh retention
@@ -273,27 +311,62 @@ public sealed class RetentionManager
                 string newMessageId;
                 if (volumeMode)
                 {
+                    var chunkIds = volumeChunks![articleId];
                     byte[] volumeBytes;
-                    try
+                    if (chunkIds.Any(id => LocalChunkMissing(repo, id)))
                     {
-                        // Prefer a local rebuild (validates chunk integrity,
-                        // works offline). Volume bytes are deterministic, so a
-                        // server download is byte-identical when local chunks
-                        // are gone (e.g. wiped after upload to save space).
-                        volumeBytes = VolumePacker.BuildVolume(
-                            volumeChunks![articleId], repo.GetChunkBlob).Bytes;
-                    }
-                    catch (InvalidDataException)
-                    {
+                        // Some local chunks are gone (e.g. wiped after
+                        // upload to save space). Volume bytes are
+                        // deterministic, so a server download is
+                        // byte-identical to a local rebuild.
                         _log($"  local chunks for volume {articleId[..12]}… missing, " +
                              "downloading volume from server for republish");
                         volumeBytes = remote.GetVolume(articleId);
+                    }
+                    else
+                    {
+                        // DL-7: verify every local blob (decrypt + hash)
+                        // BEFORE packing. BuildVolume packs raw blobs with
+                        // no integrity check, so a locally corrupted blob
+                        // would otherwise be republished, the message index
+                        // repointed to it, and the retention timestamp
+                        // advanced — orphaning the healthy server article.
+                        // A verification failure throws into the per-article
+                        // failure handling below: nothing is posted for
+                        // this volume, the index keeps the old identity,
+                        // and the retention clock does not move.
+                        foreach (string chunkId in chunkIds)
+                            repo.VerifyChunk(chunkId);
+                        volumeBytes = VolumePacker.BuildVolume(
+                            chunkIds, repo.GetChunkBlob).Bytes;
                     }
                     newMessageId = remote.RepublishVolumeWithNewIdentity(articleId, volumeBytes);
                 }
                 else
                 {
-                    byte[] blob = repo.GetChunkBlob(articleId);
+                    byte[] blob;
+                    if (LocalChunkMissing(repo, articleId))
+                    {
+                        // SF-10: chunk mode had no server-download
+                        // fallback (volume mode did), so for a pruned
+                        // chunk-mode backup every republish threw on the
+                        // missing local blob and the backup aged to
+                        // expiry unrefreshed. Download the blob back —
+                        // it is exactly the bytes republication posts.
+                        _log($"  local chunk {articleId[..12]}… missing, " +
+                             "downloading from server for republish");
+                        blob = remote.Get(articleId);
+                    }
+                    else
+                    {
+                        // DL-7: the same guard as the volume path —
+                        // verify the local blob before republishing it
+                        // under a new identity, so a corrupted blob
+                        // fails this article instead of replacing the
+                        // healthy server copy.
+                        repo.VerifyChunk(articleId);
+                        blob = repo.GetChunkBlob(articleId);
+                    }
                     newMessageId = remote.RepublishWithNewIdentity(articleId, blob);
                 }
                 republished++;
@@ -343,6 +416,31 @@ public sealed class RetentionManager
             return BackupOutcome.Failed;
         }
 
+        // SF-10: refresh the discovery articles in the same transaction,
+        // before the clock moves — a backup whose data is fresh but
+        // whose manifest article expired is undiscoverable, which is no
+        // better than expired data. The manifest is reposted only when
+        // actually missing (its deterministic ID cannot be re-issued for
+        // a present article); the single-set NFO is reposted the same
+        // way; the monthly manifest index is republished as a new
+        // version, which genuinely restarts its clock. A failure here
+        // fails the refresh exactly like an index-publication failure.
+        try
+        {
+            if (repo.RepublishManifest(record.BackupId, remote))
+                _log("  reposted manifest article (was missing from server)");
+            RepostNfoIfMissing(repo, remote, manifest, volumeMode);
+            if (repo.RefreshManifestIndex(remote))
+                _log("  republished monthly manifest index");
+        }
+        catch (Exception ex)
+        {
+            _log($"Backup {record.BackupId}: discovery-article refresh failed: " +
+                 $"{ex.Message}; retention timestamp NOT advanced");
+            report.Errors.Add($"Discovery refresh {record.BackupId}: {ex.Message}");
+            return BackupOutcome.Failed;
+        }
+
         // All republished articles STAT-verified AND the refreshed identity
         // index published — now it is safe to advance the retention clock.
         tracker.RecordUpload(record.BackupId, record.ProviderHost, record.Newsgroup);
@@ -353,18 +451,98 @@ public sealed class RetentionManager
     }
 
     /// <summary>
-    /// Samples article IDs evenly across the list for STAT checks.
+    /// True when a chunk's blob is not present in the local repository
+    /// (both blob stores report a missing chunk as
+    /// <see cref="InvalidDataException"/> from the size probe). Used to
+    /// keep "pruned locally" (server download fallback) distinct from
+    /// "present but corrupt" (verification failure) in the volume
+    /// republish path.
     /// </summary>
-    private static List<string> SampleChunks(List<string> articleIds, int sampleSize)
+    private static bool LocalChunkMissing(BackupRepository repo, string chunkId)
+    {
+        try
+        {
+            repo.GetChunkBlobSize(chunkId);
+            return false;
+        }
+        catch (InvalidDataException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// SF-10: reposts the backup's NFO article if the server has lost
+    /// it — only for the single-post-set shape (the non-batched upload
+    /// path, and legacy manifests): one NFO whose text is rebuilt from
+    /// the manifest exactly as the upload built it. Batched uploads
+    /// post one NFO per staging batch with batch-specific dates and
+    /// part counts the manifest does not record, so their NFOs cannot
+    /// be faithfully rebuilt here and are skipped. The NFO is
+    /// informational (newsreader metadata); remote discovery never
+    /// reads it, so this is completeness, not recovery-critical.
+    /// </summary>
+    private void RepostNfoIfMissing(
+        BackupRepository repo, NntpBlobStore remote, BackupManifest manifest, bool volumeMode)
+    {
+        if (!volumeMode || manifest.Volumes is not { Count: > 0 })
+            return;
+        int distinctSets = manifest.Volumes
+            .Select(v => v.SetName).Distinct(StringComparer.Ordinal).Count();
+        if (distinctSets > 1)
+            return; // batched shape: per-batch NFOs are not reproducible here
+
+        string nfoText = ArticleCodec.BuildNfoText(
+            manifest.BackupId,
+            manifest.CreatedUtc.ToString("yyyy-MM-dd"),
+            manifest.Volumes.Count,
+            repo.GetOrCreatePoster());
+        if (remote.PostNfo(manifest.BackupId, batchIndex: 0, nfoText,
+                ArticleCodec.SetName(manifest.BackupId), manifest.Volumes.Count + 1,
+                recheckServer: true))
+            _log("  reposted NFO article (was missing from server)");
+    }
+
+    /// <summary>
+    /// FNV-1a over the backup ID and the current UTC day: a sample
+    /// rotation seed that is stable within a day and across processes
+    /// (unlike <see cref="HashCode"/>, which is per-process randomized),
+    /// and different every day (SF-11).
+    /// </summary>
+    private static int StableSampleSeed(string backupId)
+    {
+        string s = backupId + ":" + DateOnly.FromDateTime(DateTime.UtcNow).DayNumber;
+        unchecked
+        {
+            uint hash = 2166136261u;
+            foreach (char c in s)
+            {
+                hash ^= c;
+                hash *= 16777619u;
+            }
+            return (int)hash;
+        }
+    }
+
+    /// <summary>
+    /// Samples article IDs evenly across the list for STAT checks. The
+    /// window is rotated by <paramref name="rotationSeed"/> (SF-11): a
+    /// fixed window STAT-ed the same ≤sampleSize articles on every
+    /// check forever, so an article outside it could expire unobserved
+    /// while the backup reported Healthy.
+    /// </summary>
+    internal static List<string> SampleChunks(
+        List<string> articleIds, int sampleSize, int rotationSeed = 0)
     {
         if (articleIds.Count <= sampleSize)
             return articleIds;
 
         var sample = new List<string>(sampleSize);
         double step = (double)articleIds.Count / sampleSize;
+        int offset = ((rotationSeed % articleIds.Count) + articleIds.Count) % articleIds.Count;
         for (int i = 0; i < sampleSize; i++)
         {
-            int idx = (int)(i * step);
+            int idx = (offset + (int)(i * step)) % articleIds.Count;
             sample.Add(articleIds[idx]);
         }
         return sample;

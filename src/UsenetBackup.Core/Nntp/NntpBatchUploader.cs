@@ -123,6 +123,41 @@ public sealed class NntpBatchUploader : IDisposable
             lastError);
     }
 
+    /// <summary>
+    /// Computes a batch's manifest volume entries WITHOUT posting
+    /// (MU-18): the packing is deterministic (canonical chunk order,
+    /// the repo's volume size), so the entries describe the batch
+    /// identically whether or not an NNTP upload produced them. The
+    /// batched scheduler uses this when a batch was delivered only to
+    /// file destinations (SMB/USB) — the chunks are pruned all the
+    /// same, and a manifest whose Volumes list omits them misleads
+    /// every consumer that trusts the packing.
+    /// </summary>
+    public static List<VolumeEntry> PlanVolumeEntries(
+        BackupRepository repo, string backupId,
+        IReadOnlyList<string> chunkIds, int batchIndex)
+    {
+        string[] ordered = ChunkOrdering.GetOrderedChunkIds(chunkIds);
+        if (ordered.Length == 0)
+            return new List<VolumeEntry>();
+        var groups = VolumePacker.Plan(ordered, repo.GetChunkBlobSize, repo.VolumeSizeBytes)
+            .ToList();
+        string setName = ArticleCodec.SetName(backupId, batchIndex);
+        var entries = new List<VolumeEntry>(groups.Count);
+        foreach (var group in groups)
+        {
+            var volume = VolumePacker.BuildVolume(group, repo.GetChunkBlob);
+            entries.Add(new VolumeEntry
+            {
+                Id = volume.Id,
+                ChunkIds = volume.ChunkIds.ToList(),
+                SizeBytes = volume.Bytes.Length,
+                SetName = setName,
+            });
+        }
+        return entries;
+    }
+
     private List<VolumeEntry> UploadVolumeBatch(string[] orderedChunkIds, int batchIndex)
     {
         // Plan volumes for this batch's chunks only (all staged locally).

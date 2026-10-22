@@ -22,6 +22,34 @@ internal static class Program
             ApplicationConfiguration.Initialize();
         }
 
+        // NS-2: in WinPE this app is the ONLY recovery UI — a stray
+        // exception must not kill it behind the stock .NET crash dialog.
+        // Catch UI-thread exceptions, show the error in a plain dialog,
+        // and keep the wizard alive; log domain-level fatals the same
+        // way on a best-effort basis before the process goes down.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            try
+            {
+                MessageBox.Show(
+                    "Something went wrong, but you can keep going:\n\n" + e.Exception.Message,
+                    "FileKeep Recovery", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            catch { /* the dialog itself failed; swallow and continue */ }
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                if (e.ExceptionObject is Exception ex)
+                    MessageBox.Show(
+                        "A serious error occurred:\n\n" + ex.Message,
+                        "FileKeep Recovery", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch { /* best effort only */ }
+        };
+
         Application.Run(new RecoveryWizard(win95));
     }
 }

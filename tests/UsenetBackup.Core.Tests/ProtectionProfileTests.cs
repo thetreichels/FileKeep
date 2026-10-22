@@ -1,6 +1,7 @@
 using UsenetBackup.Core;
 using UsenetBackup.Core.Service;
 using UsenetBackup.Service;
+using UsenetBackup.Service.Security;
 using Xunit;
 
 namespace UsenetBackup.Core.Tests;
@@ -291,5 +292,113 @@ public sealed class ProtectionProfileTests : IDisposable
     {
         var config = new ServiceConfig { ProtectionLinkMode = "sometimes" };
         Assert.Throws<InvalidOperationException>(() => config.Validate());
+    }
+
+    private static string CurrentTotpCode(string base32)
+    {
+        byte[] secret = TotpCrypto.FromBase32(base32);
+        try
+        {
+            long step = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / TotpCrypto.TimeStepSeconds;
+            return TotpCrypto.ComputeCode(secret, step);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+        }
+    }
+
+    [Fact]
+    public void PhonePromotion_SaveFailure_RollsBackAndRetrySaves()
+    {
+        // P2-R3: promotion mutated the live config BEFORE Save; a failed
+        // save left memory promoted and disk unpromoted — a retry then
+        // verified against the new secret, returned success, and never
+        // re-saved, so the next restart silently reverted the phone
+        // secret. A failed save must roll the promotion back.
+        if (!OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip("DPAPI requires Windows");
+
+        string path = ConfigPath();
+        var config = new ServiceConfig { DashboardPort = 15789 };
+        var (s1, p1) = DashboardApi.SetupPhoneTotp(config, path);
+        Assert.Equal(200, s1);
+        string secret1 = Assert.IsType<PhoneSetupDto>(p1).Secret.Replace(" ", "");
+        var (v1, ok1) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret1), path);
+        Assert.True(Assert.IsType<OkDto>(ok1).Ok);
+        string liveBefore = config.PhoneTotpSecretProtected!;
+
+        // Stage a re-enrollment, then verify against an UNWRITABLE path.
+        var (s2, p2) = DashboardApi.SetupPhoneTotp(config, path);
+        Assert.Equal(200, s2);
+        string secret2 = Assert.IsType<PhoneSetupDto>(p2).Secret.Replace(" ", "");
+        string pendingBefore = config.PendingPhoneTotpSecretProtected!;
+        string badPath = Path.Combine(_workDir, "no-such-dir", "service.json");
+        var (vBad, _) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret2), badPath);
+        Assert.Equal(400, vBad);
+        // Rolled back: live untouched, pending still staged.
+        Assert.Equal(liveBefore, config.PhoneTotpSecretProtected);
+        Assert.Equal(pendingBefore, config.PendingPhoneTotpSecretProtected);
+
+        // The retry (same code, writable path) promotes AND persists.
+        var (v2, ok2) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret2), path);
+        Assert.Equal(200, v2);
+        Assert.True(Assert.IsType<OkDto>(ok2).Ok);
+        Assert.Null(config.PendingPhoneTotpSecretProtected);
+        var reloaded = ServiceConfig.Load(path);
+        Assert.Equal(config.PhoneTotpSecretProtected, reloaded.PhoneTotpSecretProtected);
+    }
+
+    [Fact]
+    public void PhoneReenrollment_StagesPending_PromotesOnlyOnVerifiedCode()
+    {
+        // SF-17: re-enrollment used to overwrite the live TOTP secret at
+        // setup time, so abandoning or failing the wizard invalidated
+        // the authenticator that already worked. The new secret must be
+        // staged as pending and promoted only by a verified code.
+        if (!OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip("DPAPI requires Windows");
+
+        string path = ConfigPath();
+        var config = new ServiceConfig { DashboardPort = 15789 };
+
+        // First enrollment: setup stages pending; a verified code
+        // promotes it to live.
+        var (s1, p1) = DashboardApi.SetupPhoneTotp(config, path);
+        Assert.Equal(200, s1);
+        string secret1 = Assert.IsType<PhoneSetupDto>(p1).Secret.Replace(" ", "");
+        Assert.Null(config.PhoneTotpSecretProtected);
+        Assert.False(string.IsNullOrWhiteSpace(config.PendingPhoneTotpSecretProtected));
+        var (v1, ok1) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret1), path);
+        Assert.Equal(200, v1);
+        Assert.True(Assert.IsType<OkDto>(ok1).Ok);
+        Assert.False(string.IsNullOrWhiteSpace(config.PhoneTotpSecretProtected));
+        Assert.Null(config.PendingPhoneTotpSecretProtected);
+        string liveAfterFirst = config.PhoneTotpSecretProtected!;
+
+        // Re-enrollment: setup must NOT touch the live secret...
+        var (s2, p2) = DashboardApi.SetupPhoneTotp(config, path);
+        Assert.Equal(200, s2);
+        string secret2 = Assert.IsType<PhoneSetupDto>(p2).Secret.Replace(" ", "");
+        Assert.Equal(liveAfterFirst, config.PhoneTotpSecretProtected);
+        Assert.False(string.IsNullOrWhiteSpace(config.PendingPhoneTotpSecretProtected));
+
+        // ...and neither must a failed verification.
+        string wrong = CurrentTotpCode(secret2) == "000000" ? "111111" : "000000";
+        var (v2, ok2) = DashboardApi.VerifyPhoneTotp(config, wrong, path);
+        Assert.Equal(200, v2);
+        Assert.False(Assert.IsType<OkDto>(ok2).Ok);
+        Assert.Equal(liveAfterFirst, config.PhoneTotpSecretProtected);
+        Assert.False(string.IsNullOrWhiteSpace(config.PendingPhoneTotpSecretProtected));
+
+        // The correct code promotes the new secret, persisted to disk.
+        var (v3, ok3) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret2), path);
+        Assert.Equal(200, v3);
+        Assert.True(Assert.IsType<OkDto>(ok3).Ok);
+        Assert.Null(config.PendingPhoneTotpSecretProtected);
+        Assert.NotEqual(liveAfterFirst, config.PhoneTotpSecretProtected);
+        var reloaded = ServiceConfig.Load(path);
+        Assert.Equal(config.PhoneTotpSecretProtected, reloaded.PhoneTotpSecretProtected);
+        Assert.Null(reloaded.PendingPhoneTotpSecretProtected);
     }
 }

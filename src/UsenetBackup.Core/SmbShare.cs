@@ -13,12 +13,66 @@ public sealed class SmbShare : IDisposable
 {
     private readonly string _uncPath;
     private readonly bool _connectedByUs;
+    private readonly string? _shareRoot;
+    private readonly bool _holdsConnectionRef;
     private bool _disposed;
 
-    private SmbShare(string uncPath, bool connectedByUs)
+    // P2-C9: process-wide refcount of SMB connections by share root.
+    // Ownership used to be per-instance guesswork: the instance whose
+    // WNetAddConnection2 returned 0 "owned" the connection and cancelled
+    // it on Dispose — even while another consumer (a backup holding the
+    // share for its whole run) was still using the connection a second
+    // instance had merely reused. Now every consumer of a connection
+    // THIS process made holds a ref; the OS connection is cancelled
+    // only when the last ref is released. Connections that pre-existed
+    // outside this process are never refcounted (and never cancelled).
+    private static readonly object ConnectionRegistryLock = new();
+    private static readonly Dictionary<string, (int Count, bool ProcessConnected)>
+        ConnectionRegistry = new(StringComparer.OrdinalIgnoreCase);
+
+    private SmbShare(string uncPath, bool connectedByUs,
+        string? shareRoot = null, bool holdsConnectionRef = false)
     {
         _uncPath = uncPath;
         _connectedByUs = connectedByUs;
+        _shareRoot = shareRoot;
+        _holdsConnectionRef = holdsConnectionRef;
+    }
+
+    internal static void AcquireConnectionRef(string shareRoot, bool processConnected)
+    {
+        lock (ConnectionRegistryLock)
+        {
+            ConnectionRegistry.TryGetValue(shareRoot, out var entry);
+            ConnectionRegistry[shareRoot] =
+                (entry.Count + 1, entry.ProcessConnected || processConnected);
+        }
+    }
+
+    internal static bool HasConnectionRef(string shareRoot)
+    {
+        lock (ConnectionRegistryLock)
+            return ConnectionRegistry.ContainsKey(shareRoot);
+    }
+
+    /// <summary>
+    /// Drops one ref; returns true when the caller should cancel the OS
+    /// connection (last ref, and this process made the connection).
+    /// </summary>
+    internal static bool ReleaseConnectionRef(string shareRoot)
+    {
+        lock (ConnectionRegistryLock)
+        {
+            if (!ConnectionRegistry.TryGetValue(shareRoot, out var entry))
+                return false;
+            if (entry.Count <= 1)
+            {
+                ConnectionRegistry.Remove(shareRoot);
+                return entry.ProcessConnected;
+            }
+            ConnectionRegistry[shareRoot] = (entry.Count - 1, entry.ProcessConnected);
+            return false;
+        }
     }
 
     /// <summary>
@@ -108,6 +162,19 @@ public sealed class SmbShare : IDisposable
             0); // CONNECT_UPDATE_PROFILE=0: don't persist
         const int ERROR_ALREADY_ASSIGNED = 85;
         const int ERROR_DEVICE_ALREADY_REMEMBERED = 1202;
+        const int ERROR_SESSION_CREDENTIAL_CONFLICT = 1219;
+        if (result == ERROR_SESSION_CREDENTIAL_CONFLICT)
+        {
+            // MU-17: name the actual problem — an existing connection
+            // under different credentials — instead of a generic
+            // "check credentials" that sends the user in circles.
+            throw new IOException(
+                $"Could not connect to SMB share {shareRoot} as {username}: " +
+                "Windows already has a connection to this server under " +
+                "different credentials (error 1219). Disconnect the " +
+                "existing connection (e.g. `net use /delete`) or use " +
+                "those credentials.");
+        }
         if (result != 0 && result != ERROR_ALREADY_ASSIGNED && result != ERROR_DEVICE_ALREADY_REMEMBERED)
         {
             throw new IOException(
@@ -116,12 +183,33 @@ public sealed class SmbShare : IDisposable
         }
         // If already connected (85/1202), the existing connection is reused.
         bool connectedByUs = result == 0;
+        // P2-C9: take this consumer's ref on the connection now (before
+        // the reachability checks, whose failure paths release it). A
+        // reused connection is refcounted only when THIS process made
+        // it; a pre-existing external connection stays a guest.
+        bool holdsRef = connectedByUs || HasConnectionRef(shareRoot);
+        if (holdsRef)
+            AcquireConnectionRef(shareRoot, processConnected: connectedByUs);
+        if (!connectedByUs)
+        {
+            // MU-17: a reused connection keeps ITS identity — Windows
+            // silently ignores the credentials we were asked to use, so
+            // operations would run as the wrong user and fail later
+            // with unexplained permission errors. Verify the existing
+            // connection's user matches the requested one.
+            string? existingUser = GetConnectionUser(shareRoot);
+            if (existingUser is not null && !SameUser(existingUser, username))
+                throw new IOException(
+                    $"SMB share {shareRoot} is already connected as " +
+                    $"'{existingUser}', not '{username}'. Disconnect the " +
+                    "existing connection or update the location's credentials.");
+        }
         // Ensure the full subdirectory path exists / is reachable.
         if (!Directory.Exists(uncPath))
         {
             if (!createIfMissing)
             {
-                if (connectedByUs)
+                if (holdsRef && ReleaseConnectionRef(shareRoot))
                     WNetCancelConnection2(shareRoot, 0, force: false);
                 throw new IOException(
                     $"Connected to {shareRoot} but subdirectory not found: {uncPath}. " +
@@ -130,13 +218,13 @@ public sealed class SmbShare : IDisposable
             try { Directory.CreateDirectory(uncPath); }
             catch (Exception ex)
             {
-                if (connectedByUs)
+                if (holdsRef && ReleaseConnectionRef(shareRoot))
                     WNetCancelConnection2(shareRoot, 0, force: false);
                 throw new IOException(
                     $"Connected to {shareRoot} but could not reach {uncPath}: {ex.Message}", ex);
             }
         }
-        return new SmbShare(uncPath, connectedByUs);
+        return new SmbShare(uncPath, connectedByUs, shareRoot, holdsRef);
     }
 
     /// <summary>The connected UNC path (share root or subdirectory).</summary>
@@ -156,7 +244,16 @@ public sealed class SmbShare : IDisposable
         if (_disposed)
             return;
         _disposed = true;
-        if (_connectedByUs && OperatingSystem.IsWindows())
+        if (_holdsConnectionRef && _shareRoot is not null)
+        {
+            // Cancel only when the last consumer lets go (P2-C9).
+            if (ReleaseConnectionRef(_shareRoot) && OperatingSystem.IsWindows())
+            {
+                try { WNetCancelConnection2(_shareRoot, 0, force: false); }
+                catch { /* best effort */ }
+            }
+        }
+        else if (_connectedByUs && OperatingSystem.IsWindows())
         {
             try { WNetCancelConnection2(GetShareRoot(_uncPath), 0, force: false); }
             catch { /* best effort */ }
@@ -206,4 +303,38 @@ public sealed class SmbShare : IDisposable
         string lpName,
         int dwFlags,
         [MarshalAs(UnmanagedType.Bool)] bool force);
+
+    [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+    private static extern int WNetGetUser(
+        string lpName,
+        System.Text.StringBuilder lpUserName,
+        ref int lpnLength);
+
+    /// <summary>
+    /// The user an existing connection to the share was made with, or
+    /// null when it can't be determined (no connection, API failure).
+    /// </summary>
+    private static string? GetConnectionUser(string shareRoot)
+    {
+        try
+        {
+            var buffer = new System.Text.StringBuilder(256);
+            int length = buffer.Capacity;
+            return WNetGetUser(shareRoot, buffer, ref length) == 0
+                ? buffer.ToString()
+                : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>User comparison tolerant of DOMAIN\user vs bare-user forms.</summary>
+    private static bool SameUser(string existing, string? requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested))
+            return true; // no requested identity to conflict with
+        static string Bare(string u) =>
+            u.Contains('\\') ? u[(u.IndexOf('\\') + 1)..] : u;
+        return string.Equals(existing, requested, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(Bare(existing), Bare(requested), StringComparison.OrdinalIgnoreCase);
+    }
 }

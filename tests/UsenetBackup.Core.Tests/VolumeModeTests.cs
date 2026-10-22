@@ -98,7 +98,7 @@ public sealed class VolumeModeTests : IDisposable
         using var repo = BackupRepository.Init(_repoDir, Passphrase);
         string chunkId = new('e', 64);
         using (var catalog = new Catalog(repo.CatalogPath))
-            catalog.RecordUpload("<" + chunkId + ".0123456789abcdef@usenet-backup>", chunkId);
+            catalog.RecordUpload("<" + chunkId + ".0123456789abcdef@usenet-backup>", chunkId, "test-provider");
 
         var manifest = MakeManifest();
         Assert.False(repo.ResolveVolumeMode(manifest, [chunkId],

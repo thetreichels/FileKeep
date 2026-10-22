@@ -165,6 +165,7 @@ public sealed class ChunkMessageIndex
     {
         if (!File.Exists(_path))
             return new Dictionary<string, Dictionary<string, string>>();
+        Exception? firstError = null;
         try
         {
             string json = File.ReadAllText(_path);
@@ -173,7 +174,7 @@ public sealed class ChunkMessageIndex
             if (nested is not null)
                 return nested;
         }
-        catch { /* fall through to legacy attempt */ }
+        catch (Exception ex) { firstError = ex; /* fall through to legacy attempt */ }
 
         try
         {
@@ -188,13 +189,65 @@ public sealed class ChunkMessageIndex
                     ["legacy"] = flat
                 };
         }
-        catch { /* corrupt file: start empty */ }
+        catch (Exception ex) { firstError ??= ex; }
 
-        return new Dictionary<string, Dictionary<string, string>>();
+        // The file exists but neither format parses (NS-8): do NOT silently
+        // start empty — that forgets every retention-refreshed message ID
+        // with no trace. Mirror UsenetUploadTracker: preserve the torn
+        // file for forensics and surface the problem.
+        try
+        {
+            string backupPath = _path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+            File.Move(_path, backupPath);
+        }
+        catch { }
+        throw new InvalidDataException(
+            $"Chunk message index file is corrupt: {_path}. " +
+            $"The torn file was preserved with a .corrupt- suffix. " +
+            $"Original error: {firstError?.Message}", firstError);
     }
 
     private void Save()
     {
+        // P2-C4: every BackupRepository.Open creates its OWN index
+        // instance over the same file, and a whole-file rewrite from a
+        // staler instance silently erased records a concurrent instance
+        // had just saved (retention's refreshed message IDs vanished
+        // while retention reported success). Merge-on-save: re-read the
+        // current file, overlay this instance's records (they win per
+        // key — they are this instance's newest knowledge), adopt the
+        // merged map, then write. Sequential interleavings are exact;
+        // truly simultaneous writes can still lose the loser's newest
+        // single record, but never the whole other instance's work.
+        lock (_mapLock)
+        {
+            try
+            {
+                if (File.Exists(_path))
+                {
+                    var onDisk = JsonSerializer.Deserialize(
+                        File.ReadAllText(_path),
+                        FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
+                    if (onDisk is not null)
+                    {
+                        foreach (var (provider, byChunk) in onDisk)
+                        {
+                            if (!_map.TryGetValue(provider, out var mine))
+                                _map[provider] = byChunk;
+                            else
+                                foreach (var (id, messageId) in byChunk)
+                                    mine.TryAdd(id, messageId);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // An unreadable current file must not block saving this
+                // instance's records; Load() handles corruption loudly
+                // at open time.
+            }
+        }
         // Unique temp name: concurrent saves must not share a temp file.
         // Snapshot under the lock so serialization sees a consistent map.
         string json;

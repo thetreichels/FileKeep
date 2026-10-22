@@ -23,6 +23,7 @@ public sealed class RestoreSession
     private readonly object _lock = new();
     private byte[]? _passphraseUtf8;
     private DateTime _lastUsedUtc;
+    private bool _verified;
 
     /// <summary>True if a passphrase is currently held and not expired.</summary>
     public bool IsUnlocked
@@ -42,8 +43,27 @@ public sealed class RestoreSession
         }
     }
 
-    /// <summary>Stores the unwrapped passphrase (copied) and starts the session.</summary>
-    public void Unlock(string passphrase)
+    /// <summary>
+    /// Stores the unwrapped passphrase (copied) and starts the session.
+    /// This entry point is for unlocks that are verified BY CONSTRUCTION
+    /// (a YubiKey unwrap only succeeds with the right key response; the
+    /// phone path releases the machine's own DPAPI-held passphrase after
+    /// a presence proof) — the session starts out verified.
+    /// </summary>
+    public void Unlock(string passphrase) => UnlockCore(passphrase, verified: true);
+
+    /// <summary>
+    /// Starts the session with a passphrase nothing has validated yet
+    /// (MU-15): the typed recovery secret accepts any non-empty string —
+    /// there is no verifier — so the session must not present itself as
+    /// fully "unlocked" until a restore actually decrypts with it
+    /// (<see cref="MarkVerified"/>). A wrong secret surfaces at the
+    /// first restore, and the status badge says "not yet checked"
+    /// until then.
+    /// </summary>
+    public void UnlockUnverified(string passphrase) => UnlockCore(passphrase, verified: false);
+
+    private void UnlockCore(string passphrase, bool verified)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(passphrase);
         lock (_lock)
@@ -51,6 +71,30 @@ public sealed class RestoreSession
             WipeLocked();
             _passphraseUtf8 = bytes;
             _lastUsedUtc = DateTime.UtcNow;
+            _verified = verified;
+        }
+    }
+
+    /// <summary>
+    /// True when the held passphrase has been proven — by construction
+    /// (see <see cref="Unlock"/>) or by a successful restore since the
+    /// unlock (<see cref="MarkVerified"/>). False while locked.
+    /// </summary>
+    public bool IsVerified
+    {
+        get { lock (_lock) { return _passphraseUtf8 is not null && _verified; } }
+    }
+
+    /// <summary>
+    /// Records that the held passphrase successfully decrypted a
+    /// restore — the typed-secret path's deferred proof (MU-15).
+    /// </summary>
+    public void MarkVerified()
+    {
+        lock (_lock)
+        {
+            if (_passphraseUtf8 is not null)
+                _verified = true;
         }
     }
 
@@ -81,5 +125,6 @@ public sealed class RestoreSession
             CryptographicOperations.ZeroMemory(_passphraseUtf8);
             _passphraseUtf8 = null;
         }
+        _verified = false;
     }
 }

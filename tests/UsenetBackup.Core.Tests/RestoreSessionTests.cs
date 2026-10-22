@@ -19,6 +19,117 @@ public sealed class RestoreSessionTests
     }
 
     [Fact]
+    public void Session_TypedSecretUnlock_StartsUnverified_UntilProven()
+    {
+        // MU-15: the typed recovery secret has no verifier — any
+        // non-empty string unlocks the session — so it must not
+        // present as verified until a restore proves it.
+        var s = new RestoreSession();
+        s.UnlockUnverified("some-typed-secret");
+        Assert.True(s.IsUnlocked);
+        Assert.False(s.IsVerified);
+
+        s.MarkVerified();
+        Assert.True(s.IsVerified);
+
+        s.Lock();
+        Assert.False(s.IsUnlocked);
+        Assert.False(s.IsVerified);
+
+        // The by-construction paths (YubiKey unwrap) start verified.
+        s.Unlock("unwrapped");
+        Assert.True(s.IsVerified);
+    }
+
+    [Fact]
+    public void SessionStatus_ReportsVerifiedAndPhoneEnabled()
+    {
+        var config = new ServiceConfig
+        {
+            PassphraseYubiKey = true,
+            GeneratedSecretMode = true,
+            PhoneAuthEnabled = true,
+        };
+        var s = new RestoreSession();
+        var (_, payload) = DashboardApi.GetRestoreSessionStatus(config, s);
+        var dto = Assert.IsType<YubiKeyUnlockDto>(payload);
+        Assert.True(dto.PhoneEnabled);
+        Assert.False(dto.Unlocked);
+        Assert.False(dto.Verified);
+
+        // Typed-secret unlock flips Unlocked but NOT Verified.
+        var (status, _) = DashboardApi.UnlockRestoreSessionWithSecret(config, s, "ABCD2345");
+        Assert.Equal(200, status);
+        var (_, payload2) = DashboardApi.GetRestoreSessionStatus(config, s);
+        var dto2 = Assert.IsType<YubiKeyUnlockDto>(payload2);
+        Assert.True(dto2.Unlocked);
+        Assert.False(dto2.Verified);
+    }
+
+    [Fact]
+    public void PhoneUnlock_VerifiedCode_ReleasesStoredPassphrase()
+    {
+        // MU-15: the phone method must actually unlock something — a
+        // verified TOTP code releases the machine's DPAPI-held
+        // passphrase into the session.
+        if (!OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip("DPAPI requires Windows");
+
+        string dir = Path.Combine(Path.GetTempPath(), "ub-phone-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, "service.json");
+        try
+        {
+            var config = new ServiceConfig
+            {
+                DashboardPort = 15789,
+                PassphraseYubiKey = true,
+                PhoneAuthEnabled = true,
+                PassphraseProtected = UsenetBackup.Core.Dpapi.Protect("the-real-passphrase"),
+            };
+            // Enroll the phone (staged → promoted by a verified code).
+            var (ss, sp) = DashboardApi.SetupPhoneTotp(config, path);
+            Assert.Equal(200, ss);
+            string secret = Assert.IsType<PhoneSetupDto>(sp).Secret.Replace(" ", "");
+            var (vs, okp) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret), path);
+            Assert.Equal(200, vs);
+            Assert.True(Assert.IsType<OkDto>(okp).Ok);
+
+            var session = new RestoreSession();
+            // Wrong code: refused, session stays locked.
+            var (badStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(
+                config, session, "000000");
+            Assert.Equal(400, badStatus);
+            Assert.False(session.IsUnlocked);
+
+            // Right code: session unlocked with the STORED passphrase,
+            // and verified (it came from the machine's own store).
+            var (goodStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(
+                config, session, CurrentTotpCode(secret));
+            Assert.Equal(200, goodStatus);
+            Assert.True(session.IsUnlocked);
+            Assert.True(session.IsVerified);
+            Assert.Equal("the-real-passphrase", session.GetPassphrase());
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    private static string CurrentTotpCode(string base32)
+    {
+        byte[] secret = UsenetBackup.Service.Security.TotpCrypto.FromBase32(base32);
+        try
+        {
+            long step = DateTimeOffset.UtcNow.ToUnixTimeSeconds() /
+                UsenetBackup.Service.Security.TotpCrypto.TimeStepSeconds;
+            return UsenetBackup.Service.Security.TotpCrypto.ComputeCode(secret, step);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret); }
+    }
+
+    [Fact]
     public void Session_Unlock_HoldsPassphrase()
     {
         var s = new RestoreSession();
@@ -137,5 +248,28 @@ public sealed class RestoreSessionTests
         Assert.Equal(200, status);
         string json = System.Text.Json.JsonSerializer.Serialize(payload);
         Assert.Contains("detected", json);
+    }
+
+    private sealed class ThrowingProvider : IYubiKeyProvider
+    {
+        public IReadOnlyList<YubiKeyInfo> FindDevices() =>
+            throw new InvalidOperationException("HID stack unavailable (simulated)");
+        public byte[] CalculateHmacSha1(byte[] challenge, int slot, TimeSpan timeout) =>
+            throw new NotSupportedException();
+        public void ProgramHmacSha1Slot(int slot, byte[] secret, bool requireTouch) =>
+            throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void GetYubiKeyStatus_ProviderFailure_IsAnErrorNotNoDevices()
+    {
+        // SF-23: a broken provider must surface as an error — reporting
+        // "no devices" sends the user hunting for a key that is already
+        // plugged in while the driver problem stays invisible.
+        var (status, payload) = DashboardApi.GetYubiKeyStatus(new ThrowingProvider());
+        Assert.Equal(500, status);
+        string json = System.Text.Json.JsonSerializer.Serialize(payload);
+        Assert.Contains("YubiKey detection failed", json);
+        Assert.Contains("HID stack unavailable", json);
     }
 }

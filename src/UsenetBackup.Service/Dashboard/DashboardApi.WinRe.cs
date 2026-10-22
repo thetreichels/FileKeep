@@ -16,6 +16,11 @@ public static partial class DashboardApi
     /// <summary>WinRE USB build state.</summary>
     private static string? _winReBuildStatus;
     private static string? _winReBuildError;
+    // P2-C13: build generation. A build task may write terminal state
+    // only while it is still the current generation — otherwise a slow
+    // cleanup in an old (killed) build could stamp its outcome onto a
+    // newer build that already took over the status.
+    private static long _winReBuildGeneration;
     private static string? _winReBuildDrive;
 
     /// <summary>Handle of the PowerShell build process while a build runs (for cancel/timeout).</summary>
@@ -32,15 +37,16 @@ public static partial class DashboardApi
     /// reagentc, DISM, bcdboot, and WinRE enabled with a locatable WIM.
     /// ADK is NOT required.
     /// </summary>
-    public static object CheckWinRePrerequisites()
+    public static WinRePrerequisitesDto CheckWinRePrerequisites()
     {
-        var result = new Dictionary<string, object>();
-        result["isWindows"] = OperatingSystem.IsWindows();
         if (!OperatingSystem.IsWindows())
         {
-            result["ready"] = false;
-            result["error"] = "WinRE USB creation requires Windows.";
-            return result;
+            return new WinRePrerequisitesDto(
+                IsWindows: false, Ready: false,
+                Error: "WinRE USB creation requires Windows.",
+                IsAdmin: false, Reagentc: false, Dism: false, Bcdboot: false,
+                WinReEnabled: false, WinReLocation: "", ScriptFound: false,
+                Missing: new List<string>());
         }
         bool isAdmin = false;
         try
@@ -50,14 +56,10 @@ public static partial class DashboardApi
             isAdmin = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
         }
         catch { }
-        result["isAdmin"] = isAdmin;
 
         bool hasReagentc = FindSystemTool("reagentc.exe") is not null;
         bool hasDism = FindSystemTool("dism.exe") is not null;
         bool hasBcdboot = FindSystemTool("bcdboot.exe") is not null;
-        result["reagentc"] = hasReagentc;
-        result["dism"] = hasDism;
-        result["bcdboot"] = hasBcdboot;
 
         // Check WinRE status via reagentc /info
         bool winReEnabled = false;
@@ -72,9 +74,7 @@ public static partial class DashboardApi
                 RedirectStandardOutput = true,
                 CreateNoWindow = true,
             };
-            using var proc = System.Diagnostics.Process.Start(psi)!;
-            string output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(10000);
+            var (_, output) = RunToolCapture(psi, 10000);
             winReEnabled = output.Contains("Enabled", StringComparison.OrdinalIgnoreCase) &&
                            !output.Contains("Disabled", StringComparison.OrdinalIgnoreCase);
             foreach (var line in output.Split('\n'))
@@ -87,12 +87,10 @@ public static partial class DashboardApi
             }
         }
         catch { }
-        result["winReEnabled"] = winReEnabled;
-        result["winReLocation"] = winReLocation;
 
         // Check for the build script (installed layout or source tree)
         string scriptPath = FindWinReScript();
-        result["scriptFound"] = !string.IsNullOrEmpty(scriptPath);
+        bool scriptFound = !string.IsNullOrEmpty(scriptPath);
 
         var missing = new List<string>();
         if (!isAdmin) missing.Add("Administrator rights");
@@ -100,11 +98,42 @@ public static partial class DashboardApi
         if (!hasDism) missing.Add("dism.exe");
         if (!hasBcdboot) missing.Add("bcdboot.exe");
         if (!winReEnabled) missing.Add("WinRE enabled (reagentc /info)");
-        if (string.IsNullOrEmpty(scriptPath)) missing.Add("build-winre-usb.ps1");
+        if (!scriptFound) missing.Add("build-winre-usb.ps1");
 
-        result["ready"] = missing.Count == 0;
-        result["missing"] = missing;
-        return result;
+        return new WinRePrerequisitesDto(
+            IsWindows: true, Ready: missing.Count == 0, Error: "",
+            IsAdmin: isAdmin, Reagentc: hasReagentc, Dism: hasDism,
+            Bcdboot: hasBcdboot, WinReEnabled: winReEnabled,
+            WinReLocation: winReLocation, ScriptFound: scriptFound,
+            Missing: missing);
+    }
+
+    /// <summary>
+    /// P2-C17: runs a short-lived tool capturing stdout, draining BOTH
+    /// streams concurrently and enforcing the timeout for real. The
+    /// old pattern (ReadToEnd on stdout, then WaitForExit) deadlocks
+    /// when a child fills its stderr pipe first (it never reaches EOF)
+    /// and makes the WaitForExit timeout unreachable — the same bug
+    /// SF-8 fixed for the build itself, in the three helpers around it.
+    /// Returns (exitCode, stdout); exitCode is -1 on timeout.
+    /// </summary>
+    private static (int ExitCode, string Output) RunToolCapture(
+        System.Diagnostics.ProcessStartInfo psi, int timeoutMs)
+    {
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        using var proc = System.Diagnostics.Process.Start(psi)!;
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            try { proc.WaitForExit(5000); } catch { }
+            return (-1, stdoutTask.Wait(TimeSpan.FromSeconds(5)) ? stdoutTask.Result : "");
+        }
+        string output = stdoutTask.Wait(TimeSpan.FromSeconds(5)) ? stdoutTask.Result : "";
+        try { _ = stderrTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        return (proc.ExitCode, output);
     }
 
     private static string? FindSystemTool(string name)
@@ -116,12 +145,9 @@ public static partial class DashboardApi
                 FileName = "where.exe",
                 Arguments = name,
                 UseShellExecute = false,
-                RedirectStandardOutput = true,
                 CreateNoWindow = true,
             };
-            using var proc = System.Diagnostics.Process.Start(psi)!;
-            string output = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(5000);
+            var (_, output) = RunToolCapture(psi, 5000);
             var first = output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
             return string.IsNullOrEmpty(first) ? null : first;
         }
@@ -213,7 +239,8 @@ public static partial class DashboardApi
     /// USB mode (driveLetter or diskNumber): destructive, the target USB drive is formatted.
     /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
-    public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode, int imageSizeMB)
+    public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode, int imageSizeMB,
+        string? expectedModel = null, long? expectedSizeBytes = null)
     {
         if (!OperatingSystem.IsWindows())
             return (400, new ErrorDto("WinRE recovery media creation requires Windows."));
@@ -242,17 +269,32 @@ public static partial class DashboardApi
                 // The dashboard only offers USB-bus disks; refuse anything else
                 // even if the request was crafted by hand. This is checked here
                 // (before the flag) rather than only in the script.
-                bool knownUsb;
+                UsenetBackup.Core.Recovery.UsbDrives.UsbDrive? drive;
                 try
                 {
-                    knownUsb = UsenetBackup.Core.Recovery.UsbDrives.List().Any(d => d.Number == diskNumber);
+                    drive = UsenetBackup.Core.Recovery.UsbDrives.List()
+                        .FirstOrDefault(d => d.Number == diskNumber);
                 }
                 catch
                 {
-                    knownUsb = false;
+                    drive = null;
                 }
-                if (!knownUsb)
+                if (drive is null)
                     return (400, new ErrorDto($"Disk {diskNumber} is not a USB-attached drive." ));
+                // P2-L2: a disk NUMBER is not an identity — disks renumber
+                // when devices are added or removed. When the page sent
+                // the identity of the disk the user confirmed, refuse if
+                // the number now names a different disk; either way the
+                // verified identity is forwarded to the script, which
+                // re-checks it immediately before formatting.
+                if (!string.IsNullOrWhiteSpace(expectedModel) &&
+                    (!string.Equals(drive.Model, expectedModel, StringComparison.Ordinal) ||
+                     (expectedSizeBytes.HasValue && drive.SizeBytes != expectedSizeBytes.Value)))
+                    return (400, new ErrorDto(
+                        $"The disk at number {diskNumber} changed since you selected it " +
+                        $"(now: {drive.Model}, {drive.SizeBytes} bytes). Re-select the target disk and confirm again."));
+                expectedModel = drive.Model;
+                expectedSizeBytes = drive.SizeBytes;
             }
         }
         else
@@ -265,11 +307,13 @@ public static partial class DashboardApi
                 return (400, new ErrorDto("Image size must be at least 1024 MB."));
         }
 
-        var prereq = CheckWinRePrerequisites() as Dictionary<string, object>;
-        if (prereq is null || !(prereq.TryGetValue("ready", out var readyObj) && readyObj is bool ready && ready))
+        var prereq = CheckWinRePrerequisites();
+        if (!prereq.Ready)
         {
-            var missing = prereq?.TryGetValue("missing", out var m) == true ? m : "prerequisites not met";
-            return (400, new ErrorDto($"Prerequisites not met: {missing}" ));
+            string missing = prereq.Missing.Count > 0
+                ? string.Join(", ", prereq.Missing)
+                : "prerequisites not met";
+            return (400, new ErrorDto($"Prerequisites not met: {missing}"));
         }
 
         lock (_winReBuildStepsLock)
@@ -284,10 +328,16 @@ public static partial class DashboardApi
             _winReBuildError = null;
             _winReBuildDrive = imageMode ? imagePath
                 : diskNumber >= 0 ? $"Disk {diskNumber}" : driveLetter.ToUpperInvariant() + ":";
+            _winReBuildGeneration++;
         }
+        long buildGeneration = _winReBuildGeneration;
 
         Task.Run(() =>
         {
+            // Set when the build process is killed out from under the
+            // script (user cancel or the 60-minute backstop): the
+            // script's own cleanup never runs then (SF-7).
+            bool buildWasKilled = false;
             try
             {
                 string scriptPath = FindWinReScript();
@@ -329,6 +379,16 @@ public static partial class DashboardApi
                 {
                     psi.ArgumentList.Add("-DiskNumber");
                     psi.ArgumentList.Add(diskNumber.ToString());
+                    if (!string.IsNullOrWhiteSpace(expectedModel))
+                    {
+                        psi.ArgumentList.Add("-ExpectedModel");
+                        psi.ArgumentList.Add(expectedModel);
+                    }
+                    if (expectedSizeBytes.HasValue)
+                    {
+                        psi.ArgumentList.Add("-ExpectedSizeBytes");
+                        psi.ArgumentList.Add(expectedSizeBytes.Value.ToString());
+                    }
                 }
                 else
                 {
@@ -364,31 +424,40 @@ public static partial class DashboardApi
                 lock (_winReBuildStepsLock) { _winReBuildProcess = proc; }
                 try
                 {
-                    // Read stdout line-by-line so FKPROGRESS markers update the
-                    // dashboard in real time instead of only at the end.
-                    var outputLines = new System.Text.StringBuilder();
-                    string? line;
-                    while ((line = proc.StandardOutput.ReadLine()) is not null)
-                    {
-                        outputLines.AppendLine(line);
-                        if (line.StartsWith("FKPROGRESS:", StringComparison.Ordinal))
-                            ParseWinReProgress(line.Substring("FKPROGRESS:".Length).Trim());
-                    }
-                    string err = proc.StandardError.ReadToEnd();
+                    // SF-8: the run goes through RunBuildProcess, which
+                    // streams stdout (FKPROGRESS markers update the
+                    // dashboard in real time) while draining stderr
+                    // concurrently and enforcing the 60-minute backstop
+                    // for real — reading stdout to EOF *before*
+                    // WaitForExit, as this used to do, made the timeout
+                    // unreachable (a hung DISM/diskpart never EOFs, so
+                    // the status wedged at "running" until the service
+                    // restarted). The dashboard also offers Cancel for
+                    // user-initiated stops.
+                    var (timedOut, exitCode, err, outputText) = RunBuildProcess(
+                        proc, TimeSpan.FromMinutes(60),
+                        line =>
+                        {
+                            if (line.StartsWith("FKPROGRESS:", StringComparison.Ordinal))
+                                ParseWinReProgress(line.Substring("FKPROGRESS:".Length).Trim());
+                        });
                     if (_winReBuildCancelRequested)
-                        throw new OperationCanceledException("WinRE build cancelled.");
-                    if (!proc.WaitForExit(TimeSpan.FromMinutes(60)))
                     {
-                        // Backstop against a hung script: a stuck DISM/diskpart
-                        // would otherwise wedge the status as "running" until
-                        // the service restarts. The dashboard also offers
-                        // Cancel for user-initiated stops.
-                        try { proc.Kill(entireProcessTree: true); } catch { }
+                        buildWasKilled = true;
+                        throw new OperationCanceledException("WinRE build cancelled.");
+                    }
+                    if (timedOut)
+                    {
+                        buildWasKilled = true;
                         throw new TimeoutException("WinRE build timed out after 60 minutes and was stopped.");
                     }
-                    if (proc.ExitCode != 0)
-                        throw new InvalidOperationException($"build-winre-usb.ps1 exited {proc.ExitCode}: {err}{outputLines}");
-                    _winReBuildStatus = "complete";
+                    if (exitCode != 0)
+                        throw new InvalidOperationException($"build-winre-usb.ps1 exited {exitCode}: {err}{outputText}");
+                    lock (_winReBuildStepsLock)
+                    {
+                        if (_winReBuildGeneration == buildGeneration)
+                            _winReBuildStatus = "complete";
+                    }
                     LogWinReBuild($"target={_winReBuildDrive}: complete");
                 }
                 finally
@@ -401,13 +470,37 @@ public static partial class DashboardApi
             }
             catch (Exception ex)
             {
-                // Set the terminal state BEFORE logging so a logging failure
-                // can never wedge the builder as "running".
-                _winReBuildStatus = "failed";
+                string message = ex.Message;
+                if (buildWasKilled)
+                {
+                    // SF-7: a killed build never runs the script's
+                    // finally, which is what re-enables the host PC's
+                    // WinRE after the script disabled it to copy the
+                    // WIM. Restore it from here, and say plainly in the
+                    // status what state WinRE is in.
+                    string winReNote = ReenableWinReAfterKilledBuild();
+                    message += " " + winReNote;
+                    LogWinReBuild($"target={_winReBuildDrive}: build stopped mid-run; {winReNote}");
+                }
                 // Cap the message: a failed build can dump megabytes of
                 // DISM/diskpart output; the tail is where the error is.
-                _winReBuildError = TruncateTail(ex.Message, 4096);
-                LogWinReBuild($"target={_winReBuildDrive}: FAILED: {_winReBuildError}");
+                string errorText = TruncateTail(message, 4096);
+                // P2-C13: the terminal write happens only NOW — after
+                // the killed-build WinRE re-enable above (which can take
+                // 30 s) — and only if this build is still the current
+                // generation. Writing "failed" before the re-enable let
+                // a new build start while this task still ran reagentc
+                // against it, and this task's error then stamped over
+                // the new build's status.
+                lock (_winReBuildStepsLock)
+                {
+                    if (_winReBuildGeneration == buildGeneration)
+                    {
+                        _winReBuildStatus = "failed";
+                        _winReBuildError = errorText;
+                    }
+                }
+                LogWinReBuild($"target={_winReBuildDrive}: FAILED: {errorText}");
             }
         });
         return (202, new AcceptedDto(true));
@@ -476,6 +569,91 @@ public static partial class DashboardApi
             _winReBuildCancelRequested = true;
             try { _winReBuildProcess?.Kill(entireProcessTree: true); } catch { }
             return (200, new CancelledDto(true));
+        }
+    }
+
+    /// <summary>
+    /// Runs an already-started process (stdout and stderr redirected) to
+    /// completion with a REAL timeout (SF-8): stdout streams line-by-line
+    /// to <paramref name="onStdoutLine"/> from a reader task while stderr
+    /// drains concurrently, and the wait itself enforces
+    /// <paramref name="timeout"/> — on expiry the process tree is killed
+    /// and the result reports <c>TimedOut</c>. (Reading stdout to EOF
+    /// before calling WaitForExit, the previous shape, only evaluates
+    /// the timeout after the process exits on its own, and deadlocks
+    /// outright if the child fills the stderr pipe.) After exit or kill
+    /// the drain is bounded, so a grandchild holding a pipe open cannot
+    /// wedge the caller either. The exit code is -1 when timed out.
+    /// </summary>
+    public static (bool TimedOut, int ExitCode, string StdErr, string StdOut)
+        RunBuildProcess(System.Diagnostics.Process proc, TimeSpan timeout,
+            Action<string> onStdoutLine)
+    {
+        var stdout = new System.Text.StringBuilder();
+        var stdoutTask = System.Threading.Tasks.Task.Run(() =>
+        {
+            string? line;
+            while ((line = proc.StandardOutput.ReadLine()) is not null)
+            {
+                lock (stdout) stdout.AppendLine(line);
+                try { onStdoutLine(line); } catch { /* progress is best-effort */ }
+            }
+        });
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+
+        if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            System.Threading.Tasks.Task.WaitAll(
+                new System.Threading.Tasks.Task[] { stdoutTask, stderrTask },
+                TimeSpan.FromSeconds(10));
+            string partialErr = stderrTask.IsCompletedSuccessfully ? stderrTask.Result : "";
+            lock (stdout) return (true, -1, partialErr, stdout.ToString());
+        }
+        System.Threading.Tasks.Task.WaitAll(
+            new System.Threading.Tasks.Task[] { stdoutTask, stderrTask },
+            TimeSpan.FromSeconds(30));
+        string err = stderrTask.IsCompletedSuccessfully ? stderrTask.Result : "";
+        lock (stdout) return (false, proc.ExitCode, err, stdout.ToString());
+    }
+
+    /// <summary>
+    /// SF-7: best-effort <c>reagentc /enable</c> after a WinRE build was
+    /// killed. The build script disables the host PC's WinRE early (to
+    /// copy its WIM) and re-enables it in a <c>finally</c> — which never
+    /// runs when the process tree is killed, leaving the PC's recovery
+    /// environment silently off. Returns a sentence for the build status
+    /// and log stating what state WinRE is in; when the re-enable did
+    /// not succeed it gives the exact manual restore command. Never
+    /// throws.
+    /// </summary>
+    public static string ReenableWinReAfterKilledBuild()
+    {
+        const string manual = "run `reagentc /enable` from an elevated prompt to restore it";
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+                return "This PC's Windows Recovery Environment may still be disabled " +
+                       $"(the stopped build had turned it off) — {manual}.";
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "reagentc.exe",
+                Arguments = "/enable",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            var (exitCode, output) = RunToolCapture(psi, 30000);
+            if (exitCode == 0)
+                return "Windows Recovery Environment was re-enabled on this PC.";
+            return "Windows Recovery Environment could not be re-enabled automatically " +
+                   $"(reagentc exited {exitCode}: {output.Trim()}) — {manual}.";
+        }
+        catch (Exception ex)
+        {
+            return "Windows Recovery Environment could not be re-enabled automatically " +
+                   $"({ex.Message}) — {manual}.";
         }
     }
 

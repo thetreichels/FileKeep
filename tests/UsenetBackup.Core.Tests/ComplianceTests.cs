@@ -165,18 +165,30 @@ public sealed class ComplianceTests : IDisposable
         finally { Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, saved); }
     }
 
-    private static ServiceConfig OneJobConfig(string repoDir, string srcDir, string schedule = "interval 60") =>
-        new()
+    private static ServiceConfig OneJobConfig(string repoDir, string srcDir, string schedule = "interval 60")
+    {
+        // The job targets a local-folder share so runs really deliver.
+        // (It used to target a bare "nntp" with no providers configured
+        // and "succeed" vacuously — DL-3 removed that path; a
+        // provider-less run now fails, as it should.)
+        string shareDir = Path.Combine(Path.GetDirectoryName(srcDir)!, "share");
+        Directory.CreateDirectory(shareDir);
+        return new()
         {
             DashboardBind = "127.0.0.1",
             DashboardPort = 15789,
+            Locations = new List<BackupLocation>
+            {
+                new() { Name = "vault", Type = "smb", Share = shareDir },
+            },
             Jobs = new List<BackupJobConfig>
             {
                 new() { Name = "audit", Repo = repoDir, Source = srcDir,
                         Schedule = schedule, Mode = "incremental", BackupPrivilege = false,
-                        Targets = new List<string> { "nntp" } },
+                        Targets = new List<string> { "vault" } },
             },
         };
+    }
 
     [Fact]
     public void Directives_DiskImageUsesStandardCrypto_NoInventedCrypto()

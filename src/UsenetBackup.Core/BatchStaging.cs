@@ -6,8 +6,12 @@ namespace UsenetBackup.Core;
 /// Batched staging for backups: stage one batch of chunk blobs locally,
 /// upload the batch, confirm, prune the batch's local chunks, repeat.
 /// Manifests, the catalog, and the upload journal are never pruned — only
-/// chunk blobs under chunks/ are deleted, and only after the batch's upload
-/// is confirmed at every destination.
+/// chunk blobs under chunks/ are deleted, and only once the batch is
+/// confirmed delivered to at least one destination (a run where no
+/// destination confirms a batch fails and prunes nothing). A destination
+/// that misses a batch is excluded for the rest of the run and gets
+/// nothing later — no catch-up; the backup itself fails unless at least
+/// one location receives it completely (DL-3/DL-5 policy).
 /// </summary>
 public static class BatchStaging
 {
@@ -274,23 +278,28 @@ public sealed class PipelinedBackupContext : IBatchedBackupContext, IDisposable
 /// batch orchestrator flushes (upload → confirm → prune) when
 /// <see cref="StagedBytesThisBatch"/> reaches the batch size.
 ///
-/// Deduplication consults <paramref name="isKnownRemotely"/> (the catalog)
-/// in addition to the local store, so chunks uploaded and pruned by an
-/// earlier batch are not re-staged: a known chunk was either staged in the
-/// current batch or confirmed-uploaded earlier.
+/// Deduplication consults <paramref name="isDeliveredAtAllTargets"/>: a
+/// chunk is skipped only when the caller can evidence that every
+/// destination of this run already has it (flushed earlier in this run,
+/// journal-recorded for that provider, or present at that share/drive).
+/// Mere local presence or catalog knowledge is NOT delivery evidence
+/// (DL-1): a chunk staged by a failed run, or delivered to a different
+/// destination, must stage and flush again or the manifest ends up
+/// referencing a chunk some destination never received.
 /// </summary>
 public sealed class BatchTrackingBlobStore : IBlobStore
 {
     private readonly LocalBlobStore _inner;
-    private readonly Func<string, bool> _isKnownRemotely;
+    private readonly Func<string, bool> _isDeliveredAtAllTargets;
     private readonly List<string> _stagedIds = new();
     private readonly object _lock = new();
     private long _stagedBytes;
 
-    public BatchTrackingBlobStore(LocalBlobStore inner, Func<string, bool> isKnownRemotely)
+    public BatchTrackingBlobStore(LocalBlobStore inner, Func<string, bool> isDeliveredAtAllTargets)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        _isKnownRemotely = isKnownRemotely ?? throw new ArgumentNullException(nameof(isKnownRemotely));
+        _isDeliveredAtAllTargets = isDeliveredAtAllTargets
+            ?? throw new ArgumentNullException(nameof(isDeliveredAtAllTargets));
     }
 
     /// <summary>Chunk IDs staged since the last <see cref="ResetBatch"/>.</summary>
@@ -305,17 +314,30 @@ public sealed class BatchTrackingBlobStore : IBlobStore
         get { lock (_lock) return _stagedBytes; }
     }
 
+    /// <summary>
+    /// For the tracking store, "exists" answers the staging question —
+    /// may this chunk be skipped? — and the only sound yes is delivery
+    /// evidence for every destination of this run (DL-1). Local presence
+    /// alone does not skip: the blob still has to go through a flush.
+    /// </summary>
     public bool Exists(string chunkIdHex) =>
-        _inner.Exists(chunkIdHex) || _isKnownRemotely(chunkIdHex);
+        _isDeliveredAtAllTargets(chunkIdHex);
 
     public void Put(string chunkIdHex, byte[] blob)
     {
-        bool isNew;
+        // P2-C11: the delivery-evidence check does REMOTE IO (SMB
+        // decrypt-verify per DL-1/DL-4) — it used to run while holding
+        // _lock, serializing every staging thread behind one chunk's
+        // network round-trips. The lock now guards only the staged-set
+        // bookkeeping; the local write is idempotent (dedup Put), so
+        // concurrent Puts of the same chunk are harmless.
+        if (_isDeliveredAtAllTargets(chunkIdHex))
+            return; // evidenced at every destination: nothing to stage or send
+        if (!_inner.Exists(chunkIdHex))
+            _inner.Put(chunkIdHex, blob);
         lock (_lock)
         {
-            isNew = !_inner.Exists(chunkIdHex);
-            _inner.Put(chunkIdHex, blob);
-            if (isNew)
+            if (!_stagedIds.Contains(chunkIdHex))
             {
                 _stagedIds.Add(chunkIdHex);
                 _stagedBytes += blob.Length;
@@ -325,12 +347,13 @@ public sealed class BatchTrackingBlobStore : IBlobStore
 
     public void Put(string chunkIdHex, ReadOnlySpan<byte> blob)
     {
-        bool isNew;
+        if (_isDeliveredAtAllTargets(chunkIdHex))
+            return; // evidenced at every destination: nothing to stage or send
+        if (!_inner.Exists(chunkIdHex))
+            _inner.Put(chunkIdHex, blob);
         lock (_lock)
         {
-            isNew = !_inner.Exists(chunkIdHex);
-            _inner.Put(chunkIdHex, blob);
-            if (isNew)
+            if (!_stagedIds.Contains(chunkIdHex))
             {
                 _stagedIds.Add(chunkIdHex);
                 _stagedBytes += blob.Length;

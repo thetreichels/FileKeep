@@ -183,6 +183,7 @@
     background: #e8f5e9; color: var(--ok);
   }
   .pill.fail { background: #fdecea; color: var(--bad); }
+  .pill.warn { background: #fdf3e0; color: var(--warn); }
   .pill.idle { background: #f0f0f0; color: var(--text-2); }
   button {
     font-family: inherit; font-size: 14px; line-height: 20px;
@@ -393,6 +394,7 @@
     & pre { background: #242424; }
     & .pill { background: #1d3325; }
     & .pill.fail { background: #3a2320; }
+    & .pill.warn { background: #3a2f1a; }
     & .pill.idle { background: #2d2d2d; }
     & .form-grid input[type=text], & .form-grid input[type=time], & .form-grid input[type=number] { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
     & input[type=checkbox] { background: #2d2d2d; border-color: #8a8a8a; }
@@ -444,6 +446,7 @@
     </div>
   </nav>
   <main>
+    <div id="service-down-banner" class="infobar warning" style="display:none;margin:16px 20px 0">⚠ The FileKeep service isn't responding — showing the last known state. Check that the FileKeep service is running; this message clears when it answers again.</div>
     <div class="view active" id="view-overview">
       <h1 id="ovTitle">Welcome to FileKeep</h1>
       <p id="ovSub" style="color:var(--text-2);margin:-12px 0 20px">This is a snapshot of this PC.</p>
@@ -534,6 +537,11 @@
           <span style="color:var(--text-2);font-size:13px">Or enter the recovery secret from your recovery sheet:</span>
           <input id="restore-secret-input" type="text" autocomplete="off" spellcheck="false" placeholder="Recovery secret" style="flex:1;font-family:monospace" onkeydown="if (event.key === 'Enter') unlockRestoreWithSecret()">
           <button class="accent" onclick="unlockRestoreWithSecret()">Unlock with recovery secret</button>
+        </div>
+        <div class="row" id="restore-phone-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span style="color:var(--text-2);font-size:13px">Or use your phone authenticator:</span>
+          <input id="restore-phone-input" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="6-digit code" style="width:130px;font-family:monospace" onkeydown="if (event.key === 'Enter') unlockRestoreWithPhone()">
+          <button class="accent" onclick="unlockRestoreWithPhone()">Unlock with phone</button>
         </div>
         <div id="restore-secret-error" style="display:none;color:var(--bad);font-size:13px;margin-bottom:8px"></div>
         <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
@@ -1537,7 +1545,7 @@ async function loadUserFolders() {
       return;
     }
     box.innerHTML = folders.map(f =>
-      `<button type="button" onclick="pickUserFolder('${esc(f.path)}', '${esc(f.name)}')">📁 ${esc(f.name)}</button>`
+      `<button type="button" onclick="pickUserFolder(${jsAttr(f.path)}, ${jsAttr(f.name)})">📁 ${esc(f.name)}</button>`
     ).join('');
   } catch (e) {
     box.innerHTML = '<p style="color:var(--text-2)">Could not load user folders.</p>';
@@ -1568,6 +1576,14 @@ async function api(path, opts) {
   return r.status === 202 ? null : r.json();
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// P2-L9: values embedded in an inline onclick attribute cross TWO
+// parsers — HTML first, then JS. esc() alone breaks there: it turns '
+// into &#39;, which the HTML parser decodes BACK to ' before the JS
+// runs, terminating the string (a job named "Bob's stuff" made its
+// Run-now button dead). jsAttr produces a complete JS string literal
+// (JSON.stringify) with its double quotes HTML-escaped for the
+// attribute, so both layers decode exactly once.
+function jsAttr(s) { return JSON.stringify(String(s ?? '')).replace(/"/g, '&quot;'); }
 // UNC path check for network shares: \\server\share (optionally deeper).
 function isValidUnc(p) { return /^\\\\[^\\]+\\[^\\]+/.test(p || ''); }
 // Toast notifications: non-blocking inline feedback replacing alert().
@@ -1617,9 +1633,17 @@ document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', 
 }));
 function fmtLast(j) {
   if (!j.lastResult) return '<span class="pill idle">never run</span>';
-  return j.lastResult.success
-    ? '<span class="pill">backed up</span>'
-    : `<span class="pill fail" title="${esc(j.lastResult.error || 'Backup failed')}">failed</span>`;
+  // MU-16: a skipped due run is the latest outcome — show it as such
+  // instead of resurrecting the previous success or crying failure.
+  if (j.lastResult.skipped)
+    return `<span class="pill idle" title="${esc(j.lastResult.error || 'Skipped')}">skipped</span>`;
+  if (!j.lastResult.success)
+    return `<span class="pill fail" title="${esc(j.lastResult.error || 'Backup failed')}">failed</span>`;
+  // MU-19: a successful run whose upload partially failed must not
+  // render as an unqualified green.
+  if (j.lastResult.autoUploadFailed)
+    return `<span class="pill warn" title="${esc(j.lastResult.autoUploadError || 'Upload failed')}">backed up · upload failed</span>`;
+  return '<span class="pill">backed up</span>';
 }
 // First-run setup card: visible on Overview until at least one backup
 // location and one job exist. Buttons link into the existing forms.
@@ -1684,7 +1708,20 @@ async function renderSetupCard(jobs, locations) {
   card.style.display = '';
 }
 async function load() {
-  const s = await api('/api/status');
+  let s;
+  try {
+    s = await api('/api/status');
+  } catch (e) {
+    // MU-2: while the service is down this used to throw unhandled
+    // every 30 s and the page kept presenting the last good data as
+    // if current ("Protection is on", live job states). Keep the
+    // data on screen, but banner that it's stale.
+    const banner = document.getElementById('service-down-banner');
+    if (banner) banner.style.display = '';
+    return;
+  }
+  const banner = document.getElementById('service-down-banner');
+  if (banner) banner.style.display = 'none';
   jobNames = s.jobs.map(j => j.name);
   jobRepos = s.jobs.map(j => j.repo).filter(Boolean);
   // The Overview header states the real protection state — it used to be
@@ -1692,7 +1729,7 @@ async function load() {
   // unconfigured install.
   const title = document.getElementById('ovTitle');
   const sub = document.getElementById('ovSub');
-  const anyFail = s.jobs.some(j => j.lastResult && !j.lastResult.success);
+  const anyFail = s.jobs.some(j => j.lastResult && !j.lastResult.success && !j.lastResult.skipped);
   const anyNever = s.jobs.some(j => !j.lastResult);
   const lastOk = s.jobs.flatMap(j => j.lastResult && j.lastResult.success ? [j.lastResult.startedLocal] : []).sort().pop();
   if (!s.jobs.length) {
@@ -1734,7 +1771,7 @@ async function load() {
         ${esc(j.source)} → ${esc(j.repo)}<br>
         ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(j.nextRunLocal)} (local)`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}${!stateNote && j.lastResult && j.lastResult.degradedNote ? `<br><span style="color:var(--warn)">⚠ ${esc(j.lastResult.degradedNote)}</span>` : ''}</div>
       </div>
-      <button onclick="runJob('${esc(j.name)}')" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
+      <button onclick="runJob(${jsAttr(j.name)})" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
     </div>`;
   }).join('') || '<p style="color:var(--text-2)">No jobs.</p>';
   // First-run setup card (Overview).
@@ -1771,6 +1808,12 @@ function currentRepo() {
 }
 function startUploadPolling() {
   if (uploadPollTimer) return;
+  // MU-5: remember the last active snapshot so the active→inactive
+  // transition can say the upload ENDED (and how far it got) instead
+  // of the card silently vanishing, completed or failed alike. The
+  // verdict itself arrives via the outcome watchers / job status.
+  let wasActive = false;
+  let lastPercent = 0;
   const poll = async () => {
     try {
       const res = await api('/api/upload-progress');
@@ -1779,10 +1822,23 @@ function startUploadPolling() {
       // same progress in place (its bar slot is keyed by job name).
       const bars = document.querySelectorAll('[data-jobprog]');
       if (!res.active) {
-        card.style.display = 'none';
         bars.forEach(b => { b.style.display = 'none'; });
+        if (wasActive) {
+          wasActive = false;
+          document.getElementById('upTitle').textContent = lastPercent >= 100
+            ? 'Upload complete'
+            : 'Upload ended at ' + Math.round(lastPercent) + '% — see the job status / Operations log for the outcome';
+          document.getElementById('upMeta').textContent = '';
+          document.getElementById('upSpeed').textContent = '';
+          document.getElementById('upEta').textContent = '';
+          setTimeout(() => { card.style.display = 'none'; }, 8000);
+        } else {
+          card.style.display = 'none';
+        }
         return;
       }
+      wasActive = true;
+      lastPercent = res.progress ? res.progress.percent : 0;
       const p = res.progress;
       bars.forEach(b => {
         if (b.dataset.jobprog === p.jobName) {
@@ -1822,7 +1878,9 @@ async function runJob(name) {
   for (let i = 0; i < 120; i++) {
     await new Promise(r => setTimeout(r, 5000));
     let st;
-    try { st = await api('/api/status'); } catch { return; }
+    // SF-5: one failed poll used to kill the watcher, so the outcome
+    // toast never fired. Skip the bad poll and keep watching.
+    try { st = await api('/api/status'); } catch { continue; }
     const j = (st.jobs || []).find(x => x.name === name);
     if (j && j.lastResult && new Date(j.lastResult.startedLocal).getTime() >= started) {
       if (j.lastResult.success) toast('Backup "' + name + '" finished.', 'ok');
@@ -1861,10 +1919,10 @@ async function loadRepo() {
     document.getElementById('backups').style.display = bs.length ? '' : 'none';
     document.querySelector('#backups tbody').innerHTML = bs.map(b =>
       `<tr><td><code>${esc(b.backupId)}</code></td><td>${esc(b.type)}</td><td>${esc(b.createdUtc)}</td>` +
-      `<td><button onclick="uploadBackup('${esc(b.backupId)}')">Upload</button> ` +
-      `<button onclick="verifyBackup('${esc(b.backupId)}')">Verify</button> ` +
-      `<button onclick="downloadNzb('${esc(b.backupId)}')">NZB</button> ` +
-      `<button onclick="openRestoreModal('${esc(b.backupId)}','${esc(b.type)}')">Restore</button></td></tr>`).join('')
+      `<td><button onclick="uploadBackup(${jsAttr(b.backupId)})">Upload</button> ` +
+      `<button onclick="verifyBackup(${jsAttr(b.backupId)})">Verify</button> ` +
+      `<button onclick="downloadNzb(${jsAttr(b.backupId)})">NZB</button> ` +
+      `<button onclick="openRestoreModal(${jsAttr(b.backupId)},${jsAttr(b.type)})">Restore</button></td></tr>`).join('')
       || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
   const vcEl = document.getElementById('vault-count');
   if (vcEl) vcEl.textContent = bs.length;
@@ -1887,17 +1945,90 @@ async function loadRepo() {
 async function uploadBackup(backupId) {
   const repo = currentRepo();
   if (!confirm(`Upload backup ${backupId} to Usenet?`)) return;
-  await api('/api/operations/upload', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
-  toast('Upload started in the background. Watch the Operations log.');
+  // SF-4: start failures were swallowed (bare await) — the user saw
+  // nothing at all when the start was rejected.
+  try {
+    await api('/api/operations/upload', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
+  } catch (e) { toast(e.message, 'err'); return; }
+  toast('Upload started in the background.');
+  // The scheduler's per-manifest finish line is the success terminal.
+  watchOpOutcome(repo, 'manual-upload', backupId, 'Upload', ' files=');
 }
 async function verifyBackup(backupId) {
   const repo = currentRepo();
-  await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
-  toast('Verification started in the background. Watch the Operations log.');
+  try {
+    await api('/api/operations/verify', { method: 'POST', body: JSON.stringify({ repo, backupId }) });
+  } catch (e) { toast(e.message, 'err'); return; }
+  toast('Verification started in the background.');
+  watchOpOutcome(repo, 'manual-verify', backupId, 'Verification', ' OK');
 }
-function downloadNzb(backupId) {
+async function watchOpOutcome(repo, tag, backupId, label, successNeedle) {
+  // MU-5: manual upload/verify/retention/disk-restore outcomes used
+  // to exist only in the operations log — the UI said "watch the log"
+  // and never reported back, so a finished-or-failed operation was
+  // indistinguishable from a still-running one. Poll for the terminal
+  // line for THIS operation and toast the verdict, like restores do.
+  const startedAt = Date.now() - 5000;
+  // P2-L10: the old budget (200 polls ≈ 10 min, last 30 log lines)
+  // expired long before real uploads/verifies finish, and a busy log
+  // scrolled the terminal line out of the window unseen — the verdict
+  // was never reported. Watch for up to 2 hours over a 200-line
+  // window, with a "still watching" note every 5 minutes.
+  const deadline = Date.now() + 2 * 60 * 60 * 1000;
+  let nextCheckpoint = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 3000));
+    if (Date.now() >= nextCheckpoint) {
+      toast(label + ' is still running — still watching for its result.', '');
+      nextCheckpoint = Date.now() + 5 * 60 * 1000;
+    }
+    let lines;
+    try { lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=200'); } catch { continue; }
+    for (const line of lines || []) {
+      if (!line.includes('[' + tag + ']')) continue;
+      if (backupId && !line.includes('backupId=' + backupId) && !line.includes('id=' + backupId)) continue;
+      const ts = Date.parse(line.split(' ', 1)[0]);
+      if (!isNaN(ts) && ts < startedAt) continue;
+      if (line.includes(' FAILED: ')) {
+        toast(label + ' failed: ' + line.split(' FAILED: ')[1], 'err');
+        return;
+      }
+      if (line.includes(' ISSUES: ')) {
+        toast(label + ' found problems: ' + line.split(' ISSUES: ')[1], 'err');
+        return;
+      }
+      if (line.includes(successNeedle)) {
+        toast(label + ' finished.', 'ok');
+        return;
+      }
+    }
+  }
+  toast(label + ' is taking a very long time — check the Operations log for its result.', '');
+}
+async function downloadNzb(backupId) {
   const repo = currentRepo();
-  window.location = '/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId);
+  // MU-6: this used to navigate the whole window to the endpoint, so
+  // any error (notably a locked restore session) replaced the app
+  // with a raw {"error":…} page. Fetch instead: errors toast in
+  // place; success saves the file through a blob URL.
+  try {
+    const resp = await fetch('/api/operations/nzb?repo=' + encodeURIComponent(repo) + '&backupId=' + encodeURIComponent(backupId));
+    if (!resp.ok) {
+      let msg = 'Download failed (' + resp.status + ')';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename="?([^";]+)"?/.exec(cd);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : backupId + '.nzb';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { toast('NZB download failed: ' + e.message, 'err'); }
 }
 // Tray icon setting (only available in the desktop GUI via NativeBridge)
 async function updateTrayVisibility() {
@@ -2096,13 +2227,21 @@ async function refreshRestoreSession() {
   const row = document.getElementById('restore-session-row');
   const st = document.getElementById('restore-session-status');
   const srow = document.getElementById('restore-secret-row');
+  const prow = document.getElementById('restore-phone-row');
   if (!row || !st) return;
   try {
     const s = await api('/api/restore/session');
-    if (!s.yubikey) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; return; }
+    if (!s.yubikey) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; return; }
     row.style.display = '';
     st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
-    st.innerHTML = s.unlocked ? '&#128275; Unlocked' : '&#128273; Locked';
+    // MU-15: a typed-secret unlock is not yet proven — the badge says
+    // so until a restore actually decrypts with the secret.
+    st.innerHTML = !s.unlocked ? '&#128273; Locked'
+      : s.verified ? '&#128275; Unlocked'
+      : '&#128275; Unlocked — secret not yet checked';
+    st.title = (s.unlocked && !s.verified)
+      ? 'The recovery secret has not been verified yet. It is checked the first time a restore uses it — a wrong secret fails then.'
+      : '';
     st.style.color = s.unlocked ? 'var(--good)' : 'var(--text-2)';
     // The unlock path lives HERE, on the session row — not only behind
     // a backup row's Restore button, which never renders while the
@@ -2115,7 +2254,30 @@ async function refreshRestoreSession() {
     // mode, and only while the session is locked — in passphrase mode
     // the endpoint refuses by design, so the control never renders.
     if (srow) srow.style.display = (s.yubiKeyOnly && !s.unlocked) ? '' : 'none';
-  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; }
+    // Phone unlock (MU-15): shown whenever the phone method is enabled
+    // and the session is locked.
+    if (prow) prow.style.display = (s.phoneEnabled && !s.unlocked) ? '' : 'none';
+  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; }
+}
+async function unlockRestoreWithPhone() {
+  const input = document.getElementById('restore-phone-input');
+  const errEl = document.getElementById('restore-secret-error');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = msg ? '' : 'none'; };
+  showErr('');
+  const code = (input.value || '').trim();
+  if (code.length !== 6) { showErr('Enter the 6-digit code from your authenticator app.'); input.focus(); return; }
+  try {
+    await api('/api/restore/unlock-phone', {
+      method: 'POST',
+      body: JSON.stringify({ code })
+    });
+    input.value = '';
+    toast('Restore session unlocked.', 'ok');
+    refreshRestoreSession();
+    loadRepo();
+  } catch (e) {
+    showErr(e.message);
+  }
 }
 async function unlockRestoreWithSecret() {
   const input = document.getElementById('restore-secret-input');
@@ -2178,9 +2340,22 @@ async function submitAddNzbDirect() {
   const picker = document.getElementById('nzb-direct-picker');
   const f = picker.files && picker.files[0];
   if (!f) return; // user cancelled the picker
+  picker.value = ''; // reset so the same file can be picked again
   try {
     toast('Adding backup from NZB…', '');
-    picker.value = ''; // reset so the same file can be picked again
+    // SF-2: this used to stop at the toast — the picked file was
+    // discarded and nothing was ever sent. Upload it for real
+    // (multipart; api() can't be used because it forces JSON).
+    const form = new FormData();
+    form.append('nzb', f);
+    const resp = await fetch('/api/operations/download-nzb', {
+      method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: form });
+    if (!resp.ok) {
+      let msg = 'NZB download failed (' + resp.status + ').';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+      throw new Error(msg);
+    }
+    toast('NZB download started in the background. Watch the Operations log.', 'ok');
     loadRepo();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -2220,18 +2395,26 @@ async function submitRestore() {
     const opt = sel.options[sel.selectedIndex];
     const label = opt?.textContent || device;
     if (!window.confirm('This will DESTROY all data on ' + label + '. Continue?')) return;
-    await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({
-      repo, backupId: restoreTarget.backupId, device, confirmed: true,
-      deviceModel: opt?.dataset.model, deviceSizeBytes: Number(opt?.dataset.size) || null,
-    }) });
-    toast('Disk restore started in the background. Watch the Operations log.');
+    // SF-3: a failed start (locked session, bad request) used to be an
+    // unhandled rejection — the modal just sat there. Surface it and
+    // keep the modal open so the user can fix and retry.
+    try {
+      await api('/api/operations/disk-restore', { method: 'POST', body: JSON.stringify({
+        repo, backupId: restoreTarget.backupId, device, confirmed: true,
+        deviceModel: opt?.dataset.model, deviceSizeBytes: Number(opt?.dataset.size) || null,
+      }) });
+    } catch (e) { toast(e.message, 'err'); return; }
+    toast('Disk restore started in the background.');
+    watchOpOutcome(repo, 'manual-disk-restore', restoreTarget.backupId, 'Disk restore', ' OK');
   } else {
     const destDir = document.getElementById('m-restore-dest').value.trim();
     const smbShare = document.getElementById('m-restore-smb').value.trim();
     const smbUser = document.getElementById('m-restore-smb-user').value.trim();
     const mergePolicy = document.getElementById('m-restore-policy').value;
     if (!destDir) { toast('Enter a destination folder.', 'err'); return; }
-    await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, destDir, smbShare, smbUser, mergePolicy }) });
+    try {
+      await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, destDir, smbShare, smbUser, mergePolicy }) });
+    } catch (e) { toast(e.message, 'err'); return; }
     toast('Restore started in the background…');
     watchRestoreOutcome(repo, restoreTarget.backupId);
   }
@@ -2244,10 +2427,20 @@ async function watchRestoreOutcome(repo, backupId) {
   // closed the modal and said nothing; only the log knew. Mirrors the
   // outcome watcher in runJob.
   const startedAt = Date.now() - 5000;
-  for (let i = 0; i < 40; i++) {
+  // P2-L10: restores of real data run far past the old ~2-minute
+  // budget; same long watch as watchOpOutcome (2 h, 200-line window,
+  // 5-minute checkpoints).
+  const deadline = Date.now() + 2 * 60 * 60 * 1000;
+  let nextCheckpoint = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
+    if (Date.now() >= nextCheckpoint) {
+      toast('Restore is still running — still watching for its result.', '');
+      nextCheckpoint = Date.now() + 5 * 60 * 1000;
+    }
     let lines;
-    try { lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=30'); } catch { return; }
+    // SF-5: same watcher-death bug as runJob's — keep polling.
+    try { lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=200'); } catch { continue; }
     for (const line of lines || []) {
       if (!line.includes('[manual-restore]') || !line.includes('backupId=' + backupId)) continue;
       const ts = Date.parse(line.split(' ', 1)[0]);
@@ -2264,14 +2457,16 @@ async function watchRestoreOutcome(repo, backupId) {
       }
     }
   }
-  toast('Restore is still running — check the Operations log for its result.', '');
+  toast('Restore is taking a very long time — check the Operations log for its result.', '');
 }
 async function importRemote() {
   const repo = currentRepo();
   const ids = [...document.querySelectorAll('.remote-check:checked')].map(c => c.value);
   if (!ids.length) { toast('Select at least one backup.', 'err'); return; }
-  await api('/api/backups/remote/import?repo=' + encodeURIComponent(repo),
-    { method: 'POST', body: JSON.stringify({ backupIds: ids }) });
+  try {
+    await api('/api/backups/remote/import?repo=' + encodeURIComponent(repo),
+      { method: 'POST', body: JSON.stringify({ backupIds: ids }) });
+  } catch (e) { toast(e.message, 'err'); return; }
   toast('Imported ' + ids.length + ' backup' + (ids.length === 1 ? '' : 's') + '.', 'ok');
   loadRepo();
 }
@@ -2279,8 +2474,12 @@ async function importRemote() {
 async function runRetentionCheck() {
   const dryRun = document.getElementById('op-dryrun').checked;
   if (!dryRun && !confirm('Run a live retention check (may repost articles)?')) return;
-  await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ dryRun }) });
-  toast('Retention check started in the background. Watch the Operations log.', 'ok');
+  try {
+    await api('/api/operations/retention-check', { method: 'POST', body: JSON.stringify({ dryRun }) });
+  } catch (e) { toast(e.message, 'err'); return; }
+  toast('Retention check started in the background.', 'ok');
+  const repo = currentRepo();
+  if (repo) watchOpOutcome(repo, 'manual-retention', null, 'Retention check', ' complete');
 }
 function winreTargetChanged() {
   const target = document.getElementById('winre-target').value;
@@ -2293,9 +2492,16 @@ async function startWinReBuild() {
   let body, confirmText;
   if (target.startsWith('usb:')) {
     const diskNum = target.substring(4);
-    const diskLabel = document.querySelector('#winre-target option:checked')?.textContent || ('Disk ' + diskNum);
+    const opt = document.querySelector('#winre-target option:checked');
+    const diskLabel = opt?.textContent || ('Disk ' + diskNum);
     confirmText = 'Build WinRE on ' + diskLabel + '? This FORMATS the drive — all data is destroyed.';
-    body = { diskNumber: parseInt(diskNum, 10), sourceDir: null, bootMode };
+    // P2-L2: send the identity of the disk the user actually confirmed;
+    // the service and the build script re-check it before formatting,
+    // so a disk renumbering between selection and build can't redirect
+    // the format to a different disk.
+    body = { diskNumber: parseInt(diskNum, 10), sourceDir: null, bootMode,
+             expectedModel: opt?.dataset.model || null,
+             expectedSizeBytes: opt?.dataset.size ? parseInt(opt.dataset.size, 10) : null };
   } else if (target === 'folder') {
     let fileName = document.getElementById('winre-filename').value.trim() || 'filekeep-recovery';
     if (!/\.vhdx$/i.test(fileName)) fileName += '.vhdx';
@@ -2359,7 +2565,15 @@ async function checkWinReStatus() {
       if (s.status === 'complete') html += ' <b style="color:green">Done.</b>';
     }
     el.innerHTML = html;
-  } catch (e) { el.textContent = e.message; }
+  } catch (e) {
+    el.textContent = e.message;
+    // P2-L11: the poll timer used to start only on a SUCCESSFUL fetch
+    // that saw 'running' — if the first check after starting a build
+    // threw (service restarting), polling never started and the
+    // progress view froze on the error. Start the timer here too; the
+    // success path clears it on any terminal status.
+    if (!winrePollTimer) winrePollTimer = setInterval(checkWinReStatus, 3000);
+  }
 }
 async function cancelWinReBuild() {
   if (!window.confirm('Cancel the running WinRE build? The target may be left partially written; you can start a new build afterwards.')) return;
@@ -2379,7 +2593,7 @@ async function refreshWinReTargets() {
     html += ds.map(d => {
       const gb = (d.sizeBytes / 1073741824).toFixed(1);
       const label = `${esc(d.model)} (${gb} GB)`;
-      return `<option value="usb:${esc(d.number)}">USB — Disk ${d.number}: ${label}</option>`;
+      return `<option value="usb:${esc(d.number)}" data-model="${esc(d.model)}" data-size="${d.sizeBytes}">USB — Disk ${d.number}: ${label}</option>`;
     }).join('');
     html += '<option value="folder">Save to folder (.vhdx file)…</option>';
     sel.innerHTML = html;
@@ -2532,13 +2746,19 @@ function jobHealthLine(sj, state) {
   if (!sj || !sj.lastResult)
     return '<span style="color:var(--text-2)">Never run yet</span>' + (sj && sj.nextRunLocal ? ' · Next ' + esc(fmtWhen(sj.nextRunLocal)) : '');
   const lr = sj.lastResult;
+  if (lr.skipped)
+    return `<span style="color:var(--text-2)">${esc(lr.error || 'Skipped')} ${esc(fmtWhen(lr.startedLocal))}</span>`
+      + (sj.nextRunLocal ? ' · Next ' + esc(fmtWhen(sj.nextRunLocal)) : '');
   if (!lr.success)
     return `<span style="color:var(--bad)">✗ Failed ${esc(fmtWhen(lr.startedLocal))}</span>`
       + (sj.consecutiveFailures > 1 ? ` · ${sj.consecutiveFailures} consecutive failures` : '')
       + (lr.error ? ` — <span title="${esc(lr.error)}">${esc(lr.error)}</span>` : '');
   let line = `<span style="color:var(--ok)">✓ Backed up ${esc(fmtWhen(lr.startedLocal))}</span>`;
   if (lr.degradedNote) line += `<br><span style="color:var(--warn)">⚠ ${esc(lr.degradedNote)}</span>`;
-  else if (sj.nextRunLocal) line += ' · Next ' + esc(fmtWhen(sj.nextRunLocal));
+  // MU-19: surface a partial upload failure the degraded note doesn't
+  // cover (legacy aggregate upload error).
+  if (lr.autoUploadFailed) line += `<br><span style="color:var(--warn)">⚠ Upload failed${lr.autoUploadError ? ': ' + esc(lr.autoUploadError) : ''}</span>`;
+  if (!lr.degradedNote && !lr.autoUploadFailed && sj.nextRunLocal) line += ' · Next ' + esc(fmtWhen(sj.nextRunLocal));
   return line;
 }
 async function setJobPaused(name, paused) {
@@ -2626,7 +2846,18 @@ function lwNewType(type) {
   showLocationForm(type);
 }
 async function loadSettings() {
-  const cfg = await api('/api/config');
+  let cfg;
+  try {
+    cfg = await api('/api/config');
+  } catch (e) {
+    // P2-L7: this used to throw unhandled — the caller swallowed it
+    // and the jobs/locations views silently kept showing stale data.
+    // Surface it the same way load() does (MU-2 stale banner + toast).
+    const banner = document.getElementById('service-down-banner');
+    if (banner) banner.style.display = '';
+    toast('Could not refresh settings — showing the last loaded data. ' + e.message, 'err');
+    return;
+  }
   lastConfigJobs = {};
   cfg.jobs.forEach(j => { lastConfigJobs[j.name] = j; });
   // Job run-states live on /api/status; merge them in for the state
@@ -3056,7 +3287,10 @@ async function testLocationConnection() {
   }
 }
 async function editLocation(name) {
-  const cfg = await api('/api/config');
+  // SF-4: a failed config fetch made Edit silently do nothing.
+  let cfg;
+  try { cfg = await api('/api/config'); }
+  catch (e) { toast('Could not load settings: ' + e.message, 'err'); return; }
   const loc = (cfg.locations || []).find(l => l.name === name);
   if (loc) showLocationForm(loc.type, loc);
 }
@@ -3253,7 +3487,12 @@ function editJob(name) {
   api('/api/config').then(cfg => {
     const job = cfg.jobs.find(j => j.name === name);
     if (job) showJobForm(job);
-  });
+    else {
+      // P2-L8: a stale card for a deleted job used to dead-click.
+      toast('That job no longer exists — refreshing the list.', 'err');
+      loadSettings();
+    }
+  }).catch(e => toast('Failed to load the job for editing: ' + e.message, 'err'));
 }
 async function saveJob() {
   const errBox = document.getElementById('jf-error');
@@ -3367,6 +3606,10 @@ document.querySelector('[data-view="jobs"]').addEventListener('click', loadSetti
 document.querySelector('[data-view="vault"]').addEventListener('click', loadSettings);
 // ---- Security tab: protection wizard ----
 let secProfile = { passphraseEnabled: true, yubiKeyEnabled: false, phoneEnabled: false, yubiKeyOnly: false, linkMode: 'or', yubiKeys: [] };
+// MU-3: false until a profile load actually succeeds; secSaveProfile
+// refuses to save a profile that was never loaded (it would be the
+// factory defaults above, posted over the user's real settings).
+let secProfileLoaded = false;
 
 async function secLoadProfile() {
   // A generated recovery secret lives only for one wizard run: any fresh
@@ -3378,12 +3621,22 @@ async function secLoadProfile() {
   try {
     const p = await api('/api/protection/profile');
     secProfile = p;
+    secProfileLoaded = true;
     document.getElementById('sec-passphrase-toggle').checked = p.passphraseEnabled;
     document.getElementById('sec-yubikey-toggle').checked = p.yubiKeyEnabled;
     document.getElementById('sec-phone-toggle').checked = p.phoneEnabled;
     secUpdateLinkBand();
     secUpdateInsight();
-  } catch (e) { /* use defaults */ }
+  } catch (e) {
+    // MU-3: the old catch silently edited the factory-default
+    // profile ("use defaults"), so finishing the wizard POSTed
+    // defaults over the real profile — configured methods could be
+    // switched off with no error ever shown. Now the failure is
+    // shown and saving is blocked until a load succeeds.
+    secProfileLoaded = false;
+    toast('Couldn\'t load your current security settings: ' + e.message +
+      ' Saving is paused until they load, so nothing is overwritten by accident.', 'err');
+  }
 }
 
 function secShowBanner(msg) {
@@ -3445,6 +3698,10 @@ function secToggleLink() {
 }
 
 async function secSaveProfile() {
+  if (!secProfileLoaded) {
+    toast('Your current security settings couldn\'t be loaded, so saving is paused to avoid overwriting them. Reopen the Security tab to try again.', 'err');
+    return false;
+  }
   try {
     await api('/api/protection/profile', {
       method: 'POST',

@@ -106,6 +106,84 @@ public sealed class VssSnapshotTests : IDisposable
         Assert.Equal("complete", ReadSignal());
     }
 
+    private string WriteStub(string name, string windowsBody, string unixBody)
+    {
+        string path = Path.Combine(_workDir, name);
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllText(path, windowsBody);
+        }
+        else
+        {
+            File.WriteAllText(path, "#!/bin/sh\n" + unixBody);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        return path;
+    }
+
+    [Fact]
+    public void Create_HelperThatNeverReports_TimesOutAndIsStopped()
+    {
+        // NS-10: a hung helper used to block Create() forever on a
+        // synchronous ReadLine, and the process leaked. Now the wait is
+        // bounded and the helper is killed.
+        string stub = WriteStub("hang-stub",
+            "@echo off\r\nping -n 60 127.0.0.1 >nul\r\n",
+            "exec sleep 60\n");
+        using var snapshot = new VssSnapshot(stub, timeoutSecs: 30, createTimeoutSecs: 2);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            snapshot.Create("C:", _workDir));
+        sw.Stop();
+        Assert.Contains("did not report a snapshot", ex.Message);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(30),
+            $"Create took {sw.Elapsed}; the hung helper was not bounded/killed.");
+        // The instance is not poisoned: a retry fails the same honest way,
+        // not with "Snapshot already created."
+        var ex2 = Assert.Throws<InvalidOperationException>(() =>
+            snapshot.Create("C:", _workDir));
+        Assert.Contains("did not report a snapshot", ex2.Message);
+    }
+
+    [Fact]
+    public void Create_HelperFloodingStderr_StillReadsSnapshotPath()
+    {
+        // NS-10: stderr is drained concurrently; a helper that writes
+        // more than a pipe buffer of stderr BEFORE the path must not
+        // deadlock Create.
+        string flood = OperatingSystem.IsWindows()
+            ? string.Join("", Enumerable.Repeat("echo floodfloodfloodfloodfloodfloodfloodflood 1>&2\r\n", 3000))
+            : string.Join("", Enumerable.Repeat("echo floodfloodfloodfloodfloodfloodfloodflood >&2\n", 3000));
+        string stub = WriteStub("flood-stub",
+            "@echo off\r\n" + flood +
+            "echo \\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy999\r\n" +
+            "set /p SIGNAL=\r\nexit /b 0\r\n",
+            flood +
+            "echo '\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy999'\n" +
+            "read SIGNAL\nexit 0\n");
+        using var snapshot = new VssSnapshot(stub, timeoutSecs: 30, createTimeoutSecs: 20);
+        snapshot.Create("C:", _workDir);
+        Assert.NotNull(snapshot.SnapshotPath);
+        snapshot.Complete();
+    }
+
+    [Fact]
+    public void Create_HelperFailsWithStderr_MessageCarriesErrorAndExitCode()
+    {
+        // NS-10: the failure branch used to ReadToEnd stderr (blocking),
+        // ignore WaitForExit's result, and then throw from ExitCode —
+        // masking the real error. Now: stderr text + exit code, and the
+        // process is cleaned up.
+        string stub = WriteStub("fail-stub",
+            "@echo off\r\necho VSS_E_FAIL: no writers 1>&2\r\nexit /b 7\r\n",
+            "echo 'VSS_E_FAIL: no writers' >&2\nexit 7\n");
+        using var snapshot = new VssSnapshot(stub, timeoutSecs: 30, createTimeoutSecs: 20);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            snapshot.Create("C:", _workDir));
+        Assert.Contains("VSS_E_FAIL", ex.Message);
+        Assert.Contains("7", ex.Message);
+    }
+
     [Fact]
     public void Complete_ThrowsWhenHelperExitsNonZero()
     {

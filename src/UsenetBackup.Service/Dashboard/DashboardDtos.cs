@@ -64,7 +64,14 @@ public sealed record YubiKeyStatusDto(
 public sealed record YubiKeyUnlockDto(
     [property: JsonPropertyName("yubikey")] bool Yubikey,
     [property: JsonPropertyName("unlocked")] bool Unlocked,
-    [property: JsonPropertyName("yubiKeyOnly")] bool YubiKeyOnly);
+    [property: JsonPropertyName("yubiKeyOnly")] bool YubiKeyOnly,
+    // MU-15: a typed-secret unlock is unverified until a restore
+    // decrypts with it; the badge must not claim more than that.
+    [property: JsonPropertyName("verified")] bool Verified,
+    // MU-15: the phone is a real unlock path (it releases the
+    // machine's DPAPI-held passphrase after a TOTP presence proof);
+    // the restore view shows its unlock row only when enabled.
+    [property: JsonPropertyName("phoneEnabled")] bool PhoneEnabled);
 
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);
@@ -199,7 +206,19 @@ public sealed record StatusLastResultDto(
     [property: JsonPropertyName("error")] string? Error,
     // Why one of several locations missed the last backup, when the job
     // is degraded (partial delivery). Null otherwise.
-    [property: JsonPropertyName("degradedNote")] string? DegradedNote);
+    [property: JsonPropertyName("degradedNote")] string? DegradedNote,
+    // MU-19: the run-result side flags, exposed so a successful run
+    // whose upload partially failed (or whose verify flagged trouble
+    // on an older build's semantics) renders as a warning instead of
+    // an unqualified green. Total upload failure and verify-detected
+    // corruption now also flip Success itself.
+    [property: JsonPropertyName("autoUploadFailed")] bool AutoUploadFailed,
+    [property: JsonPropertyName("autoUploadError")] string? AutoUploadError,
+    [property: JsonPropertyName("verifyFailed")] bool VerifyFailed,
+    [property: JsonPropertyName("verifyError")] string? VerifyError,
+    // MU-16: this result records a skipped due run, not an attempted
+    // one (reason in Error). Rendered neutrally, never as a failure.
+    [property: JsonPropertyName("skipped")] bool Skipped);
 
 /// <summary>Job status for /api/status.</summary>
 public sealed record StatusJobDto(
@@ -286,6 +305,24 @@ public sealed record WinReBuildStepDto(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("percent")] int Percent,
     [property: JsonPropertyName("estimatedRemainingSec")] int EstimatedRemainingSec);
+
+/// <summary>
+/// Response for GET /api/operations/winre-prerequisites. (SF-24: this
+/// used to be a Dictionary&lt;string, object&gt;, which the trimmed
+/// service has no JSON metadata for.)
+/// </summary>
+public sealed record WinRePrerequisitesDto(
+    [property: JsonPropertyName("isWindows")] bool IsWindows,
+    [property: JsonPropertyName("ready")] bool Ready,
+    [property: JsonPropertyName("error")] string Error,
+    [property: JsonPropertyName("isAdmin")] bool IsAdmin,
+    [property: JsonPropertyName("reagentc")] bool Reagentc,
+    [property: JsonPropertyName("dism")] bool Dism,
+    [property: JsonPropertyName("bcdboot")] bool Bcdboot,
+    [property: JsonPropertyName("winReEnabled")] bool WinReEnabled,
+    [property: JsonPropertyName("winReLocation")] string WinReLocation,
+    [property: JsonPropertyName("scriptFound")] bool ScriptFound,
+    [property: JsonPropertyName("missing")] List<string> Missing);
 
 /// <summary>
 /// Response for GET /api/operations/winre-build-status. (WALK-9: this

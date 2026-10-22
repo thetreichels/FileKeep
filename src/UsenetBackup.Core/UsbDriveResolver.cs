@@ -10,6 +10,15 @@ namespace UsenetBackup.Core;
 /// </summary>
 public static class UsbDriveResolver
 {
+    /// <summary>
+    /// Optional diagnostics sink (MU-17): resolution failures used to
+    /// be swallowed whole, making a present-but-erroring drive
+    /// indistinguishable from an unplugged one in every surface. The
+    /// service wires this to its log; when null (tests, CLI) failures
+    /// stay quiet but the return contract is unchanged.
+    /// </summary>
+    public static Action<string>? DiagnosticLog { get; set; }
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool GetVolumeInformationW(
         string lpRootPathName,
@@ -36,8 +45,15 @@ public static class UsbDriveResolver
             {
                 return serial.ToString("X8");
             }
+            DiagnosticLog?.Invoke(
+                $"USB: could not read the volume serial of {driveRoot} " +
+                $"(Win32 error {Marshal.GetLastWin32Error()}).");
         }
-        catch { /* fall through */ }
+        catch (Exception ex)
+        {
+            DiagnosticLog?.Invoke(
+                $"USB: reading the volume serial of {driveRoot} failed: {ex.Message}");
+        }
         return null;
     }
 
@@ -49,9 +65,23 @@ public static class UsbDriveResolver
     {
         if (string.IsNullOrWhiteSpace(volumeSerial))
             return null;
+        DriveInfo[] drives;
         try
         {
-            foreach (var drive in DriveInfo.GetDrives())
+            drives = DriveInfo.GetDrives();
+        }
+        catch (Exception ex)
+        {
+            // MU-17: an enumeration failure is not "drive not plugged
+            // in" — log it as the error it is.
+            DiagnosticLog?.Invoke($"USB: enumerating drives failed: {ex.Message}");
+            return null;
+        }
+        foreach (var drive in drives)
+        {
+            // Per-drive isolation: one present-but-erroring drive
+            // (no media, not ready) must not hide every other drive.
+            try
             {
                 if (drive.DriveType != DriveType.Removable || !drive.IsReady)
                     continue;
@@ -62,8 +92,12 @@ public static class UsbDriveResolver
                     return drive.Name;
                 }
             }
+            catch (Exception ex)
+            {
+                DiagnosticLog?.Invoke(
+                    $"USB: inspecting drive {drive.Name} failed: {ex.Message}");
+            }
         }
-        catch { /* fall through */ }
         return null;
     }
 

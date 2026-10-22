@@ -114,4 +114,11 @@ public sealed class RestoreResult
     /// already has a differing file or link. Left untouched, never overwritten.
     /// </summary>
     public List<string> SkippedDiffering { get; } = new();
+
+    /// <summary>
+    /// Non-fatal problems on files that DID restore (NS-11) — e.g. the
+    /// content landed but restoring the original modification time
+    /// failed. Never counted as restore errors.
+    /// </summary>
+    public List<string> Warnings { get; } = new();
 }

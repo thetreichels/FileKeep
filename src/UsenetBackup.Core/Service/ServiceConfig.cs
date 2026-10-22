@@ -395,9 +395,15 @@ public sealed class ServiceConfig
     public List<BackupJobConfig> Jobs { get; set; } = new();
 
     /// <summary>
-    /// Guards concurrent access to <see cref="Jobs"/>. Dashboard HTTP handlers
-    /// and the scheduler run on different threads; all reads and writes of the
-    /// Jobs list must hold this lock.
+    /// Guards concurrent access to ALL mutable config state — Jobs,
+    /// Locations, NntpProviders, the legacy Nntp, and the protection
+    /// fields (P2-C1/C2: Jobs were guarded; everything else was mutated
+    /// unlocked while handlers and the scheduler read it lock-free,
+    /// which tore saves and handed running jobs half-edited locations).
+    /// Dashboard HTTP handlers and the scheduler run on different
+    /// threads; every mutation — and every enumeration that isn't a
+    /// Snapshot* copy — must hold this lock. (Named JobsLock for
+    /// historical reasons; the contract covers the whole config.)
     /// </summary>
     [JsonIgnore]
     public readonly object JobsLock = new();
@@ -410,6 +416,27 @@ public sealed class ServiceConfig
     {
         lock (JobsLock)
             return Jobs.ToList();
+    }
+
+    /// <summary>
+    /// Returns a snapshot copy of the Locations list taken under
+    /// <see cref="JobsLock"/>. Use this for all read-only iterations
+    /// outside the lock.
+    /// </summary>
+    public List<BackupLocation> SnapshotLocations()
+    {
+        lock (JobsLock)
+            return Locations.ToList();
+    }
+
+    /// <summary>
+    /// Returns a snapshot copy of the NntpProviders list taken under
+    /// <see cref="JobsLock"/>.
+    /// </summary>
+    public List<NntpConfig> SnapshotProviders()
+    {
+        lock (JobsLock)
+            return NntpProviders.ToList();
     }
 
     /// <summary>
@@ -532,6 +559,19 @@ public sealed class ServiceConfig
     public string? PhoneTotpSecretProtected { get; set; }
 
     /// <summary>
+    /// DPAPI-protected TOTP secret from an in-progress phone enrollment
+    /// (SF-17). A re-enrollment stages its new secret here and only a
+    /// verified code promotes it over
+    /// <see cref="PhoneTotpSecretProtected"/> — abandoning or failing
+    /// enrollment must never invalidate the authenticator that already
+    /// works. Not itself an unlock secret; nothing verifies against it
+    /// except the enrollment check that promotes it.
+    /// </summary>
+    [JsonPropertyName("pendingPhoneTotpSecretProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PendingPhoneTotpSecretProtected { get; set; }
+
+    /// <summary>
     /// How the Passphrase and YubiKey methods interact: <c>"or"</c>
     /// (default; either one unlocks) or <c>"and"</c> (both required).
     /// The Phone method is never linked.
@@ -552,10 +592,19 @@ public sealed class ServiceConfig
     /// otherwise the legacy single Nntp config as a singleton list.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public IReadOnlyList<NntpConfig> EffectiveProviders =>
-        NntpProviders.Count > 0 ? NntpProviders :
-        Nntp is not null ? new[] { Nntp } :
-        Array.Empty<NntpConfig>();
+    public IReadOnlyList<NntpConfig> EffectiveProviders
+    {
+        get
+        {
+            // Snapshot copy under the lock (P2-C2): returning the live
+            // list let the scheduler's provider list alias a list the
+            // dashboard could replace or mutate mid-run.
+            lock (JobsLock)
+                return NntpProviders.Count > 0 ? NntpProviders.ToList() :
+                    Nntp is not null ? new[] { Nntp } :
+                    Array.Empty<NntpConfig>();
+        }
+    }
 
     /// <summary>
     /// Enable automatic retention checks. When true, the scheduler periodically
@@ -736,6 +785,51 @@ public sealed class ServiceConfig
             throw new InvalidOperationException($"dashboardPort {DashboardPort} is out of range.");
         if (string.IsNullOrWhiteSpace(DashboardBind))
             throw new InvalidOperationException("dashboardBind must not be empty.");
+        if (RetentionCheckIntervalHours < 0)
+            throw new InvalidOperationException(
+                $"retentionCheckIntervalHours {RetentionCheckIntervalHours} is invalid (must be 0 or more).");
+
+        // Locations (SF-21): these were never validated at all — a
+        // duplicate name silently shadowed the first entry (resolution
+        // is FirstOrDefault), unknown types and missing per-type fields
+        // loaded fine and failed (or silently no-opped) at backup time.
+        var locationNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var loc in Locations)
+        {
+            if (string.IsNullOrWhiteSpace(loc.Name))
+                throw new InvalidOperationException("A backup location has no name.");
+            if (!locationNames.Add(loc.Name))
+                throw new InvalidOperationException($"Duplicate location name '{loc.Name}'.");
+            if (loc.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(loc.Host))
+                    throw new InvalidOperationException($"Location '{loc.Name}' (nntp) has no host.");
+                if (loc.Port is < 1 or > 65535)
+                    throw new InvalidOperationException($"Location '{loc.Name}' port {loc.Port} is out of range.");
+                if (loc.Connections < 1 || loc.Connections > 100)
+                    throw new InvalidOperationException($"Location '{loc.Name}' connections must be between 1 and 100.");
+            }
+            else if (loc.Type.Equals("smb", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(loc.Share))
+                    throw new InvalidOperationException($"Location '{loc.Name}' (smb) has no share path.");
+            }
+            else if (loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(loc.VolumeSerial))
+                    throw new InvalidOperationException($"Location '{loc.Name}' (usb) has no volume serial.");
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"Location '{loc.Name}' has unknown type '{loc.Type}' (expected \"nntp\", \"smb\", or \"usb\").");
+            }
+            if (!string.IsNullOrEmpty(loc.RedundancyMode) &&
+                loc.RedundancyMode is not ("none" or "xor" or "par2"))
+                throw new InvalidOperationException(
+                    $"Location '{loc.Name}' has unknown redundancyMode '{loc.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+        }
+
         // Empty jobs are valid: a fresh install has no jobs yet, and the
         // dashboard is used to create the first one. The service must start
         // so the dashboard is available.
@@ -764,6 +858,39 @@ public sealed class ServiceConfig
             if (job.Vss && job.BackupPrivilege)
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");
+            // Enum/numeric fields (SF-22): an unknown redundancyMode
+            // silently behaved as "none", an unknown verificationMode
+            // was rejected only when a backup started, and
+            // parityGroupSize < 2 with xor either hung parity
+            // generation (0/negative) or silently produced no parity
+            // (1) — all become load-time errors with the job named.
+            if (job.RedundancyMode is not ("none" or "xor" or "par2"))
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}' has unknown redundancyMode '{job.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+            try { VerificationModeParser.Parse(job.VerificationMode); }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException($"Job '{job.Name}': {ex.Message}");
+            }
+            bool xorInPlay = job.RedundancyMode == "xor"
+                || Locations.Any(l => l.RedundancyMode == "xor")
+                || EffectiveProviders.Any(p => p.RedundancyMode == "xor");
+            if (xorInPlay && job.ParityGroupSize < 2)
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}': parityGroupSize must be at least 2 when redundancyMode is \"xor\" (got {job.ParityGroupSize}).");
+            // Targets (SF-21): every named target must be a legacy bare
+            // target or a defined location — an unknown name was treated
+            // as Active by the gate and silently dropped by target
+            // resolution whenever another target resolved.
+            foreach (string target in job.EffectiveTargets)
+            {
+                if (target.Equals("nntp", StringComparison.OrdinalIgnoreCase) ||
+                    target.Equals("smb", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!locationNames.Contains(target))
+                    throw new InvalidOperationException(
+                        $"Job '{job.Name}' targets unknown backup location '{target}'.");
+            }
             if (job.Vss && !OperatingSystem.IsWindows())
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' requires Windows.");
@@ -802,6 +929,25 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException($"nntp.port {Nntp.Port} is out of range.");
             if (Nntp.Connections < 1 || Nntp.Connections > 100)
                 throw new InvalidOperationException("nntp.connections must be between 1 and 100.");
+        }
+        // Providers (SF-21): entries in the list get the same checks the
+        // legacy singleton gets. A blank-host entry is a tolerated
+        // placeholder (uploads skip it with a log line — SF-14), so only
+        // entries with a host are field-checked.
+        foreach (var provider in NntpProviders)
+        {
+            if (string.IsNullOrWhiteSpace(provider.Host))
+                continue;
+            if (provider.Port is < 1 or > 65535)
+                throw new InvalidOperationException(
+                    $"nntpProviders entry '{provider.Host}' port {provider.Port} is out of range.");
+            if (provider.Connections < 1 || provider.Connections > 100)
+                throw new InvalidOperationException(
+                    $"nntpProviders entry '{provider.Host}' connections must be between 1 and 100.");
+            if (!string.IsNullOrEmpty(provider.RedundancyMode) &&
+                provider.RedundancyMode is not ("none" or "xor" or "par2"))
+                throw new InvalidOperationException(
+                    $"nntpProviders entry '{provider.Host}' has unknown redundancyMode '{provider.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
         }
     }
 

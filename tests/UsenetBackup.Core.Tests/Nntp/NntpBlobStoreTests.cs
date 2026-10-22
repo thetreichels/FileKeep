@@ -36,22 +36,24 @@ public sealed class NntpBlobStoreTests : IDisposable
         return b;
     }
 
-    private NntpClient Connect()
+    private NntpClient Connect() => ConnectTo(_server);
+
+    private NntpClient ConnectTo(FakeNntpServer server)
     {
         var (clientStream, serverStream) = InMemoryTransport.Create();
         _ = Task.Run(() =>
         {
             using (serverStream)
-                _server.HandleConnection(serverStream, CancellationToken.None);
+                server.HandleConnection(serverStream, CancellationToken.None);
         });
         var client = new NntpClient(clientStream);
         client.Connect();
         return client;
     }
 
-    private NntpBlobStore OpenStore(NntpClient client, string? dbName = null) =>
+    private NntpBlobStore OpenStore(NntpClient client, string? dbName = null, string? providerKey = null) =>
         new(client, Newsgroup, RepoId,
-            Path.Combine(_workDir, dbName ?? "journal.db"));
+            Path.Combine(_workDir, dbName ?? "journal.db"), providerKey: providerKey);
 
     private static (string ChunkId, byte[] Blob) RandomChunk(int size = 5000)
     {
@@ -85,6 +87,34 @@ public sealed class NntpBlobStoreTests : IDisposable
         store.Put(chunkId, blob);
         store.Put(chunkId, blob);
         Assert.Equal(1, _server.PostCount);
+    }
+
+    [Fact]
+    public void Put_SecondProvider_DoesNotTrustFirstProvidersJournal()
+    {
+        // DL-2: message IDs derive from chunk + repo, identical for
+        // every provider. With the old unscoped journal, provider A's
+        // post made provider B's store believe it already had the chunk
+        // and skip posting — silently leaving B without the data while
+        // B's upload still counted as confirmed.
+        var (chunkId, blob) = RandomChunk();
+        using var serverB = new FakeNntpServer();
+        string keyA = ChunkMessageIndex.MakeProviderKey("a.example.com", Newsgroup);
+        string keyB = ChunkMessageIndex.MakeProviderKey("b.example.com", Newsgroup);
+
+        using (var clientA = Connect())
+        using (var storeA = OpenStore(clientA, providerKey: keyA))
+            storeA.Put(chunkId, blob);
+        Assert.Equal(1, _server.PostCount);
+
+        // Same journal file, different provider: B must not consider
+        // the chunk present, and putting it must really post to B.
+        using var clientB = ConnectTo(serverB);
+        using var storeB = OpenStore(clientB, providerKey: keyB);
+        Assert.False(storeB.Exists(chunkId));
+        storeB.Put(chunkId, blob);
+        Assert.Equal(1, serverB.PostCount);
+        Assert.Equal(blob, storeB.Get(chunkId));
     }
 
     [Fact]

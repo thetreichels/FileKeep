@@ -81,11 +81,18 @@ public sealed class RetentionManagerTests : IDisposable
             Tracker = new UsenetUploadTracker(outer._repoDir);
         }
 
-        /// <summary>Simulates the original upload: posts all chunks.</summary>
+        /// <summary>
+        /// Simulates the original upload: posts all chunks AND the
+        /// manifest article (+ monthly index), as every real upload
+        /// path does. (SF-10: retention now health-checks the manifest
+        /// article, so a fixture without one reads as a backup whose
+        /// manifest already expired.)
+        /// </summary>
         public void UploadAll()
         {
             foreach (string chunkId in ChunkIds)
                 Store.Put(chunkId, Repo.GetChunkBlob(chunkId));
+            Repo.UploadManifest(Manifest.BackupId, Store);
         }
 
         public void Dispose()
@@ -94,6 +101,84 @@ public sealed class RetentionManagerTests : IDisposable
             _client.Dispose();
             Repo.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Volume-mode fixture: same repo shape as <see cref="Fixture"/>, but
+    /// the backup is packed into ONE volume (all chunks), the volume is
+    /// posted to the server, and the manifest is stamped with the volume
+    /// entry — the state a volume-packed upload leaves behind.
+    /// </summary>
+    private sealed class VolumeFixture : IDisposable
+    {
+        public BackupRepository Repo { get; }
+        public NntpBlobStore Store { get; }
+        public ChunkMessageIndex MessageIndex { get; }
+        public UsenetUploadTracker Tracker { get; }
+        public BackupManifest Manifest { get; }
+        public List<VolumeEntry> Volumes { get; }
+        public List<string> ChunkIds { get; }
+        private readonly NntpClient _client;
+
+        public VolumeFixture(RetentionManagerTests outer)
+        {
+            Repo = BackupRepository.Init(outer._repoDir, Passphrase, 64 * 1024, 10_000);
+            Manifest = Repo.BackupDirectory(outer._srcDir);
+            ChunkIds = Manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
+
+            _client = outer.Connect();
+            MessageIndex = new ChunkMessageIndex(outer._repoDir);
+            Store = new NntpBlobStore(_client, Newsgroup, RepoId,
+                Path.Combine(outer._workDir, "journal.db"),
+                messageIndex: MessageIndex,
+                providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
+            Tracker = new UsenetUploadTracker(outer._repoDir);
+
+            // One volume holding every chunk: a single corrupt chunk then
+            // decides the whole volume's republication fate.
+            var groups = VolumePacker.Plan(ChunkIds, Repo.GetChunkBlobSize, 16 * 1024 * 1024);
+            Assert.Single(groups);
+            var entries = new List<VolumeEntry>();
+            foreach (var group in groups)
+            {
+                var volume = VolumePacker.BuildVolume(group, Repo.GetChunkBlob);
+                Store.PutVolume(volume.Id, volume.Bytes);
+                entries.Add(new VolumeEntry
+                {
+                    Id = volume.Id,
+                    ChunkIds = volume.ChunkIds.ToList(),
+                    SizeBytes = volume.Bytes.Length,
+                });
+            }
+            Volumes = entries;
+            Manifest.Volumes = entries;
+            Repo.SaveManifest(Manifest);
+
+            // Simulate the rest of a real volume upload (SF-10 fixture
+            // fidelity): the single-set NFO article and the manifest
+            // article (+ monthly index) are posted too.
+            string nfoText = ArticleCodec.BuildNfoText(
+                Manifest.BackupId, Manifest.CreatedUtc.ToString("yyyy-MM-dd"),
+                entries.Count, Repo.GetOrCreatePoster());
+            Store.PostNfo(Manifest.BackupId, nfoText,
+                ArticleCodec.SetName(Manifest.BackupId), entries.Count + 1);
+            Repo.UploadManifest(Manifest.BackupId, Store);
+        }
+
+        public void Dispose()
+        {
+            Store.Dispose();
+            _client.Dispose();
+            Repo.Dispose();
+        }
+    }
+
+    private static void CorruptChunkBlob(string repoDir, string chunkId)
+    {
+        string path = Path.Combine(repoDir, "chunks", chunkId[..2], chunkId[2..]);
+        byte[] blob = File.ReadAllBytes(path);
+        blob[blob.Length / 2] ^= 0xFF; // flip one ciphertext byte: GCM must reject it
+        File.WriteAllBytes(path, blob);
     }
 
     private static RetentionManager CreateManager(List<string> log) =>
@@ -152,8 +237,9 @@ public sealed class RetentionManagerTests : IDisposable
         // gets a fresh identity so the retention-clock reset is honest.
         Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished);
         // +1 for the message-index publication (published before the
-        // retention clock is advanced).
-        Assert.Equal(postsBefore + fx.ChunkIds.Count + 1, _server.PostCount);
+        // retention clock is advanced) and +1 for the monthly
+        // manifest-index republication (SF-10 discovery refresh).
+        Assert.Equal(postsBefore + fx.ChunkIds.Count + 2, _server.PostCount);
 
         // New identity recorded in the index (per-provider)
         string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
@@ -190,8 +276,9 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(1, report.BackupsRefreshed);
         Assert.Equal(0, report.ArticlesMissing); // nothing was missing...
         Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished); // ...but all refreshed
-        // +1 for the message-index publication.
-        Assert.Equal(postsBefore + fx.ChunkIds.Count + 1, _server.PostCount);
+        // +1 for the message-index publication, +1 for the monthly
+        // manifest-index republication (SF-10).
+        Assert.Equal(postsBefore + fx.ChunkIds.Count + 2, _server.PostCount);
 
         // Every chunk now has a new identity (per-provider)
         string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
@@ -349,6 +436,8 @@ public sealed class RetentionManagerTests : IDisposable
             storeA.Put(chunkId, blob);
             storeB.Put(chunkId, blob);
         }
+        repo.UploadManifest(manifest.BackupId, storeA);
+        repo.UploadManifest(manifest.BackupId, storeB);
         int postsBeforeA = _server.PostCount;
         int postsBeforeB = serverB.PostCount;
 
@@ -381,9 +470,10 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Contains(hostB, requestedHosts);
 
         // Each provider refreshed through its OWN connection: all chunks
-        // republished plus one message-index post per provider.
-        Assert.Equal(chunkIds.Count + 1, _server.PostCount - postsBeforeA);
-        Assert.Equal(chunkIds.Count + 1, serverB.PostCount - postsBeforeB);
+        // republished plus one message-index post and one monthly
+        // manifest-index post (SF-10) per provider.
+        Assert.Equal(chunkIds.Count + 2, _server.PostCount - postsBeforeA);
+        Assert.Equal(chunkIds.Count + 2, serverB.PostCount - postsBeforeB);
 
         // New identities recorded under each provider's own key...
         string keyA = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
@@ -434,6 +524,7 @@ public sealed class RetentionManagerTests : IDisposable
             providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
         foreach (string chunkId in chunkIds)
             store.Put(chunkId, repo.GetChunkBlob(chunkId));
+        repo.UploadManifest(manifest.BackupId, store);
         int postsBefore = _server.PostCount;
 
         var uploaded = DateTime.UtcNow.AddDays(-1070);
@@ -454,7 +545,7 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.Equal(1, report.BackupsRefreshed); // known provider still refreshed
         Assert.Single(report.Errors);
         Assert.Contains("gone.example.com", report.Errors[0]);
-        Assert.Equal(chunkIds.Count + 1, _server.PostCount - postsBefore);
+        Assert.Equal(chunkIds.Count + 2, _server.PostCount - postsBefore);
 
         // Known provider's timestamp advanced after its own refresh...
         var fresh = new UsenetUploadTracker(_repoDir);
@@ -467,6 +558,120 @@ public sealed class RetentionManagerTests : IDisposable
     }
 
     [Fact]
+    public void CorruptLocalBlob_VolumeRepublish_Fails_ServerArticleStaysAuthoritative()
+    {
+        // DL-7: a locally corrupted chunk blob must NOT be packed and
+        // republished. Before the fix, BuildVolume packed raw blobs with
+        // no integrity check, so the corrupt volume was posted, the
+        // message index repointed to it, and the retention timestamp
+        // advanced — orphaning the healthy server article.
+        using var fx = new VolumeFixture(this);
+        string volumeId = fx.Volumes.Single().Id;
+        byte[] serverVolumeBytes = fx.Store.GetVolume(volumeId);
+
+        // Expiring (25 days left) so a full republish is attempted.
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        CorruptChunkBlob(_repoDir, fx.ChunkIds[0]);
+        int postsBefore = _server.PostCount;
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        // The refresh failed and the failure is visible in the report.
+        Assert.Equal(0, report.BackupsRefreshed);
+        Assert.Equal(0, report.ArticlesRepublished);
+        Assert.NotEmpty(report.Errors);
+        Assert.Contains(report.Errors, e => e.Contains("Republish"));
+
+        // Nothing was posted: no republished volume, no index publication.
+        Assert.Equal(postsBefore, _server.PostCount);
+
+        // The message index was NOT repointed for the volume.
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        Assert.False(fx.MessageIndex.HasNewIdentity(providerKey, volumeId));
+
+        // The retention timestamp did NOT advance.
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
+
+        // The healthy server article is untouched and still authoritative.
+        Assert.True(fx.Store.ExistsOnServer(volumeId));
+        Assert.Equal(serverVolumeBytes, fx.Store.GetVolume(volumeId));
+    }
+
+    [Fact]
+    public void CorruptLocalChunk_ChunkRepublish_Fails_TimestampUnchanged()
+    {
+        // DL-7, per-chunk path: same guard as the volume path — a corrupt
+        // local blob fails the refresh instead of being republished under
+        // a new identity over the healthy server copy.
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        string corruptChunk = fx.ChunkIds[0];
+        CorruptChunkBlob(_repoDir, corruptChunk);
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(0, report.BackupsRefreshed);
+        Assert.NotEmpty(report.Errors);
+        Assert.Contains(report.Errors, e => e.Contains("Republish"));
+
+        // The corrupted chunk was NOT repointed; its original server
+        // article remains the authoritative copy.
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        Assert.False(fx.MessageIndex.HasNewIdentity(providerKey, corruptChunk));
+        Assert.True(fx.Store.ExistsOnServer(corruptChunk));
+
+        // The retention timestamp did NOT advance.
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void MissingLocalChunks_VolumeRepublish_FallsBackToServerDownload()
+    {
+        // DL-7 guard rail: chunks pruned locally after upload are NOT
+        // corruption — the volume must still refresh from the server
+        // copy (byte-identical), exactly as before the fix.
+        using var fx = new VolumeFixture(this);
+        string volumeId = fx.Volumes.Single().Id;
+
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        foreach (string chunkId in fx.ChunkIds)
+            File.Delete(Path.Combine(_repoDir, "chunks", chunkId[..2], chunkId[2..]));
+        int postsBefore = _server.PostCount;
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        Assert.Equal(1, report.ArticlesRepublished);
+        Assert.Empty(report.Errors);
+        // One volume republish + one message-index publication + one
+        // monthly manifest-index republication (SF-10).
+        Assert.Equal(postsBefore + 3, _server.PostCount);
+
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, volumeId));
+        Assert.True(fx.Store.ExistsOnServer(volumeId));
+
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.True(record.UploadedUtc > uploaded);
+    }
+
+    [Fact]
     public void MakeRefreshMessageId_Unique()
     {
         string chunkId = new string('a', 64);
@@ -475,5 +680,94 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.NotEqual(id1, id2);
         Assert.Contains(chunkId, id1);
         Assert.Contains(".refresh.", id1);
+    }
+
+    [Fact]
+    public void MissingManifestArticle_TriggersRefresh_AndIsReposted()
+    {
+        // SF-10: the manifest article was invisible to retention — it
+        // could expire while every data article stayed fresh, leaving
+        // the backup undiscoverable. Now it is health-checked like a
+        // data article, and a refresh reposts it.
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+        Assert.NotNull(fx.Store.GetManifest(fx.Manifest.BackupId));
+
+        // The manifest article expires on the server.
+        string manifestId = ArticleCodec.MakeManifestMessageId(fx.Manifest.BackupId, RepoId);
+        Assert.True(_server.Articles.TryRemove(manifestId, out _));
+        Assert.Null(fx.Store.GetManifest(fx.Manifest.BackupId));
+
+        // Otherwise healthy: 65 days left (inside the check window,
+        // above the repost threshold), every data article present.
+        // Only the missing manifest can trigger the refresh.
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        Assert.Equal(1, report.ArticlesMissing); // the manifest counts as missing
+        Assert.Contains(log, l => l.Contains("manifest article MISSING"));
+        // The manifest is fetchable again, and the clock advanced.
+        Assert.NotNull(fx.Store.GetManifest(fx.Manifest.BackupId));
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.True(record.UploadedUtc > uploaded);
+    }
+
+    [Fact]
+    public void PrunedLocalChunk_ChunkMode_FallsBackToServerDownload()
+    {
+        // SF-10: chunk mode had no server-download fallback (volume
+        // mode did), so a pruned chunk-mode backup threw on every
+        // republish and aged to expiry. The local blob is gone here;
+        // the refresh must download it back and republish it.
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+
+        var uploaded = DateTime.UtcNow.AddDays(-1070); // 25 days left: expiring
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        string prunedChunk = fx.ChunkIds[0];
+        File.Delete(Path.Combine(_repoDir, "chunks", prunedChunk[..2], prunedChunk[2..]));
+
+        var log = new List<string>();
+        var report = CreateManager(log).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        Assert.Equal(fx.ChunkIds.Count, report.ArticlesRepublished);
+        Assert.Empty(report.Errors);
+        Assert.Contains(log, l => l.Contains("downloading from server for republish"));
+
+        // The pruned chunk was republished under a new identity, and
+        // its bytes resolve through the index.
+        string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+        Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, prunedChunk));
+        Assert.NotEmpty(fx.Store.Get(prunedChunk));
+    }
+
+    [Fact]
+    public void SampleChunks_RotationSweepsTheWholeList()
+    {
+        // SF-11: a fixed sample window checked the same articles
+        // forever. Different rotation seeds must give different
+        // windows, and the windows together must cover the whole list.
+        var ids = Enumerable.Range(0, 100).Select(i => $"id-{i:D3}").ToList();
+
+        var first = RetentionManager.SampleChunks(ids, 10, rotationSeed: 0);
+        Assert.Equal(10, first.Count);
+        Assert.Equal(first.Count, first.Distinct().Count());
+        // Deterministic for a given seed.
+        Assert.Equal(first, RetentionManager.SampleChunks(ids, 10, rotationSeed: 0));
+        // A different seed gives a different window.
+        Assert.NotEqual(first, RetentionManager.SampleChunks(ids, 10, rotationSeed: 1));
+
+        var covered = new HashSet<string>();
+        for (int seed = 0; seed < 100; seed++)
+            covered.UnionWith(RetentionManager.SampleChunks(ids, 10, seed));
+        Assert.Equal(ids.Count, covered.Count);
     }
 }

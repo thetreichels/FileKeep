@@ -19,6 +19,15 @@ public interface IBlobStore
     void Put(string chunkIdHex, byte[] blob);
 
     /// <summary>
+    /// Removes a stored blob, if present. File-backed stores implement
+    /// this so a corrupt local copy can be replaced by a verified
+    /// re-download (SF-13: <see cref="Put"/> alone would no-op over the
+    /// bad bytes). The default is a no-op — remote stores (Usenet)
+    /// cannot delete what they published.
+    /// </summary>
+    void Delete(string chunkIdHex) { }
+
+    /// <summary>
     /// Stores a blob from a span, for hot loops that encrypt into a pooled
     /// buffer. The default implementation copies into an array; stores that
     /// can write a span directly (e.g. <see cref="LocalBlobStore"/>) override

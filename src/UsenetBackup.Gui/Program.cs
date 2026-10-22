@@ -26,7 +26,23 @@ internal static class Program
     [STAThread]
     static void Main()
     {
-        using var mutex = new Mutex(true, MutexName, out bool createdNew);
+        // P2-L12: when the previous GUI instance crashed, the mutex is
+        // abandoned and the ownership request in the constructor throws
+        // AbandonedMutexException — ownership IS granted in that case,
+        // but unhandled it crashed every later launch. Treat it as
+        // acquisition (we are the only instance; the last one died).
+        Mutex mutex;
+        bool createdNew;
+        try
+        {
+            mutex = new Mutex(true, MutexName, out createdNew);
+        }
+        catch (AbandonedMutexException)
+        {
+            mutex = new Mutex(false, MutexName);
+            createdNew = true;
+        }
+        using var ownedMutex = mutex;
         if (!createdNew)
         {
             // Another instance is already running — bring its window to front and exit.

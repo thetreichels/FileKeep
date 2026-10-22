@@ -32,6 +32,14 @@ public sealed class SmbBlobStore : IBlobStore
 
     public bool Exists(string chunkIdHex) => File.Exists(PathFor(chunkIdHex));
 
+    /// <summary>Deletes a stored blob. Used to replace a corrupt copy
+    /// with a verified re-download (SF-13).</summary>
+    public void Delete(string chunkIdHex)
+    {
+        try { File.Delete(PathFor(chunkIdHex)); }
+        catch { /* best effort: a failed delete surfaces at the next verify */ }
+    }
+
     public void Put(string chunkIdHex, byte[] blob)
     {
         string path = PathFor(chunkIdHex);
@@ -39,14 +47,23 @@ public sealed class SmbBlobStore : IBlobStore
             return;
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        // Write atomically so interrupted backups never leave half a blob.
+        // Write atomically so interrupted backups never leave half a blob,
+        // and flush to disk before the rename so a power loss cannot leave
+        // the renamed blob's contents behind in a volatile cache (DL-9).
+        // Over SMB the flush is best-effort — the server decides how much
+        // of it reaches stable storage.
         string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
-            File.WriteAllBytes(tmp, blob);
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                fs.Write(blob, 0, blob.Length);
+                fs.Flush(flushToDisk: true);
+            }
             try
             {
                 File.Move(tmp, path);
+                TryFlushDirectory(Path.GetDirectoryName(path)!);
             }
             catch (IOException)
             {
@@ -72,10 +89,14 @@ public sealed class SmbBlobStore : IBlobStore
         try
         {
             using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
                 fs.Write(blob);
+                fs.Flush(flushToDisk: true);
+            }
             try
             {
                 File.Move(tmp, path);
+                TryFlushDirectory(Path.GetDirectoryName(path)!);
             }
             catch (IOException)
             {
@@ -86,6 +107,32 @@ public sealed class SmbBlobStore : IBlobStore
         finally
         {
             try { File.Delete(tmp); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>
+    /// Best-effort fsync of the directory holding a just-renamed blob, so
+    /// the rename (directory entry) is as durable as the file contents.
+    /// Unix-only: Windows cannot open a directory as a stream (NTFS/SMB
+    /// handle metadata durability server-side), so this is a no-op there;
+    /// any other failure is swallowed — durability here is strictly
+    /// best-effort and must never fail a Put. Residual caveat: the entry
+    /// of a subdirectory created moments earlier (the chunk's hh folder
+    /// in its parent) is covered only by the filesystem's own journaling,
+    /// not by this flush.
+    /// </summary>
+    private static void TryFlushDirectory(string dir)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        try
+        {
+            using var fs = new FileStream(dir, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            fs.Flush(flushToDisk: true);
+        }
+        catch
+        {
+            // Best effort only.
         }
     }
 

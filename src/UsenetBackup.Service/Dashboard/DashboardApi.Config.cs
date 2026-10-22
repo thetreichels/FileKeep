@@ -15,6 +15,16 @@ namespace UsenetBackup.Service;
 public static partial class DashboardApi
 {
     /// <summary>
+    /// Status for a failed config mutation+save (MU-4): validation
+    /// problems (InvalidOperationException from ServiceConfig.Validate)
+    /// are the caller's (400); disk, permission, DPAPI and other
+    /// server-side failures are 500. The two used to share 400, so a
+    /// full disk looked like a bad request.
+    /// </summary>
+    private static int SaveFailureStatus(Exception ex) =>
+        ex is InvalidOperationException ? 400 : 500;
+
+    /// <summary>
     /// Runs the NNTP connectivity diagnostic synchronously (fast probes).
     /// </summary>
     public static (int Status, object Payload) TestNntpConnection(string host, int port, string user, string pass, bool ssl)
@@ -199,7 +209,7 @@ public static partial class DashboardApi
     {
         try
         {
-            var probes = config.Locations
+            var probes = config.SnapshotLocations()
                 .Where(l => l.Type is not null &&
                     (l.Type.Equals("usb", StringComparison.OrdinalIgnoreCase) ||
                      l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase)))
@@ -240,8 +250,29 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// The one place job/location DTOs are built, so every response —
+    /// GET /api/config and the save endpoints alike — exposes the same
+    /// shape and NEVER the DPAPI password blobs (CX-6: the save
+    /// responses used to return the raw config objects, blobs included,
+    /// while the snapshot deliberately stripped them).
+    /// </summary>
+    internal static ConfigJobDto ToDto(BackupJobConfig j) => new(
+        j.Name, j.Repo, j.Source, j.Schedule, j.Mode, j.JobType,
+        j.BackupPrivilege, j.Vss, j.AutoUpload, j.Targets,
+        j.SmbShare, j.SmbUser, !string.IsNullOrEmpty(j.SmbPasswordProtected),
+        j.AutoVerify, j.VerificationMode, j.RedundancyMode, j.Sources, j.Paused);
+
+    internal static ConfigLocationDto ToDto(ServiceConfig config, BackupLocation l) => new(
+        l.Name, l.Type, l.Host, l.Port, l.Username, l.Ssl, l.Connections,
+        l.Newsgroup, l.RetentionDays, l.Share, l.SmbUser, l.HasPassword,
+        config.SnapshotJobs()
+            .Where(j => j.EffectiveTargets.Any(t =>
+                t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
+            .Select(j => j.Name).ToList());
+
+    /// <summary>
     /// Adds a new job or updates an existing one (matched by name, case-insensitive).
-    /// Validates, saves to disk, and reloads the scheduler. Returns (200, job) or (400, error).
+    /// Validates, saves to disk, and reloads the scheduler. Returns (200, job DTO) or (400, error).
     /// </summary>
     public static (int Status, object Payload) UpsertJob(ServiceConfig config,
         BackupScheduler scheduler, string configPath, BackupJobConfig job,
@@ -276,8 +307,8 @@ public static partial class DashboardApi
             DashboardPort = config.DashboardPort,
             DashboardBind = config.DashboardBind,
             Nntp = config.Nntp,
-            Locations = config.Locations,
-            Jobs = config.Jobs
+            Locations = config.SnapshotLocations(),
+            Jobs = config.SnapshotJobs()
                 .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
                 .Concat(new[] { job }).ToList(),
         };
@@ -322,11 +353,11 @@ public static partial class DashboardApi
             config.Save(configPath);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: job '{job.Name}' saved");
-            return (200, job);
+            return (200, ToDto(job));
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
         }
     }
 
@@ -353,18 +384,20 @@ public static partial class DashboardApi
         }
         try
         {
-            string json = UsenetBackup.Core.Json.FileKeepJsonOptions.Serialize(config,
-                UsenetBackup.Core.Json.FileKeepJsonOptions.ServiceConfigSave,
-                UsenetBackup.Core.Json.FileKeepJsonContext.Default.ServiceConfig);
-            File.WriteAllText(configPath + ".tmp", json);
-            File.Move(configPath + ".tmp", configPath, overwrite: true);
+            // SF-20: persist through the safe path like every other
+            // config mutation — Save validates, serializes under
+            // JobsLock, and writes via a unique temp file. The previous
+            // hand-rolled write skipped the lock and shared a fixed
+            // ".tmp" name, so a save racing this delete could tear the
+            // JSON or lose an update.
+            config.Save(configPath);
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: job '{name}' deleted");
             return (200, new EmptyDto());
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
         }
     }
 
@@ -387,36 +420,43 @@ public static partial class DashboardApi
         if (loc.Type == "usb" && string.IsNullOrWhiteSpace(loc.VolumeSerial))
             return (400, new ErrorDto("Volume serial is required for USB locations."));
 
-        var existing = config.Locations.FirstOrDefault(l =>
-            l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
-        // Encrypt supplied passwords; blank keeps the stored blob.
-        string? pwBlob = existing?.PasswordProtected;
-        if (!string.IsNullOrEmpty(loc.PasswordPlaintext))
-            pwBlob = UsenetBackup.Core.Dpapi.Protect(loc.PasswordPlaintext);
-        string? smbPwBlob = existing?.SmbPasswordProtected;
-        if (!string.IsNullOrEmpty(loc.SmbPasswordPlaintext))
-            smbPwBlob = UsenetBackup.Core.Dpapi.Protect(loc.SmbPasswordPlaintext);
-        loc.PasswordProtected = pwBlob;
-        loc.SmbPasswordProtected = smbPwBlob;
-        loc.PasswordPlaintext = null;
-        loc.SmbPasswordPlaintext = null;
-
-        if (existing is null)
-            config.Locations.Add(loc);
-        else
+        // P2-C1: lookup + field-by-field mutation under the config
+        // lock — unlocked, a concurrent save/scan or a running job
+        // could observe a torn location (new host, old credentials).
+        BackupLocation? existing;
+        lock (config.JobsLock)
         {
-            existing.Type = loc.Type;
-            existing.Host = loc.Host; existing.Port = loc.Port;
-            existing.Ssl = loc.Ssl; existing.Username = loc.Username;
-            existing.Connections = loc.Connections;
-            existing.Newsgroup = loc.Newsgroup;
-            existing.RetentionDays = loc.RetentionDays;
-            existing.PasswordProtected = pwBlob;
-            existing.Share = loc.Share; existing.SmbUser = loc.SmbUser;
-            existing.SmbPasswordProtected = smbPwBlob;
-            existing.VolumeSerial = loc.VolumeSerial;
-            existing.VolumeLabel = loc.VolumeLabel;
-            existing.UsbFolder = loc.UsbFolder;
+            existing = config.Locations.FirstOrDefault(l =>
+                l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
+            // Encrypt supplied passwords; blank keeps the stored blob.
+            string? pwBlob = existing?.PasswordProtected;
+            if (!string.IsNullOrEmpty(loc.PasswordPlaintext))
+                pwBlob = UsenetBackup.Core.Dpapi.Protect(loc.PasswordPlaintext);
+            string? smbPwBlob = existing?.SmbPasswordProtected;
+            if (!string.IsNullOrEmpty(loc.SmbPasswordPlaintext))
+                smbPwBlob = UsenetBackup.Core.Dpapi.Protect(loc.SmbPasswordPlaintext);
+            loc.PasswordProtected = pwBlob;
+            loc.SmbPasswordProtected = smbPwBlob;
+            loc.PasswordPlaintext = null;
+            loc.SmbPasswordPlaintext = null;
+
+            if (existing is null)
+                config.Locations.Add(loc);
+            else
+            {
+                existing.Type = loc.Type;
+                existing.Host = loc.Host; existing.Port = loc.Port;
+                existing.Ssl = loc.Ssl; existing.Username = loc.Username;
+                existing.Connections = loc.Connections;
+                existing.Newsgroup = loc.Newsgroup;
+                existing.RetentionDays = loc.RetentionDays;
+                existing.PasswordProtected = pwBlob;
+                existing.Share = loc.Share; existing.SmbUser = loc.SmbUser;
+                existing.SmbPasswordProtected = smbPwBlob;
+                existing.VolumeSerial = loc.VolumeSerial;
+                existing.VolumeLabel = loc.VolumeLabel;
+                existing.UsbFolder = loc.UsbFolder;
+            }
         }
         try
         {
@@ -437,9 +477,9 @@ public static partial class DashboardApi
                 }
             }
 
-            return (200, loc);
+            return (200, ToDto(config, loc));
         }
-        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        catch (Exception ex) { return (SaveFailureStatus(ex), new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -454,13 +494,16 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string name,
         Action<string>? log = null)
     {
-        var existing = config.Locations.FirstOrDefault(l =>
-            l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-        if (existing is null)
-            return (400, new ErrorDto($"Unknown location '{name}'." ));
         var strippedFrom = new List<string>();
+        // P2-C1: the lookup and the Remove belong inside the same lock
+        // as the job-target strip — both sat outside it, racing other
+        // config mutations.
         lock (config.JobsLock)
         {
+            var existing = config.Locations.FirstOrDefault(l =>
+                l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+                return (400, new ErrorDto($"Unknown location '{name}'." ));
             foreach (var job in config.Jobs)
             {
                 var targets = job.EffectiveTargets
@@ -472,8 +515,8 @@ public static partial class DashboardApi
                     strippedFrom.Add(job.Name);
                 }
             }
+            config.Locations.Remove(existing);
         }
-        config.Locations.Remove(existing);
         try
         {
             config.Save(configPath);
@@ -483,7 +526,7 @@ public static partial class DashboardApi
                 : $"dashboard: location '{name}' deleted");
             return (200, new EmptyDto());
         }
-        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        catch (Exception ex) { return (SaveFailureStatus(ex), new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -511,7 +554,7 @@ public static partial class DashboardApi
             log?.Invoke($"dashboard: job '{name}' {(paused ? "paused" : "resumed")}");
             return (200, new EmptyDto());
         }
-        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        catch (Exception ex) { return (SaveFailureStatus(ex), new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -525,11 +568,11 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string jobName,
         string locationName, Action<string>? log = null)
     {
-        if (!config.Locations.Any(l =>
-                l.Name.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
-            return (400, new ErrorDto($"Unknown location '{locationName}'." ));
         lock (config.JobsLock)
         {
+            if (!config.Locations.Any(l =>
+                    l.Name.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
+                return (400, new ErrorDto($"Unknown location '{locationName}'." ));
             var job = config.Jobs.FirstOrDefault(j =>
                 j.Name.Equals(jobName, StringComparison.OrdinalIgnoreCase));
             if (job is null)
@@ -548,7 +591,7 @@ public static partial class DashboardApi
             log?.Invoke($"dashboard: location '{locationName}' attached to job '{jobName}'");
             return (200, new EmptyDto());
         }
-        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        catch (Exception ex) { return (SaveFailureStatus(ex), new ErrorDto(ex.Message)); }
     }
 
     /// <summary>
@@ -603,6 +646,11 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, NntpConfig nntp,
         Action<string>? log = null)
     {
+        // P2-C2: the Nntp assignment, the "Usenet" location sync, and the
+        // save all mutated shared config unlocked. One lock across the
+        // mutation + validate + save (Save's own lock is reentrant).
+        lock (config.JobsLock)
+        {
         // Empty host clears the Usenet configuration.
         if (string.IsNullOrWhiteSpace(nntp.Host))
         {
@@ -659,7 +707,8 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
+        }
         }
     }
 
@@ -677,6 +726,10 @@ public static partial class DashboardApi
             if (p.Connections is < 1 or > 100)
                 return (400, new ErrorDto($"Connections must be 1-100 (got {p.Connections})." ));
         }
+        // P2-C2: blob matching reads the live list and the wholesale
+        // replacement swaps it — both under the config lock.
+        lock (config.JobsLock)
+        {
         // Encrypt supplied plaintext passwords via DPAPI; blank keeps the stored blob.
         // Match against existing providers by host+port to preserve blobs.
         foreach (var p in providers)
@@ -700,7 +753,8 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
+        }
         }
     }
 }

@@ -43,6 +43,24 @@ public sealed class MessageIndexSyncTests : IDisposable
     }
 
     [Fact]
+    public void CorruptIndexFile_ThrowsAndPreservesTornCopy()
+    {
+        // NS-8: a torn chunk-message-ids.json used to be silently
+        // discarded (every retention-refreshed identity forgotten, no
+        // trace). Now: preserved as .corrupt-* and surfaced, mirroring
+        // UsenetUploadTracker.
+        string path = Path.Combine(_workDir, "chunk-message-ids.json");
+        File.WriteAllText(path, "{ this is not json");
+        var ex = Assert.Throws<InvalidDataException>(() => new ChunkMessageIndex(_workDir));
+        Assert.Contains("corrupt", ex.Message);
+        Assert.False(File.Exists(path));
+        Assert.Single(Directory.GetFiles(_workDir, "chunk-message-ids.json.corrupt-*"));
+        // After preservation, a fresh index can start clean.
+        var fresh = new ChunkMessageIndex(_workDir);
+        Assert.NotNull(fresh);
+    }
+
+    [Fact]
     public void PostAndGetLatest_RoundTrips()
     {
         using var store = CreateStore();
@@ -234,5 +252,46 @@ public sealed class MessageIndexSyncTests : IDisposable
         Assert.Equal(id1, id2);
         Assert.NotEqual(id1, id3);
         Assert.Contains("msgindex", id1);
+    }
+    [Fact]
+    public void TwoInstances_InterleavedRecords_BothSurvive()
+    {
+        // P2-C4: two ChunkMessageIndex instances over one repo (the
+        // scheduler's repo + a dashboard-opened repo) each rewrote the
+        // whole file from their own in-memory map — the staler
+        // instance's save silently erased the other's records.
+        // Merge-on-save must keep both.
+        string chunkA = new('a', 64);
+        string chunkB = new('b', 64);
+        var first = new ChunkMessageIndex(_workDir);
+        var second = new ChunkMessageIndex(_workDir); // stale snapshot: knows neither record
+
+        first.RecordNewIdentity("host/alt.binaries.test", chunkA, "<new-a@invalid>");
+        second.RecordNewIdentity("host/alt.binaries.test", chunkB, "<new-b@invalid>");
+
+        var fresh = new ChunkMessageIndex(_workDir);
+        Assert.True(fresh.TryGetMessageId("host/alt.binaries.test", chunkA, out string? a));
+        Assert.Equal("<new-a@invalid>", a);
+        Assert.True(fresh.TryGetMessageId("host/alt.binaries.test", chunkB, out string? b));
+        Assert.Equal("<new-b@invalid>", b);
+        // The stale instance adopted the merged map too.
+        Assert.True(second.TryGetMessageId("host/alt.binaries.test", chunkA, out _));
+    }
+
+    [Fact]
+    public void UploadTracker_TwoInstances_InterleavedRecords_BothSurvive()
+    {
+        // P2-C4, tracker half: same whole-file-rewrite flaw.
+        var first = new UsenetUploadTracker(_workDir);
+        var second = new UsenetUploadTracker(_workDir);
+        first.RecordUpload("backup-one", "news.example.com", Newsgroup,
+            new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc));
+        second.RecordUpload("backup-two", "news.example.com", Newsgroup,
+            new DateTime(2026, 10, 2, 0, 0, 0, DateTimeKind.Utc));
+
+        var fresh = new UsenetUploadTracker(_workDir);
+        Assert.Equal(2, fresh.GetAll().Count);
+        Assert.Contains(fresh.GetAll(), r => r.BackupId == "backup-one");
+        Assert.Contains(fresh.GetAll(), r => r.BackupId == "backup-two");
     }
 }

@@ -44,14 +44,21 @@ public static partial class DashboardApi
     {
         if (!string.IsNullOrEmpty(passphrase) && config.GeneratedSecretMode)
             return (400, new ErrorDto("YubiKey-only mode is active: the repository secret was generated, not typed. Clear the generated secret before setting a passphrase."));
+        // P2-C2: field mutations + save under the config lock. The
+        // YubiKey branch's hardware interaction stays OUTSIDE the lock
+        // (a touch wait must not block other handlers); its config
+        // writes lock inside SetupYubiKeyOnConfig.
         if (string.IsNullOrEmpty(passphrase))
         {
-            config.PassphraseProtected = null;
-            config.PassphraseYubiKey = false;
-            config.GeneratedSecretMode = false;
-            config.YubiKeyChallenge = null;
-            config.PassphraseYubiKeyWrapped = null;
-            config.YubiKeySlotSecretProtected = null;
+            lock (config.JobsLock)
+            {
+                config.PassphraseProtected = null;
+                config.PassphraseYubiKey = false;
+                config.GeneratedSecretMode = false;
+                config.YubiKeyChallenge = null;
+                config.PassphraseYubiKeyWrapped = null;
+                config.YubiKeySlotSecretProtected = null;
+            }
         }
         else if (useYubiKey)
         {
@@ -64,10 +71,13 @@ public static partial class DashboardApi
         }
         else
         {
-            config.PassphraseProtected = Dpapi.Protect(passphrase);
-            config.PassphraseYubiKey = false;
-            config.YubiKeyChallenge = null;
-            config.PassphraseYubiKeyWrapped = null;
+            lock (config.JobsLock)
+            {
+                config.PassphraseProtected = Dpapi.Protect(passphrase);
+                config.PassphraseYubiKey = false;
+                config.YubiKeyChallenge = null;
+                config.PassphraseYubiKeyWrapped = null;
+            }
         }
         try
         {
@@ -97,20 +107,41 @@ public static partial class DashboardApi
         ServiceConfig config, IYubiKeyProvider yubiKeyProvider, string passphrase,
         int slot, bool storePassphraseCopy)
     {
+        // SF-16: if this slot already has a working setup, fetch its
+        // slot secret so a failed re-setup can roll the key back to it
+        // (YubiKeySetup.Setup re-programs it on failure). Without this,
+        // a missed wrap touch silently stranded the key: the stored
+        // config kept the old challenge/wrapped pair the reprogrammed
+        // key could no longer answer.
+        byte[]? previousSecret = null;
+        if (config.PassphraseYubiKey &&
+            !string.IsNullOrEmpty(config.YubiKeySlotSecretProtected) &&
+            config.YubiKeySlot == slot)
+        {
+            try
+            {
+                previousSecret = Convert.FromBase64String(
+                    Dpapi.Unprotect(config.YubiKeySlotSecretProtected));
+            }
+            catch { /* undecryptable: proceed without rollback protection */ }
+        }
         try
         {
             var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(
-                yubiKeyProvider, passphrase, slot);
+                yubiKeyProvider, passphrase, slot, previousSecret);
             try
             {
-                if (storePassphraseCopy)
-                    config.PassphraseProtected = Dpapi.Protect(passphrase);
-                config.YubiKeyChallenge = challenge;
-                config.PassphraseYubiKeyWrapped = wrapped;
-                config.YubiKeySlotSecretProtected = Dpapi.Protect(
-                    Convert.ToBase64String(slotSecret));
-                config.YubiKeySlot = slot;
-                config.PassphraseYubiKey = true;
+                lock (config.JobsLock)
+                {
+                    if (storePassphraseCopy)
+                        config.PassphraseProtected = Dpapi.Protect(passphrase);
+                    config.YubiKeyChallenge = challenge;
+                    config.PassphraseYubiKeyWrapped = wrapped;
+                    config.YubiKeySlotSecretProtected = Dpapi.Protect(
+                        Convert.ToBase64String(slotSecret));
+                    config.YubiKeySlot = slot;
+                    config.PassphraseYubiKey = true;
+                }
             }
             finally
             {
@@ -129,6 +160,11 @@ public static partial class DashboardApi
         catch (Exception ex)
         {
             return (400, new ErrorDto("YubiKey setup failed: " + ex.Message));
+        }
+        finally
+        {
+            if (previousSecret is not null)
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(previousSecret);
         }
     }
 
@@ -236,9 +272,80 @@ public static partial class DashboardApi
         string canonical = GeneratedSecret.Normalize(secret);
         if (canonical.Length == 0)
             return (400, new ErrorDto("A recovery secret is required."));
-        session.Unlock(canonical);
-        log?.Invoke("dashboard: restore session unlocked via recovery secret");
+        // MU-15: no verifier exists for the typed secret — the session
+        // starts UNVERIFIED and only a successful restore proves it.
+        session.UnlockUnverified(canonical);
+        log?.Invoke("dashboard: restore session unlocked via recovery secret (unverified until first restore)");
         return (200, new OkDto(true));
+    }
+
+    /// <summary>
+    /// Unlocks the restore session with a phone authenticator code
+    /// (MU-15): the profile reported the phone enabled, but no endpoint
+    /// ever consulted TOTP, so the phone unlocked nothing. Mechanism: a
+    /// verified code is a presence proof, and on the running system the
+    /// service holds a DPAPI-protected copy of the passphrase — the
+    /// proof authorizes releasing that copy into the session (so the
+    /// session starts verified). Without the DPAPI copy there is
+    /// nothing to release and the unlock honestly refuses. Only the
+    /// LIVE secret is consulted (a pending re-enrollment must not
+    /// unlock restores), and the phone stays an OR method — this path
+    /// exists only while YubiKey gating is on, per the protection
+    /// design (running-system-only, never the sole method).
+    /// </summary>
+    public static (int Status, object Payload) UnlockRestoreSessionWithPhone(
+        ServiceConfig config, RestoreSession session, string? code,
+        Action<string>? log = null)
+    {
+        if (!config.PassphraseYubiKey)
+            return (400, new ErrorDto(
+                "Phone unlock applies to YubiKey-gated restores; this profile doesn't gate restores."));
+        if (!config.PhoneAuthEnabled || string.IsNullOrWhiteSpace(config.PhoneTotpSecretProtected))
+            return (400, new ErrorDto("Phone authenticator unlock isn't set up for this profile."));
+        if (string.IsNullOrWhiteSpace(code) || code.Trim().Length != Security.TotpCrypto.CodeDigits)
+            return (400, new ErrorDto("Enter the 6-digit code from your authenticator app."));
+        if (!PhoneCodeMatchesLiveSecret(config, code.Trim()))
+            return (400, new ErrorDto("That code doesn't match — check the authenticator and try again."));
+        if (!BackupScheduler.TryGetPassphrase(config, out string? passphrase, out string? problem))
+            return (400, new ErrorDto(problem ??
+                "Phone unlock needs the stored passphrase copy on this PC, which isn't " +
+                "available — unlock with your YubiKey or recovery secret instead."));
+        session.Unlock(passphrase);
+        log?.Invoke("dashboard: restore session unlocked via phone authenticator");
+        return (200, new OkDto(true));
+    }
+
+    /// <summary>
+    /// Checks a TOTP code against the LIVE phone secret only (never a
+    /// pending re-enrollment secret — see SF-17). Mirrors the verify
+    /// core in VerifyPhoneTotp without its promotion behaviour.
+    /// </summary>
+    private static bool PhoneCodeMatchesLiveSecret(ServiceConfig config, string code)
+    {
+        // P2-R4: an undecryptable stored secret (profile restored onto
+        // another PC / another Windows user — DPAPI is machine+user
+        // bound) threw out of Dpapi.Unprotect, escaping this endpoint
+        // as a bare 500 with no body; the page showed "phone unlock
+        // failed (500)" while the verify endpoint's twin check degraded
+        // gracefully. A secret that cannot be read matches NO code —
+        // the caller answers its plain "doesn't match" 400.
+        string base32;
+        try
+        {
+            base32 = Dpapi.Unprotect(config.PhoneTotpSecretProtected!);
+        }
+        catch
+        {
+            return false;
+        }
+        byte[] secret;
+        try { secret = Security.TotpCrypto.FromBase32(base32); }
+        finally { base32 = new string('\0', base32.Length); }
+        try
+        {
+            return Security.TotpCrypto.ValidateCode(secret, code, DateTimeOffset.UtcNow);
+        }
+        finally { CryptographicOperations.ZeroMemory(secret); }
     }
 
     /// <summary>
@@ -250,7 +357,14 @@ public static partial class DashboardApi
             return (200, new YubiKeyStatusDto(false, Array.Empty<string>()));
         IReadOnlyList<YubiKeyInfo> devices;
         try { devices = provider.FindDevices(); }
-        catch { devices = Array.Empty<YubiKeyInfo>(); }
+        catch (Exception ex)
+        {
+            // SF-23: a provider failure (broken HID/driver state) must
+            // not be indistinguishable from "no key plugged in" — the
+            // setup UI would tell the user to insert a key that is
+            // already there while the real problem stays invisible.
+            return (500, new ErrorDto("YubiKey detection failed: " + ex.Message));
+        }
         return (200, new YubiKeyStatusDto(
             devices.Count > 0,
             devices.Select(d => d.Description).ToArray()));
@@ -351,7 +465,7 @@ public static partial class DashboardApi
     public static (int Status, object Payload) GetRestoreSessionStatus(
         ServiceConfig config, RestoreSession session) =>
         (200, new YubiKeyUnlockDto(config.PassphraseYubiKey, session.IsUnlocked,
-            config.GeneratedSecretMode));
+            config.GeneratedSecretMode, session.IsVerified, config.PhoneAuthEnabled));
 
     /// <summary>
     /// Resolves the passphrase for restore-side operations. When YubiKey
@@ -362,4 +476,16 @@ public static partial class DashboardApi
     /// </summary>
     public static string? GetRestorePassphrase(ServiceConfig config, RestoreSession? session) =>
         config.PassphraseYubiKey ? session?.GetPassphrase() : BackupScheduler.GetPassphrase(config);
+
+    /// <summary>
+    /// The honest "no usable passphrase" error for dashboard operations
+    /// (MU-12): when a stored passphrase exists but no longer decrypts,
+    /// the error says so (and how to fix it) instead of claiming none
+    /// is configured.
+    /// </summary>
+    public static ErrorDto PassphraseUnavailableError(ServiceConfig config, string fallback)
+    {
+        BackupScheduler.TryGetPassphrase(config, out _, out string? problem);
+        return new ErrorDto(problem ?? fallback);
+    }
 }

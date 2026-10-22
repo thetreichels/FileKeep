@@ -16,6 +16,7 @@ public sealed class StreamingVolumeBlobStore : IBlobStore, IDisposable
 {
     private readonly Action<string, byte[]> _postVolume;
     private readonly long _targetVolumeBytes;
+    private readonly Action<Exception>? _onFlushError;
     private readonly List<string> _bufferIds = new();
     private readonly List<byte[]> _bufferBlobs = new();
     private long _bufferBytes = 0;
@@ -35,20 +36,32 @@ public sealed class StreamingVolumeBlobStore : IBlobStore, IDisposable
     /// Creates a streaming store. <paramref name="postVolume"/> is called
     /// with (volumeIdHex, volumeBytes) for each completed volume.
     /// </summary>
-    public StreamingVolumeBlobStore(Action<string, byte[]> postVolume, long targetVolumeBytes = 100 * 1024 * 1024)
+    public StreamingVolumeBlobStore(Action<string, byte[]> postVolume, long targetVolumeBytes = 100 * 1024 * 1024,
+        Action<Exception>? onFlushError = null)
     {
         ArgumentNullException.ThrowIfNull(postVolume);
         if (targetVolumeBytes <= 0)
             throw new ArgumentOutOfRangeException(nameof(targetVolumeBytes));
         _postVolume = postVolume;
         _targetVolumeBytes = targetVolumeBytes;
+        _onFlushError = onFlushError;
     }
+
+    /// <summary>
+    /// The failure of the final flush attempted by <see cref="Dispose"/>,
+    /// if it failed (CX-2). Dispose must not throw, but the failure is
+    /// never silent anymore: it lands here and in the onFlushError
+    /// callback. A caller that flushes explicitly (the normal path)
+    /// sees the exception from Flush itself and this stays null.
+    /// </summary>
+    public Exception? DisposeFlushError { get; private set; }
 
     /// <summary>
     /// Creates a streaming store that posts volumes to an NNTP blob store.
     /// </summary>
-    public StreamingVolumeBlobStore(NntpBlobStore inner, long targetVolumeBytes = 100 * 1024 * 1024)
-        : this((id, bytes) => inner.PutVolume(id, bytes), targetVolumeBytes)
+    public StreamingVolumeBlobStore(NntpBlobStore inner, long targetVolumeBytes = 100 * 1024 * 1024,
+        Action<Exception>? onFlushError = null)
+        : this((id, bytes) => inner.PutVolume(id, bytes), targetVolumeBytes, onFlushError)
     {
     }
 
@@ -119,7 +132,14 @@ public sealed class StreamingVolumeBlobStore : IBlobStore, IDisposable
         if (_disposed)
             return;
         try { FlushBuffer(); }
-        catch { /* best effort on dispose */ }
+        catch (Exception ex)
+        {
+            // Best effort on dispose — but recorded, not swallowed (CX-2):
+            // a Dispose-only caller would otherwise lose the last volume
+            // without a trace.
+            DisposeFlushError = ex;
+            try { _onFlushError?.Invoke(ex); } catch { /* the callback must not break Dispose */ }
+        }
         _disposed = true;
     }
 }

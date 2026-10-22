@@ -69,8 +69,14 @@ public static class BackupDiscovery
                 if (root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String)
                     type = t.GetString();
                 if (root.TryGetProperty("created_utc", out var c) && c.ValueKind == JsonValueKind.String
-                    && DateTime.TryParse(c.GetString(), out var dt))
-                    createdUtc = dt;
+                    && DateTimeOffset.TryParse(c.GetString(),
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var dto))
+                    // P2-D7: manifests store UTC ("...Z"), but plain
+                    // DateTime.TryParse produced a LOCAL-Kind value that
+                    // consumers labeled UTC — discovered backups showed
+                    // created times shifted by the local offset.
+                    createdUtc = dto.UtcDateTime;
                 if (root.TryGetProperty("source", out var s) && s.ValueKind == JsonValueKind.String)
                     source = s.GetString();
             }

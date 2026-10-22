@@ -64,6 +64,31 @@ public static class Dashboard
         });
         var app = builder.Build();
 
+        // CX-3: a malformed request body used to escape ~15 operations
+        // routes as a raw JsonException → bare 500 with an empty body,
+        // and the page showed an empty error message. Body-parse
+        // failures are client errors: translate them into the standard
+        // 400 ErrorDto shape, once, for every /api route.
+        app.Use(async (ctx, next) =>
+        {
+            try
+            {
+                await next();
+            }
+            catch (Exception ex) when (
+                (ex is JsonException || ex is BadHttpRequestException) &&
+                ctx.Request.Path.StartsWithSegments("/api"))
+            {
+                if (!ctx.Response.HasStarted)
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    await Results.Json(
+                        new ErrorDto("The request body was not valid JSON."),
+                        statusCode: StatusCodes.Status400BadRequest).ExecuteAsync(ctx);
+                }
+            }
+        });
+
         app.MapGet("/", (HttpContext ctx) =>
         {
             // The page must never come from a browser/WebView2 cache: a cached
@@ -145,7 +170,7 @@ public static class Dashboard
         app.MapGet("/api/browse-folders", (string? path) =>
         {
             var (status, payload) = DashboardApi.BrowseFolders(path);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/jobs/{name}/run", (string name, HttpRequest request) =>
@@ -188,7 +213,7 @@ public static class Dashboard
             }
             string repoPath = GetBodyString(body, "repoPath");
             var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sources, repoPath, config);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         // Repo-scoped endpoints only accept repos belonging to configured
@@ -196,13 +221,13 @@ public static class Dashboard
         app.MapGet("/api/backups", (string repo) =>
         {
             var (status, payload) = DashboardApi.GetBackups(config, repo, restoreSession);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/backups/remote", (string repo) =>
         {
             var (status, payload) = DashboardApi.GetRemoteBackups(config, repo, restoreSession);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/backups/remote/import", async (string repo, HttpRequest request) =>
@@ -214,13 +239,13 @@ public static class Dashboard
                 ? el.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray()
                 : Array.Empty<string>();
             var (status, payload) = DashboardApi.ImportRemoteBackups(config, repo, ids, restoreSession);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/log", (string repo, int lines = 100) =>
         {
             var (status, payload) = DashboardApi.GetLog(config, repo, lines);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         // Operations: manual actions for every CLI capability, run in the
@@ -233,7 +258,7 @@ public static class Dashboard
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
             var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/smb-sync", async (HttpRequest request) =>
@@ -243,8 +268,8 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string share = GetBodyString(body, "share");
             string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
-            var (status, payload) = DashboardApi.StartSmbSync(config, share, user);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.StartSmbSync(config, share, user, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
@@ -254,8 +279,8 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
-            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/retention-check", async (HttpRequest request) =>
@@ -265,7 +290,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
             var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, dryRun);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/diagnose", async (HttpRequest request) =>
@@ -275,7 +300,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string host = GetBodyString(body, "host");
             var (status, payload) = DashboardApi.RunDiagnose(host);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/nntp-test", async (HttpRequest request) =>
@@ -289,7 +314,7 @@ public static class Dashboard
             string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
             bool ssl = body.TryGetProperty("ssl", out var s) && s.GetBoolean();
             var (status, payload) = DashboardApi.TestNntpConnection(host, port, user, pass, ssl);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/smb-test", async (HttpRequest request) =>
@@ -301,7 +326,7 @@ public static class Dashboard
             string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
             string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.TestSmbConnection(share, user, pass);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/file-exists", async (HttpRequest request) =>
@@ -317,19 +342,19 @@ public static class Dashboard
         app.MapGet("/api/operations/usb-drives", () =>
         {
             var (status, payload) = DashboardApi.ListUsbDrives();
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/removable-drives", () =>
         {
             var (status, payload) = DashboardApi.ListRemovableDrives();
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/drives", () =>
         {
             var (status, payload) = DashboardApi.ListPhysicalDrives();
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/restore", async (HttpRequest request) =>
@@ -345,8 +370,11 @@ public static class Dashboard
             string mergePolicyRaw = body.TryGetProperty("mergePolicy", out var mpol) ? mpol.GetString() ?? "" : "";
             // Unknown/absent policy falls back to Overwrite (classic behavior).
             UsenetBackup.Core.MergePolicyInfo.TryParse(mergePolicyRaw, out var mergePolicy);
-            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            // P2-C8: the host token lets a service stop interrupt the
+            // restore between files/chunks so its outcome gets logged
+            // instead of the process dying mid-write in silence.
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession, ct, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/backup-now", async (HttpRequest request) =>
@@ -356,14 +384,14 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string repo = GetBodyString(body, "repo");
             string sourceDir = GetBodyString(body, "sourceDir");
-            var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/nzb", (string repo, string backupId) =>
         {
             var (status, payload, fileName) = DashboardApi.GenerateNzb(config, repo, backupId, restoreSession);
-            if (status != 200) return Results.BadRequest(payload);
+            if (status != 200) return Results.Json(payload, statusCode: status);
             return Results.File((byte[])payload, "application/x-nzb", fileName);
         });
 
@@ -378,7 +406,7 @@ public static class Dashboard
             string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
             await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
             var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, tmp, restoreSession);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/disk-backup", async (HttpRequest request) =>
@@ -391,8 +419,8 @@ public static class Dashboard
             string imageName = body.TryGetProperty("imageName", out var n) ? n.GetString() ?? "disk.img" : "disk.img";
             string? smbShare = body.TryGetProperty("smbShare", out var s) ? s.GetString() : null;
             bool sparse = !body.TryGetProperty("sparse", out var sp) || sp.GetBoolean();
-            var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName, smbShare, sparse);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName, smbShare, sparse, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/disk-restore", async (HttpRequest request) =>
@@ -406,8 +434,8 @@ public static class Dashboard
             bool confirmed = body.TryGetProperty("confirmed", out var c) && c.GetBoolean();
             string? deviceModel = body.TryGetProperty("deviceModel", out var dm) ? dm.GetString() : null;
             long? deviceSizeBytes = body.TryGetProperty("deviceSizeBytes", out var ds) && ds.TryGetInt64(out long s) ? s : null;
-            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes, ct, scheduler);
+            return Results.Json(payload, statusCode: status);
         });
 
 
@@ -429,8 +457,10 @@ public static class Dashboard
             string? sourceDir = body.TryGetProperty("sourceDir", out var sd) ? sd.GetString() : null;
             string bootMode = body.TryGetProperty("bootMode", out var bm) ? bm.GetString() ?? "Both" : "Both";
             int imageSizeMB = body.TryGetProperty("imageSizeMB", out var ism) && ism.ValueKind == JsonValueKind.Number ? ism.GetInt32() : 4096;
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB);
-            return status == 202 ? Results.Json(payload, statusCode: 202) : Results.BadRequest(payload);
+            string? expectedModel = body.TryGetProperty("expectedModel", out var em) && em.ValueKind == JsonValueKind.String ? em.GetString() : null;
+            long? expectedSizeBytes = body.TryGetProperty("expectedSizeBytes", out var es) && es.ValueKind == JsonValueKind.Number ? es.GetInt64() : null;
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB, expectedModel, expectedSizeBytes);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/winre-build/cancel", (HttpRequest request) =>
@@ -438,7 +468,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.CancelWinReBuild();
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
 
@@ -450,25 +480,7 @@ public static class Dashboard
                 config.DashboardBind,
                 // Never expose the encrypted password blob to the UI.
                 // Snapshot under JobsLock: UpsertJob/DeleteJob mutate concurrently.
-                config.SnapshotJobs().Select(j => new ConfigJobDto(
-                    j.Name,
-                    j.Repo,
-                    j.Source,
-                    j.Schedule,
-                    j.Mode,
-                    j.JobType,
-                    j.BackupPrivilege,
-                    j.Vss,
-                    j.AutoUpload,
-                    j.Targets,
-                    j.SmbShare,
-                    j.SmbUser,
-                    !string.IsNullOrEmpty(j.SmbPasswordProtected),
-                    j.AutoVerify,
-                    j.VerificationMode,
-                    j.RedundancyMode,
-                    j.Sources,
-                    j.Paused)).ToList(),
+                config.SnapshotJobs().Select(DashboardApi.ToDto).ToList(),
                 // Never expose the encrypted password blob to the UI.
                 config.Nntp == null ? null : new ConfigNntpDto(
                     config.Nntp.Host,
@@ -477,7 +489,7 @@ public static class Dashboard
                     config.Nntp.Ssl,
                     config.Nntp.Connections,
                     config.Nntp.HasPassword),
-                config.NntpProviders.Select(p => new ConfigNntpProviderDto(
+                config.SnapshotProviders().Select(p => new ConfigNntpProviderDto(
                     p.Host,
                     p.Port,
                     p.Username,
@@ -488,23 +500,7 @@ public static class Dashboard
                     p.HasPassword)).ToList(),
                 // Backup locations (Usenet providers + SMB shares). Never
                 // expose encrypted password blobs to the UI.
-                config.Locations.Select(l => new ConfigLocationDto(
-                    l.Name,
-                    l.Type,
-                    l.Host,
-                    l.Port,
-                    l.Username,
-                    l.Ssl,
-                    l.Connections,
-                    l.Newsgroup,
-                    l.RetentionDays,
-                    l.Share,
-                    l.SmbUser,
-                    l.HasPassword,
-                    config.SnapshotJobs()
-                        .Where(j => j.EffectiveTargets.Any(t =>
-                            t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
-                        .Select(j => j.Name).ToList())).ToList())));
+                config.SnapshotLocations().Select(l => DashboardApi.ToDto(config, l)).ToList())));
 
         // Disk usage for disk-backed locations (USB drives, network
         // shares), fetched by the locations card after it renders —
@@ -512,7 +508,7 @@ public static class Dashboard
         app.MapGet("/api/config/location-disk", () =>
         {
             var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
@@ -543,7 +539,10 @@ public static class Dashboard
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new ErrorDto(ex.Message));
+                // CX-4: this is a server-side failure (tracker read), not
+                // a client error — 500, not 400.
+                return Results.Json(new ErrorDto(ex.Message),
+                    statusCode: StatusCodes.Status500InternalServerError);
             }
         });
 
@@ -565,7 +564,7 @@ public static class Dashboard
             if (job is null)
                 return Results.BadRequest(new ErrorDto("Empty job."));
             var (status, payload) = DashboardApi.UpsertJob(config, scheduler, configPath, job, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapDelete("/api/config/jobs/{name}", (string name, HttpRequest request) =>
@@ -573,7 +572,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, name, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/locations", async (HttpRequest request) =>
@@ -586,7 +585,7 @@ public static class Dashboard
             if (loc is null)
                 return Results.BadRequest(new ErrorDto("Empty location."));
             var (status, payload) = DashboardApi.UpsertLocation(config, configPath, loc, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapDelete("/api/config/locations/{name}", (string name, HttpRequest request) =>
@@ -594,7 +593,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteLocation(config, scheduler, configPath, name, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/jobs/{name}/pause", async (string name, HttpRequest request) =>
@@ -606,7 +605,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             bool paused = body.TryGetProperty("paused", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.True;
             var (status, payload) = DashboardApi.SetJobPaused(config, scheduler, configPath, name, paused, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/jobs/{name}/attach-location", async (string name, HttpRequest request) =>
@@ -620,7 +619,7 @@ public static class Dashboard
             if (string.IsNullOrWhiteSpace(location))
                 return Results.BadRequest(new ErrorDto("location is required."));
             var (status, payload) = DashboardApi.AttachLocation(config, scheduler, configPath, name, location, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/locations/{name}/test", (string name, HttpRequest request) =>
@@ -628,7 +627,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.TestLocation(config, name);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/locations/{name}/scan", (string name, HttpRequest request) =>
@@ -636,7 +635,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.ScanLocationForBackups(config, name, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/vault/scan-usb", async (HttpRequest request) =>
@@ -648,7 +647,7 @@ public static class Dashboard
                 ? el.GetString() ?? ""
                 : "";
             var (status, payload) = DashboardApi.ScanUsbForBackups(config, drivePath, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/vault/import-discovered", async (HttpRequest request) =>
@@ -666,7 +665,7 @@ public static class Dashboard
                 ? sEl.GetString() ?? ""
                 : "";
             var (status, payload) = DashboardApi.ImportDiscoveredBackup(config, repo, backupId, sourcePath, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/nntp", async (HttpRequest request) =>
@@ -679,7 +678,7 @@ public static class Dashboard
             if (nntp is null)
                 return Results.BadRequest(new ErrorDto("Empty NNTP config."));
             var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/nntp-providers", async (HttpRequest request) =>
@@ -692,13 +691,13 @@ public static class Dashboard
             if (providers is null)
                 return Results.BadRequest(new ErrorDto("Empty providers list."));
             var (status, payload) = DashboardApi.UpdateNntpProviders(config, scheduler, configPath, providers, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/config/passphrase-status", (HttpRequest request) =>
         {
             var (status, payload) = DashboardApi.GetPassphraseStatus(config);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/passphrase", async (HttpRequest request) =>
@@ -711,7 +710,7 @@ public static class Dashboard
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
             var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/protection/profile", () =>
@@ -737,7 +736,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("Empty profile."));
             var (status, payload) = DashboardApi.SetProtectionProfile(config, configPath, profile, log);
             if (status != 200)
-                return Results.BadRequest(payload);
+                return Results.Json(payload, statusCode: status);
             return Results.Content(FileKeepJsonOptions.Serialize((ProtectionProfileResponse)payload,
                 FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileResponse),
                 "application/json");
@@ -758,7 +757,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("Empty request."));
             var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log);
             if (status != 200)
-                return Results.BadRequest(payload);
+                return Results.Json(payload, statusCode: status);
             return Results.Content(FileKeepJsonOptions.Serialize((AddYubiKeyResponse)payload,
                 FileKeepJsonOptions.Default, FileKeepJsonContext.Default.AddYubiKeyResponse),
                 "application/json");
@@ -769,7 +768,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.SetupPhoneTotp(config, configPath, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/protection/phone/verify", async (HttpRequest request) =>
@@ -780,14 +779,16 @@ public static class Dashboard
             try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
-            var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code, configPath, log);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapGet("/api/yubikey/status", () =>
         {
             var (status, payload) = DashboardApi.GetYubiKeyStatus(yubiKeyProvider);
-            return Results.Json(payload);
+            // SF-23: honor the status — a provider failure must reach
+            // the wire as an error, not as a 200 "no devices" body.
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/yubikey/program-spare", (HttpRequest request) =>
@@ -795,7 +796,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.ProgramSpareKey(config, configPath, yubiKeyProvider, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/yubikey/link", async (HttpRequest request) =>
@@ -813,7 +814,7 @@ public static class Dashboard
             // (program + wrap, 60s timeout each).
             var (status, payload) = DashboardApi.LinkYubiKey(config, configPath, body?.Slot, yubiKeyProvider, log);
             if (status != 200)
-                return Results.BadRequest(payload);
+                return Results.Json(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkYubiKeyDto)payload, DashboardJsonContext.Default.OkYubiKeyDto),
                 "application/json");
@@ -835,7 +836,7 @@ public static class Dashboard
             // returned in this response only — never again.
             var (status, payload) = DashboardApi.SetupGeneratedSecret(config, configPath, body?.Slot, yubiKeyProvider, log);
             if (status != 200)
-                return Results.BadRequest(payload);
+                return Results.Json(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((YubiKeySetupGeneratedDto)payload, DashboardJsonContext.Default.YubiKeySetupGeneratedDto),
                 "application/json");
@@ -847,7 +848,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             // The touch blocks until the user presses the key (or 60s timeout).
             var (status, payload) = DashboardApi.UnlockRestoreSession(config, restoreSession, yubiKeyProvider, log);
-            return status == 200 ? Results.Json(payload) : Results.BadRequest(payload);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/restore/unlock-secret", async (HttpRequest request) =>
@@ -860,7 +861,23 @@ public static class Dashboard
             string? secret = body.TryGetProperty("secret", out var s) ? s.GetString() : null;
             var (status, payload) = DashboardApi.UnlockRestoreSessionWithSecret(config, restoreSession, secret, log);
             if (status != 200)
-                return Results.BadRequest(payload);
+                return Results.Json(payload, statusCode: status);
+            return Results.Content(
+                JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
+                "application/json");
+        });
+
+        app.MapPost("/api/restore/unlock-phone", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
+            var (status, payload) = DashboardApi.UnlockRestoreSessionWithPhone(config, restoreSession, code, log);
+            if (status != 200)
+                return Results.Json(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
                 "application/json");

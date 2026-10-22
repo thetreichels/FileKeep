@@ -11,18 +11,23 @@ namespace UsenetBackup.Service;
 /// </summary>
 public sealed class YubicoSdkYubiKeyProvider : IYubiKeyProvider
 {
+    /// <summary>
+    /// Serializes device attempts (MU-14): a timed-out challenge keeps
+    /// its blocking SDK call running against the key, and a second
+    /// attempt started on top of it races two sessions on one device.
+    /// Calls fail fast while an earlier attempt is still outstanding.
+    /// </summary>
+    private readonly SemaphoreSlim _attemptGate = new(1, 1);
+
     public IReadOnlyList<YubiKeyInfo> FindDevices()
     {
-        try
-        {
-            return YubiKeyDevice.FindAll()
-                .Select(d => new YubiKeyInfo($"{d.FormFactor} (serial {d.SerialNumber})"))
-                .ToList();
-        }
-        catch
-        {
-            return Array.Empty<YubiKeyInfo>();
-        }
+        // MU-14: detection failures used to be swallowed into an empty
+        // list, so a broken HID stack reported as "no key detected."
+        // Let the SDK exception propagate — callers distinguish "no
+        // devices" (empty list) from "detection failed" (throw).
+        return YubiKeyDevice.FindAll()
+            .Select(d => new YubiKeyInfo($"{d.FormFactor} (serial {d.SerialNumber})"))
+            .ToList();
     }
 
     public byte[] CalculateHmacSha1(byte[] challenge, int slot, TimeSpan timeout)
@@ -33,6 +38,15 @@ public sealed class YubicoSdkYubiKeyProvider : IYubiKeyProvider
 
         IYubiKeyDevice? device = FindFirstDevice()
             ?? throw new InvalidOperationException("No YubiKey detected.");
+
+        // MU-14: the SDK call below can't be cancelled once started —
+        // on timeout it keeps running against the device. Fail fast
+        // instead of stacking a second session on the same key; the
+        // outstanding attempt releases the gate when it ends.
+        if (!_attemptGate.Wait(0))
+            throw new InvalidOperationException(
+                "A YubiKey attempt is still in progress (waiting for a touch). " +
+                "Let it finish or time out before trying again.");
 
         // The SDK blocks indefinitely waiting for a touch; race it against
         // the timeout so the dashboard unlock endpoint can't hang forever.
@@ -52,7 +66,7 @@ public sealed class YubicoSdkYubiKeyProvider : IYubiKeyProvider
                 response = resp.ToArray();
             }
             catch (Exception ex) { error = ex; }
-            finally { done.Set(); }
+            finally { done.Set(); _attemptGate.Release(); }
         });
         thread.IsBackground = true;
         thread.Start();
@@ -78,19 +92,32 @@ public sealed class YubicoSdkYubiKeyProvider : IYubiKeyProvider
         IYubiKeyDevice? device = FindFirstDevice()
             ?? throw new InvalidOperationException("No YubiKey detected.");
 
-        using var otp = new OtpSession(device);
-        var op = otp.ConfigureChallengeResponse(yubiSlot)
-            .UseHmacSha1()
-            .UseKey(secret);
-        if (requireTouch)
-            op.UseButton(true);
-        op.Execute();
+        if (!_attemptGate.Wait(0))
+            throw new InvalidOperationException(
+                "A YubiKey attempt is still in progress (waiting for a touch). " +
+                "Let it finish or time out before programming a slot.");
+        try
+        {
+            using var otp = new OtpSession(device);
+            var op = otp.ConfigureChallengeResponse(yubiSlot)
+                .UseHmacSha1()
+                .UseKey(secret);
+            if (requireTouch)
+                op.UseButton(true);
+            op.Execute();
+        }
+        finally { _attemptGate.Release(); }
     }
 
     private static IYubiKeyDevice? FindFirstDevice()
     {
+        // MU-14: an enumeration FAILURE is not "no key" — surface it.
         try { return YubiKeyDevice.FindAll().FirstOrDefault(); }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"YubiKey detection failed: {ex.Message}", ex);
+        }
     }
 
     private static Slot ToSlot(int slot) => slot switch

@@ -24,6 +24,32 @@ public sealed class StreamingVolumeBlobStoreTests : IDisposable
     }
 
     [Fact]
+    public void Dispose_FailedFinalFlush_IsRecordedNotSwallowed()
+    {
+        // CX-2: Dispose used to swallow a failed final flush silently —
+        // a Dispose-only caller lost the last volume without a trace.
+        Exception? reported = null;
+        var store = new StreamingVolumeBlobStore(
+            (id, bytes) => throw new InvalidOperationException("post rejected"),
+            targetVolumeBytes: 1024 * 1024,
+            onFlushError: ex => reported = ex);
+        string chunkId = new string('a', 64);
+        store.Put(chunkId, new byte[100]);
+        store.Dispose(); // must not throw
+        Assert.NotNull(store.DisposeFlushError);
+        Assert.Contains("post rejected", store.DisposeFlushError!.Message);
+        Assert.Same(store.DisposeFlushError, reported);
+
+        // The explicit-Flush path still throws to its caller as before.
+        var store2 = new StreamingVolumeBlobStore(
+            (id, bytes) => throw new InvalidOperationException("post rejected"),
+            targetVolumeBytes: 1024 * 1024);
+        store2.Put(chunkId, new byte[100]);
+        Assert.Throws<InvalidOperationException>(() => store2.Flush());
+        store2.Dispose();
+    }
+
+    [Fact]
     public void Put_PacksIntoVolumes_WhenBufferFull()
     {
         var posted = new List<(string Id, byte[] Bytes)>();

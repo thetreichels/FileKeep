@@ -113,6 +113,23 @@ if ($LASTEXITCODE -eq 0) {
 
 Write-Host "Starting service..."
 sc.exe start $ServiceName | Out-Null
+# P2-L5: verify the service actually reached Running — sc.exe start
+# returning (or even succeeding) only means the start was REQUESTED.
+# This used to print "Installed and started" unconditionally, so a
+# service that failed on launch (bad config, missing binary) reported
+# a successful install.
+$svcState = $null
+for ($i = 0; $i -lt 15; $i++) {
+    Start-Sleep 1
+    $svcState = (Get-Service $ServiceName -ErrorAction SilentlyContinue).Status
+    if ($svcState -eq 'Running') { break }
+}
+if ($svcState -ne 'Running') {
+    Write-Host ""
+    Write-Host "ERROR: The service did not start (state: $svcState). The install is NOT complete."
+    Write-Host "Service log: $(Join-Path $InstallDir 'service.log')"
+    exit 1
+}
 Write-Host ""
 Write-Host "Installed and started. Dashboard: http://127.0.0.1:15789/ (loopback only)"
 Write-Host "Service log: $(Join-Path $InstallDir 'service.log')"

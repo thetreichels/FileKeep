@@ -17,7 +17,33 @@ static string DefaultConfigPath()
     return Path.Combine(AppContext.BaseDirectory, "service.json");
 }
 
-string? configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
+// NS-7: a Windows service's stderr is discarded, so a startup failure
+// that only writes there is an invisible total outage (no dashboard, no
+// scheduler, nothing in service.log). Every fatal startup error ALSO
+// goes to service.log beside the config (falling back to the temp dir
+// when even the config directory is unreachable).
+void WriteStartupError(string? cfgPath, string what, Exception ex)
+{
+    string line = $"[{DateTime.Now:O}] FATAL startup: {what}: {ex.Message}{Environment.NewLine}";
+    Console.Error.WriteLine($"error: {what}: {ex.Message}");
+    string[] candidates =
+    {
+        cfgPath is not null
+            ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(cfgPath)) ?? ".", "service.log")
+            : "",
+        Path.Combine(Path.GetTempPath(), "FileKeep-service-startup-error.log"),
+    };
+    foreach (string candidate in candidates)
+    {
+        if (candidate.Length == 0) continue;
+        try { File.AppendAllText(candidate, line); return; } catch { /* try next */ }
+    }
+}
+
+string? configPath = null;
+try
+{
+    configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
 
 // First-run: if the config doesn't exist, seed it from the example file
 // installed in the docs subdirectory (Program Files\FileKeep\docs).
@@ -38,6 +64,12 @@ if (!File.Exists(configPath))
         Console.WriteLine($"Created default config at {configPath} from example.");
     }
 }
+}
+catch (Exception ex)
+{
+    WriteStartupError(configPath, "could not prepare the config file", ex);
+    return 2;
+}
 bool consoleMode = args.Contains("--console") || !OperatingSystem.IsWindows();
 
 ServiceConfig config;
@@ -47,7 +79,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"error: {ex.Message}");
+    WriteStartupError(configPath, $"could not load config '{configPath}'", ex);
     return 2;
 }
 
@@ -65,7 +97,9 @@ void Log(string message)
         Console.WriteLine(message);
 }
 
-var scheduler = new BackupScheduler(config, log: Log);
+UsenetBackup.Core.UsbDriveResolver.DiagnosticLog = Log; // MU-17: USB resolution errors reach the log
+var scheduler = new BackupScheduler(config, log: Log,
+    runStateFilePath: Path.Combine(logDir, "job-state.json"));
 
 Console.WriteLine(
     $"filekeep-service: {config.Jobs.Count} job(s); " +
@@ -90,9 +124,13 @@ return 0;
 
 async Task RunAllAsync(CancellationToken ct)
 {
-    await Task.WhenAll(
-        Dashboard.RunAsync(config, scheduler, configPath, ct, Log),
-        scheduler.RunAsync(ct));
+    // If either half dies, the whole service must die with it (SF-6) —
+    // a bare WhenAll would run the scheduler forever behind a dead
+    // dashboard while the host reports RUNNING.
+    await ServiceSupervisor.RunTogetherAsync(
+        "dashboard", t => Dashboard.RunAsync(config, scheduler, configPath, t, Log),
+        "scheduler", t => scheduler.RunAsync(t),
+        ct);
 }
 
 static string? ArgValue(string[] args, string name)

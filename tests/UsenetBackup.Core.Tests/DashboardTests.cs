@@ -28,6 +28,7 @@ public sealed class DashboardTests : IDisposable
         _repoDir = Path.Combine(_workDir, "repo");
         _srcDir = Path.Combine(_workDir, "src");
         Directory.CreateDirectory(_srcDir);
+        Directory.CreateDirectory(Path.Combine(_workDir, "share"));
         File.WriteAllBytes(Path.Combine(_srcDir, "a.txt"), "dash"u8.ToArray());
         BackupRepository.Init(_repoDir, Passphrase, 64 * 1024, 10_000).Dispose();
         _savedPassphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
@@ -44,11 +45,20 @@ public sealed class DashboardTests : IDisposable
     {
         DashboardBind = "127.0.0.1",
         DashboardPort = 15789,
+        // The job targets a local-folder share so runs really deliver.
+        // (It used to target a bare "nntp" with no providers configured
+        // and "succeed" vacuously — DL-3 removed that path; a
+        // provider-less run now fails, as it should.)
+        Locations = new List<BackupLocation>
+        {
+            new() { Name = "vault", Type = "smb",
+                    Share = Path.Combine(_workDir, "share") },
+        },
         Jobs = new List<BackupJobConfig>
         {
             new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
                     Schedule = "interval 60", Mode = "incremental", BackupPrivilege = false,
-                    Targets = new List<string> { "nntp" } },
+                    Targets = new List<string> { "vault" } },
         },
     };
 
@@ -370,11 +380,14 @@ public sealed class DashboardTests : IDisposable
         var job = config.Jobs[0];
         job.Targets = new List<string> { "vault" };
         job.SmbUser = "";
-        config.Locations.Add(new BackupLocation
+        config.Locations = new List<BackupLocation>
         {
-            Name = "vault", Type = "smb",
-            Share = @"\\nas\backups", SmbUser = @"nas\alice",
-        });
+            new()
+            {
+                Name = "vault", Type = "smb",
+                Share = @"\\nas\backups", SmbUser = @"nas\alice",
+            },
+        };
         var (share, user, _) = DashboardApi.ResolveRestoreSmb(config, _repoDir, null, null);
         Assert.Equal(@"\\nas\backups", share);
         Assert.Equal(@"nas\alice", user);
@@ -385,11 +398,14 @@ public sealed class DashboardTests : IDisposable
     {
         var config = MakeConfig();
         config.Jobs[0].Targets = new List<string> { "vault" };
-        config.Locations.Add(new BackupLocation
+        config.Locations = new List<BackupLocation>
         {
-            Name = "vault", Type = "smb",
-            Share = @"\\nas\backups", SmbUser = @"nas\alice",
-        });
+            new()
+            {
+                Name = "vault", Type = "smb",
+                Share = @"\\nas\backups", SmbUser = @"nas\alice",
+            },
+        };
         var (share, user, _) = DashboardApi.ResolveRestoreSmb(
             config, _repoDir, @"\\other\share", "bob");
         Assert.Equal(@"\\other\share", share);
@@ -426,6 +442,45 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void ScanUsbForBackups_ResultSerializesThroughDashboardContext()
+    {
+        // SF-1: ScanBackupsResultDto (and its nested DiscoveredBackupDto)
+        // were registered in NO source-gen context, so the trimmed
+        // service 500'd both vault scan endpoints while the in-process
+        // auto-scan worked. Serialize the real payload through the app's
+        // context, like the WALK-9 status test.
+        var config = MakeConfig();
+        var (status, payload) = DashboardApi.ScanUsbForBackups(config, _workDir);
+        Assert.Equal(200, status);
+        var dto = Assert.IsType<ScanBackupsResultDto>(payload);
+        string json = JsonSerializer.Serialize(dto,
+            DashboardJsonContext.Default.ScanBackupsResultDto);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal(_workDir, root.GetProperty("scannedPath").GetString());
+        Assert.Equal(0, root.GetProperty("found").GetInt32());
+        Assert.Equal(0, root.GetProperty("unknown").GetArrayLength());
+    }
+
+    [Fact]
+    public void WinRePrerequisites_SerializesThroughDashboardContext()
+    {
+        // SF-24: the prerequisites payload used to be a raw Dictionary —
+        // no source-gen metadata, a 500 trap for the first caller. (On
+        // this Linux sandbox the non-Windows branch answers.)
+        var dto = DashboardApi.CheckWinRePrerequisites();
+        Assert.IsType<WinRePrerequisitesDto>(dto);
+        string json = JsonSerializer.Serialize(dto,
+            DashboardJsonContext.Default.WinRePrerequisitesDto);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.False(root.GetProperty("isWindows").GetBoolean());
+        Assert.False(root.GetProperty("ready").GetBoolean());
+        Assert.Contains("Windows", root.GetProperty("error").GetString());
+        Assert.Equal(0, root.GetProperty("missing").GetArrayLength());
+    }
+
+    [Fact]
     public void ResolveRestoreUsb_NoUsbTarget_ReturnsNull()
     {
         // WALK-8: a job without a USB target has no USB chunk source.
@@ -447,6 +502,370 @@ public sealed class DashboardTests : IDisposable
             VolumeSerial = "DEADBEEF", UsbFolder = "FileKeep",
         });
         Assert.Null(DashboardApi.ResolveRestoreUsb(config, _repoDir));
+    }
+
+    // ---------- DL-6: disk restore stages chunks before writing ----------
+
+    private string MakeDiskImageBackup(byte[] imageBytes)
+    {
+        string disk = Path.Combine(_workDir, "disk.bin");
+        File.WriteAllBytes(disk, imageBytes);
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        return repo.BackupDiskImage(disk, "disk.img").BackupId;
+    }
+
+    private ServiceConfig MakeDiskRestoreConfig(string shareDir)
+    {
+        // The job targets an SMB location holding the backup's chunks —
+        // the credential home a disk restore resolves its source from.
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string> { "vault" };
+        config.Locations = new List<BackupLocation>
+        {
+            new() { Name = "vault", Type = "smb", Share = shareDir },
+        };
+        return config;
+    }
+
+    private static void CopyDir(string src, string dst)
+    {
+        foreach (string file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(dst, Path.GetRelativePath(src, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+    }
+
+    /// <summary>
+    /// Disk restores run in the background (202); their outcome lands in
+    /// the repo's operations log. Polls for this backup's terminal line
+    /// and returns "ok", "failed", or "timeout".
+    /// </summary>
+    private static string WaitForDiskRestoreOutcome(string repoDir, string backupId)
+    {
+        string logPath = Path.Combine(repoDir, "operations.log");
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (File.Exists(logPath))
+                {
+                    using var fs = new FileStream(logPath, FileMode.Open,
+                        FileAccess.Read, FileShare.ReadWrite);
+                    using var reader = new StreamReader(fs);
+                    foreach (string line in reader.ReadToEnd().Split('\n'))
+                    {
+                        if (!line.Contains("[manual-disk-restore]") || !line.Contains(backupId))
+                            continue;
+                        if (line.Contains("FAILED"))
+                            return "failed";
+                        if (line.Contains(" OK"))
+                            return "ok";
+                    }
+                }
+            }
+            catch (IOException) { /* log mid-append; retry */ }
+            Thread.Sleep(50);
+        }
+        return "timeout";
+    }
+
+    private string MakeSentinelTarget(byte[] imageBytes)
+    {
+        string target = Path.Combine(_workDir, "target.bin");
+        byte[] sentinel = new byte[imageBytes.Length];
+        Array.Fill(sentinel, (byte)0xAB);
+        File.WriteAllBytes(target, sentinel);
+        return target;
+    }
+
+    [Fact]
+    public void ImportDiscoveredBackup_VerifiesRegistersAndRefusesConflicts()
+    {
+        // P2-D3: the import used to raw-copy the manifest — unverified,
+        // unregistered (invisible in the vault list, yet filtered out of
+        // future discovery), and silently overwriting a local manifest.
+        // Source repo with a real backup.
+        File.WriteAllText(Path.Combine(_srcDir, "a.txt"), "alpha");
+        string backupId;
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            backupId = repo.BackupDirectory(_srcDir).BackupId;
+
+        // Destination repo: initialized, empty catalog.
+        string destRepo = Path.Combine(_workDir, "dest-repo");
+        using (var repo = BackupRepository.Init(destRepo, Passphrase))
+            Assert.Empty(repo.ListBackups());
+        var config = MakeConfig();
+        config.Jobs[0].Repo = destRepo;
+
+        var (status, _) = DashboardApi.ImportDiscoveredBackup(config, destRepo, backupId, _repoDir);
+        Assert.Equal(200, status);
+        using (var repo = BackupRepository.Open(destRepo, Passphrase))
+            Assert.Contains(repo.ListBackups(), b => b.BackupId == backupId);
+
+        // Idempotent re-import of the identical manifest: still 200.
+        var (again, _) = DashboardApi.ImportDiscoveredBackup(config, destRepo, backupId, _repoDir);
+        Assert.Equal(200, again);
+
+        // A tampered discovered manifest (content changed, hash stale)
+        // is refused and changes nothing.
+        string shareDir = Path.Combine(_workDir, "share-tampered");
+        CopyDir(_repoDir, shareDir);
+        string tamperedPath = Path.Combine(shareDir, "manifests", backupId + ".json");
+        string json = File.ReadAllText(tamperedPath).Replace("alpha-src", "evil-src");
+        if (json == File.ReadAllText(tamperedPath))
+            json = json.Replace("\"source\"", "\"sourceX\"");
+        File.WriteAllText(tamperedPath, json);
+        string destRepo2 = Path.Combine(_workDir, "dest-repo2");
+        using (var repo = BackupRepository.Init(destRepo2, Passphrase)) { }
+        config.Jobs[0].Repo = destRepo2;
+        var (badStatus, _) = DashboardApi.ImportDiscoveredBackup(config, destRepo2, backupId, shareDir);
+        Assert.Equal(400, badStatus);
+        Assert.False(File.Exists(Path.Combine(destRepo2, "manifests", backupId + ".json")));
+
+        // A DIFFERENT valid manifest under the same ID (re-stamped with
+        // the repo key, as a stale share copy would be) must not replace
+        // the local one: 409.
+        string shareDir2 = Path.Combine(_workDir, "share-restamped");
+        CopyDir(_repoDir, shareDir2);
+        string restampedPath = Path.Combine(shareDir2, "manifests", backupId + ".json");
+        var alt = System.Text.Json.JsonSerializer.Deserialize(
+            File.ReadAllText(restampedPath),
+            UsenetBackup.Core.Json.FileKeepJsonContext.Default.BackupManifest)!;
+        alt.Source = "somewhere-else";
+        alt.RootSha256 = alt.ComputeRootHash();
+        File.WriteAllText(restampedPath, System.Text.Json.JsonSerializer.Serialize(alt,
+            UsenetBackup.Core.Json.FileKeepJsonContext.Default.BackupManifest));
+        config.Jobs[0].Repo = destRepo;
+        var (conflict, _) = DashboardApi.ImportDiscoveredBackup(config, destRepo, backupId, shareDir2);
+        Assert.Equal(409, conflict);
+    }
+
+    [Fact]
+    public void StartDiskRestore_SameTargetAlreadyRestoring_Refused409()
+    {
+        // P2-C5: two restores writing one device interleaved chunk
+        // writes and left a spliced image. The second start must be
+        // refused while the target is claimed — and must not touch it.
+        byte[] imageBytes = new byte[50_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+        string target = MakeSentinelTarget(imageBytes);
+        byte[] sentinel = File.ReadAllBytes(target);
+        string shareDir = Path.Combine(_workDir, "share");
+        CopyDir(_repoDir, shareDir);
+        var config = MakeDiskRestoreConfig(shareDir);
+
+        string key = DashboardApi.DiskRestoreTargetKey(target);
+        Assert.True(DashboardApi.TryClaimRestoreTarget(key));
+        try
+        {
+            var (status, payload) = DashboardApi.StartDiskRestore(
+                config, _repoDir, backupId, target, confirmed: true);
+            Assert.Equal(409, status);
+            Assert.Contains("already writing", ((ErrorDto)payload).Error);
+            Assert.Equal(sentinel, File.ReadAllBytes(target));
+        }
+        finally
+        {
+            DashboardApi.ReleaseRestoreTarget(key);
+        }
+
+        // Released: a fresh start is accepted and completes.
+        var (okStatus, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true);
+        Assert.Equal(202, okStatus);
+        Assert.Equal("ok", WaitForDiskRestoreOutcome(_repoDir, backupId));
+        Assert.Equal(imageBytes, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void StartRestore_SameDestinationAlreadyRestoring_Refused409()
+    {
+        string dest = Path.Combine(_workDir, "restore-out");
+        var config = MakeConfig();
+        string key = DashboardApi.FileRestoreTargetKey(dest);
+        Assert.True(DashboardApi.TryClaimRestoreTarget(key));
+        try
+        {
+            var (status, payload) = DashboardApi.StartRestore(
+                config, _repoDir, "somebackup", dest,
+                UsenetBackup.Core.MergePolicy.Overwrite);
+            Assert.Equal(409, status);
+            Assert.Contains("already writing", ((ErrorDto)payload).Error);
+        }
+        finally
+        {
+            DashboardApi.ReleaseRestoreTarget(key);
+        }
+    }
+
+    [Fact]
+    public void StartDiskRestore_CorruptLocalChunk_NoSource_RefusesBeforeWriting()
+    {
+        // P2-V1 (DL-6 residual): with no banked location resolved, the
+        // staging proof was existence-only — a present-but-corrupt local
+        // chunk passed it and the restore died mid-write, target partly
+        // overwritten. The proof must content-verify in that case.
+        byte[] imageBytes = new byte[2_000_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+
+        string[] chunks;
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            chunks = repo.LoadManifest(backupId).Files[0].Chunks.ToArray();
+        Assert.True(chunks.Length >= 3, $"chunks={chunks.Length}");
+        string victim = Path.Combine(_repoDir, "chunks", chunks[1][..2], chunks[1][2..]);
+        byte[] blob = File.ReadAllBytes(victim);
+        blob[20] ^= 0xFF;
+        File.WriteAllBytes(victim, blob);
+
+        string target = MakeSentinelTarget(imageBytes);
+        byte[] before = File.ReadAllBytes(target);
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string>();
+        config.Locations = new List<BackupLocation>();
+        var (status, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true);
+        Assert.Equal(202, status);
+
+        string outcome = WaitForDiskRestoreOutcome(_repoDir, backupId);
+        Assert.StartsWith("failed", outcome);
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void StartDiskRestore_WithScheduler_WaitsForOperationGate()
+    {
+        // P2-C3: dashboard restores bypassed the scheduler's operation
+        // lock and ran concurrently with scheduled runs on the same
+        // repo. Gated, a restore started while another operation holds
+        // the gate must not write (or log an outcome) until it frees.
+        byte[] imageBytes = new byte[100_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+        string target = MakeSentinelTarget(imageBytes);
+        byte[] before = File.ReadAllBytes(target);
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string>();
+        config.Locations = new List<BackupLocation>();
+        var scheduler = new BackupScheduler(config);
+
+        using var hold = scheduler.BeginDashboardOperation();
+        var (status, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true, scheduler: scheduler);
+        Assert.Equal(202, status);
+
+        // While the gate is held: no outcome, target untouched.
+        Thread.Sleep(750);
+        Assert.Equal(before, File.ReadAllBytes(target));
+        string logPath = Path.Combine(_repoDir, "operations.log");
+        string logText = File.Exists(logPath) ? File.ReadAllText(logPath) : "";
+        Assert.DoesNotContain(" OK", logText.Split('\n').FirstOrDefault(
+            l => l.Contains("[manual-disk-restore]") && l.Contains(backupId) && !l.Contains("started")) ?? "");
+
+        hold.Dispose();
+        Assert.Equal("ok", WaitForDiskRestoreOutcome(_repoDir, backupId));
+        Assert.Equal(imageBytes, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void StartDiskRestore_PreCancelledToken_FailsLoggedBeforeWriting()
+    {
+        // P2-C8: dashboard restores ignored the host's stop token — a
+        // service stop killed them mid-write and the operations log
+        // showed only "started". With the token threaded, cancellation
+        // lands as a logged failure before the first chunk is written.
+        byte[] imageBytes = new byte[500_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+        string target = MakeSentinelTarget(imageBytes);
+        byte[] before = File.ReadAllBytes(target);
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string>();
+        config.Locations = new List<BackupLocation>();
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var (status, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true,
+            cancellationToken: cts.Token);
+        Assert.Equal(202, status);
+
+        string outcome = WaitForDiskRestoreOutcome(_repoDir, backupId);
+        Assert.StartsWith("failed", outcome);
+        Assert.Equal(before, File.ReadAllBytes(target));
+    }
+
+    [Fact]
+    public void StartDiskRestore_ChunksOnlyOnShare_PullsAndRestores()
+    {
+        // DL-6: the image's chunks live only on the job's SMB location
+        // (local staging pruned). The restore must pull them first and
+        // then write the image — byte-for-byte the original.
+        byte[] imageBytes = new byte[200_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+
+        string shareDir = Path.Combine(_workDir, "share");
+        CopyDir(_repoDir, shareDir);
+        Directory.Delete(Path.Combine(_repoDir, "chunks"), recursive: true);
+
+        string target = MakeSentinelTarget(imageBytes);
+        var config = MakeDiskRestoreConfig(shareDir);
+        var (status, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true);
+        Assert.Equal(202, status);
+
+        Assert.Equal("ok", WaitForDiskRestoreOutcome(_repoDir, backupId));
+        Assert.Equal(imageBytes, File.ReadAllBytes(target));
+    }
+
+    private static void DeleteChunk(string repoRoot, string chunkId)
+    {
+        string path = Path.Combine(repoRoot, "chunks", chunkId[..2], chunkId[2..]);
+        Assert.True(File.Exists(path));
+        File.Delete(path);
+    }
+
+    [Fact]
+    public void StartDiskRestore_ChunkMissingEverywhere_RefusesBeforeWriting()
+    {
+        // DL-6: the first chunks are staged locally, but a later chunk
+        // is missing from BOTH the local repo and the share. The restore
+        // must fail WITHOUT touching the target — not one byte written
+        // (it used to write the chunks it had and die on the missing
+        // one, leaving the target partly overwritten).
+        byte[] imageBytes = new byte[2_000_000];
+        Random.Shared.NextBytes(imageBytes);
+        string backupId = MakeDiskImageBackup(imageBytes);
+
+        string shareDir = Path.Combine(_workDir, "share");
+        CopyDir(_repoDir, shareDir);
+
+        string[] chunks;
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            chunks = repo.LoadManifest(backupId).Files[0].Chunks.ToArray();
+        Assert.True(chunks.Length >= 3, $"chunks={chunks.Length}");
+        // chunks[1]: gone from local AND share — unobtainable. (Chunk 0
+        // stays staged locally, so a restore that writes as it goes
+        // would overwrite the target's first bytes before dying here.)
+        DeleteChunk(_repoDir, chunks[1]);
+        DeleteChunk(shareDir, chunks[1]);
+        // The last chunk: pruned locally, still banked on the share.
+        DeleteChunk(_repoDir, chunks[^1]);
+
+        string target = MakeSentinelTarget(imageBytes);
+        byte[] before = File.ReadAllBytes(target);
+        var config = MakeDiskRestoreConfig(shareDir);
+        var (status, _) = DashboardApi.StartDiskRestore(
+            config, _repoDir, backupId, target, confirmed: true);
+        Assert.Equal(202, status);
+
+        Assert.Equal("failed", WaitForDiskRestoreOutcome(_repoDir, backupId));
+        Assert.Equal(before, File.ReadAllBytes(target));
     }
 
     [Fact]
@@ -504,6 +923,86 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void DeleteJob_PersistsViaTheSafeSavePath()
+    {
+        // SF-20: DeleteJob used to hand-roll serialization with a fixed
+        // shared ".tmp" name outside JobsLock. It now persists through
+        // ServiceConfig.Save (validated, locked, unique temp file) —
+        // observable here as: the delete round-trips AND no temp file
+        // of either naming scheme is left behind.
+        var config = MakeConfig();
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var (status, _) = DashboardApi.DeleteJob(config, scheduler, configPath, "docs");
+        Assert.Equal(200, status);
+        Assert.Empty(ServiceConfig.Load(configPath).Jobs);
+        Assert.False(File.Exists(configPath + ".tmp"));
+        Assert.Empty(Directory.GetFiles(_workDir, "service.json.tmp-*"));
+    }
+
+    private static System.Diagnostics.Process StartShell(string unixCmd, string windowsCmd)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        if (OperatingSystem.IsWindows()) psi.Arguments = "/c " + windowsCmd;
+        else { psi.ArgumentList.Add("-c"); psi.ArgumentList.Add(unixCmd); }
+        return System.Diagnostics.Process.Start(psi)!;
+    }
+
+    [Fact]
+    public void RunBuildProcess_StreamsOutputAndReportsExit()
+    {
+        var lines = new System.Collections.Concurrent.ConcurrentBag<string>();
+        using var proc = StartShell(
+            "echo hello-out; echo hello-err >&2; exit 3",
+            "echo hello-out & echo hello-err 1>&2 & exit /b 3");
+        var (timedOut, exitCode, stdErr, stdOut) =
+            DashboardApi.RunBuildProcess(proc, TimeSpan.FromMinutes(1), lines.Add);
+        Assert.False(timedOut);
+        Assert.Equal(3, exitCode);
+        Assert.Contains("hello-out", stdOut);
+        Assert.Contains("hello-err", stdErr);
+        Assert.Contains("hello-out", lines);
+    }
+
+    [Fact]
+    public void RunBuildProcess_HungChild_TimesOutAndIsKilled()
+    {
+        // SF-8: the old shape (read stdout to EOF, THEN WaitForExit)
+        // blocks here forever — a hung child never EOFs its stdout, so
+        // the 60-minute backstop could never fire.
+        using var proc = StartShell("sleep 60", "ping -n 61 127.0.0.1 >nul");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (timedOut, _, _, _) =
+            DashboardApi.RunBuildProcess(proc, TimeSpan.FromSeconds(1), _ => { });
+        sw.Stop();
+        Assert.True(timedOut);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20),
+            $"timeout path took {sw.Elapsed}");
+        Assert.True(proc.HasExited);
+    }
+
+    [Fact]
+    public void ReenableWinReAfterKilledBuild_NeverThrows_AlwaysStatesTheOutcome()
+    {
+        // SF-7: whatever the platform or tool state, the outcome must
+        // be a sentence the build status can show — silence about the
+        // host's WinRE state is the bug.
+        string note = DashboardApi.ReenableWinReAfterKilledBuild();
+        Assert.False(string.IsNullOrWhiteSpace(note));
+        if (!OperatingSystem.IsWindows())
+            Assert.Contains("reagentc /enable", note);
+    }
+
+    [Fact]
     public void ServiceConfig_RejectsAutoUploadWithoutProvider()
     {
         var config = new ServiceConfig
@@ -534,6 +1033,68 @@ public sealed class DashboardTests : IDisposable
             Nntp = new NntpConfig { Host = "news.example.com", Port = 119 },
         };
         config.Validate(); // should not throw
+    }
+
+    [Fact]
+    public void SaveResponses_NeverCarryPasswordBlobs()
+    {
+        // CX-6: UpsertJob/UpsertLocation used to return the raw config
+        // objects — DPAPI blobs included — while GET /api/config strips
+        // them by design. Both now return the DTO shape.
+        var config = MakeConfig();
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var loc = new BackupLocation
+        {
+            Name = "nas", Type = "smb",
+            Share = Path.Combine(_workDir, "share"), SmbUser = "joel",
+        };
+        var (locStatus, locPayload) = DashboardApi.UpsertLocation(config, configPath, loc);
+        Assert.Equal(200, locStatus);
+        var locDto = Assert.IsType<ConfigLocationDto>(locPayload);
+        Assert.False(locDto.HasPassword);
+
+        // Simulate a stored blob, then save again: the blob must not
+        // ride the response.
+        config.Locations.Single(l => l.Name == "nas").SmbPasswordProtected = "FAKE-DPAPI-BLOB";
+        var (locStatus2, locPayload2) = DashboardApi.UpsertLocation(config, configPath,
+            new BackupLocation
+            {
+                Name = "nas", Type = "smb",
+                Share = Path.Combine(_workDir, "share"), SmbUser = "joel",
+            });
+        Assert.Equal(200, locStatus2);
+        var locDto2 = Assert.IsType<ConfigLocationDto>(locPayload2);
+        Assert.True(locDto2.HasPassword);
+        string locJson = System.Text.Json.JsonSerializer.Serialize(locDto2,
+            UsenetBackup.Service.DashboardJsonContext.Default.ConfigLocationDto);
+        Assert.DoesNotContain("FAKE-DPAPI-BLOB", locJson);
+
+        var job = new BackupJobConfig
+        {
+            Name = "blob-job", Repo = _repoDir, Source = _srcDir,
+            Schedule = "interval 60", Mode = "full",
+            Targets = new List<string> { "nas" },
+        };
+        var (jobStatus, jobPayload) = DashboardApi.UpsertJob(config, scheduler, configPath, job);
+        Assert.Equal(200, jobStatus);
+        Assert.IsType<ConfigJobDto>(jobPayload);
+        config.Jobs.Single(j => j.Name == "blob-job").SmbPasswordProtected = "FAKE-JOB-BLOB";
+        var (jobStatus2, jobPayload2) = DashboardApi.UpsertJob(config, scheduler, configPath,
+            new BackupJobConfig
+            {
+                Name = "blob-job", Repo = _repoDir, Source = _srcDir,
+                Schedule = "interval 60", Mode = "full",
+                Targets = new List<string> { "nas" },
+            });
+        Assert.Equal(200, jobStatus2);
+        var jobDto2 = Assert.IsType<ConfigJobDto>(jobPayload2);
+        Assert.True(jobDto2.HasSmbPassword);
+        string jobJson = System.Text.Json.JsonSerializer.Serialize(jobDto2,
+            UsenetBackup.Service.DashboardJsonContext.Default.ConfigJobDto);
+        Assert.DoesNotContain("FAKE-JOB-BLOB", jobJson);
     }
 
     [Fact]

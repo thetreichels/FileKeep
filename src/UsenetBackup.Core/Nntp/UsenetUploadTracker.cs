@@ -100,6 +100,34 @@ public sealed class UsenetUploadTracker
 
     private void Save()
     {
+        // P2-C4 (same class as ChunkMessageIndex): multiple repository
+        // instances over one repo each hold their own tracker; a
+        // whole-file rewrite from a staler instance erased the other's
+        // upload records. Merge-on-save: re-read the current file and
+        // overlay this instance's records before writing.
+        try
+        {
+            if (File.Exists(_path))
+            {
+                var onDisk = JsonSerializer.Deserialize(
+                    File.ReadAllText(_path),
+                    FileKeepJsonContext.Default.ListUploadRecord);
+                if (onDisk is not null)
+                {
+                    var merged = new Dictionary<string, UploadRecord>();
+                    foreach (var r in onDisk)
+                        merged[$"{r.BackupId}@{r.ProviderHost}"] = r;
+                    foreach (var (key, record) in _records)
+                        merged[key] = record;
+                    _records = merged;
+                }
+            }
+        }
+        catch
+        {
+            // Unreadable current file: save this instance's records
+            // anyway; Load() reports corruption loudly at open time.
+        }
         string json = FileKeepJsonOptions.Serialize(_records.Values.ToList(),
             FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.ListUploadRecord);
         // Atomic write via temp file: a crash mid-write must not truncate

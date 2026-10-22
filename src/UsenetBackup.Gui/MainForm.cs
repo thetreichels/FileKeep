@@ -132,10 +132,60 @@ public class NativeBridge
 public class MainForm : Form
 {
     private readonly WebView2 _webView;
+
+    // P2-L13: set when the form starts closing; the async WebView2
+    // init checks it after every await and stops touching controls.
+    private bool _closing;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _trayToggleItem;
     private bool _trayEnabled;
-    private const string DashboardUrl = "http://127.0.0.1:15789/";
+    // P2-L14: resolved on EVERY use, not once at process start — a
+    // bind/port change in service.json (with the service restarted)
+    // used to leave a running GUI pointing at the old address until
+    // the GUI itself was relaunched.
+    private static string DashboardUrl => ResolveDashboardUrl();
+
+    /// <summary>
+    /// The dashboard address (MU-7): the service lets the bind/port be
+    /// changed in service.json, and the GUI used to hardcode the
+    /// defaults — after a port change it showed "check the service is
+    /// running / reinstall" forever while the healthy service listened
+    /// on the new port. Read the same config the service reads; fall
+    /// back to the defaults when it's missing or unreadable.
+    /// </summary>
+    private static string ResolveDashboardUrl()
+    {
+        const string fallback = "http://127.0.0.1:15789/";
+        try
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "FileKeep", "service.json");
+            if (!File.Exists(path))
+                return fallback;
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            string bind = root.TryGetProperty("dashboardBind", out var b)
+                && b.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? b.GetString() ?? "127.0.0.1" : "127.0.0.1";
+            int port = root.TryGetProperty("dashboardPort", out var p)
+                && p.ValueKind == System.Text.Json.JsonValueKind.Number
+                && p.TryGetInt32(out int pv) ? pv : 15789;
+            // Wildcard binds aren't dialable — loopback reaches them.
+            if (bind is "0.0.0.0" or "::" or "*" or "")
+                bind = "127.0.0.1";
+            // P2-L14: an IPv6 literal bind (::1, fe80::...) must be
+            // bracketed in a URL — unbracketed it is unparseable and
+            // the GUI blamed the service ("check it's running").
+            if (bind.Contains(':'))
+                bind = $"[{bind}]";
+            return $"http://{bind}:{port}/";
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
 
     private static string GuiSettingsPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -214,9 +264,13 @@ public class MainForm : Form
         };
         FormClosing += (s, e) =>
         {
+            // Flag FIRST: an in-flight InitializeWebViewAsync resumes
+            // after its awaits and must not touch the WebView while
+            // (or after) it is disposed here (P2-L13).
+            _closing = true;
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
-            _webView?.Dispose();
+            try { _webView?.Dispose(); } catch { /* closing anyway */ }
         };
     }
 
@@ -333,6 +387,11 @@ public class MainForm : Form
             Directory.CreateDirectory(userDataFolder);
             var env = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
             await _webView.EnsureCoreWebView2Async(env);
+            // P2-L13: the form may have closed while the runtime was
+            // initializing — the WebView is disposed by then and every
+            // touch below throws ObjectDisposedException on a dead form.
+            if (_closing || IsDisposed)
+                return;
 
             // Expose native dialogs to JavaScript as window.chrome.webview.hostObjects.fileKeep
             _webView.CoreWebView2.AddHostObjectToScript("fileKeep", new NativeBridge(this));

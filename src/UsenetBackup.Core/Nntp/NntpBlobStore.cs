@@ -96,6 +96,14 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// <summary>Number of connections in the pool, or 1 for single-client mode.</summary>
     public int ConnectionCount => _pool?.Size ?? 1;
 
+    /// <summary>
+    /// Journal scope for this store's provider (DL-2): journal rows are
+    /// only ever read and written under this key, so one provider's
+    /// uploads can't be mistaken for another's. Stores constructed
+    /// without a provider key share the legacy '' scope.
+    /// </summary>
+    private string JournalKey => _providerKey ?? "";
+
     private T UseClient<T>(Func<NntpClient, T> action)
     {
         if (_pool is not null)
@@ -119,11 +127,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         ValidateChunkId(chunkIdHex);
         string messageId = ResolveMessageId(chunkIdHex);
-        if (_journal.IsUploaded(messageId))
+        if (_journal.IsUploaded(messageId, JournalKey))
             return true;
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, chunkIdHex); // adopt into journal
+            _journal.RecordUpload(messageId, chunkIdHex, JournalKey); // adopt into journal
             return true;
         }
         return false;
@@ -165,7 +173,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         // Confirm the new article is retrievable before recording it —
         // otherwise we'd point the index at a phantom article.
         WaitForArticle(newMessageId);
-        _journal.RecordUpload(newMessageId, chunkIdHex);
+        _journal.RecordUpload(newMessageId, chunkIdHex, JournalKey);
         _messageIndex?.RecordNewIdentity(_providerKey!, chunkIdHex, newMessageId);
         return newMessageId;
     }
@@ -175,11 +183,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         ValidateChunkId(chunkIdHex);
         ArgumentNullException.ThrowIfNull(blob);
         string messageId = ArticleCodec.MakeMessageId(chunkIdHex, _repoId);
-        if (_journal.IsUploaded(messageId))
+        if (_journal.IsUploaded(messageId, JournalKey))
             return; // resume fast path: already posted
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, chunkIdHex); // server already has it
+            _journal.RecordUpload(messageId, chunkIdHex, JournalKey); // server already has it
             return;
         }
         string article = ArticleCodec.BuildArticle(chunkIdHex, _repoId, blob, _newsgroup, _from);
@@ -188,7 +196,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         // (propagation delay). Confirm via STAT with retry before journaling,
         // otherwise a subsequent download would fail with 430.
         WaitForArticle(messageId);
-        _journal.RecordUpload(messageId, chunkIdHex);
+        _journal.RecordUpload(messageId, chunkIdHex, JournalKey);
     }
 
     private string ResolveVolumeMessageId(string volumeIdHex)
@@ -210,11 +218,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         ValidateChunkId(volumeIdHex);
         ArgumentNullException.ThrowIfNull(volumeBytes);
         string messageId = ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
-        if (_journal.IsUploaded(messageId))
+        if (_journal.IsUploaded(messageId, JournalKey))
             return;
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, volumeIdHex);
+            _journal.RecordUpload(messageId, volumeIdHex, JournalKey);
             return;
         }
         string article = ArticleCodec.BuildVolumeArticleWithMessageId(
@@ -225,7 +233,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 "Lower volume_size_bytes in repo.json and re-run the upload.");
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
-        _journal.RecordUpload(messageId, volumeIdHex);
+        _journal.RecordUpload(messageId, volumeIdHex, JournalKey);
     }
 
     /// <summary>
@@ -246,11 +254,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             throw new ArgumentOutOfRangeException(nameof(partNumber),
                 "Volume parts start at 2 (part 1 is the NFO).");
         string messageId = ArticleCodec.MakeVolumeMessageId(volumeIdHex, _repoId);
-        if (_journal.IsUploaded(messageId))
+        if (_journal.IsUploaded(messageId, JournalKey))
             return; // resume fast path: already posted
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, volumeIdHex); // server already has it
+            _journal.RecordUpload(messageId, volumeIdHex, JournalKey); // server already has it
             return;
         }
         string article = ArticleCodec.BuildVolumeArticle(
@@ -261,7 +269,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 "Lower volume_size_bytes in repo.json and re-run the upload.");
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
-        _journal.RecordUpload(messageId, volumeIdHex);
+        _journal.RecordUpload(messageId, volumeIdHex, JournalKey);
     }
 
     /// <summary>
@@ -270,14 +278,15 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// Idempotent: the message-ID is derived from (backupId, repoId), so a
     /// repost is a STAT-confirmed no-op.
     /// </summary>
-    public void PostNfo(string backupId, string nfoText, string setName, int totalParts)
+    public void PostNfo(string backupId, string nfoText, string setName, int totalParts,
+        bool recheckServer = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(backupId);
         ArgumentException.ThrowIfNullOrEmpty(nfoText);
         ArgumentException.ThrowIfNullOrEmpty(setName);
         if (totalParts < 1)
             throw new ArgumentOutOfRangeException(nameof(totalParts));
-        PostNfo(backupId, batchIndex: 0, nfoText, setName, totalParts);
+        PostNfo(backupId, batchIndex: 0, nfoText, setName, totalParts, recheckServer);
     }
 
     /// <summary>
@@ -285,7 +294,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// article (distinct message ID per batch index) describing that
     /// batch's post set.
     /// </summary>
-    public void PostNfo(string backupId, int batchIndex, string nfoText, string setName, int totalParts)
+    public bool PostNfo(string backupId, int batchIndex, string nfoText, string setName, int totalParts,
+        bool recheckServer = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(backupId);
         ArgumentException.ThrowIfNullOrEmpty(nfoText);
@@ -293,18 +303,19 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         if (totalParts < 1)
             throw new ArgumentOutOfRangeException(nameof(totalParts));
         string messageId = ArticleCodec.MakeNfoMessageId(backupId, batchIndex, _repoId);
-        if (_journal.IsUploaded(messageId))
-            return;
+        if (!recheckServer && _journal.IsUploaded(messageId, JournalKey))
+            return false;
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, backupId);
-            return;
+            _journal.RecordUpload(messageId, backupId, JournalKey);
+            return false;
         }
         string article = ArticleCodec.BuildNfoArticle(
             nfoText, backupId, _repoId, _newsgroup, _from, setName, totalParts);
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
-        _journal.RecordUpload(messageId, backupId);
+        _journal.RecordUpload(messageId, backupId, JournalKey);
+        return true;
     }
 
     /// <summary>
@@ -347,7 +358,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 "Lower volume_size_bytes in repo.json and re-run.");
         UseClient(c => c.Post(article));
         WaitForArticle(newMessageId);
-        _journal.RecordUpload(newMessageId, volumeIdHex);
+        _journal.RecordUpload(newMessageId, volumeIdHex, JournalKey);
         _messageIndex?.RecordNewIdentity(_providerKey!, volumeIdHex, newMessageId);
         return newMessageId;
     }
@@ -400,22 +411,53 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// path and STAT fallback, like <see cref="Put"/>. The manifest post is
     /// journaled so interrupted uploads resume without re-posting.
     /// </summary>
-    public void PostManifest(string backupId, byte[] encryptedBlob)
+    /// <summary>
+    /// True when this store's provider has the backup's manifest
+    /// article — per the provider-scoped journal (posted by us, or
+    /// adopted via STAT). Lets the manifest index advertise only
+    /// backups actually delivered to THIS provider (SF-15).
+    /// </summary>
+    public bool IsManifestUploaded(string backupId)
+    {
+        string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
+        return _journal.IsUploaded(messageId, JournalKey);
+    }
+
+    /// <param name="recheckServer">
+    /// When true, the journal fast path is skipped and the server is
+    /// STAT-checked even for a journaled article (SF-10): the journal
+    /// never expires entries, so without a recheck an expired manifest
+    /// article would never be reposted by anything. Returns true when
+    /// an article was actually posted.
+    /// </param>
+    public bool PostManifest(string backupId, byte[] encryptedBlob, bool recheckServer = false)
     {
         ArgumentNullException.ThrowIfNull(encryptedBlob);
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
-        if (_journal.IsUploaded(messageId))
-            return; // resume fast path: already posted
+        if (!recheckServer && _journal.IsUploaded(messageId, JournalKey))
+            return false; // resume fast path: already posted
         if (UseClient(c => c.Stat(messageId)))
         {
-            _journal.RecordUpload(messageId, backupId); // server already has it
-            return;
+            _journal.RecordUpload(messageId, backupId, JournalKey); // server already has it
+            return false;
         }
         string article = ArticleCodec.BuildManifestArticle(
             backupId, _repoId, encryptedBlob, _newsgroup, _from);
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
-        _journal.RecordUpload(messageId, backupId);
+        _journal.RecordUpload(messageId, backupId, JournalKey);
+        return true;
+    }
+
+    /// <summary>
+    /// True when the server currently holds the backup's manifest
+    /// article (live STAT of its deterministic message ID — never the
+    /// journal, which cannot know about expiry).
+    /// </summary>
+    public bool ManifestExistsOnServer(string backupId)
+    {
+        string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
+        return UseClient(c => c.Stat(messageId));
     }
 
     /// <summary>
@@ -443,7 +485,15 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// previous (Usenet articles are immutable). The index lists all backup
     /// IDs for the given year-month. Returns the version number posted.
     /// </summary>
-    public int PostManifestIndex(string yearMonth, IReadOnlyList<string> backupIds)
+    /// <param name="forceNewVersion">
+    /// Post a fresh version even when the latest has identical content.
+    /// Uploads leave this off (the dedup below makes re-upload
+    /// idempotent); retention sets it — restarting the index article's
+    /// retention clock is the entire point there (SF-10), exactly as
+    /// data articles are republished under new identities.
+    /// </param>
+    public int PostManifestIndex(string yearMonth, IReadOnlyList<string> backupIds,
+        bool forceNewVersion = false)
     {
         // Find the latest version by probing (tolerates expired versions).
         int latestVersion = ProbeLatestVersion(
@@ -452,7 +502,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         // This makes re-upload idempotent.
-        if (latestVersion > 0)
+        if (!forceNewVersion && latestVersion > 0)
         {
             var existing = GetLatestManifestIndex(yearMonth);
             if (existing is not null && existing.SequenceEqual(backupIds))

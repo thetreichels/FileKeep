@@ -25,6 +25,17 @@ public static class YubiKeySetup
     /// challenge, then wraps <paramref name="passphrase"/> under the
     /// challenge-response-derived KEK (second touch).
     /// </summary>
+    /// <param name="previousSlotSecret">
+    /// SF-16: when re-setting-up a slot that already has a working
+    /// challenge/wrapped pair, the slot secret that pair belongs to.
+    /// Programming the slot destroys the old secret BEFORE the wrap
+    /// touch happens, so if the wrap then fails (missed touch, key
+    /// removed) the previously working unlock path would be silently
+    /// broken while the stored config still points at the old pair.
+    /// When a previous secret is supplied, a failed setup re-programs
+    /// it, restoring the old pair; if even that fails, the thrown
+    /// error says so instead of a plain "try again".
+    /// </param>
     /// <returns>
     /// The base64 challenge and wrapped passphrase blob to persist in the
     /// service config (<c>yubiKeyChallenge</c> /
@@ -33,7 +44,8 @@ public static class YubiKeySetup
     /// <exception cref="InvalidOperationException">No YubiKey attached.</exception>
     /// <exception cref="TimeoutException">No touch within the timeout.</exception>
     public static (string ChallengeBase64, string WrappedBase64, byte[] SlotSecret) Setup(
-        IYubiKeyProvider provider, string passphrase, int slot = 2)
+        IYubiKeyProvider provider, string passphrase, int slot = 2,
+        byte[]? previousSlotSecret = null)
     {
         if (provider.FindDevices().Count == 0)
             throw new InvalidOperationException("No YubiKey detected. Plug one in and try again.");
@@ -49,24 +61,56 @@ public static class YubiKeySetup
         // Secret is returned (not wiped here) so the caller can store it
         // encrypted for programming spare keys later. Caller must wipe.
 
-        byte[] challenge = YubiKeyCrypto.GenerateChallenge();
-        byte[] hmac = provider.CalculateHmacSha1(challenge, slot, SetupTouchTimeout);
         try
         {
-            byte[] kek = YubiKeyCrypto.DeriveKek(hmac);
+            byte[] challenge = YubiKeyCrypto.GenerateChallenge();
+            byte[] hmac = provider.CalculateHmacSha1(challenge, slot, SetupTouchTimeout);
             try
             {
-                string wrapped = YubiKeyCrypto.Wrap(passphrase, kek);
-                return (Convert.ToBase64String(challenge), wrapped, secret);
+                byte[] kek = YubiKeyCrypto.DeriveKek(hmac);
+                try
+                {
+                    string wrapped = YubiKeyCrypto.Wrap(passphrase, kek);
+                    return (Convert.ToBase64String(challenge), wrapped, secret);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(kek);
+                }
             }
             finally
             {
-                CryptographicOperations.ZeroMemory(kek);
+                CryptographicOperations.ZeroMemory(hmac);
             }
         }
-        finally
+        catch (Exception ex)
         {
-            CryptographicOperations.ZeroMemory(hmac);
+            // The slot now holds the NEW secret, which nothing has a
+            // wrapped pair for. Try to put the previous secret back so
+            // the existing unlock setup keeps working (SF-16).
+            if (previousSlotSecret is { Length: > 0 })
+            {
+                bool rolledBack;
+                try
+                {
+                    provider.ProgramHmacSha1Slot(slot, previousSlotSecret, requireTouch: true);
+                    rolledBack = true;
+                }
+                catch
+                {
+                    rolledBack = false;
+                }
+                if (!rolledBack)
+                {
+                    CryptographicOperations.ZeroMemory(secret);
+                    throw new InvalidOperationException(
+                        "YubiKey setup failed, and the previous key setup could not be restored. " +
+                        "The key no longer matches the saved unlock settings — " +
+                        "run YubiKey setup again to relink it.", ex);
+                }
+            }
+            CryptographicOperations.ZeroMemory(secret);
+            throw;
         }
     }
 

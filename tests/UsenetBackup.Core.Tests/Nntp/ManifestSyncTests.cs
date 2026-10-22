@@ -68,6 +68,40 @@ public sealed class ManifestSyncTests : IDisposable
     }
 
     [Fact]
+    public void ManifestIndex_ListsOnlyBackupsDeliveredToThisProvider()
+    {
+        // SF-15: the monthly index used to list every LOCAL manifest,
+        // so a provider advertised backups whose manifest article it
+        // never received; discovery showed them, then silently skipped
+        // them when selected.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var first = repo.BackupDirectory(_srcDir);
+        File.WriteAllText(Path.Combine(_srcDir, "a.txt"), "hello again");
+        var second = repo.BackupDirectory(_srcDir);
+
+        using var client = Connect();
+        using var store = new NntpBlobStore(client, Newsgroup, repo.RepoId,
+            Path.Combine(_repoDir, "journal.db"),
+            providerKey: ChunkMessageIndex.MakeProviderKey("news.example.com", Newsgroup));
+
+        string yearMonth = DateTime.UtcNow.ToString("yyyy-MM");
+        // Upload only the FIRST backup's manifest: the index must name
+        // it alone, even though the second manifest exists locally.
+        repo.UploadManifest(first.BackupId, store);
+        var index = store.GetLatestManifestIndex(yearMonth);
+        Assert.NotNull(index);
+        Assert.Equal(new[] { first.BackupId }, index);
+
+        // Once the second is delivered too, the refreshed index lists both.
+        repo.UploadManifest(second.BackupId, store);
+        index = store.GetLatestManifestIndex(yearMonth);
+        Assert.NotNull(index);
+        Assert.Equal(2, index!.Count);
+        Assert.Contains(first.BackupId, index);
+        Assert.Contains(second.BackupId, index);
+    }
+
+    [Fact]
     public void UploadDiscover_RoundTrip()
     {
         using var repo = BackupRepository.Open(_repoDir, Passphrase);

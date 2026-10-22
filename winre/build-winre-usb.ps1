@@ -44,6 +44,8 @@ param(
     [int]$ImageSizeMB = 4096,
     [ValidateSet("UEFI", "BIOS", "Both")]
     [string]$BootMode = "Both",
+    [string]$ExpectedModel = "",
+    [long]$ExpectedSizeBytes = 0,
     [string]$SourceDir = "C:\ub\src",
     [string]$BinaryDir = "",
     [string]$MountDir = "C:\winre-mount",
@@ -143,6 +145,16 @@ if ($script:ImageMode) {
         $udisk = Get-Disk -Number $DiskNumber -ErrorAction SilentlyContinue
         if (-not $udisk) { Fail "Disk $DiskNumber not found." }
         if ($udisk.IsSystem -or $udisk.IsBoot) { Fail "Refusing to target the system/boot disk (Disk $DiskNumber)." }
+        # P2-L2: a disk number is not an identity. When the caller named
+        # the disk it confirmed (the dashboard always does), refuse if
+        # this number now holds a different disk — never format on a
+        # renumbering guess.
+        if ($ExpectedModel -ne "" -and $udisk.FriendlyName -ne $ExpectedModel) {
+            Fail "Disk $DiskNumber is not the disk that was confirmed (expected '$ExpectedModel', found '$($udisk.FriendlyName)'). The device list changed - re-select the target and try again."
+        }
+        if ($ExpectedSizeBytes -gt 0 -and $udisk.Size -ne $ExpectedSizeBytes) {
+            Fail "Disk $DiskNumber has a different size than the disk that was confirmed (expected $ExpectedSizeBytes bytes, found $($udisk.Size)). The device list changed - re-select the target and try again."
+        }
         if (-not $Force -and $udisk.BusType -ne 'USB') {
             Fail "Disk $DiskNumber is not a USB disk (BusType: $($udisk.BusType)). Pass -Force to override."
         }
@@ -300,10 +312,19 @@ Step-Done 4
     # --- Mount the WIM (already copied to temp in step 2) ---
     Step-Start 5
     Write-Host "Mounting winre.wim..."
+    # P2-L4: discard any stale mount left at this directory by a
+    # crashed earlier build — DISM refuses to mount over it, wedging
+    # every later build until a manual cleanup. Best effort only.
+    dism /Unmount-Wim /MountDir:$MountDir /Discard 2>$null | Out-Null
     if (Test-Path $MountDir) { Remove-Item $MountDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $MountDir | Out-Null
     dism /Mount-Wim /WimFile:$wimCopy /Index:1 /MountDir:$MountDir
-    if ($LASTEXITCODE -ne 0) { Fail "DISM mount failed." }
+    if ($LASTEXITCODE -ne 0) {
+        # A failed mount can still leave the image half-mounted;
+        # discard it so the next build starts clean.
+        dism /Unmount-Wim /MountDir:$MountDir /Discard | Out-Null
+        Fail "DISM mount failed."
+    }
     Step-Done 5
 
     try {
@@ -317,16 +338,39 @@ Step-Done 4
         # Add a startup hook so the recovery wizard launches in WinRE.
         # WinRE honors Winpeshl.ini for a custom shell.
         $winpeshl = Join-Path $MountDir "Windows\System32\winpeshl.ini"
-        $winpeshlContent = @"
-[LaunchApps]
-X:\FileKeep\recovery\FileKeepRecovery.exe
-"@
-        # Only write if not already present to avoid clobbering.
+        $launchLine = "X:\FileKeep\recovery\FileKeepRecovery.exe"
         if (-not (Test-Path $winpeshl)) {
-            $winpeshlContent | Out-File $winpeshl -Encoding ascii
+            "[LaunchApps]`r`n$launchLine" | Out-File $winpeshl -Encoding ascii
             Write-Host "Added winpeshl.ini to launch the recovery wizard."
+        } elseif ((Get-Content $winpeshl -Raw) -match 'FileKeepRecovery\.exe') {
+            Write-Host "winpeshl.ini already launches the recovery wizard; leaving it alone."
         } else {
-            Write-Host "winpeshl.ini already exists; leaving it alone."
+            # MU-10: an existing winpeshl.ini without our entry boots
+            # WinPE to something else and the recovery app never starts
+            # — the old script still ended "USB build complete" for a
+            # stick that can't recover anything. Merge our app FIRST in
+            # [LaunchApps] (entries run in order; a pre-existing shell
+            # may never exit, which would starve an appended entry).
+            $lines = New-Object System.Collections.Generic.List[string]
+            $inserted = $false
+            foreach ($line in (Get-Content $winpeshl)) {
+                $lines.Add($line)
+                if (-not $inserted -and $line -match '^\s*\[LaunchApps\]') {
+                    $lines.Add($launchLine)
+                    $inserted = $true
+                }
+            }
+            if (-not $inserted) {
+                $lines.Add("[LaunchApps]")
+                $lines.Add($launchLine)
+            }
+            $lines | Out-File $winpeshl -Encoding ascii
+            Write-Host "winpeshl.ini existed without a FileKeep entry; merged the recovery wizard into [LaunchApps]."
+        }
+        # Whatever path was taken, "complete" must mean the app will
+        # actually launch.
+        if ((Get-Content $winpeshl -Raw) -notmatch 'FileKeepRecovery\.exe') {
+            Fail "winpeshl.ini does not launch FileKeepRecovery.exe; the USB would boot without the recovery wizard."
         }
         Step-Done 6
 
@@ -397,14 +441,21 @@ assign
         if (-not $vhdVol) { Fail "Could not find the attached VHDX volume." }
         $targetRoot = "$($vhdVol.DriveLetter):\"
         Write-Host "VHDX attached as $($vhdVol.DriveLetter):"
+        # NS-6: mark the volume UNFINISHED until the very last step, so a
+        # build that dies midway never leaves a drive that looks ready.
+        $MARKERROOT = $targetRoot
+Set-Content -Path (Join-Path $MARKERROOT "BUILD-INCOMPLETE.txt") -Encoding ASCII -Value @(
+    "This FileKeep recovery drive is UNFINISHED."
+    "The build did not complete, so this drive will not recover anything."
+    "Rebuild it from FileKeep (Tools - Recovery USB) before relying on it."
+)
         Step-Done 9
 
         try {
             Step-Start 10
-            Write-Host "Copying boot files..."
-            bcdboot C:\Windows /s $targetRoot /f $script:BcdBootFlag
-            if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
-
+            # Copy the image BEFORE bcdboot (NS-6): a failure mid-copy then
+            # leaves no boot configuration pointing at a missing/truncated
+            # boot.wim.
             Write-Host "Copying customized WinRE image..."
             $imgSources = Join-Path $targetRoot "sources"
             New-Item -ItemType Directory -Force -Path $imgSources | Out-Null
@@ -414,6 +465,11 @@ assign
             New-Item -ItemType Directory -Force -Path $imgFk | Out-Null
             Copy-Item (Join-Path $stageDir "*") $imgFk -Recurse -Force
 
+            Write-Host "Copying boot files..."
+            bcdboot C:\Windows /s $targetRoot /f $script:BcdBootFlag
+            if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
+
+            Remove-Item (Join-Path $targetRoot "BUILD-INCOMPLETE.txt") -Force -ErrorAction SilentlyContinue
             Write-Host "Disk image build complete."
             Step-Done 10
         } finally {
@@ -445,9 +501,20 @@ assign letter=$($script:UsbLetter)
                 if ($LASTEXITCODE -ne 0) { Fail "diskpart USB preparation failed." }
             } else {
                 Write-Host "Preparing USB drive $usbRoot (formatting as FAT32)..."
-                Format-Volume -DriveLetter $script:UsbLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force
-                if ($LASTEXITCODE -ne 0 -and $?) { Write-Host "Format complete." }
+                Format-Volume -DriveLetter $script:UsbLetter -FileSystem FAT32 -NewFileSystemLabel "FILEKEEP" -Confirm:$false -Force -ErrorAction Stop
             }
+            # P2-L3: verify the format actually happened — diskpart
+            # exits 0 even when its format command fails, and this
+            # branch used to proceed to copy the whole recovery image
+            # onto an unformatted (or differently formatted) volume and
+            # report success. The disk-number branch always verified
+            # via its volume poll; the letter branch now checks the
+            # same facts directly.
+            Start-Sleep 2
+            $prepared = Get-Volume -DriveLetter $script:UsbLetter -ErrorAction SilentlyContinue
+            if (-not $prepared) { Fail "Drive $($script:UsbLetter): has no volume after preparation - the format did not take." }
+            if ($prepared.FileSystem -ne 'FAT32') { Fail "Drive $($script:UsbLetter): is formatted $($prepared.FileSystem), not FAT32 - the format did not take." }
+            Write-Host "USB prepared as $usbRoot (FAT32)."
         } else {
             # Disk-number path (dashboard): repartition via diskpart, let it
             # pick the letter, then resolve the volume on OUR disk (never by
@@ -479,13 +546,20 @@ assign
             Write-Host "USB prepared as $($script:UsbLetter):\"
         }
         $script:UsbRoot = "$($script:UsbLetter):\"
+        # NS-6: mark the stick UNFINISHED until the very last step, so a
+        # build that dies midway never leaves a stick that looks ready.
+        $MARKERROOT = $script:UsbRoot
+Set-Content -Path (Join-Path $MARKERROOT "BUILD-INCOMPLETE.txt") -Encoding ASCII -Value @(
+    "This FileKeep recovery drive is UNFINISHED."
+    "The build did not complete, so this drive will not recover anything."
+    "Rebuild it from FileKeep (Tools - Recovery USB) before relying on it."
+)
         Step-Done 9
 
         Step-Start 10
-        Write-Host "Copying boot files..."
-        bcdboot C:\Windows /s "$($script:UsbLetter):" /f $script:BcdBootFlag
-        if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
-
+        # Copy the image BEFORE bcdboot (NS-6): a failure mid-copy then
+        # leaves no boot configuration pointing at a missing/truncated
+        # boot.wim.
         Write-Host "Copying customized WinRE image to USB..."
         $usbSources = Join-Path $script:UsbRoot "sources"
         New-Item -ItemType Directory -Force -Path $usbSources | Out-Null
@@ -497,6 +571,11 @@ assign
         New-Item -ItemType Directory -Force -Path $usbFk | Out-Null
         Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
 
+        Write-Host "Copying boot files..."
+        bcdboot C:\Windows /s "$($script:UsbLetter):" /f $script:BcdBootFlag
+        if ($LASTEXITCODE -ne 0) { Fail "bcdboot failed." }
+
+        Remove-Item (Join-Path $script:UsbRoot "BUILD-INCOMPLETE.txt") -Force -ErrorAction SilentlyContinue
         Write-Host "USB build complete."
         Step-Done 10
     }
@@ -513,6 +592,12 @@ assign
             $winreReenabled = $true
             Write-Host "WinRE re-enabled."
         } else {
+            # P2-L1: this used to be warning-only — the script then
+            # printed "USB build complete" and exited 0, so the
+            # dashboard showed success while the host PC was left with
+            # WinRE disabled. Record it; the end of the script fails
+            # loudly on it.
+            $script:WinReReenableFailed = $true
             Write-Warning "reagentc /enable failed. Run 'reagentc /enable' manually."
         }
     }
@@ -532,6 +617,14 @@ detach vdisk
     if ($stageDir) { Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
     $wimCopy = Join-Path ([IO.Path]::GetTempPath()) "filekeep-winre.wim"
     Remove-Item $wimCopy -Force -ErrorAction SilentlyContinue
+}
+
+# P2-L1: a failed WinRE re-enable means the HOST is left in a worse
+# state than before the build — never let the run report success.
+if ($script:WinReReenableFailed) {
+    Write-Host "ERROR: The recovery media was built, but re-enabling WinRE on this PC FAILED."
+    Write-Host "The host PC currently has Windows Recovery Environment disabled. Run 'reagentc /enable' from an elevated prompt to restore it."
+    exit 1
 }
 
 Write-Host ""

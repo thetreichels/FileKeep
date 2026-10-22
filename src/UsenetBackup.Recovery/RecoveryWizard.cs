@@ -356,6 +356,23 @@ public sealed class RecoveryWizard : Form
         }
     }
 
+    /// <summary>
+    /// P2-L17: marshals a UI update from a worker thread ONLY if the
+    /// form is still alive. The progress callbacks used to call
+    /// Invoke/BeginInvoke unguarded — closing the wizard mid-operation
+    /// threw ObjectDisposedException INSIDE the worker (aborting a
+    /// healthy chunk pull), and the handlers' catches then touched
+    /// disposed controls and stacked more error dialogs. A dead form
+    /// simply drops the update; the operation itself continues.
+    /// </summary>
+    private void UiInvoke(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated)
+            return;
+        try { BeginInvoke(action); }
+        catch (InvalidOperationException) { /* form closing/gone (ObjectDisposedException included) */ }
+    }
+
     private void SetStatus(string text, bool isError = false)
     {
         _status.Text = text;
@@ -409,9 +426,17 @@ public sealed class RecoveryWizard : Form
         var browse = new Button { Text = "Browse…", Location = new Point(464, 202), Size = new Size(90, 30) };
         browse.Click += (_, _) =>
         {
-            using var d = new FolderBrowserDialog { Description = "Select the folder containing the backup" };
-            if (d.ShowDialog() == DialogResult.OK)
-                _repoPath.Text = d.SelectedPath;
+            try
+            {
+                using var d = new FolderBrowserDialog { Description = "Select the folder containing the backup" };
+                if (d.ShowDialog() == DialogResult.OK)
+                    _repoPath.Text = d.SelectedPath;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the folder picker:\n\n" + ex.Message,
+                    "FileKeep Recovery", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         };
         p.Controls.Add(browse);
 
@@ -805,25 +830,48 @@ public sealed class RecoveryWizard : Form
             }
             else
             {
-                // Save SMB manifests locally
-                foreach (var (id, manifest) in found)
-                {
-                    string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
-                    using var smb = UsenetBackup.Core.SmbShare.Connect(
-                        share,
-                        string.IsNullOrEmpty(user) ? null : user,
-                        string.IsNullOrEmpty(password) ? null : password);
-                    string remotePath = smb.Combine("manifests", id + ".json");
-                    File.Copy(remotePath, localPath, overwrite: true);
-                    _backupList.Items.Add(new BackupSummaryView(
-                        id, manifest.Type + " (from SMB)",
-                        manifest.Snapshot ?? "", manifest.CreatedUtc));
-                }
-                // Store the SMB share for the chunk-pull phase before restore
+                // P2-L16: record the share FIRST — the copy loop below
+                // used to run before these assignments, so one failed
+                // copy aborted into "SMB discovery failed" with the
+                // listed backups unable to pull chunks at restore time
+                // (no share stored) and retries adding duplicates.
                 _state.SmbShare = share;
                 _state.SmbUser = user;
                 _state.SmbPassword = password;
-                SetStatus($"Found {found.Count} backup(s) on SMB share — marked '(from SMB)'.");
+                Directory.CreateDirectory(Path.Combine(_state.RepoPath, "manifests"));
+                int added = 0;
+                var failed = new List<string>();
+                foreach (var (id, manifest) in found)
+                {
+                    if (_backupList.Items.Cast<BackupSummaryView>()
+                            .Any(v => v.BackupId == id))
+                        continue; // already listed (a retry after a partial copy)
+                    try
+                    {
+                        string localPath = Path.Combine(_state.RepoPath, "manifests", id + ".json");
+                        using var smb = UsenetBackup.Core.SmbShare.Connect(
+                            share,
+                            string.IsNullOrEmpty(user) ? null : user,
+                            string.IsNullOrEmpty(password) ? null : password);
+                        string remotePath = smb.Combine("manifests", id + ".json");
+                        File.Copy(remotePath, localPath, overwrite: true);
+                        _backupList.Items.Add(new BackupSummaryView(
+                            id, manifest.Type + " (from SMB)",
+                            manifest.Snapshot ?? "", manifest.CreatedUtc));
+                        added++;
+                    }
+                    catch (Exception ex)
+                    {
+                        // One failed copy must not poison the whole
+                        // discovery: the rest still list and restore.
+                        failed.Add($"{id} ({ex.Message})");
+                    }
+                }
+                SetStatus(failed.Count == 0
+                    ? $"Found {added} backup(s) on SMB share — marked '(from SMB)'."
+                    : $"Found {added} backup(s) on SMB share. {failed.Count} manifest(s) could not be copied: " +
+                      string.Join("; ", failed),
+                    isError: failed.Count > 0 && added == 0);
             }
         }
         catch (Exception ex)
@@ -846,7 +894,7 @@ public sealed class RecoveryWizard : Form
         {
             var discovery = new UsenetBackup.Core.SmbDiscovery();
             var hosts = await Task.Run(() => discovery.DiscoverAsync(
-                (done, total) => BeginInvoke(() =>
+                (done, total) => UiInvoke(() =>
                 {
                     if (_smbResults.Items.Count > 0)
                         _smbResults.Items[0] = $"Scanning… {done}/{total} addresses";
@@ -904,9 +952,17 @@ public sealed class RecoveryWizard : Form
         var browse = new Button { Text = "Browse…", Location = new Point(464, 42), Size = new Size(90, 30) };
         browse.Click += (_, _) =>
         {
-            using var d = new OpenFileDialog { Filter = "NZB files (*.nzb)|*.nzb" };
-            if (d.ShowDialog() == DialogResult.OK)
-                _nzbPath.Text = d.FileName;
+            try
+            {
+                using var d = new OpenFileDialog { Filter = "NZB files (*.nzb)|*.nzb" };
+                if (d.ShowDialog() == DialogResult.OK)
+                    _nzbPath.Text = d.FileName;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the file picker:\n\n" + ex.Message,
+                    "FileKeep Recovery", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         };
         p.Controls.Add(browse);
 
@@ -939,14 +995,14 @@ public sealed class RecoveryWizard : Form
                 _state.LoadNzb(_nzbPath.Text);
                 var result = _state.Download((done, total) =>
                 {
-                    Invoke(() =>
+                    UiInvoke(() =>
                     {
                         _dlProgress.Maximum = total;
                         _dlProgress.Value = Math.Min(done, total);
                         _dlLog.AppendText($"\r{done}/{total} chunks");
                     });
                 });
-                Invoke(() => _dlLog.AppendText(
+                UiInvoke(() => _dlLog.AppendText(
                     $"\r\nDone: {result.Downloaded} downloaded, {result.AlreadyPresent} already present.\r\n"));
             });
             SetStatus("Download complete.");
@@ -988,6 +1044,9 @@ public sealed class RecoveryWizard : Form
         p.Controls.Add(_verifyResult);
     }
 
+    // The backup ID the last COMPLETED verification ran against (CX-5).
+    private string? _verifyRunForBackupId;
+
     private async void VerifyStart_Click(object? sender, EventArgs e)
     {
         _verifyStart.Enabled = false;
@@ -995,6 +1054,7 @@ public sealed class RecoveryWizard : Form
         try
         {
             var issues = await Task.Run(() => _state.Verify());
+            _verifyRunForBackupId = _state.SelectedBackupId;
             if (issues.Count == 0)
             {
                 _verifyResult.Text = "OK — all chunks verified.";
@@ -1043,9 +1103,17 @@ public sealed class RecoveryWizard : Form
         var destBrowse = new Button { Text = "Browse…", Location = new Point(464, 102), Size = new Size(90, 30) };
         destBrowse.Click += (_, _) =>
         {
-            using var d = new FolderBrowserDialog { Description = "Select restore destination" };
-            if (d.ShowDialog() == DialogResult.OK)
-                _restoreDest.Text = d.SelectedPath;
+            try
+            {
+                using var d = new FolderBrowserDialog { Description = "Select restore destination" };
+                if (d.ShowDialog() == DialogResult.OK)
+                    _restoreDest.Text = d.SelectedPath;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not open the folder picker:\n\n" + ex.Message,
+                    "FileKeep Recovery", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         };
         p.Controls.Add(destBrowse);
 
@@ -1175,16 +1243,15 @@ public sealed class RecoveryWizard : Form
         _policyOverwrite.Visible = !disk;
         _policyNewer.Visible = !disk;
         _policyInfo.Visible = !disk;
-        // Show/hide drive controls vs folder controls
-        foreach (Control c in Controls)
-        {
-            if (c is TabPage)
-                foreach (Control inner in c.Controls)
-                {
-                    if (inner.Name is "driveLbl" or "refreshBtn")
-                        inner.Visible = disk;
-                }
-        }
+        // Show/hide drive controls vs folder controls.
+        // P2-L18: the old loop searched this.Controls for a TabPage —
+        // the pages live in _tabs inside a content panel, so it never
+        // matched and the drive label/refresh button stayed visible
+        // (overlapping the policy radios) in file-restore mode.
+        // Controls.Find with searchAllChildren walks the real tree.
+        foreach (string name in new[] { "driveLbl", "refreshBtn" })
+            foreach (Control c in Controls.Find(name, searchAllChildren: true))
+                c.Visible = disk;
         _driveDetail.Visible = disk;
         if (disk && _drivePicker.Items.Count == 0)
             LoadDrives();
@@ -1225,7 +1292,7 @@ public sealed class RecoveryWizard : Form
             void ReportSmb(int done, int total)
             {
                 if (total == 0) return;
-                BeginInvoke(() =>
+                UiInvoke(() =>
                 {
                     _restoreProgress.Value = Math.Min(100, done * 100 / total);
                     _restoreLog.Text = $"Copying chunks from SMB share… {done}/{total}";
@@ -1368,6 +1435,20 @@ public sealed class RecoveryWizard : Form
                 SetStatus("");
                 return true;
 
+            case 4: // verify — the step says "do not skip", so don't let
+                // Next sail past it (CX-5). Verification must have RUN for
+                // the currently selected backup; whether it passed is the
+                // user's call (restore hash-verifies every file anyway).
+                if (_verifyRunForBackupId is null ||
+                    _verifyRunForBackupId != _state.SelectedBackupId)
+                {
+                    SetStatus("Run verification first — it checks every chunk " +
+                        "before anything is restored.", isError: true);
+                    return false;
+                }
+                SetStatus("");
+                return true;
+
             default:
                 return true;
         }
@@ -1404,11 +1485,45 @@ public sealed class RecoveryWizard : Form
         if (!string.IsNullOrEmpty(_state.Passphrase))
             return true;
 
-        if (!_state.LoadYubiKeyChallenge())
+        bool hasChallenge;
+        try
+        {
+            hasChallenge = _state.LoadYubiKeyChallenge();
+        }
+        catch (Exception ex)
+        {
+            // MU-13: a corrupt manifest is not "no YubiKey on this
+            // backup" — stop with the real error instead of steering
+            // into a restore that fails confusingly later.
+            SetStatus($"This backup's manifest is damaged or has been tampered with: {ex.Message}",
+                isError: true);
+            return false;
+        }
+        if (!hasChallenge)
             return true; // no YubiKey on this backup; typed flow already validated
 
         // This backup wants a YubiKey and the user didn't type a passphrase.
-        var keys = YubiKeyRecovery.DetectKeys();
+        // P2-L15: DetectKeys P/Invokes raw HID (SetupAPI) — in WinPE the
+        // HID stack may be absent entirely, and the resulting
+        // DllNotFound/TypeInitialization failure used to escape to the
+        // generic crash dialog ("Something went wrong: Unable to load
+        // DLL 'hid.dll'"), reading as data corruption at the worst
+        // moment of a bare-metal restore. Detection being unavailable
+        // is a steering message, not a crash.
+        IReadOnlyList<YubiKeyRecovery.YubiKeyDeviceInfo> keys;
+        try
+        {
+            keys = YubiKeyRecovery.DetectKeys();
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException
+                                   or TypeInitializationException or BadImageFormatException)
+        {
+            SetStatus("YubiKey detection isn't available in this recovery environment " +
+                "(no HID device support), so the key can't be used here. " +
+                "Go back and unlock with your passphrase or recovery secret instead.",
+                isError: true);
+            return false;
+        }
         if (keys.Count == 0)
         {
             SetStatus("This backup is YubiKey-protected but no YubiKey was found. " +
@@ -1420,7 +1535,16 @@ public sealed class RecoveryWizard : Form
         using var dlg = new YubiKeyTouchDialog(_state.YubiKeyChallenge!);
         if (dlg.ShowDialog(this) != DialogResult.OK || dlg.HmacResponse is null)
         {
-            SetStatus("YubiKey unlock cancelled. Type your passphrase or try again.",
+            // MU-11: hardware failures and timeouts are not "cancelled" —
+            // say which one happened, so a hopeless retry loop (missing
+            // HID driver, removed key) is recognizable as hopeless.
+            SetStatus(dlg.Failure is not null
+                    ? $"YubiKey unlock failed: {dlg.Failure.Message} " +
+                      "Type your passphrase or try again."
+                    : dlg.TimedOut
+                        ? "No YubiKey touch within 30 seconds. " +
+                          "Type your passphrase or try again."
+                        : "YubiKey unlock cancelled. Type your passphrase or try again.",
                 isError: true);
             return false;
         }
@@ -1455,6 +1579,15 @@ internal sealed class YubiKeyTouchDialog : Form
     private bool _done;
 
     public byte[]? HmacResponse { get; private set; }
+
+    /// <summary>
+    /// The hardware/SDK failure that ended the touch attempt, when one
+    /// occurred (MU-11) — null for a user cancel or a plain timeout.
+    /// </summary>
+    public Exception? Failure { get; private set; }
+
+    /// <summary>True when the attempt ended by the 30s deadline, not by the user.</summary>
+    public bool TimedOut { get; private set; }
 
     public YubiKeyTouchDialog(string challengeB64)
     {
@@ -1497,6 +1630,7 @@ internal sealed class YubiKeyTouchDialog : Form
                 _timer.Stop();
                 if (!_done)
                 {
+                    TimedOut = true;
                     DialogResult = DialogResult.Cancel;
                     Close();
                 }
@@ -1510,13 +1644,20 @@ internal sealed class YubiKeyTouchDialog : Form
         Task.Run(() =>
         {
             byte[]? response = null;
+            Exception? failure = null;
             try
             {
                 byte[] challenge = Convert.FromBase64String(_challengeB64);
                 response = YubiKeyRecovery.ChallengeResponse(
                     challenge, slot: 1, timeout: TimeSpan.FromSeconds(28));
             }
-            catch { /* surfaced as cancel */ }
+            catch (Exception ex)
+            {
+                // MU-11: keep the failure — it used to be discarded and
+                // surfaced as "cancelled," indistinguishable from the
+                // user giving up.
+                failure = ex;
+            }
 
             if (_done) // user cancelled or timed out while we were waiting
             {
@@ -1529,6 +1670,7 @@ internal sealed class YubiKeyTouchDialog : Form
             {
                 _timer?.Stop();
                 HmacResponse = response;
+                Failure = failure;
                 DialogResult = response is not null
                     ? DialogResult.OK : DialogResult.Cancel;
                 Close();

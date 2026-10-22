@@ -99,6 +99,10 @@
              machine-bound DPAPI blobs; logs may contain paths). -->
         <RemoveFile Id="RemoveAppDataJson" Directory="APPDATADIR" Name="service.json" On="uninstall" />
         <RemoveFile Id="RemoveAppDataLog" Directory="APPDATADIR" Name="service.log" On="uninstall" />
+        <!-- P2-L6: files the current build writes that the cleanup
+             missed — a reinstall resurrected pre-uninstall run history
+             (job-state.json, MU-16) for a deliberately wiped config. -->
+        <RemoveFile Id="RemoveAppDataJobState" Directory="APPDATADIR" Name="job-state.json" On="uninstall" />
         <RemoveFolder Id="RemoveAppDataDir" Directory="APPDATADIR" On="uninstall" />
         <ServiceInstall Id="BackupService"
                         Type="ownProcess"
@@ -114,9 +118,21 @@
                         Stop="both"
                         Remove="uninstall"
                         Wait="true" />
+        <!-- SCM recovery (MU-1): a host crash reports a specific-error
+             exit code (WindowsServiceHost); these actions make Windows
+             restart the service on the first two failures instead of
+             leaving backups silently stopped until someone notices. -->
+        <ServiceConfig Id="BackupServiceRecovery"
+                       ServiceName="FileKeep"
+                       FirstFailureActionType="restart"
+                       SecondFailureActionType="restart"
+                       ThirdFailureActionType="none"
+                       RestartServiceDelayInSeconds="60"
+                       ResetPeriodInDays="1" />
         <!-- Clean up runtime-created files (service writes config/logs here, single-file exe extracts native libs) -->
         <RemoveFile Id="RemoveServiceJson" Directory="SERVICEDIR" Name="service.json" On="uninstall" />
         <RemoveFile Id="RemoveServiceLog" Directory="SERVICEDIR" Name="service.log" On="uninstall" />
+        <RemoveFile Id="RemoveServiceCrashLog" Directory="SERVICEDIR" Name="service-crash.log" On="uninstall" />
         <RemoveFile Id="RemoveSqliteDll" Directory="SERVICEDIR" Name="e_sqlite3.dll" On="uninstall" />
         <RemoveFile Id="RemoveServicePdb" Directory="SERVICEDIR" Name="*.pdb" On="uninstall" />
         <RemoveFile Id="RemoveAspNetDll" Directory="SERVICEDIR" Name="aspnetcorev2_inprocess.dll" On="uninstall" />
