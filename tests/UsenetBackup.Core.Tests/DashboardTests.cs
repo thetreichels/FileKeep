@@ -289,6 +289,29 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void HtmlPage_JobsView_CardLayoutAndRelocatedAddButton()
+    {
+        string html = DashboardHtml.Page("test-csrf-token");
+        // Card-per-job layout pieces ship in the page: the summary strip,
+        // the in-list toolbar, the empty state, and the per-card live
+        // upload-progress slot the poll writes into.
+        Assert.Contains("id=\"jobs-summary\"", html);
+        Assert.Contains("jobs-toolbar", html);
+        Assert.Contains("No backup jobs yet", html);
+        Assert.Contains("data-jobprog", html);
+        // Joel's button spec: no add-job button in the page header — the
+        // "New backup job" buttons are the ones loadSettings renders into
+        // the jobs list itself (toolbar at the head of the list, and the
+        // empty state beside its text). The heading stands alone.
+        int h1 = html.IndexOf("<h1>Backup jobs</h1>");
+        Assert.True(h1 >= 0, "Backup jobs heading missing");
+        int len = html.Length - h1;
+        if (len > 400) len = 400;
+        Assert.False(html.Substring(h1, len).Contains("New backup job"),
+            "An add-job button sits by the jobs page heading; it belongs in the jobs list");
+    }
+
+    [Fact]
     public void ValidateCsrfToken_AcceptsOnlyExactMatch()
     {
         Assert.True(DashboardApi.ValidateCsrfToken("abc123", "abc123"));

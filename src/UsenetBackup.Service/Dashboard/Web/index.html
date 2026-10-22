@@ -118,6 +118,40 @@
   .state-btn.ok { color: var(--ok); border: 1px solid var(--ok); background: transparent; }
   .state-btn.bad { color: var(--bad); border: 1px solid var(--bad); background: transparent; font-weight: 600; }
   .state-btn.warn { color: var(--warn); border: 1px solid var(--warn); background: transparent; font-weight: 600; }
+  /* Backup jobs view — one card per job, per the approved jobs-area
+     mockup: icon tile, human schedule line, destination chips, a health
+     line (last/next run from /api/status), and a live upload bar while
+     the job is the one uploading. State reads passively from the card:
+     amber left edge = degraded, red = failed or a derived pause, and a
+     user-paused job's whole card dims. */
+  .jobs-toolbar { display: flex; justify-content: flex-end; margin: 0 0 12px; }
+  .job-card { display: flex; gap: 14px; align-items: flex-start; }
+  .job-card.warn-edge { border-left: 3px solid var(--warn); }
+  .job-card.bad-edge { border-left: 3px solid var(--bad); }
+  .job-card.paused { opacity: .62; }
+  .job-card .name { font-weight: 600; }
+  .job-card .meta { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  .job-tile {
+    width: 44px; height: 44px; border-radius: 8px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+  }
+  .job-main { flex: 1; min-width: 0; }
+  .job-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .icon-btn { min-width: 32px; padding: 4px 8px; }
+  .chip {
+    display: inline-block; font-size: 12px; padding: 1px 8px; margin: 2px 4px 0 0;
+    border: 1px solid var(--border); border-radius: 10px; white-space: nowrap;
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+  }
+  .chip.dim { opacity: .45; }
+  .job-health { font-size: 13px; margin-top: 4px; }
+  .job-progress { margin-top: 10px; }
+  .job-progress .track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .job-progress .fill { height: 100%; background: var(--ok); width: 0; transition: width .3s ease; }
+  .summary-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--text-2); padding: 12px 20px; }
+  .summary-strip .dot { font-size: 10px; }
+  .jobs-empty { text-align: center; padding: 36px 20px; }
   /* Security link band — one pill in both states, per the walkthrough
      mockup: the same full-width box, flush with the cards above and
      below (their facing corners square off), so the two cards and the
@@ -551,20 +585,18 @@
       </div>
     </div>
     <div class="view" id="view-jobs">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <h1 style="margin:0">Backup jobs</h1>
-        <button class="accent" onclick="showJobForm()">New backup job</button>
-      </div>
-      <p style="color:var(--text-2);margin:8px 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
-      <div class="card" id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
+      <h1>Backup jobs</h1>
+      <p style="color:var(--text-2);margin:0 0 20px">Each job runs on its schedule, encrypts with your protection profile, and banks the finished backup.</p>
+      <div class="card summary-strip" id="jobs-summary" style="display:none"></div>
+      <div id="jobs-list"><p style="color:var(--text-2)">Loading…</p></div>
       <div class="card">
         <div class="name">Backup locations</div>
         <div class="meta">The places backups are sent. Scheduled jobs and one-time backups pick from this list.</div>
         <div id="locations-list"><p style="color:var(--text-2)">Loading…</p></div>
         <div style="margin-top:12px;display:flex;gap:8px">
-          <button class="accent" onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
-          <button class="accent" onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
-          <button class="accent" onclick="showLocationForm('usb')" style="font-size:14px;padding:10px 18px">＋ Add removable drive</button>
+          <button onclick="showLocationForm('nntp')" style="font-size:14px;padding:10px 18px">＋ Add Usenet provider</button>
+          <button onclick="showLocationForm('smb')" style="font-size:14px;padding:10px 18px">＋ Add network share</button>
+          <button onclick="showLocationForm('usb')" style="font-size:14px;padding:10px 18px">＋ Add removable drive</button>
         </div>
       <div id="locationFormCard" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
         <h2 style="margin-top:0" id="locationFormTitle">Add location</h2>
@@ -1737,11 +1769,23 @@ function startUploadPolling() {
     try {
       const res = await api('/api/upload-progress');
       const card = document.getElementById('uploadProgress');
+      // The Backup jobs card for the job currently uploading shows the
+      // same progress in place (its bar slot is keyed by job name).
+      const bars = document.querySelectorAll('[data-jobprog]');
       if (!res.active) {
         card.style.display = 'none';
+        bars.forEach(b => { b.style.display = 'none'; });
         return;
       }
       const p = res.progress;
+      bars.forEach(b => {
+        if (b.dataset.jobprog === p.jobName) {
+          b.style.display = '';
+          b.querySelector('[data-jobprog-fill]').style.width = p.percent + '%';
+          b.querySelector('[data-jobprog-label]').textContent =
+            'Uploading ' + p.phase + ' to ' + p.host + ' — ' + p.doneChunks + '/' + p.totalChunks + ' items · ' + p.percent + '%';
+        } else b.style.display = 'none';
+      });
       card.style.display = 'block';
       document.getElementById('upTitle').textContent = 'Uploading ' + p.phase + ' to ' + p.host;
       document.getElementById('upMeta').textContent = p.jobName + ' — ' + p.doneChunks + '/' + p.totalChunks + ' items';
@@ -1783,6 +1827,13 @@ async function runJob(name) {
   }
   toast('Backup "' + name + '" is still running — check Backup jobs for its result.', '');
   load();
+}
+// Run now from a Backup jobs card: same run + outcome toasts as the
+// Overview's button, then re-render the jobs view so the card's health
+// line and state button reflect the finished run.
+async function runJobFromJobs(name) {
+  await runJob(name);
+  loadSettings();
 }
 function fmtBytes(b) {
   if (b >= 1099511627776) return (b / 1099511627776).toFixed(1) + ' TB';
@@ -2435,6 +2486,55 @@ function jobStateButton(j, state) {
       return `<button class="state-btn ok" title="Running on schedule. Click to pause." onclick='setJobPaused(${n}, true)'>⏸ Pause</button>`;
   }
 }
+// Friendly local date/time for the jobs-view health line and summary
+// strip — not the raw ISO string (same treatment as the Overview's
+// next-run tile, WALK-5). Unparseable values pass through unchanged.
+function fmtWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+// The jobs card shows the source's folder name; the full path is the
+// hover text (the raw "source → repo" line is gone from the card).
+function folderName(p) {
+  const parts = (p || '').split(/[\\/]+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : (p || '');
+}
+// Destination chips for a job card: one pill per target, iconed by the
+// location's type. A destination named in the job's degraded note (it
+// missed the last backup) renders dimmed, with the note as its tooltip.
+function jobChips(j, locByName) {
+  const targets = (j.targets && j.targets.length) ? j.targets : [];
+  if (!targets.length) return j.autoUpload ? '<span class="meta">auto-upload</span>' : '';
+  const note = (lastDegraded[j.name] || '').toLowerCase();
+  return targets.map(t => {
+    const loc = locByName[t];
+    const icon = !loc ? '💾' : loc.type === 'nntp' ? '📡' : loc.type === 'usb' ? '🔌' : '💾';
+    const dim = !!note && note.includes(t.toLowerCase());
+    return `<span class="chip${dim ? ' dim' : ''}"${dim ? ` title="${esc(lastDegraded[j.name])}"` : ''}>${icon} ${esc(t)}</span>`;
+  }).join('');
+}
+// The card's health line, from the /api/status row (sj) merged by name.
+// Wording mirrors the Overview's state notes so the two views agree.
+function jobHealthLine(sj, state) {
+  if (state === 'UserPaused')
+    return '<span style="color:var(--text-2)">Paused</span>' + (sj && sj.lastResult ? ' · Last run ' + esc(fmtWhen(sj.lastResult.startedLocal)) : '');
+  if (state === 'NeedsLocation') return '<span style="color:var(--bad)">Paused — no backup location</span>';
+  if (state === 'WaitingForDrive') return '<span style="color:var(--bad)">Paused — waiting for USB drive</span>';
+  if (state === 'WaitingForNetwork') return '<span style="color:var(--bad)">Paused — waiting for network</span>';
+  if (!sj || !sj.lastResult)
+    return '<span style="color:var(--text-2)">Never run yet</span>' + (sj && sj.nextRunLocal ? ' · Next ' + esc(fmtWhen(sj.nextRunLocal)) : '');
+  const lr = sj.lastResult;
+  if (!lr.success)
+    return `<span style="color:var(--bad)">✗ Failed ${esc(fmtWhen(lr.startedLocal))}</span>`
+      + (sj.consecutiveFailures > 1 ? ` · ${sj.consecutiveFailures} consecutive failures` : '')
+      + (lr.error ? ` — <span title="${esc(lr.error)}">${esc(lr.error)}</span>` : '');
+  let line = `<span style="color:var(--ok)">✓ Backed up ${esc(fmtWhen(lr.startedLocal))}</span>`;
+  if (lr.degradedNote) line += `<br><span style="color:var(--warn)">⚠ ${esc(lr.degradedNote)}</span>`;
+  else if (sj.nextRunLocal) line += ' · Next ' + esc(fmtWhen(sj.nextRunLocal));
+  return line;
+}
 async function setJobPaused(name, paused) {
   try {
     await api('/api/config/jobs/' + encodeURIComponent(name) + '/pause', {
@@ -2524,32 +2624,100 @@ async function loadSettings() {
   lastConfigJobs = {};
   cfg.jobs.forEach(j => { lastConfigJobs[j.name] = j; });
   // Job run-states live on /api/status; merge them in for the state
-  // buttons. If the status fetch fails, fall back to the stored pause
-  // flag so pause/resume still renders.
+  // buttons. The full status rows merge too — the card health line
+  // (last result, next run) lives there, not on /api/config. If the
+  // status fetch fails, fall back to the stored pause flag so
+  // pause/resume still renders.
   let states = {};
+  let health = {};
   lastDegraded = {};
   try {
     const st = await api('/api/status');
     (st.jobs || []).forEach(j => {
       states[j.name] = j.state;
+      health[j.name] = j;
       if (j.lastResult && j.lastResult.degradedNote) lastDegraded[j.name] = j.lastResult.degradedNote;
     });
   } catch (e) { /* states stay empty; fallback below applies */ }
+  const stateOf = j => states[j.name] || (j.paused ? 'UserPaused' : ((j.targets && j.targets.length) ? 'Active' : 'NeedsLocation'));
+  const locByName = {};
+  (cfg.locations || []).forEach(l => { locByName[l.name] = l; });
+  // Summary strip: totals the user can read without opening a card.
+  const sum = document.getElementById('jobs-summary');
+  if (sum) {
+    if (!cfg.jobs.length) { sum.style.display = 'none'; sum.innerHTML = ''; }
+    else {
+      let healthy = 0, attention = 0, pausedCount = 0;
+      const nexts = [];
+      cfg.jobs.forEach(j => {
+        const state = stateOf(j);
+        const sj = health[j.name];
+        if (state === 'UserPaused') pausedCount++;
+        else if (state !== 'Active' || lastDegraded[j.name] || (sj && sj.lastResult && !sj.lastResult.success)) attention++;
+        else if (sj && sj.lastResult && sj.lastResult.success) healthy++;
+        if (state === 'Active' && sj && sj.nextRunLocal) nexts.push(sj.nextRunLocal);
+      });
+      const parts = [`${cfg.jobs.length} job${cfg.jobs.length > 1 ? 's' : ''}`];
+      if (healthy) parts.push(`<span><span class="dot" style="color:var(--ok)">●</span> ${healthy} healthy</span>`);
+      if (attention) parts.push(`<span><span class="dot" style="color:var(--bad)">●</span> ${attention} need${attention > 1 ? '' : 's'} attention</span>`);
+      if (pausedCount) parts.push(`<span><span class="dot" style="color:var(--text-2)">●</span> ${pausedCount} paused</span>`);
+      if (nexts.length) {
+        const parsed = nexts.map(t => ({ t, d: Date.parse(t) })).filter(x => !isNaN(x.d));
+        const soonest = parsed.length ? parsed.sort((a, b) => a.d - b.d)[0].t : nexts[0];
+        parts.push('Next run ' + esc(fmtWhen(soonest)));
+      }
+      sum.innerHTML = parts.join('<span>·</span>');
+      sum.style.display = '';
+    }
+  }
   // The Backup jobs view's list is #jobs-list. (It was #settingsJobs before
   // the redesign; when the id changed, this render silently went nowhere
-  // and the view sat on "Loading…" forever.)
+  // and the view sat on "Loading…" forever.) One card per job; the "New
+  // backup job" button lives in this area — at the head of the list, or
+  // beside the empty-state text when there are no jobs (Joel's spec;
+  // there is deliberately no add-job button in the page header).
   const box = document.getElementById('jobs-list');
-  if (box) box.innerHTML = cfg.jobs.map(j => `
-    <div class="row">
-      <div class="grow">
-        <div class="name">${esc(j.name)}</div>
-        <div class="meta">${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}${(j.targets && j.targets.length ? ' → ' + j.targets.join(', ') : (j.autoUpload ? ' · auto-upload' : ''))}<br>
-        ${esc(j.source)} → ${esc(j.repo)}</div>
+  if (box) {
+    if (!cfg.jobs.length) {
+      box.innerHTML = `<div class="card jobs-empty">
+        <div style="font-size:34px">📂</div>
+        <div class="name" style="font-weight:600;font-size:16px;margin-top:8px">No backup jobs yet</div>
+        <p style="color:var(--text-2);margin:8px 0 16px">Create a job to start protecting a folder or a whole disk.</p>
+        <button class="accent" onclick="showJobForm()">New backup job</button>
+      </div>`;
+    } else {
+      box.innerHTML = '<div class="jobs-toolbar"><button class="accent" onclick="showJobForm()">New backup job</button></div>'
+        + cfg.jobs.map(j => {
+          const state = stateOf(j);
+          const sj = health[j.name];
+          const degraded = state === 'Active' && !!lastDegraded[j.name];
+          const failed = !!(sj && sj.lastResult && !sj.lastResult.success);
+          const cls = state === 'UserPaused' ? 'paused'
+            : degraded ? 'warn-edge'
+            : (failed || state !== 'Active') ? 'bad-edge' : '';
+          const dest = jobChips(j, locByName);
+          return `<div class="card job-card ${cls}">
+      <div class="job-tile">${j.jobType === 'disk' ? '💽' : '📁'}</div>
+      <div class="job-main">
+        <div class="name">${esc(j.name)} ${sj ? fmtLast(sj) : ''}</div>
+        <div class="meta">🕐 ${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}</div>
+        <div class="meta"><span title="${esc(j.source)}">📂 ${esc(folderName(j.source))}</span>${dest ? ' → ' + dest : ''}</div>
+        <div class="job-health">${jobHealthLine(sj, state)}</div>
+        <div class="job-progress" data-jobprog="${esc(j.name)}" style="display:none">
+          <div class="track"><div class="fill" data-jobprog-fill></div></div>
+          <div class="meta" data-jobprog-label></div>
+        </div>
       </div>
-      ${jobStateButton(j, states[j.name] || (j.paused ? 'UserPaused' : ((j.targets && j.targets.length) ? 'Active' : 'NeedsLocation')))}
-      <button onclick='editJob(${JSON.stringify(j.name)})'>Edit</button>
-      <button onclick='deleteJob(${JSON.stringify(j.name)})'>Delete</button>
-    </div>`).join('') || '<p style="color:var(--text-2)">No jobs configured. Use "New backup job" to create one.</p>';
+      <div class="job-actions">
+        <button onclick='runJobFromJobs(${JSON.stringify(j.name)})'${state !== 'Active' ? ' disabled title="This job is paused."' : ''}>Run now</button>
+        ${jobStateButton(j, state)}
+        <button class="icon-btn" title="Edit job" onclick='editJob(${JSON.stringify(j.name)})'>✎</button>
+        <button class="icon-btn" title="Delete job" onclick='deleteJob(${JSON.stringify(j.name)})'>🗑</button>
+      </div>
+    </div>`;
+        }).join('');
+    }
+  }
   // Load backup locations
   renderLocations(cfg.locations || []);
   renderVaultLocations(cfg.locations || []);
