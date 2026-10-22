@@ -404,6 +404,85 @@ public sealed class RecoveryWizardTests : IDisposable
         }
     }
 
+    [Fact]
+    public void EnsureLocalChunks_PullsMissingChunksFromFolder()
+    {
+        // WALK-8: a USB backup location is a plain folder with the same
+        // layout as a share. Back up, copy the repo to a "drive" folder,
+        // strip the local chunks (staging pruned after upload), then
+        // pull them back from the folder.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string driveDir = Path.Combine(Path.GetTempPath(), "ub-usb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            CopyDir(_repoDir, driveDir);
+            Directory.Delete(Path.Combine(_repoDir, "chunks"), recursive: true);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+            };
+            int progressCalls = 0;
+            s.EnsureLocalChunks(driveDir, (done, total) => progressCalls++);
+            Assert.True(progressCalls > 0);
+
+            // Chunks are back; a full restore works without the folder.
+            string dest = Path.Combine(Path.GetTempPath(), "ub-restored-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                s.RestoreFiles(dest, MergePolicy.Overwrite);
+                Assert.Equal("hello", File.ReadAllText(Path.Combine(dest, "a.txt")));
+            }
+            finally
+            {
+                try { Directory.Delete(dest, recursive: true); } catch { }
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(driveDir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void EnsureLocalChunks_BlankFolder_IsNoop()
+    {
+        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
+        s.SelectedBackupId = "nonexistent";
+        // Must not throw when no folder was resolved.
+        s.EnsureLocalChunks("");
+    }
+
+    [Fact]
+    public void EnsureLocalChunks_MissingChunk_ThrowsClearError()
+    {
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.BackupDirectory(_srcDir);
+        string driveDir = Path.Combine(Path.GetTempPath(), "ub-usb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // The folder exists but holds no chunks.
+            Directory.CreateDirectory(Path.Combine(driveDir, "chunks"));
+            Directory.Delete(Path.Combine(_repoDir, "chunks"), recursive: true);
+
+            using var s = new WizardState
+            {
+                RepoPath = _repoDir,
+                Passphrase = Passphrase,
+                SelectedBackupId = manifest.BackupId,
+            };
+            var ex = Assert.Throws<FileNotFoundException>(() => s.EnsureLocalChunks(driveDir));
+            Assert.Contains("not found in folder", ex.Message);
+        }
+        finally
+        {
+            try { Directory.Delete(driveDir, recursive: true); } catch { }
+        }
+    }
+
     private static void CopyDir(string src, string dst)
     {
         Directory.CreateDirectory(dst);

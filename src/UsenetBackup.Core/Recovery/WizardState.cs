@@ -399,8 +399,39 @@ public sealed class WizardState : IDisposable
             string.IsNullOrEmpty(SmbUser) ? null : SmbUser,
             string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword,
             createIfMissing: false);
+        EnsureChunksFrom(smb.Combine("chunks"),
+            id => $"Chunk {id} not found on SMB share {SmbShare}.", progress);
+    }
+
+    /// <summary>
+    /// If a plain local folder holds a copy of this backup — e.g. a USB
+    /// backup location resolved to its current drive path — copies the
+    /// selected backup's missing chunks from it into the local repo
+    /// before restore. The folder layout is identical to a share's
+    /// (chunks/manifests/repo.json, written by the scheduler's location
+    /// sync), and the pull is the same content-addressed, idempotent
+    /// copy as the SMB path. (WALK-8: the dashboard restore never looked
+    /// at USB locations, so a USB-backed restore failed on every chunk
+    /// once local staging was pruned.)
+    /// </summary>
+    public void EnsureLocalChunks(string folderRoot, Action<int, int>? progress = null)
+    {
+        if (string.IsNullOrWhiteSpace(folderRoot) || SelectedBackupId is null)
+            return;
+        EnsureChunksFrom(Path.Combine(folderRoot, "chunks"),
+            id => $"Chunk {id} not found in folder {folderRoot}.", progress);
+    }
+
+    /// <summary>
+    /// Copies the selected backup's chunks from a chunks root — an SMB
+    /// share or a plain folder, same sharded layout — into the local
+    /// repo, skipping chunks already present.
+    /// </summary>
+    private void EnsureChunksFrom(string remoteChunks, Func<string, string> notFoundMessage,
+        Action<int, int>? progress)
+    {
         var repo = OpenRepo();
-        var manifest = repo.LoadManifest(SelectedBackupId);
+        var manifest = repo.LoadManifest(SelectedBackupId!);
         // Collect chunk IDs from the manifest (volumes or per-file chunk lists).
         var chunkIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (manifest.Volumes is { Count: > 0 })
@@ -416,7 +447,6 @@ public sealed class WizardState : IDisposable
                     chunkIds.Add(id);
         }
         string localChunks = Path.Combine(RepoPath, "chunks");
-        string remoteChunks = smb.Combine("chunks");
         int done = 0;
         int total = chunkIds.Count;
         foreach (string id in chunkIds)
@@ -431,8 +461,7 @@ public sealed class WizardState : IDisposable
             {
                 string remotePath = Path.Combine(remoteChunks, shard, fileName);
                 if (!File.Exists(remotePath))
-                    throw new FileNotFoundException(
-                        $"Chunk {id} not found on SMB share {SmbShare}.");
+                    throw new FileNotFoundException(notFoundMessage(id));
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                 File.Copy(remotePath, localPath);
             }

@@ -144,8 +144,13 @@ public static partial class DashboardApi
         return "";
     }
 
-    /// <summary>Current WinRE USB build status for the dashboard, with per-step progress.</summary>
-    public static object GetWinReBuildStatus()
+    /// <summary>
+    /// Current WinRE USB build status for the dashboard, with per-step
+    /// progress. Returns the named <see cref="WinReBuildStatusDto"/> —
+    /// an anonymous type here made the endpoint return HTTP 500 under
+    /// the trimmed service (WALK-9; same trap as the bc4158f fix).
+    /// </summary>
+    public static WinReBuildStatusDto GetWinReBuildStatus()
     {
         // Snapshot everything under the lock so the status, error, target,
         // and steps are always mutually consistent.
@@ -181,17 +186,26 @@ public static partial class DashboardApi
             ? (DateTime.UtcNow - startedAt).TotalSeconds
             : 0;
 
-        return new
-        {
-            status = status ?? "idle",
-            error = error ?? "",
-            drive = drive ?? "",
+        // Convert the loosely-typed step snapshots into the named step
+        // DTO. startedAt/completedAt bookkeeping stays internal — the
+        // dashboard polls only step/name/state/percent/eta.
+        static int StepInt(Dictionary<string, object> d, string key) =>
+            d.TryGetValue(key, out var v) && v is int i ? i : 0;
+        static string StepStr(Dictionary<string, object> d, string key) =>
+            d.TryGetValue(key, out var v) ? v as string ?? "" : "";
+        var stepDtos = steps.Select(s => new WinReBuildStepDto(
+            StepInt(s, "step"), StepStr(s, "name"), StepStr(s, "state"),
+            StepInt(s, "percent"), StepInt(s, "estimatedRemainingSec"))).ToList();
+
+        return new WinReBuildStatusDto(
+            status ?? "idle",
+            error ?? "",
+            drive ?? "",
             percent,
-            currentStep = currentStepName,
-            estimatedRemainingSec = etaSec,
-            elapsedSec = (int)elapsedSec,
-            steps,
-        };
+            currentStepName,
+            etaSec,
+            (int)elapsedSec,
+            stepDtos);
     }
 
     /// <summary>

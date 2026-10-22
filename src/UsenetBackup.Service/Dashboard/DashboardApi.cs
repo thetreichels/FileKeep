@@ -742,6 +742,37 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// Resolves a restore's USB chunk source: the job's first USB target
+    /// location whose drive is currently plugged in, resolved by volume
+    /// serial to its backup folder (e.g. "E:\FileKeep"). Returns null
+    /// when the job has no USB target or no such drive is present.
+    /// (WALK-8: restores previously had exactly one remote chunk source —
+    /// SMB — so a USB-backed restore failed on every chunk once local
+    /// staging was pruned, even with the drive plugged in.)
+    /// </summary>
+    public static string? ResolveRestoreUsb(ServiceConfig config, string repo)
+    {
+        var job = config.SnapshotJobs().FirstOrDefault(j =>
+            j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
+        if (job is null)
+            return null;
+        var locByName = config.Locations.ToDictionary(
+            l => l.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (string target in job.EffectiveTargets)
+        {
+            if (locByName.TryGetValue(target, out var loc) &&
+                loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+            {
+                string? path = UsbDriveResolver.ResolveBackupPath(
+                    loc.VolumeSerial ?? "", loc.UsbFolder ?? "FileKeep");
+                if (path is not null)
+                    return path;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Starts a restore of a backup to a destination directory in the background.
     /// </summary>
     public static (int Status, object Payload) StartRestore(
@@ -767,23 +798,32 @@ public static partial class DashboardApi
             ResolveRestoreSmb(config, repo, smbShare, smbUser);
         smbShare = resolvedShare;
         smbUser = resolvedUser;
+        // USB source: the job's USB target location, if its drive is
+        // plugged in now; see ResolveRestoreUsb.
+        string? usbFolder = ResolveRestoreUsb(config, repo);
         Task.Run(() =>
         {
             try
             {
-                // Pull missing chunks from the SMB share first, if one was given.
-                if (!string.IsNullOrWhiteSpace(smbShare))
+                // Pull missing chunks from the job's banked locations
+                // first: the SMB share if one resolved, and the USB
+                // drive if it is plugged in. Both pulls are idempotent
+                // and skip chunks already staged locally.
+                if (!string.IsNullOrWhiteSpace(smbShare) || usbFolder is not null)
                 {
                     using var ws = new UsenetBackup.Core.Recovery.WizardState
                     {
                         RepoPath = repo,
                         Passphrase = passphrase,
                         SelectedBackupId = backupId,
-                        SmbShare = smbShare,
+                        SmbShare = smbShare ?? "",
                         SmbUser = smbUser ?? "",
                         SmbPassword = smbPassword ?? "",
                     };
-                    ws.EnsureSmbChunks();
+                    if (!string.IsNullOrWhiteSpace(smbShare))
+                        ws.EnsureSmbChunks();
+                    if (usbFolder is not null)
+                        ws.EnsureLocalChunks(usbFolder);
                 }
                 using var r = BackupRepository.Open(repo, passphrase);
                 var restoreOptions = new UsenetBackup.Core.RestoreOptions { MergePolicy = mergePolicy };

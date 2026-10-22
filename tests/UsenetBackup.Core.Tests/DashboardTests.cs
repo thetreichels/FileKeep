@@ -150,6 +150,19 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
+    public void HtmlPage_VaultHasJobRepoSwitcher()
+    {
+        // WALK-7: the Banked Vault needs a per-job repo switcher. Without
+        // a #repo select in the page, currentRepo() can only ever return
+        // the first job's repo, so every other job's backups are
+        // invisible — and unrestorable — in the GUI.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("id=\"vault-repo-row\"", html);
+        Assert.Contains("id=\"repo\"", html);
+        Assert.Contains("onchange=\"loadRepo()\"", html);
+    }
+
+    [Fact]
     public void HtmlPage_LinkBand_FollowsTheMockup()
     {
         // The walkthrough mockup: ONE pill in both states (full width,
@@ -164,6 +177,98 @@ public sealed class DashboardTests : IDisposable
         Assert.Contains("band.style.display = bothOn ? 'flex' : 'none'", html);
         Assert.Contains("label.textContent = isLinked ? 'Linked — AND' : 'Link'", html);
         Assert.DoesNotContain("sec-link-band-unlinked", html);
+    }
+
+    [Fact]
+    public void HtmlPage_SidebarWidthIs230()
+    {
+        // Joel's call (2026-10-21): the nav was 300px — noticeably
+        // slimmer at 230px while the sidebar Operations Log stays
+        // readable. Pinned so a layout pass doesn't silently widen it.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("nav { width: 230px;", html);
+    }
+
+    [Fact]
+    public void HtmlPage_InsightPanelAlignsWithMethodCards()
+    {
+        // Joel's call (2026-10-21): the "What this means" box must
+        // align with the selection cards, not with the "Build your
+        // protection" heading. The heading therefore sits ABOVE the
+        // flex row, so the row's left column starts with the first
+        // card and the insight card (flex-start) shares its top edge.
+        string html = DashboardHtml.Page("test-csrf-token");
+        int heading = html.IndexOf("Build your protection", StringComparison.Ordinal);
+        int row = html.IndexOf("display:flex;gap:20px;align-items:flex-start", StringComparison.Ordinal);
+        int firstCard = html.IndexOf("id=\"sec-card-passphrase\"", StringComparison.Ordinal);
+        int panel = html.IndexOf("id=\"igPanel\"", StringComparison.Ordinal);
+        Assert.True(heading >= 0 && row > heading && firstCard > row && panel > row,
+            "heading must precede the flex row; cards and panel live inside it");
+    }
+
+    [Fact]
+    public void HtmlPage_InsightPanelHasNoIconRow()
+    {
+        // Joel's call (2026-10-21): the method icon row that sat
+        // between the "What this means" heading and the infograph
+        // diagram is removed. The diagram and its card/band hover
+        // previews stay; nothing may reference the row any more.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("id=\"igPanel\"", html);
+        Assert.Contains("id=\"igYou\"", html);
+        Assert.DoesNotContain("igKeys", html);
+        Assert.DoesNotContain("CUE_ICONS", html);
+        Assert.DoesNotContain("ig-kname", html);
+    }
+
+    [Fact]
+    public void HtmlPage_SecurityNoticesAreToastsNotBanner()
+    {
+        // Joel's call (2026-10-21): the "Switched to YubiKey — at
+        // least one..." explanation (and its siblings) must arrive as
+        // a sliding error-style toast, not an in-flow banner box that
+        // appears at the top of the step and moves the layout.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.DoesNotContain("id=\"sec-banner\"", html);
+        int start = html.IndexOf("function secShowBanner(msg)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "secShowBanner not found in the page");
+        int end = html.IndexOf("\n}", start, StringComparison.Ordinal);
+        Assert.True(end > start, "secShowBanner body not terminated as expected");
+        string body = html.Substring(start, end - start);
+        Assert.Contains("toast(msg, 'err')", body);
+    }
+
+    [Fact]
+    public void HtmlPage_YubiKeyCardTextIsStatic()
+    {
+        // Joel's call (2026-10-21): the YubiKey card showed a long
+        // "No YubiKey?..." reassurance panel only while the method was
+        // off, so toggling it changed the card's text and height and
+        // the layout jumped. The card now reads the same in both
+        // states: "Physical key — touch to unlock."
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("Physical key — touch to unlock.", html);
+        Assert.DoesNotContain("sec-yk-reassurance", html);
+        Assert.DoesNotContain("No YubiKey? No problem", html);
+    }
+
+    [Fact]
+    public void HtmlPage_LinkToggleIsIntentOnly()
+    {
+        // The link pill must NOT save on click: on a fresh system the
+        // profile save it fired carried passphraseEnabled=true before
+        // any passphrase was configured, so both linking and unlinking
+        // failed with "No passphrase is configured..." The choice is
+        // intent, persisted by Finish / setup-step saves (secSaveProfile
+        // is called there with the same secProfile.linkMode).
+        string html = DashboardHtml.Page("test-csrf-token");
+        int start = html.IndexOf("function secToggleLink()", StringComparison.Ordinal);
+        Assert.True(start >= 0, "secToggleLink not found in the page");
+        int end = html.IndexOf("\n}", start, StringComparison.Ordinal);
+        Assert.True(end > start, "secToggleLink body not terminated as expected");
+        string body = html.Substring(start, end - start);
+        Assert.Contains("secUpdateLinkBand()", body);
+        Assert.DoesNotContain("secSaveProfile", body);
     }
 
     [Fact]
@@ -231,6 +336,59 @@ public sealed class DashboardTests : IDisposable
             config, _repoDir, @"\\other\share", "bob");
         Assert.Equal(@"\\other\share", share);
         Assert.Equal("bob", user);
+    }
+
+    [Fact]
+    public void GetWinReBuildStatus_ReturnsNamedDtoWithThePolledContract()
+    {
+        // WALK-9: the status used to be an anonymous type returned
+        // through Results.Json — under the trimmed service that
+        // serialized as HTTP 500 and the dashboard showed no build
+        // progress. It must be the named DTO carrying the exact
+        // camelCase fields checkWinReStatus polls for.
+        var status = DashboardApi.GetWinReBuildStatus();
+        Assert.IsType<WinReBuildStatusDto>(status);
+        // Serialize through the app's source-generated context — the
+        // trimmed service has no reflection fallback, so a DTO missing
+        // from DashboardJsonContext 500s in production while passing a
+        // plain reflection-based serialization here. (First version of
+        // this fix missed the registration and did exactly that.)
+        string json = JsonSerializer.Serialize(status,
+            DashboardJsonContext.Default.WinReBuildStatusDto);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal("idle", root.GetProperty("status").GetString());
+        Assert.Equal("", root.GetProperty("error").GetString());
+        Assert.Equal("", root.GetProperty("drive").GetString());
+        Assert.Equal(0, root.GetProperty("percent").GetInt32());
+        Assert.Equal("", root.GetProperty("currentStep").GetString());
+        Assert.Equal(0, root.GetProperty("estimatedRemainingSec").GetInt32());
+        Assert.Equal(0, root.GetProperty("elapsedSec").GetInt32());
+        Assert.Equal(0, root.GetProperty("steps").GetArrayLength());
+    }
+
+    [Fact]
+    public void ResolveRestoreUsb_NoUsbTarget_ReturnsNull()
+    {
+        // WALK-8: a job without a USB target has no USB chunk source.
+        var config = MakeConfig();
+        Assert.Null(DashboardApi.ResolveRestoreUsb(config, _repoDir));
+    }
+
+    [Fact]
+    public void ResolveRestoreUsb_UsbTargetButDriveAbsent_ReturnsNull()
+    {
+        // The job targets a USB location, but no plugged-in drive carries
+        // that volume serial — the resolver must come back empty rather
+        // than guessing a drive letter.
+        var config = MakeConfig();
+        config.Jobs[0].Targets = new List<string> { "stick" };
+        config.Locations.Add(new BackupLocation
+        {
+            Name = "stick", Type = "usb",
+            VolumeSerial = "DEADBEEF", UsbFolder = "FileKeep",
+        });
+        Assert.Null(DashboardApi.ResolveRestoreUsb(config, _repoDir));
     }
 
     [Fact]

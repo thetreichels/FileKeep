@@ -267,3 +267,27 @@ public sealed record PhoneSetupDto(
     [property: JsonPropertyName("otpauthUri")] string OtpauthUri,
     [property: JsonPropertyName("secret")] string Secret,
     [property: JsonPropertyName("qrSvg")] string QrSvg);
+
+/// <summary>One step of a WinRE build for /api/operations/winre-build-status.</summary>
+public sealed record WinReBuildStepDto(
+    [property: JsonPropertyName("step")] int Step,
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("percent")] int Percent,
+    [property: JsonPropertyName("estimatedRemainingSec")] int EstimatedRemainingSec);
+
+/// <summary>
+/// Response for GET /api/operations/winre-build-status. (WALK-9: this
+/// used to be an anonymous type, which the trimmed service cannot
+/// serialize — the endpoint returned HTTP 500 and the dashboard showed
+/// no build progress at all.)
+/// </summary>
+public sealed record WinReBuildStatusDto(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("error")] string Error,
+    [property: JsonPropertyName("drive")] string Drive,
+    [property: JsonPropertyName("percent")] int Percent,
+    [property: JsonPropertyName("currentStep")] string CurrentStep,
+    [property: JsonPropertyName("estimatedRemainingSec")] int EstimatedRemainingSec,
+    [property: JsonPropertyName("elapsedSec")] int ElapsedSec,
+    [property: JsonPropertyName("steps")] List<WinReBuildStepDto> Steps);

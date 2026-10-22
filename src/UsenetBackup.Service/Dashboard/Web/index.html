@@ -55,7 +55,7 @@
   /* Left nav, Settings-style (only our own real sections — no fake entries).
      The nav is a fixed full-height column; only <main> scrolls, so the nav
      and the operations log stay on screen on long views. */
-  nav { width: 300px; flex-shrink: 0; padding: 24px 12px 24px 20px; display: flex; flex-direction: column; overflow: hidden; }
+  nav { width: 230px; flex-shrink: 0; padding: 24px 12px 24px 20px; display: flex; flex-direction: column; overflow: hidden; }
   .nav-brand { display: flex; align-items: center; gap: 12px; padding: 4px 12px 20px; }
   .nav-brand .glyph {
     width: 40px; height: 40px; border-radius: 10px;
@@ -182,18 +182,12 @@
   .sec-method { transition: border-color 0.2s; }
   /* "What this means" infographic — ported from the YubiKey
      walkthrough mockup; replaces the former Security/Redundancy
-     meter bars. A row of the enabled methods, then one
-     mini-diagram below: what happens to you if you lose one
-     method. (Mockup vars mapped: --text-secondary -> --text-2,
-     --success -> --ok, --danger -> --bad, --accent-tint ->
-     a color-mix of --accent.) */
-  .ig-keys { display: flex; align-items: flex-start; gap: 4px; margin-top: 12px; }
-  .ig-key { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 54px; color: var(--text); border-radius: 6px; cursor: pointer; transition: background 0.1s ease; }
-  .ig-key:hover, .ig-key.previewing { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .ig-key svg { width: 22px; height: 22px; }
-  .ig-kname { font-size: 10.5px; line-height: 1.15; color: var(--text-2); text-align: center; }
-  .ig-join { display: inline-flex; margin-top: 4px; color: var(--accent); }
-  .ig-join svg { width: 13px; height: 13px; }
+     meter bars. One mini-diagram: what happens to you if you
+     lose one method. (The method icon row that used to sit
+     above the diagram was removed at Joel's direction,
+     2026-10-21.) (Mockup vars mapped: --text-secondary ->
+     --text-2, --success -> --ok, --danger -> --bad,
+     --accent-tint -> a color-mix of --accent.) */
   .ig-views { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
   .ig-svg { margin-top: 2px; }
   .ig-svg svg { display: block; width: 100%; height: auto; }
@@ -486,6 +480,10 @@
         </div>
       </div>
       <div class="card" style="padding:8px 20px">
+        <div class="row" id="vault-repo-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span style="color:var(--text-2);font-size:13px">Showing backups for:</span>
+          <select id="repo" onchange="loadRepo()" data-tooltip="Each backup job keeps its own vault. Pick a job to see the backups it has banked."></select>
+        </div>
         <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px;align-items:center">
           <span id="restore-session-status" class="yk-badge locked">&#128273; Locked</span>
           <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
@@ -523,7 +521,7 @@
               <input id="m-restore-smb" placeholder="SMB share (optional, e.g. \\NAS\backups)" style="flex:1">
               <input id="m-restore-smb-user" placeholder="Username (optional)" style="width:160px">
             </div>
-            <div class="meta">If chunks are missing locally, enter the SMB share to pull them from (uses the job's saved SMB password).</div>
+            <div class="meta">If chunks are missing locally, they are pulled from the job's backup locations automatically (its network share or a plugged-in USB drive). Enter a share here only to pull from somewhere else.</div>
           </div>
           <div id="restoreDiskForm" style="display:none">
             <div class="row" style="margin-top:8px">
@@ -548,31 +546,6 @@
           <div id="scanResultsBody" style="margin-top:12px"></div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeScanResultsModal()">Close</button>
-          </div>
-        </div>
-      </div>
-      <div id="locationWizardModal" class="modal" style="display:none">
-        <div class="modal-box">
-          <h2 style="margin-top:0">Give this job a backup location</h2>
-          <p class="meta" id="lw-sub">This job has no backup location, so it is paused. Pick one of your saved locations, or create a new one.</p>
-          <div id="lw-step1">
-            <div id="lw-locations" style="margin-top:12px"></div>
-            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-              <button onclick="closeLocationWizard()">Cancel</button>
-              <button class="accent" onclick="lwContinue()">Continue</button>
-            </div>
-          </div>
-          <div id="lw-step2" style="display:none">
-            <p class="meta">What kind of location?</p>
-            <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
-              <button onclick="lwNewType('nntp')">📡 Usenet provider</button>
-              <button onclick="lwNewType('smb')">💾 Network share</button>
-              <button onclick="lwNewType('usb')">🔌 USB drive</button>
-            </div>
-            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-              <button onclick="lwBack()">Back</button>
-              <button onclick="closeLocationWizard()">Cancel</button>
-            </div>
           </div>
         </div>
       </div>
@@ -769,10 +742,9 @@
         <div class="sec-step" id="sec-step-1">
           <h1>Encryption / Decryption</h1>
           <p style="color:var(--text-2);margin:-12px 0 20px">Backups stay encrypted until restored.</p>
-          <div id="sec-banner" style="display:none;margin-bottom:16px;padding:12px 16px;border-radius:6px;background:var(--bg-2);border:1px solid var(--accent);color:var(--text);font-size:14px"></div>
+          <h2 style="margin-top:0">Build your protection</h2>
           <div style="display:flex;gap:20px;align-items:flex-start">
             <div style="flex:1;min-width:0">
-              <h2 style="margin-top:0">Build your protection</h2>
               <!-- Passphrase card -->
               <div class="card sec-method" id="sec-card-passphrase" style="margin-bottom:12px">
                 <div class="row" style="align-items:center">
@@ -800,9 +772,6 @@
                     <div class="meta">Physical key — touch to unlock.</div>
                   </div>
                 </div>
-                <div id="sec-yk-reassurance" style="display:none;margin-top:12px;padding:12px;background:var(--bg-2);border-radius:6px;font-size:13px;color:var(--text-2)">
-                  No YubiKey? No problem — a strong passphrase keeps your backups secure on its own. If you add one later, it raises your security and makes unlocking as simple as a touch.
-                </div>
               </div>
               <!-- Phone OR connector (static, collapses when phone off) -->
               <div id="sec-phone-connector" style="display:flex;justify-content:center;margin:0 auto 12px;height:20px">
@@ -826,7 +795,6 @@
             <div class="card" style="width:280px;flex-shrink:0">
               <h2 style="margin-top:0">What this means</h2>
               <div class="ig" id="igPanel" role="img" aria-label="Protection summary">
-                <div class="ig-keys" id="igKeys" aria-hidden="true"></div>
                 <div class="ig-views">
                   <div class="ig-view">
                     <div class="ig-svg" id="igYou" aria-hidden="true"></div>
@@ -1189,6 +1157,31 @@
     </div>
   </div>
 </div>
+      <div id="locationWizardModal" class="modal" style="display:none">
+        <div class="modal-box">
+          <h2 style="margin-top:0">Give this job a backup location</h2>
+          <p class="meta" id="lw-sub">This job has no backup location, so it is paused. Pick one of your saved locations, or create a new one.</p>
+          <div id="lw-step1">
+            <div id="lw-locations" style="margin-top:12px"></div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button onclick="closeLocationWizard()">Cancel</button>
+              <button class="accent" onclick="lwContinue()">Continue</button>
+            </div>
+          </div>
+          <div id="lw-step2" style="display:none">
+            <p class="meta">What kind of location?</p>
+            <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+              <button onclick="lwNewType('nntp')">📡 Usenet provider</button>
+              <button onclick="lwNewType('smb')">💾 Network share</button>
+              <button onclick="lwNewType('usb')">🔌 USB drive</button>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+              <button onclick="lwBack()">Back</button>
+              <button onclick="closeLocationWizard()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
 <script>
 // Folder picker: in the desktop app this uses the GUI's native dialog;
 // in a plain browser it opens the server-backed picker (below), which
@@ -1713,15 +1706,26 @@ async function load() {
   } catch (e) { /* setup card stays hidden on error */ }
   // Start upload progress polling
   startUploadPolling();
+  // Vault job switcher (WALK-7): one vault per job. Rebuild the options
+  // on every load so job adds/deletes show up, keeping the current
+  // selection when its job still exists. The switcher row only appears
+  // when there is more than one job to switch between.
   const sel = document.getElementById('repo');
-  if (sel && !sel.options.length)
-    s.jobs.forEach(j => sel.add(new Option(j.name + ' — ' + j.repo, j.repo)));
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = '';
+    s.jobs.forEach(j => { if (j.repo) sel.add(new Option(j.name + ' — ' + j.repo, j.repo)); });
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
+  const repoRow = document.getElementById('vault-repo-row');
+  if (repoRow) repoRow.style.display = jobRepos.length > 1 ? '' : 'none';
   loadRepo();
   loadLog();
 }
 let uploadPollTimer = null;
-// The legacy repo-picker select was removed in the redesign; code that
-// needs "the current repo" falls back to the first job's repo.
+// "The current repo" is the Banked Vault's job switcher selection
+// (#repo, restored for WALK-7); before it is populated — or in code
+// paths that run ahead of load() — it falls back to the first job's repo.
 function currentRepo() {
   const el = document.getElementById('repo');
   if (el && el.value) return el.value;
@@ -2171,9 +2175,39 @@ async function submitRestore() {
     const mergePolicy = document.getElementById('m-restore-policy').value;
     if (!destDir) { toast('Enter a destination folder.', 'err'); return; }
     await api('/api/operations/restore', { method: 'POST', body: JSON.stringify({ repo, backupId: restoreTarget.backupId, destDir, smbShare, smbUser, mergePolicy }) });
-    toast('Restore started in the background. Watch the Operations log.');
+    toast('Restore started in the background…');
+    watchRestoreOutcome(repo, restoreTarget.backupId);
   }
   closeRestoreModal();
+}
+async function watchRestoreOutcome(repo, backupId) {
+  // The restore runs in the background; its outcome lands in the repo's
+  // operations log as a [manual-restore] line. Poll for the terminal
+  // line for THIS restore and toast it — before WALK-8 a failed restore
+  // closed the modal and said nothing; only the log knew. Mirrors the
+  // outcome watcher in runJob.
+  const startedAt = Date.now() - 5000;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    let lines;
+    try { lines = await api('/api/log?repo=' + encodeURIComponent(repo) + '&lines=30'); } catch { return; }
+    for (const line of lines || []) {
+      if (!line.includes('[manual-restore]') || !line.includes('backupId=' + backupId)) continue;
+      const ts = Date.parse(line.split(' ', 1)[0]);
+      if (!isNaN(ts) && ts < startedAt) continue;
+      if (line.includes(' FAILED: ')) {
+        toast('Restore failed: ' + line.split(' FAILED: ')[1], 'err');
+        loadRepo();
+        return;
+      }
+      if (line.includes(' restored=')) {
+        toast('Restore finished.', 'ok');
+        loadRepo();
+        return;
+      }
+    }
+  }
+  toast('Restore is still running — check the Operations log for its result.', '');
 }
 async function importRemote() {
   const repo = currentRepo();
@@ -2767,6 +2801,9 @@ function showLocationForm(type, loc) {
     document.getElementById('lf-smbpass').value = '';
   }
   document.getElementById('lf-error').style.display = 'none';
+  const testResult = document.getElementById('lf-test-result');
+  testResult.style.display = 'none';
+  testResult.innerHTML = '';
 }
 function hideLocationForm() {
   document.getElementById('locationFormCard').style.display = 'none';
@@ -3148,10 +3185,10 @@ async function secLoadProfile() {
 }
 
 function secShowBanner(msg) {
-  const b = document.getElementById('sec-banner');
-  b.textContent = msg;
-  b.style.display = '';
-  setTimeout(() => { b.style.display = 'none'; }, 8000);
+  // Presented as an error-style toast (slides up, overlays the page):
+  // Joel's call (2026-10-21) — the old in-flow banner box appeared at
+  // the top of the step and shoved the whole layout down.
+  toast(msg, 'err');
 }
 
 async function secToggleMethod(method, enabled) {
@@ -3194,10 +3231,15 @@ async function secToggleMethod(method, enabled) {
 }
 
 function secToggleLink() {
+  // Intent only, like the method toggles: the link choice is persisted
+  // when a setup step or Finish saves the profile. Saving here made
+  // every click error out on a fresh system — the save carries
+  // passphraseEnabled=true (the wizard default) before any passphrase
+  // exists, and the server rightly refuses to enable one that isn't
+  // configured ("No passphrase is configured..."), in both directions.
   secProfile.linkMode = secProfile.linkMode === 'and' ? 'or' : 'and';
   secUpdateLinkBand();
   secUpdateInsight();
-  secSaveProfile();
 }
 
 async function secSaveProfile() {
@@ -3819,9 +3861,6 @@ function secUpdateLinkBand() {
   ykCard.classList.toggle('join-t', bothOn);
   passCard.style.marginBottom = bothOn ? '0' : '';
 
-  // Show reassurance when YubiKey off
-  document.getElementById('sec-yk-reassurance').style.display = secProfile.yubiKeyEnabled ? 'none' : '';
-  
   // Phone connector collapses when phone off
   document.getElementById('sec-phone-connector').style.visibility = secProfile.phoneEnabled ? 'visible' : 'hidden';
   
@@ -3840,14 +3879,13 @@ function secUpdateLinkBand() {
 /* ---------- "What this means" insight panel ----------
    Ported from the YubiKey walkthrough mockup: a visual
    infographic replaces the former Security / Redundancy
-   meter bars. Top row: the enabled methods as icons. Below,
-   one mini-diagram. By default the diagram is the healthy
+   meter bars. One mini-diagram. By default the diagram is the healthy
    picture: nothing lost, no ✕ anywhere — each way in (a
    linked pair counts as one) gets a solid green arrow to
    the open padlock, and the USB path never shows. Every
    loss picture is a hover preview, and the diagram reverts
-   when the pointer leaves. Hovering a method's icon — in
-   the top row, or its card in the builder — previews losing
+   when the pointer leaves. Hovering a method's card in
+   the builder previews losing
    just that method: it greys out and is crossed, each way
    in that survives whole keeps its green arrow to the open
    lock, and if the lost method was one half of a linked
@@ -3876,7 +3914,6 @@ function secUpdateLinkBand() {
    Passphrase, YubiKey, Phone — and Phone is never part of
    the linked pair (OR-only, standing product rule). */
 const SEC_IG_ORDER = ['pass', 'yubi', 'totp'];
-const SEC_IG_NAMES = { pass: 'Passphrase', yubi: 'YubiKey', totp: 'Phone' };
 function secIgEnabled(k) {
   return k === 'pass' ? secProfile.passphraseEnabled
        : k === 'yubi' ? secProfile.yubiKeyEnabled
@@ -3899,17 +3936,9 @@ function secIgGroups() {
   if (secProfile.phoneEnabled) gs.push(['totp']);
   return gs;
 }
-function secIgName(k) { return SEC_IG_NAMES[k]; }
-
-const CUE_ICONS = {
-  pass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M8 10.3V13.7M6.53 11.15L9.47 12.85M9.47 11.15L6.53 12.85"/><path d="M12 10.3V13.7M10.53 11.15L13.47 12.85M13.47 11.15L10.53 12.85"/><path d="M16 10.3V13.7M14.53 11.15L17.47 12.85M17.47 11.15L14.53 12.85"/></svg>',
-  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9.8" y="2" width="4.4" height="4" rx="0.8"/><path d="M8 6h8v12.5A3.5 3.5 0 0 1 12.5 22h-1A3.5 3.5 0 0 1 8 18.5V6z"/><circle cx="12" cy="13.5" r="2.4"/></svg>',
-  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.8 18.8h2.4"/></svg>',
-  chain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.1"/><path d="M14 10a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.1"/></svg>'
-};
 const METHOD_ICON = { pass: 'pass', yubi: 'key', totp: 'phone' };
-/* Same glyphs as CUE_ICONS, as bare path data so the
-   mini-diagrams can place them inside one SVG each. */
+/* Method glyphs as bare path data so the mini-diagrams
+   can place them inside one SVG each. */
 const GLYPHS = {
   pass: '<rect x="3" y="7" width="18" height="10" rx="2"/><path d="M8 10.3V13.7M6.53 11.15L9.47 12.85M9.47 11.15L6.53 12.85"/><path d="M12 10.3V13.7M10.53 11.15L13.47 12.85M13.47 11.15L10.53 12.85"/><path d="M16 10.3V13.7M14.53 11.15L17.47 12.85M17.47 11.15L14.53 12.85"/>',
   key: '<rect x="9.8" y="2" width="4.4" height="4" rx="0.8"/><path d="M8 6h8v12.5A3.5 3.5 0 0 1 12.5 22h-1A3.5 3.5 0 0 1 8 18.5V6z"/><circle cx="12" cy="13.5" r="2.4"/>',
@@ -4066,40 +4095,21 @@ function renderYouDiagram() {
     && soleSurvivors[0][0] === 'totp';
   const you = youDiagram(keys, gs, lostKeys, usbLimit);
   document.getElementById('igYou').innerHTML = you.svg;
-
-  /* Mark the top-row icons whose loss is being previewed
-     — both halves while a linked pair is hovered. */
-  const keyEls = document.getElementById('igKeys').children;
-  for (let i = 0; i < keyEls.length; i++) {
-    keyEls[i].classList.toggle('previewing', !!igHoverKey && lostKeys.indexOf(keyEls[i].getAttribute('data-k')) !== -1);
-  }
 }
 
-/* Hover preview: hovering a method's icon — in the top
-   row above, or its card in the builder — re-renders the
-   diagram with that method as the lost one, immediately;
-   moving the pointer away restores the default. Only
-   enabled methods preview: the top row only ever shows
-   enabled methods, and a switched-off method's card is
-   ignored, so hovering a greyed-out icon changes
-   nothing. */
+/* Hover preview: hovering a method's card in the
+   builder re-renders the diagram with that method as
+   the lost one, immediately; moving the pointer away
+   restores the default. Only enabled methods preview:
+   a switched-off method's card is ignored, so hovering
+   a greyed-out card changes nothing. (The panel's old
+   icon row was a second hover surface; Joel removed
+   the row on 2026-10-21, the cards remain.) */
 function igSetHover(k) {
   if (igHoverKey === k) return;
   igHoverKey = k;
   renderYouDiagram();
 }
-const igKeysEl = document.getElementById('igKeys');
-igKeysEl.addEventListener('mouseover', e => {
-  if (!e.target.closest) { igSetHover(null); return; }
-  const el = e.target.closest('.ig-key');
-  if (el) { igSetHover(el.getAttribute('data-k')); return; }
-  /* The chain glyph between a linked pair is inert:
-     it carries no hover handler, so resting on the
-     link indicator itself changes nothing — only the
-     method icons on either side preview. */
-  igSetHover(null);
-});
-igKeysEl.addEventListener('mouseleave', () => { igSetHover(null); });
 const SEC_IG_CARDS = {
   pass: document.getElementById('sec-card-passphrase'),
   yubi: document.getElementById('sec-card-yubikey'),
@@ -4118,7 +4128,7 @@ SEC_IG_ORDER.forEach(k => {
    YubiKey cards previews losing the whole pair: while
    the two are linked, resting on the band crosses both
    halves and draws nothing from either — distinct
-   from hovering one method's icon or card, which loses
+   from hovering one method's card, which loses
    only that half and strands the other with its grey
    attempt line. Unlinked, the band is hidden (the OR /
    Link band shows instead) and hovering previews
@@ -4169,17 +4179,6 @@ function secUpdateInsight() {
   const rLabels = ['Low', 'Good', 'Best'];
   const rDescs = ['No other way in if a member is lost', 'Two ways in', 'Three ways in'];
 
-  // Top row: the enabled methods as icons, a chain glyph
-  // between Passphrase and YubiKey while they're linked.
-  const keys = secIgKeys();
-  let rowHtml = '';
-  keys.forEach((k, i) => {
-    if (i > 0 && secIgLinked() && keys[i - 1] === 'pass' && k === 'yubi') {
-      rowHtml += '<span class="ig-join" aria-hidden="true">' + CUE_ICONS.chain + '</span>';
-    }
-    rowHtml += '<span class="ig-key" data-k="' + k + '">' + CUE_ICONS[METHOD_ICON[k]] + '<span class="ig-kname">' + secIgName(k) + '</span></span>';
-  });
-  document.getElementById('igKeys').innerHTML = rowHtml;
   renderYouDiagram();
   document.getElementById('igPanel').setAttribute('aria-label',
     'Security: ' + label + '. ' + desc + '. Redundancy: ' + rLabels[rLevel] + '. ' + rDescs[rLevel] + '.');
