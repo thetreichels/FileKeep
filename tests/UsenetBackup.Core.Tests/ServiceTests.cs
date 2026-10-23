@@ -426,9 +426,17 @@ public sealed class ServiceTests : IDisposable
         {
             var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
             var scheduler = MakeScheduler(clock);
-            var result = scheduler.RunJobNow("docs");
-            Assert.False(result.Success);
-            Assert.Contains(BackupScheduler.PassphraseEnvVar, result.Error);
+            // Item 3 (2026-10-22): without a passphrase the job is HELD
+            // — the gate refuses run-now with the held reason instead
+            // of the run failing inside the executor with the old
+            // env-var error. Due occurrences record as skips (covered
+            // by JobPauseTests.Scheduler_NoSecurityDueJob_*).
+            var job = Assert.Single(scheduler.Jobs);
+            Assert.Equal(JobRunState.HeldNoSecurity,
+                scheduler.EvaluateJobState(job.Config));
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => scheduler.RunJobNow("docs"));
+            Assert.Contains("set up security", ex.Message);
         }
         finally
         {

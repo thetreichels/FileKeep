@@ -45,6 +45,8 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(ConfigLocationDto))]
 [JsonSerializable(typeof(List<ConfigLocationDto>))]
 [JsonSerializable(typeof(ConfigSnapshotDto))]
+[JsonSerializable(typeof(ActiveRestoreDto))]
+[JsonSerializable(typeof(List<ActiveRestoreDto>))]
 [JsonSerializable(typeof(StatusDto))]
 [JsonSerializable(typeof(StatusJobDto))]
 [JsonSerializable(typeof(List<StatusJobDto>))]

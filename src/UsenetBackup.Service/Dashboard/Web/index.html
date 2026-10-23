@@ -55,8 +55,14 @@
   /* Left nav, Settings-style (only our own real sections — no fake entries).
      The nav is a fixed full-height column; only <main> scrolls, so the nav
      and the operations log stay on screen on long views. */
-  nav { width: 230px; flex-shrink: 0; padding: 24px 12px 24px 20px; display: flex; flex-direction: column; overflow: hidden; }
-  .nav-brand { display: flex; align-items: center; gap: 12px; padding: 4px 12px 20px; }
+  /* Content-sized width (Joel, 2026-10-22): the column hugs its widest
+     item instead of a fixed 230px, so there's no dead margin beside it;
+     combined with the host applying the Windows text-size scale as the
+     WebView zoom, the sidebar grows/shrinks with the text size. The
+     min/max guards keep a pathological label from crushing or
+     stretching the layout. */
+  nav { width: max-content; min-width: 10rem; max-width: 20rem; flex-shrink: 0; padding: 24px 12px 24px 20px; display: flex; flex-direction: column; overflow: hidden; }
+  .nav-brand { display: flex; align-items: center; gap: 12px; padding: 4px 12px 20px; white-space: nowrap; }
   .nav-brand .glyph {
     width: 40px; height: 40px; border-radius: 10px;
     background: var(--accent); color: #fff;
@@ -68,6 +74,7 @@
   .nav-item {
     display: block; padding: 9px 12px; margin: 2px 0; border-radius: 6px;
     color: var(--text); text-decoration: none; position: relative; cursor: pointer;
+    white-space: nowrap;
   }
   .nav-item:hover { background: #fafafa; }
   .nav-item.active { background: #fafafa; font-weight: 600; }
@@ -546,6 +553,7 @@
         <div id="restore-secret-error" style="display:none;color:var(--bad);font-size:13px;margin-bottom:8px"></div>
         <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
       </div>
+      <div id="active-restores"></div>
       <div id="restoreModal" class="modal" style="display:none">
         <div class="modal-box">
           <h2 style="margin-top:0">Recover backup</h2>
@@ -1760,6 +1768,7 @@ async function load() {
   }
   document.getElementById('jobs').innerHTML = s.jobs.map(j => {
     const stateNote = j.state === 'UserPaused' ? 'Paused'
+      : j.state === 'HeldNoSecurity' ? 'Held — set up security'
       : j.state === 'NeedsLocation' ? 'Paused — no backup location'
       : j.state === 'WaitingForDrive' ? 'Paused — waiting for USB drive'
       : j.state === 'WaitingForNetwork' ? 'Paused — waiting for network' : null;
@@ -1769,7 +1778,7 @@ async function load() {
         <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
         <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}<br>
         ${esc(j.source)} → ${esc(j.repo)}<br>
-        ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(j.nextRunLocal)} (local)`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}${!stateNote && j.lastResult && j.lastResult.degradedNote ? `<br><span style="color:var(--warn)">⚠ ${esc(j.lastResult.degradedNote)}</span>` : ''}</div>
+        ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(fmtWhen(j.nextRunLocal))}`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}${!stateNote && j.lastResult && j.lastResult.degradedNote ? `<br><span style="color:var(--warn)">⚠ ${esc(j.lastResult.degradedNote)}</span>` : ''}</div>
       </div>
       <button onclick="runJob(${jsAttr(j.name)})" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
     </div>`;
@@ -1910,6 +1919,7 @@ async function loadRepo() {
   // The restore-session row must refresh even with no repo (zero jobs):
   // protection can be on with nothing banked yet (WALK-0).
   refreshRestoreSession();
+  refreshActiveRestores();
   const repo = currentRepo();
   if (!repo) return;
   const q = '?repo=' + encodeURIComponent(repo);
@@ -1989,6 +1999,10 @@ async function watchOpOutcome(repo, tag, backupId, label, successNeedle) {
       if (backupId && !line.includes('backupId=' + backupId) && !line.includes('id=' + backupId)) continue;
       const ts = Date.parse(line.split(' ', 1)[0]);
       if (!isNaN(ts) && ts < startedAt) continue;
+      if (line.includes(' CANCELLED')) {
+        toast(label + ' cancelled.', '');
+        return;
+      }
       if (line.includes(' FAILED: ')) {
         toast(label + ' failed: ' + line.split(' FAILED: ')[1], 'err');
         return;
@@ -2419,6 +2433,42 @@ async function submitRestore() {
     watchRestoreOutcome(repo, restoreTarget.backupId);
   }
   closeRestoreModal();
+  refreshActiveRestores();
+}
+// ---- Active restores + per-restore cancel (item 7, 2026-10-22) ----
+// Restores run in the background after their modal closes, so their
+// cancel control lives in a strip above the backups list, fed by
+// GET /api/operations/restores (the server's claim registry). The
+// strip polls while anything is running and empties itself when the
+// last restore finishes or is cancelled.
+let activeRestoreTimer = null;
+async function refreshActiveRestores() {
+  const box = document.getElementById('active-restores');
+  if (!box) return;
+  let list = [];
+  try { list = await api('/api/operations/restores'); } catch { /* keep the last render */ return; }
+  if (!list || !list.length) {
+    box.innerHTML = '';
+    if (activeRestoreTimer) { clearInterval(activeRestoreTimer); activeRestoreTimer = null; }
+    return;
+  }
+  box.innerHTML = list.map(r => `
+    <div class="card" style="display:flex;align-items:center;gap:12px">
+      <div class="grow">
+        <div class="name">⏳ Restore in progress</div>
+        <div class="meta">${esc(r.kind === 'disk' ? 'Disk image' : 'Backup')} ${esc(r.backupId)} → ${esc(r.target)} · started ${esc(fmtWhen(r.startedLocal))}</div>
+      </div>
+      <button class="state-btn bad" title="Stop this restore. Work already done stays done; the restore is recorded as cancelled, not failed." onclick='cancelRestore(${JSON.stringify(r.kind)}, ${JSON.stringify(r.target)})'>✕ Cancel restore</button>
+    </div>`).join('');
+  if (!activeRestoreTimer) activeRestoreTimer = setInterval(refreshActiveRestores, 3000);
+}
+async function cancelRestore(kind, target) {
+  const body = kind === 'disk' ? { device: target } : { destDir: target };
+  try {
+    await api('/api/operations/restore/cancel', { method: 'POST', body: JSON.stringify(body) });
+    toast('Cancelling the restore — it stops in a moment and releases the destination.', '');
+  } catch (e) { toast(e.message, 'err'); }
+  refreshActiveRestores();
 }
 async function watchRestoreOutcome(repo, backupId) {
   // The restore runs in the background; its outcome lands in the repo's
@@ -2445,6 +2495,11 @@ async function watchRestoreOutcome(repo, backupId) {
       if (!line.includes('[manual-restore]') || !line.includes('backupId=' + backupId)) continue;
       const ts = Date.parse(line.split(' ', 1)[0]);
       if (!isNaN(ts) && ts < startedAt) continue;
+      if (line.includes(' CANCELLED')) {
+        toast('Restore cancelled.', '');
+        loadRepo();
+        return;
+      }
       if (line.includes(' FAILED: ')) {
         toast('Restore failed: ' + line.split(' FAILED: ')[1], 'err');
         loadRepo();
@@ -2694,6 +2749,8 @@ function jobStateButton(j, state) {
     return `<button class="state-btn warn" title="${esc(lastDegraded[j.name])}" onclick='degradedInfo(${n})'>▶ Degraded</button>`;
   }
   switch (state) {
+    case 'HeldNoSecurity':
+      return `<button class="state-btn bad" title="No security is set up yet, so this job cannot run. Click to go to Security — the job starts on its own once a passphrase or YubiKey is in place." onclick='goSecurity()'>⏸ Set up security</button>`;
     case 'NeedsLocation':
       return `<button class="state-btn bad" title="This job has no backup location and cannot run. Click to give it one." onclick='openLocationWizard(${n})'>⏸ No location</button>`;
     case 'WaitingForDrive':
@@ -2740,6 +2797,7 @@ function jobChips(j, locByName) {
 function jobHealthLine(sj, state) {
   if (state === 'UserPaused')
     return '<span style="color:var(--text-2)">Paused</span>' + (sj && sj.lastResult ? ' · Last run ' + esc(fmtWhen(sj.lastResult.startedLocal)) : '');
+  if (state === 'HeldNoSecurity') return '<span style="color:var(--bad)">Held — set up security to run backups</span>';
   if (state === 'NeedsLocation') return '<span style="color:var(--bad)">Paused — no backup location</span>';
   if (state === 'WaitingForDrive') return '<span style="color:var(--bad)">Paused — waiting for USB drive</span>';
   if (state === 'WaitingForNetwork') return '<span style="color:var(--bad)">Paused — waiting for network</span>';
@@ -2770,6 +2828,11 @@ async function setJobPaused(name, paused) {
     loadSettings();
     load();
   } catch (e) { toast(e.message, 'err'); }
+}
+// Held jobs (no security set up) repair on the Security view.
+function goSecurity() {
+  const a = document.querySelector('.nav-item[data-view="security"]');
+  if (a) a.click();
 }
 function waitingDriveInfo(name) {
   toast(`'${name}' is waiting for its USB drive. Plug the drive back in and the job resumes on its own — no catch-up run, it just picks up its schedule.`, '');
@@ -2991,18 +3054,23 @@ function renderVaultLocations(locations) {
     return;
   }
   box.innerHTML = locations.map(l => {
-    const icon = l.type === 'nntp' ? '📡' : '💾';
+    const icon = l.type === 'nntp' ? '📡' : l.type === 'usb' ? '🔌' : '💾';
     const label = l.type === 'nntp' ? 'Usenet' : esc(l.name);
+    // Per-type detail, mirroring the Backup jobs location list. (This
+    // list used to label EVERY non-NNTP location "SMB share on your
+    // home network" and badge it "Connected" — neither was checked,
+    // and USB locations aren't SMB shares.)
     const detail = l.type === 'nntp'
       ? 'Volumes posted and confirmed'
-      : 'SMB share on your home network';
+      : l.type === 'usb'
+        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.usbFolder || 'FileKeep')}`
+        : esc(l.share || '');
     return `<div class="row" style="padding:8px 0">
       <div style="font-size:20px">${icon}</div>
       <div class="grow">
         <div class="name">${label}</div>
         <div class="meta">${detail}</div>
       </div>
-      <span class="pill">Connected</span>
     </div>`;
   }).join('');
   updateSmbScanButtonVisibility(locations);
@@ -3134,9 +3202,12 @@ function renderLocations(locations) {
         ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.usbFolder || 'FileKeep')}`
         : esc(l.share);
     const usedBy = l.usedBy && l.usedBy.length
-      ? `Used by ${l.usedBy.length} job${l.usedBy.length > 1 ? 's' : ''} · `
-      : 'Not used by any job · ';
-    const pw = l.hasPassword ? 'credentials saved ✓' : 'no credentials saved';
+      ? `Used by ${l.usedBy.length} job${l.usedBy.length > 1 ? 's' : ''}`
+      : 'Not used by any job';
+    // USB locations have no credentials concept — the line is omitted
+    // for them rather than reporting a meaningless saved/not-saved.
+    const pw = l.type === 'usb' ? ''
+      : l.hasPassword ? ' · credentials saved ✓' : ' · no credentials saved';
     return `<div class="row">
       <div style="font-size:20px">${icon}</div>
       <div class="grow">

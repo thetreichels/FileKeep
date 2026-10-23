@@ -377,6 +377,25 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapGet("/api/operations/restores", () =>
+        {
+            var (status, payload) = DashboardApi.ListActiveRestores();
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/operations/restore/cancel", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string destDir = body.TryGetProperty("destDir", out var dd) ? dd.GetString() ?? "" : "";
+            string device = body.TryGetProperty("device", out var dv) ? dv.GetString() ?? "" : "";
+            var (status, payload) = DashboardApi.CancelRestore(
+                string.IsNullOrWhiteSpace(destDir) ? null : destDir,
+                string.IsNullOrWhiteSpace(device) ? null : device);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/operations/backup-now", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

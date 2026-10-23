@@ -83,6 +83,48 @@ public sealed class JobPauseTests : IDisposable
     }
 
     [Fact]
+    public void Evaluator_NoSecurity_IsHeld_EvenWithGoodTargets()
+    {
+        // Joel, 2026-10-22 (item 3): a job whose passphrase was never
+        // set up is HELD — a visible derived state — instead of
+        // failing every scheduled attempt.
+        var state = JobStateEvaluator.Evaluate(
+            Job(false, "vault"), Lookup(("vault", false, true)),
+            securityReady: false);
+        Assert.Equal(JobRunState.HeldNoSecurity, state);
+    }
+
+    [Fact]
+    public void Evaluator_UserPausedWinsOverHeld()
+    {
+        var state = JobStateEvaluator.Evaluate(
+            Job(paused: true, "vault"), Lookup(("vault", false, true)),
+            securityReady: false);
+        Assert.Equal(JobRunState.UserPaused, state);
+    }
+
+    [Fact]
+    public void Evaluator_HeldBeatsNeedsLocation()
+    {
+        // Security is the precondition for any run, so it is the
+        // headline even when the job also lacks a location.
+        var state = JobStateEvaluator.Evaluate(
+            Job(), Lookup(), securityReady: false);
+        Assert.Equal(JobRunState.HeldNoSecurity, state);
+    }
+
+    [Fact]
+    public void Evaluator_SecurityReady_FallsThroughToLocationRules()
+    {
+        Assert.Equal(JobRunState.NeedsLocation,
+            JobStateEvaluator.Evaluate(Job(), Lookup(), securityReady: true));
+        Assert.Equal(JobRunState.Active,
+            JobStateEvaluator.Evaluate(
+                Job(false, "vault"), Lookup(("vault", false, true)),
+                securityReady: true));
+    }
+
+    [Fact]
     public void Evaluator_NoTargets_IsNeedsLocation()
     {
         Assert.Equal(JobRunState.NeedsLocation,
@@ -256,6 +298,72 @@ public sealed class JobPauseTests : IDisposable
         Assert.NotNull(job.LastResult);
         Assert.True(job.LastResult.Skipped);
         Assert.Equal(new DateTime(2026, 10, 5, 13, 30, 0), job.NextRunLocal);
+    }
+
+    [Fact]
+    public void Scheduler_NoSecurityDueJob_HeldNotFailed_LiftsWhenSecuritySet()
+    {
+        // Joel, 2026-10-22 (item 3): with no passphrase stored and no
+        // env passphrase, a due job used to throw "Cannot run scheduled
+        // backup without a passphrase…" and pile up FAILURES. It is
+        // now held: the attempt records as a skip, the state shows as
+        // HeldNoSecurity, and the job runs on its own once a usable
+        // passphrase exists. (The class ctor sets the env passphrase;
+        // this test clears it for its own duration.)
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
+        try
+        {
+            var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+            string shareDir = Path.Combine(_workDir, "share-held");
+            Directory.CreateDirectory(shareDir);
+            var config = new ServiceConfig
+            {
+                DashboardBind = "127.0.0.1",
+                DashboardPort = 15789,
+                Locations = new List<BackupLocation>
+                {
+                    new() { Name = "vault", Type = "smb", Share = shareDir },
+                },
+                Jobs = new List<BackupJobConfig>
+                {
+                    new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                            Schedule = "interval 60", Mode = "incremental",
+                            Targets = new List<string> { "vault" } },
+                },
+            };
+            var scheduler = new BackupScheduler(config, clock);
+            var job = Assert.Single(scheduler.Jobs);
+            Assert.Equal(JobRunState.HeldNoSecurity,
+                scheduler.EvaluateJobState(job.Config));
+
+            clock.Now = new DateTime(2026, 10, 5, 12, 30, 0);
+            scheduler.RunDueJobs(clock.Now);
+            Assert.NotNull(job.LastResult);
+            Assert.True(job.LastResult.Skipped);
+            Assert.False(job.LastResult.Success);
+            Assert.Contains("set up security", job.LastResult.Error);
+            Assert.Equal(0, job.ConsecutiveFailures);
+            Assert.Equal(new DateTime(2026, 10, 5, 13, 30, 0), job.NextRunLocal);
+
+            // Run-now also refuses, with the held reason (not a failure).
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => scheduler.RunJobNow("docs"));
+            Assert.Contains("set up security", ex.Message);
+
+            // Security appears: the very next due occurrence runs.
+            Environment.SetEnvironmentVariable(
+                BackupScheduler.PassphraseEnvVar, Passphrase);
+            Assert.Equal(JobRunState.Active, scheduler.EvaluateJobState(job.Config));
+            clock.Now = new DateTime(2026, 10, 5, 13, 30, 0);
+            scheduler.RunDueJobs(clock.Now);
+            Assert.NotNull(job.LastResult);
+            Assert.True(job.LastResult.Success);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(
+                BackupScheduler.PassphraseEnvVar, Passphrase);
+        }
     }
 
     [Fact]

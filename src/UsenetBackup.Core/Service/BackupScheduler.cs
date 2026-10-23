@@ -1014,7 +1014,8 @@ public sealed class BackupScheduler
         if (cfg is null)
             return job.Paused ? JobRunState.UserPaused : JobRunState.Active;
         return JobStateEvaluator.Evaluate(job,
-            JobStateEvaluator.BuildLookup(cfg, _ => recordedNetworkAway));
+            JobStateEvaluator.BuildLookup(cfg, _ => recordedNetworkAway),
+            TryGetPassphrase(cfg, out _, out _));
     }
 
     /// <summary>
@@ -1045,7 +1046,8 @@ public sealed class BackupScheduler
             return !reachable;
         }
         var lookup = JobStateEvaluator.BuildLookup(cfg, Away);
-        var state = JobStateEvaluator.Evaluate(job, lookup);
+        var state = JobStateEvaluator.Evaluate(job, lookup,
+            TryGetPassphrase(cfg, out _, out _));
         if (state != JobRunState.Active)
             return (state, null, Array.Empty<(string, string)>());
         var usable = new List<string>();

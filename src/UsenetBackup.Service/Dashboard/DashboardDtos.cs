@@ -186,7 +186,9 @@ public sealed record ConfigLocationDto(
     [property: JsonPropertyName("share")] string? Share,
     [property: JsonPropertyName("smbUser")] string? SmbUser,
     [property: JsonPropertyName("hasPassword")] bool HasPassword,
-    [property: JsonPropertyName("usedBy")] List<string> UsedBy);
+    [property: JsonPropertyName("usedBy")] List<string> UsedBy,
+    [property: JsonPropertyName("volumeLabel")] string? VolumeLabel,
+    [property: JsonPropertyName("usbFolder")] string? UsbFolder);
 
 /// <summary>Full response for GET /api/config.</summary>
 public sealed record ConfigSnapshotDto(
@@ -232,8 +234,22 @@ public sealed record StatusJobDto(
     [property: JsonPropertyName("nextRunLocal")] DateTime? NextRunLocal,
     [property: JsonPropertyName("consecutiveFailures")] int ConsecutiveFailures,
     [property: JsonPropertyName("lastResult")] StatusLastResultDto? LastResult,
-    // JobRunState name: Active | UserPaused | NeedsLocation | WaitingForDrive | WaitingForNetwork.
+    // JobRunState name: Active | UserPaused | HeldNoSecurity | NeedsLocation | WaitingForDrive | WaitingForNetwork.
     [property: JsonPropertyName("state")] string State);
+
+/// <summary>
+/// One in-flight restore for GET /api/operations/restores — the
+/// Banked Vault's active-restores strip renders these with a
+/// per-restore Cancel button (item 7, 2026-10-22). Kind is "file"
+/// or "disk"; Target is the destination folder or device path the
+/// cancel call keys on.
+/// </summary>
+public sealed record ActiveRestoreDto(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("repo")] string Repo,
+    [property: JsonPropertyName("backupId")] string BackupId,
+    [property: JsonPropertyName("target")] string Target,
+    [property: JsonPropertyName("startedLocal")] DateTime StartedLocal);
 
 /// <summary>Response for GET /api/status.</summary>
 public sealed record StatusDto(

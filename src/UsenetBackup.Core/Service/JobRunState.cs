@@ -17,6 +17,19 @@ public enum JobRunState
     UserPaused,
 
     /// <summary>
+    /// No security is set up the scheduler can use: no passphrase (or
+    /// YubiKey-only generated secret) is stored for unattended runs —
+    /// none was ever set up, or the stored copy no longer decrypts on
+    /// this machine/account. The job is HELD, not failed: scheduled
+    /// attempts are recorded as skips, never as failures, and the state
+    /// lifts by itself the moment a usable passphrase exists
+    /// (Settings → Security). Before this state existed, every attempt
+    /// threw "Cannot run scheduled backup without a passphrase…" and
+    /// piled up as a failure (Joel, 2026-10-22).
+    /// </summary>
+    HeldNoSecurity,
+
+    /// <summary>
     /// The job has no backup location at all (its target list is empty —
     /// the state a job lands in when its locations are deleted out from
     /// under it). Repaired by attaching a location.
@@ -56,13 +69,29 @@ public static class JobStateEvaluator
     public readonly record struct LocationFacts(
         bool Exists, bool IsUsb, bool UsbPresent, bool NetworkAway);
 
+    /// <summary>
+    /// Location-only evaluation (assumes security is set up). Kept for
+    /// focused location-rule tests — production paths (the scheduler's
+    /// gate and status feed) use the three-argument form so a missing
+    /// passphrase holds the job instead of failing it.
+    /// </summary>
     public static JobRunState Evaluate(
         BackupJobConfig job, Func<string, LocationFacts> locationLookup)
+        => Evaluate(job, locationLookup, securityReady: true);
+
+    public static JobRunState Evaluate(
+        BackupJobConfig job, Func<string, LocationFacts> locationLookup,
+        bool securityReady)
     {
         ArgumentNullException.ThrowIfNull(job);
         ArgumentNullException.ThrowIfNull(locationLookup);
         if (job.Paused)
             return JobRunState.UserPaused;
+        // Security is the precondition for ANY unattended run — the
+        // executor resolves the passphrase before it touches a target —
+        // so a missing one holds the job ahead of the location checks.
+        if (!securityReady)
+            return JobRunState.HeldNoSecurity;
         var targets = job.EffectiveTargets;
         if (targets.Count == 0)
             return JobRunState.NeedsLocation;
@@ -99,6 +128,7 @@ public static class JobStateEvaluator
     {
         JobRunState.Active => "active",
         JobRunState.UserPaused => "paused",
+        JobRunState.HeldNoSecurity => "set up security to run backups",
         JobRunState.NeedsLocation => "no backup location",
         JobRunState.WaitingForDrive => "USB drive not connected",
         JobRunState.WaitingForNetwork => "network location unavailable",

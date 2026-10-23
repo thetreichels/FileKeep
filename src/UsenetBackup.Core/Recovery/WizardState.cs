@@ -400,7 +400,8 @@ public sealed class WizardState : IDisposable
     /// content-addressed: files already present are skipped, so this is
     /// idempotent and resumable. Verifies the manifest exists on the share.
     /// </summary>
-    public void EnsureSmbChunks(Action<int, int>? progress = null)
+    public void EnsureSmbChunks(Action<int, int>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(SmbShare) || SelectedBackupId is null)
             return;
@@ -410,7 +411,8 @@ public sealed class WizardState : IDisposable
             string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword,
             createIfMissing: false);
         EnsureChunksFrom(smb.Combine("chunks"),
-            id => $"Chunk {id} not found on SMB share {SmbShare}.", progress);
+            id => $"Chunk {id} not found on SMB share {SmbShare}.", progress,
+            cancellationToken);
     }
 
     /// <summary>
@@ -424,12 +426,14 @@ public sealed class WizardState : IDisposable
     /// at USB locations, so a USB-backed restore failed on every chunk
     /// once local staging was pruned.)
     /// </summary>
-    public void EnsureLocalChunks(string folderRoot, Action<int, int>? progress = null)
+    public void EnsureLocalChunks(string folderRoot, Action<int, int>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(folderRoot) || SelectedBackupId is null)
             return;
         EnsureChunksFrom(Path.Combine(folderRoot, "chunks"),
-            id => $"Chunk {id} not found in folder {folderRoot}.", progress);
+            id => $"Chunk {id} not found in folder {folderRoot}.", progress,
+            cancellationToken);
     }
 
     /// <summary>
@@ -438,7 +442,7 @@ public sealed class WizardState : IDisposable
     /// repo, skipping chunks already present.
     /// </summary>
     private void EnsureChunksFrom(string remoteChunks, Func<string, string> notFoundMessage,
-        Action<int, int>? progress)
+        Action<int, int>? progress, CancellationToken cancellationToken = default)
     {
         var repo = OpenRepo();
         var manifest = repo.LoadManifest(SelectedBackupId!);
@@ -465,6 +469,10 @@ public sealed class WizardState : IDisposable
         int total = chunkIds.Count;
         foreach (string id in chunkIds)
         {
+            // Per-restore cancel (item 7, 2026-10-22): the pull honors
+            // the restore's token between chunks, so cancelling during
+            // a long pull stops promptly instead of after the last copy.
+            cancellationToken.ThrowIfCancellationRequested();
             // Chunk files are sharded: chunks/ab/cdef... (first 2 hex chars
             // as the directory, remaining 62 as the file name) — same layout
             // as LocalBlobStore.

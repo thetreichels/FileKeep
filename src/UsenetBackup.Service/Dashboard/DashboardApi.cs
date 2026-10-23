@@ -21,8 +21,24 @@ public static partial class DashboardApi
     // the same backup picked twice) interleaved their writes and left
     // a spliced result both reported on only at the end. Claims are
     // per-target: different destinations restore in parallel freely.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
-        ActiveRestoreTargets = new(StringComparer.OrdinalIgnoreCase);
+    // Item 7 (2026-10-22): each claim is a RestoreClaim carrying the
+    // restore's identity and its OWN CancellationTokenSource, so the
+    // dashboard can cancel that one restore while it runs — the claim
+    // is both the mutual-exclusion token and the cancel handle.
+    internal sealed class RestoreClaim
+    {
+        public required string Key { get; init; }
+        public required string Repo { get; init; }
+        public required string BackupId { get; init; }
+        /// <summary>Destination folder (file restore) or device path
+        /// (disk restore), for display and for the cancel lookup.</summary>
+        public required string Target { get; init; }
+        public required DateTime StartedUtc { get; init; }
+        public CancellationTokenSource Cts { get; } = new();
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, RestoreClaim>
+        ActiveRestores = new(StringComparer.OrdinalIgnoreCase);
 
     internal static string FileRestoreTargetKey(string destDir) =>
         "file:" + Path.GetFullPath(destDir.Trim());
@@ -30,11 +46,61 @@ public static partial class DashboardApi
     internal static string DiskRestoreTargetKey(string device) =>
         "disk:" + device.Trim();
 
-    internal static bool TryClaimRestoreTarget(string key) =>
-        ActiveRestoreTargets.TryAdd(key, 0);
+    internal static bool TryClaimRestoreTarget(RestoreClaim claim) =>
+        ActiveRestores.TryAdd(claim.Key, claim);
 
     internal static void ReleaseRestoreTarget(string key) =>
-        ActiveRestoreTargets.TryRemove(key, out _);
+        // The claim's CTS is deliberately NOT disposed here: a cancel
+        // request racing the restore's final moments may still hold
+        // the claim, and Cancel() on a disposed source throws. The
+        // source has no timer and is tiny; the GC reclaims it.
+        ActiveRestores.TryRemove(key, out _);
+
+    /// <summary>
+    /// Requests cancellation of the restore claimed under
+    /// <paramref name="key"/>. Returns false when no restore is
+    /// running to that target. Cancelling is a signal, not a removal:
+    /// the claim stays until the restore actually stops and releases
+    /// it, so a second restore to the same target still gets a 409
+    /// while the first is winding down.
+    /// </summary>
+    internal static bool TryCancelRestore(string key)
+    {
+        if (!ActiveRestores.TryGetValue(key, out var claim))
+            return false;
+        claim.Cts.Cancel();
+        return true;
+    }
+
+    internal static IReadOnlyList<RestoreClaim> ActiveRestoreList() =>
+        ActiveRestores.Values.OrderBy(c => c.StartedUtc).ToList();
+
+    /// <summary>Active restores for GET /api/operations/restores.</summary>
+    public static (int Status, object Payload) ListActiveRestores() =>
+        (200, ActiveRestoreList().Select(c => new ActiveRestoreDto(
+            c.Key.StartsWith("disk:", StringComparison.Ordinal) ? "disk" : "file",
+            c.Repo, c.BackupId, c.Target,
+            DateTime.SpecifyKind(c.StartedUtc, DateTimeKind.Utc).ToLocalTime())).ToList());
+
+    /// <summary>
+    /// Cancels the restore running to the given destination folder
+    /// (file restore) or device (disk restore). The restore stops at
+    /// its next chunk/file boundary, records a CANCELLED outcome in
+    /// the operations log (not a failure), and releases its target.
+    /// </summary>
+    public static (int Status, object Payload) CancelRestore(
+        string? destDir, string? device)
+    {
+        string? key = !string.IsNullOrWhiteSpace(destDir)
+            ? FileRestoreTargetKey(destDir)
+            : !string.IsNullOrWhiteSpace(device)
+                ? DiskRestoreTargetKey(device) : null;
+        if (key is null)
+            return (400, new ErrorDto("destDir or device is required."));
+        return TryCancelRestore(key)
+            ? (200, new OkDto(true))
+            : (404, new ErrorDto("No restore is running to that destination."));
+    }
 
     /// <summary>
     /// The installed app version, from the assembly informational version
@@ -898,7 +964,12 @@ public static partial class DashboardApi
         // plugged in now; see ResolveRestoreUsb.
         string? usbFolder = ResolveRestoreUsb(config, repo);
         string targetKey = FileRestoreTargetKey(destDir);
-        if (!TryClaimRestoreTarget(targetKey))
+        var claim = new RestoreClaim
+        {
+            Key = targetKey, Repo = repo, BackupId = backupId,
+            Target = destDir, StartedUtc = DateTime.UtcNow,
+        };
+        if (!TryClaimRestoreTarget(claim))
             return (409, new ErrorDto(
                 "A restore is already writing to that destination. " +
                 "Wait for it to finish before starting another one there."));
@@ -907,12 +978,16 @@ public static partial class DashboardApi
             // P2-C3: serialize against scheduled runs and every other
             // long operation through the scheduler's operation gate.
             using var op = scheduler?.BeginDashboardOperation();
-            // The restore honors both stop signals: the dashboard host
-            // token (P2-C8) and the operation gate's token (service stop
-            // via CancelActiveOperation).
-            using var linked = op is null ? null :
-                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, op.Token);
-            var effectiveToken = linked?.Token ?? cancellationToken;
+            // The restore honors every stop signal: the dashboard host
+            // token (P2-C8), the operation gate's token (service stop
+            // via CancelActiveOperation), and the claim's own token —
+            // the per-restore cancel (item 7).
+            using var linked = op is null
+                ? CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken, claim.Cts.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken, op.Token, claim.Cts.Token);
+            var effectiveToken = linked.Token;
             try
             {
                 // Pull missing chunks from the job's banked locations
@@ -931,9 +1006,9 @@ public static partial class DashboardApi
                         SmbPassword = smbPassword ?? "",
                     };
                     if (!string.IsNullOrWhiteSpace(smbShare))
-                        ws.EnsureSmbChunks();
+                        ws.EnsureSmbChunks(null, effectiveToken);
                     if (usbFolder is not null)
-                        ws.EnsureLocalChunks(usbFolder);
+                        ws.EnsureLocalChunks(usbFolder, null, effectiveToken);
                 }
                 using var r = BackupRepository.Open(repo, passphrase);
                 var restoreOptions = new UsenetBackup.Core.RestoreOptions { MergePolicy = mergePolicy };
@@ -946,6 +1021,15 @@ public static partial class DashboardApi
                     $"backupId={backupId} dest={destDir} policy={mergePolicy} " +
                     $"restored={restoreResult.RestoredFiles} " +
                     $"skippedDiffering={restoreResult.SkippedDiffering.Count} OK");
+            }
+            catch (OperationCanceledException) when (claim.Cts.IsCancellationRequested)
+            {
+                // Item 7: a user cancel is a clean outcome, not a
+                // failure. Files already restored stay restored; the
+                // claim releases below and the staging the pull built
+                // stays as ordinary (prunable) local staging.
+                OperationLog.Append(repo, "manual-restore",
+                    $"backupId={backupId} dest={destDir} CANCELLED by user");
             }
             catch (Exception ex)
             {
@@ -1270,7 +1354,12 @@ public static partial class DashboardApi
             ResolveRestoreSmb(config, repo, null, null);
         string? usbFolder = ResolveRestoreUsb(config, repo);
         string targetKey = DiskRestoreTargetKey(device);
-        if (!TryClaimRestoreTarget(targetKey))
+        var claim = new RestoreClaim
+        {
+            Key = targetKey, Repo = repo, BackupId = backupId,
+            Target = device, StartedUtc = DateTime.UtcNow,
+        };
+        if (!TryClaimRestoreTarget(claim))
             return (409, new ErrorDto(
                 "A restore is already writing to that disk. " +
                 "Wait for it to finish before starting another one there."));
@@ -1279,9 +1368,15 @@ public static partial class DashboardApi
             // P2-C3: serialize against scheduled runs and every other
             // long operation through the scheduler's operation gate.
             using var op = scheduler?.BeginDashboardOperation();
-            using var linked = op is null ? null :
-                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, op.Token);
-            var effectiveToken = linked?.Token ?? cancellationToken;
+            // Stop signals: host token (P2-C8), gate token (service
+            // stop), and the claim's own token (per-restore cancel,
+            // item 7).
+            using var linked = op is null
+                ? CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken, claim.Cts.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken, op.Token, claim.Cts.Token);
+            var effectiveToken = linked.Token;
             try
             {
                 // DL-6: stage and prove every chunk BEFORE the first
@@ -1289,7 +1384,8 @@ public static partial class DashboardApi
                 // so without this the restore died on the first pruned
                 // chunk — with the target already partly overwritten.
                 EnsureDiskImageChunksStaged(repo, backupId, passphrase,
-                    resolvedShare, resolvedUser, smbPassword, usbFolder);
+                    resolvedShare, resolvedUser, smbPassword, usbFolder,
+                    effectiveToken);
                 using var r = BackupRepository.Open(repo, passphrase);
                 r.RestoreDiskImage(backupId, device, effectiveToken);
                 // MU-15: deferred proof for a typed-secret unlock.
@@ -1297,6 +1393,15 @@ public static partial class DashboardApi
                     session?.MarkVerified();
                 OperationLog.Append(repo, "manual-disk-restore",
                     $"backupId={backupId} device={device} OK");
+            }
+            catch (OperationCanceledException) when (claim.Cts.IsCancellationRequested)
+            {
+                // Item 7: a user cancel is a clean outcome, not a
+                // failure. (A disk image already partly written stays
+                // partly written — the same as any interrupted disk
+                // restore; the cancel stops further writes promptly.)
+                OperationLog.Append(repo, "manual-disk-restore",
+                    $"backupId={backupId} device={device} CANCELLED by user");
             }
             catch (Exception ex)
             {
@@ -1330,7 +1435,8 @@ public static partial class DashboardApi
     /// </summary>
     private static void EnsureDiskImageChunksStaged(
         string repo, string backupId, string passphrase,
-        string? smbShare, string? smbUser, string? smbPassword, string? usbFolder)
+        string? smbShare, string? smbUser, string? smbPassword, string? usbFolder,
+        CancellationToken cancellationToken = default)
     {
         // The chunk set the manifest declares — volumes or per-file chunk
         // lists, the same enumeration the chunk pull uses.
@@ -1368,10 +1474,11 @@ public static partial class DashboardApi
                 SmbPassword = smbPassword ?? "",
             };
             if (!string.IsNullOrWhiteSpace(smbShare))
-                ws.EnsureSmbChunks();
+                ws.EnsureSmbChunks(null, cancellationToken);
             if (usbFolder is not null)
-                ws.EnsureLocalChunks(usbFolder);
+                ws.EnsureLocalChunks(usbFolder, null, cancellationToken);
         }
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Presence proof: every non-sparse chunk must now be a local
         // chunk file (chunks/<first 2 hex>/<remaining 62> — the

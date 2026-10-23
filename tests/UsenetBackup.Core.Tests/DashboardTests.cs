@@ -192,11 +192,12 @@ public sealed class DashboardTests : IDisposable
     [Fact]
     public void HtmlPage_SidebarWidthIs230()
     {
-        // Joel's call (2026-10-21): the nav was 300px — noticeably
-        // slimmer at 230px while the sidebar Operations Log stays
-        // readable. Pinned so a layout pass doesn't silently widen it.
+        // Superseded 2026-10-22 by Joel's content-sized spec (item 6,
+        // see HtmlPage_Sidebar_ContentSizedNotFixedWidth): the 230px
+        // fixed width from 2026-10-21 no longer applies. Kept as a
+        // tombstone asserting the old fixed width stays gone.
         string html = DashboardHtml.Page("test-csrf-token");
-        Assert.Contains("nav { width: 230px;", html);
+        Assert.DoesNotContain("nav { width: 230px;", html);
     }
 
     [Fact]
@@ -296,6 +297,60 @@ public sealed class DashboardTests : IDisposable
         string token = DashboardApi.GetBuildToken();
         Assert.NotNull(token);
         Assert.Equal(token, DashboardApi.GetBuildToken());
+    }
+
+    [Fact]
+    public void HtmlPage_LocationAndJobCard_HonestyFixes()
+    {
+        // 2026-10-22 fix batch (Joel's items 12/13/14): the Banked Vault
+        // location list must not label every non-NNTP location an SMB
+        // share or badge it "Connected" unchecked; the job card's Next
+        // run goes through the friendly formatter like everywhere else.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.DoesNotContain("SMB share on your home network", html);
+        Assert.DoesNotContain("<span class=\"pill\">Connected</span>", html);
+        Assert.Contains("Next run: ${esc(fmtWhen(j.nextRunLocal))}", html);
+        Assert.DoesNotContain("Next run: ${esc(j.nextRunLocal)}", html);
+    }
+
+    [Fact]
+    public void HtmlPage_HeldState_RendersSetUpSecurity()
+    {
+        // Joel, 2026-10-22 (item 3): jobs with no security set up show
+        // a visible held state — the jobs-view state button routes to
+        // the Security view, and both health lines name the state.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("case 'HeldNoSecurity':", html);
+        Assert.Contains("⏸ Set up security", html);
+        Assert.Contains("Held — set up security to run backups", html);
+        Assert.Contains("Held — set up security'", html);
+        Assert.Contains("function goSecurity()", html);
+    }
+
+    [Fact]
+    public void HtmlPage_RestoreCancel_StripAndWatcherShip()
+    {
+        // Item 7 (2026-10-22): the active-restores strip, its poller
+        // and cancel action ship in the page, and both outcome
+        // watchers recognize the CANCELLED terminal line (without
+        // that they'd poll to their 2-hour deadline).
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("id=\"active-restores\"", html);
+        Assert.Contains("async function refreshActiveRestores()", html);
+        Assert.Contains("async function cancelRestore(kind, target)", html);
+        Assert.Contains("/api/operations/restore/cancel", html);
+        Assert.Contains("line.includes(' CANCELLED')", html);
+    }
+
+    [Fact]
+    public void HtmlPage_Sidebar_ContentSizedNotFixedWidth()
+    {
+        // Joel, 2026-10-22 (item 6): the sidebar hugs its content and
+        // scales with the system text size (the host applies that as
+        // WebView zoom) — no fixed pixel width may come back.
+        string html = DashboardHtml.Page("test-csrf-token");
+        Assert.Contains("nav { width: max-content;", html);
+        Assert.DoesNotContain("nav { width: 230px", html);
     }
 
     [Fact]
@@ -673,7 +728,11 @@ public sealed class DashboardTests : IDisposable
         var config = MakeDiskRestoreConfig(shareDir);
 
         string key = DashboardApi.DiskRestoreTargetKey(target);
-        Assert.True(DashboardApi.TryClaimRestoreTarget(key));
+        Assert.True(DashboardApi.TryClaimRestoreTarget(new DashboardApi.RestoreClaim
+        {
+            Key = key, Repo = _repoDir, BackupId = backupId,
+            Target = target, StartedUtc = DateTime.UtcNow,
+        }));
         try
         {
             var (status, payload) = DashboardApi.StartDiskRestore(
@@ -701,7 +760,11 @@ public sealed class DashboardTests : IDisposable
         string dest = Path.Combine(_workDir, "restore-out");
         var config = MakeConfig();
         string key = DashboardApi.FileRestoreTargetKey(dest);
-        Assert.True(DashboardApi.TryClaimRestoreTarget(key));
+        Assert.True(DashboardApi.TryClaimRestoreTarget(new DashboardApi.RestoreClaim
+        {
+            Key = key, Repo = _repoDir, BackupId = "somebackup",
+            Target = dest, StartedUtc = DateTime.UtcNow,
+        }));
         try
         {
             var (status, payload) = DashboardApi.StartRestore(
@@ -714,6 +777,56 @@ public sealed class DashboardTests : IDisposable
         {
             DashboardApi.ReleaseRestoreTarget(key);
         }
+    }
+
+    [Fact]
+    public void CancelRestore_NoActiveRestore_Returns404()
+    {
+        // Item 7 (2026-10-22): cancelling with nothing running to the
+        // target is a clean 404, and a missing target is a 400.
+        string dest = Path.Combine(_workDir, "restore-cancel-none");
+        var (status, _) = DashboardApi.CancelRestore(dest, null);
+        Assert.Equal(404, status);
+        var (badStatus, _) = DashboardApi.CancelRestore(null, null);
+        Assert.Equal(400, badStatus);
+    }
+
+    [Fact]
+    public void CancelRestore_ActiveClaim_CancelsOnlyThatRestore()
+    {
+        // The cancel signals the claim's own token — the claim stays
+        // registered (winding down still excludes a second restore)
+        // until the restore releases it; then cancel is a 404 again.
+        string dest = Path.Combine(_workDir, "restore-cancel-me");
+        string key = DashboardApi.FileRestoreTargetKey(dest);
+        var claim = new DashboardApi.RestoreClaim
+        {
+            Key = key, Repo = _repoDir, BackupId = "b1",
+            Target = dest, StartedUtc = DateTime.UtcNow,
+        };
+        Assert.True(DashboardApi.TryClaimRestoreTarget(claim));
+        try
+        {
+            var (status, _) = DashboardApi.CancelRestore(dest, null);
+            Assert.Equal(200, status);
+            Assert.True(claim.Cts.IsCancellationRequested);
+            // Still listed while it winds down, as a file restore.
+            var active = DashboardApi.ActiveRestoreList();
+            Assert.Contains(active, c => c.Key == key);
+            var (listStatus, payload) = DashboardApi.ListActiveRestores();
+            Assert.Equal(200, listStatus);
+            var dto = Assert.Single(
+                Assert.IsType<List<ActiveRestoreDto>>(payload),
+                d => d.BackupId == "b1");
+            Assert.Equal("file", dto.Kind);
+            Assert.Equal(dest, dto.Target);
+        }
+        finally
+        {
+            DashboardApi.ReleaseRestoreTarget(key);
+        }
+        var (goneStatus, _) = DashboardApi.CancelRestore(dest, null);
+        Assert.Equal(404, goneStatus);
     }
 
     [Fact]
@@ -1270,6 +1383,33 @@ public sealed class DashboardTests : IDisposable
             new NntpConfig { Host = "" });
         Assert.Equal(200, status);
         Assert.Null(config.Nntp);
+    }
+
+    [Fact]
+    public void UpdateNntp_SetPayload_SerializesThroughDashboardContext()
+    {
+        // The payload must be a named DTO registered in
+        // DashboardJsonContext: the pre-fix anonymous type serialized
+        // to an empty body in the trimmed build (no source-gen
+        // metadata), which a reflection-based assert cannot see — so
+        // serialize through the app's context, per house rule.
+        var config = MakeConfig();
+        var scheduler = new BackupScheduler(config);
+        string configPath = Path.Combine(_workDir, "service.json");
+        config.Save(configPath);
+
+        var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath,
+            new NntpConfig
+            {
+                Host = "news.example.com", Port = 563, Username = "u",
+                Ssl = true, Connections = 8,
+            });
+        Assert.Equal(200, status);
+        string json = System.Text.Json.JsonSerializer.Serialize(
+            payload, DashboardJsonContext.Default.GetTypeInfo(payload.GetType()));
+        Assert.Contains("\"host\":\"news.example.com\"", json);
+        Assert.Contains("\"port\":563", json);
+        Assert.Contains("\"ssl\":true", json);
     }
 
     [Fact]

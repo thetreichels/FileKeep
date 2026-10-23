@@ -268,7 +268,8 @@ public static partial class DashboardApi
         config.SnapshotJobs()
             .Where(j => j.EffectiveTargets.Any(t =>
                 t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
-            .Select(j => j.Name).ToList());
+            .Select(j => j.Name).ToList(),
+        l.VolumeLabel, l.UsbFolder);
 
     /// <summary>
     /// Adds a new job or updates an existing one (matched by name, case-insensitive).
@@ -692,17 +693,16 @@ public static partial class DashboardApi
             scheduler.ReloadJobs(config);
             log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
             // Never return the encrypted blob to the UI; just report whether one is stored.
+            // Named DTO, registered in DashboardJsonContext: this used to
+            // return an anonymous type, whose metadata the trimmer strips
+            // — in the published build the response body came back empty
+            // (the SF-1 class of bug; the endpoint is not called by the
+            // current page, which is why it survived both audit passes).
             object safe = config.Nntp is null
                 ? new HasPasswordDto(false)
-                : new
-                {
-                    host = config.Nntp.Host,
-                    port = config.Nntp.Port,
-                    username = config.Nntp.Username,
-                    ssl = config.Nntp.Ssl,
-                    connections = config.Nntp.Connections,
-                    hasPassword = config.Nntp.HasPassword,
-                };
+                : new ConfigNntpDto(
+                    config.Nntp.Host, config.Nntp.Port, config.Nntp.Username,
+                    config.Nntp.Ssl, config.Nntp.Connections, config.Nntp.HasPassword);
             return (200, safe);
         }
         catch (Exception ex)

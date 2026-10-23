@@ -268,10 +268,49 @@ public class MainForm : Form
             // after its awaits and must not touch the WebView while
             // (or after) it is disposed here (P2-L13).
             _closing = true;
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             try { _webView?.Dispose(); } catch { /* closing anyway */ }
         };
+    }
+
+    /// <summary>
+    /// Applies the Windows text size (Settings → Accessibility → Text
+    /// size) to the dashboard. WebView2 does not pick the scale up by
+    /// itself, so the host reads the percentage the slider maintains
+    /// (HKCU\Software\Microsoft\Accessibility\TextScaleFactor) and sets
+    /// it as the WebView zoom. The page's nav is content-sized, so the
+    /// sidebar grows and shrinks with the text like everything else
+    /// (Joel, 2026-10-22). Best-effort: any failure leaves the zoom at
+    /// 100% and never blocks startup.
+    /// </summary>
+    private void ApplyTextScaleZoom()
+    {
+        try
+        {
+            double factor = 1.0;
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Accessibility");
+            if (key?.GetValue("TextScaleFactor") is int pct && pct >= 50 && pct <= 300)
+                factor = pct / 100.0;
+            if (!_closing && !IsDisposed)
+                _webView.ZoomFactor = factor;
+        }
+        catch { /* cosmetic — ignore */ }
+    }
+
+    private void OnUserPreferenceChanged(
+        object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        // Fires on a system thread when system preferences change (a
+        // text-size change included); marshal back to the UI thread.
+        try
+        {
+            if (!IsDisposed)
+                BeginInvoke(new Action(ApplyTextScaleZoom));
+        }
+        catch { /* form closing */ }
     }
 
     private void RestoreFromTray()
@@ -392,6 +431,9 @@ public class MainForm : Form
             // touch below throws ObjectDisposedException on a dead form.
             if (_closing || IsDisposed)
                 return;
+
+            ApplyTextScaleZoom();
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
             // Expose native dialogs to JavaScript as window.chrome.webview.hostObjects.fileKeep
             _webView.CoreWebView2.AddHostObjectToScript("fileKeep", new NativeBridge(this));
