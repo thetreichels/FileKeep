@@ -150,12 +150,21 @@ public sealed class JobPauseTests : IDisposable
     }
 
     [Fact]
-    public void Evaluator_LegacyBareTarget_DefersToExecutor()
+    public void Evaluator_UnresolvableTargetOnly_IsNeedsLocation()
     {
-        // A target naming no location (legacy bare "nntp") is resolved by
-        // the executor as before; it is never a derived pause.
-        Assert.Equal(JobRunState.Active, JobStateEvaluator.Evaluate(
+        // Phase 6: a target naming no existing location — the legacy
+        // bare token "nntp" is the archetype — resolves to nothing. A
+        // job whose targets all fail to resolve behaves like the
+        // zero-target case: derived pause (NeedsLocation), never a
+        // silent upload somewhere unintended.
+        Assert.Equal(JobRunState.NeedsLocation, JobStateEvaluator.Evaluate(
             Job(false, "nntp"), Lookup()));
+
+        // Mixed: one dangling target beside a real, present location
+        // still runs on the location (the dangling one is dropped by
+        // the gate/executor and named in the run's degraded note).
+        Assert.Equal(JobRunState.Active, JobStateEvaluator.Evaluate(
+            Job(false, "nntp", "vault"), Lookup(("vault", false, true))));
     }
 
     [Fact]
@@ -640,14 +649,16 @@ public sealed class JobPauseTests : IDisposable
     }
 
     [Fact]
-    public void Run_BareNntpTargetWithoutProviders_FailsAndKeepsChunks()
+    public void Run_UnresolvableTargetOnly_DerivedPausedNeedsLocation()
     {
-        // DL-3 (error-handling audit 2026-10-21): a legacy bare "nntp"
-        // target with no providers configured resolves to no deliverer
-        // at all. The batched path used to prune every batch
-        // "successfully" into the void — the staged chunks (the only
-        // copy) were deleted and the run reported success. The run
-        // must now fail and the chunks must survive.
+        // Was Run_BareNntpTargetWithoutProviders_FailsAndKeepsChunks
+        // (DL-3, error-handling audit 2026-10-21): a legacy bare "nntp"
+        // target with no providers used to run, resolve to no deliverer,
+        // and prune its staged chunks into the void. Since Phase 6
+        // dropped the bare-target fallback, such a job never runs at
+        // all: its targets resolve to no location, so it is
+        // derived-paused (NeedsLocation) exactly like a zero-target job —
+        // no crash, no silent upload, and nothing staged or pruned.
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
         var config = new ServiceConfig
         {
@@ -662,11 +673,14 @@ public sealed class JobPauseTests : IDisposable
         };
         var scheduler = new BackupScheduler(config, clock);
 
-        var result = scheduler.RunJobNow("docs");
-        Assert.False(result.Success);
-        string chunksDir = Path.Combine(_repoDir, "chunks");
-        Assert.True(Directory.Exists(chunksDir));
-        Assert.NotEmpty(Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories));
+        Assert.Equal(JobRunState.NeedsLocation, scheduler.EvaluateJobState(config.Jobs[0]));
+        int ChunkFiles() => Directory.Exists(Path.Combine(_repoDir, "chunks"))
+            ? Directory.GetFiles(Path.Combine(_repoDir, "chunks"), "*", SearchOption.AllDirectories).Length
+            : 0;
+        int before = ChunkFiles();
+        var ex = Assert.Throws<InvalidOperationException>(() => scheduler.RunJobNow("docs"));
+        Assert.Contains("no backup location", ex.Message);
+        Assert.Equal(before, ChunkFiles());
     }
 
     [Fact]
@@ -919,9 +933,11 @@ public sealed class JobPauseTests : IDisposable
     [Fact]
     public void Run_ProviderlessNntpAlongsideShare_SucceedsDegraded_NamesNntp()
     {
-        // DL-3: the share really receives the backup (the prune is
-        // earned), but the provider-less "nntp" target must appear as
-        // a miss in the degraded note instead of counting as delivered.
+        // DL-3 in its Phase 6 form: the share really receives the backup
+        // (the prune is earned), but the "nntp" target — which names no
+        // location, the bare-target fallback having been dropped — must
+        // appear as a miss in the degraded note instead of counting as
+        // delivered.
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
         string shareDir = Path.Combine(_workDir, "vault");
         Directory.CreateDirectory(shareDir);

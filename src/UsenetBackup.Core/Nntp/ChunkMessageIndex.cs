@@ -8,7 +8,7 @@ namespace UsenetBackup.Core.Nntp;
 /// Maps chunk IDs to their current Usenet message IDs, per provider.
 ///
 /// Chunk message IDs are normally deterministic
-/// (&lt;chunkId.repoId@invalid&gt;, legacy @usenet-backup&gt;), but retention refresh republishes
+/// (&lt;chunkId.repoId@invalid&gt;), but retention refresh republishes
 /// articles under NEW message IDs (servers reject duplicate IDs, so
 /// reposting the same ID does not extend retention). This index records
 /// which message ID is currently live for each republished chunk, so
@@ -150,7 +150,7 @@ public sealed class ChunkMessageIndex
     }
 
     /// <summary>
-    /// Message IDs we generate look like &lt;...@invalid&gt; (legacy: &lt;...@usenet-backup&gt;). At minimum,
+    /// Message IDs we generate look like &lt;...@invalid&gt;. At minimum,
     /// an ID interpolated into an NNTP command must not contain CR, LF, or
     /// whitespace that would split protocol lines.
     /// </summary>
@@ -169,29 +169,18 @@ public sealed class ChunkMessageIndex
         try
         {
             string json = File.ReadAllText(_path);
-            // Try the current nested format first.
+            // The only accepted format is the nested provider map. The
+            // pre-release flat format (chunkId -> messageId, single
+            // global map) is NOT migrated: legacy support was dropped
+            // before the first release, so a flat file lands in the
+            // corrupt-file path below like any other invalid payload.
             var nested = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
             if (nested is not null)
                 return nested;
         }
-        catch (Exception ex) { firstError = ex; /* fall through to legacy attempt */ }
+        catch (Exception ex) { firstError = ex; }
 
-        try
-        {
-            // Legacy flat format (chunkId -> messageId, single global map).
-            // Migrate under a "legacy" provider key so old refresh records
-            // are not silently dropped.
-            string json = File.ReadAllText(_path);
-            var flat = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.DictionaryStringString);
-            if (flat is not null && flat.Count > 0)
-                return new Dictionary<string, Dictionary<string, string>>
-                {
-                    ["legacy"] = flat
-                };
-        }
-        catch (Exception ex) { firstError ??= ex; }
-
-        // The file exists but neither format parses (NS-8): do NOT silently
+        // The file exists but does not parse (NS-8): do NOT silently
         // start empty — that forgets every retention-refreshed message ID
         // with no trace. Mirror UsenetUploadTracker: preserve the torn
         // file for forensics and surface the problem.

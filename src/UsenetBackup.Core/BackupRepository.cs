@@ -89,11 +89,21 @@ public sealed class BackupRepository : IDisposable
         File.Move(tmpPath, repoJsonPath, overwrite: true);
     }
 
+    /// <summary>
+    /// Subkeys authenticating this repo's published Usenet index
+    /// articles (chunk message index + manifest index), derived from
+    /// the repo key. Callers constructing an <see cref="Nntp.NntpBlobStore"/>
+    /// for this repo pass this so the store signs the indexes it posts
+    /// and refuses forged ones it fetches (B-H1/B-M1).
+    /// </summary>
+    public Nntp.IndexAuth IndexAuth { get; }
+
     private BackupRepository(string root, RepositoryConfig config, byte[] key)
     {
         _root = root;
         _config = config;
         _key = key;
+        IndexAuth = Nntp.IndexAuth.FromRepoKey(key);
         _blobs = new LocalBlobStore(root);
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
         RebuildCatalogIfNeeded();
@@ -108,6 +118,7 @@ public sealed class BackupRepository : IDisposable
         _root = root;
         _config = config;
         _key = key;
+        IndexAuth = Nntp.IndexAuth.FromRepoKey(key);
         _blobs = blobs;
         _catalog = new Catalog(Path.Combine(root, "catalog.db"));
         RebuildCatalogIfNeeded();
@@ -625,12 +636,18 @@ public sealed class BackupRepository : IDisposable
         if (!manifest.VerifyRootHash())
             throw new InvalidDataException(
                 $"Imported manifest {manifest.BackupId} failed root-hash verification.");
-        // DL-8: the manifest arrived AES-GCM-authenticated, so a
+        // DL-8: the manifest arrived AES-GCM-authenticated, but its
+        // root HMAC must still verify under this repo's key — a
+        // missing HMAC means the pre-release format (refused: legacy
+        // repo support was dropped before the first release), and a
         // present-but-wrong HMAC means it was stamped under a
-        // different repo key — refuse it rather than re-stamping over
-        // the discrepancy in WriteManifest. A legacy import (no HMAC)
-        // is stamped by WriteManifest like any other write.
-        if (manifest.RootHmac is not null && !manifest.VerifyRootHmac(_key))
+        // different repo key. Either way refuse rather than letting
+        // WriteManifest re-stamp over the discrepancy.
+        if (manifest.RootHmac is null)
+            throw new InvalidDataException(
+                $"Imported manifest {manifest.BackupId} carries no root_hmac: it uses the " +
+                "unsupported pre-release backup format and cannot be imported.");
+        if (!manifest.VerifyRootHmac(_key))
             throw new InvalidDataException(
                 $"Imported manifest {manifest.BackupId} could not be authenticated " +
                 "(stamped under a different passphrase, or tampered).");
@@ -1432,28 +1449,22 @@ public sealed class BackupRepository : IDisposable
         var manifest = BackupManifest.FromJson(File.ReadAllText(path));
         if (!manifest.VerifyRootHash())
             throw new InvalidDataException($"Manifest {backupId} failed root-hash verification (tampered or corrupt).");
-        // DL-8: when the manifest carries an HMAC, it must verify
+        // DL-8: the manifest must carry a root HMAC that verifies
         // under this repo's key — the plain root hash alone can be
-        // recomputed by anyone who can write to the repo, so a
-        // mismatch here is exactly the silent-subset tamper the HMAC
-        // exists to catch. Fail closed.
-        if (manifest.RootHmac is not null)
-        {
-            if (!manifest.VerifyRootHmac(_key))
-                throw new InvalidDataException(
-                    $"Manifest {backupId} could not be authenticated — " +
-                    "the passphrase is wrong or the manifest was tampered with.");
-        }
-        else
-        {
-            // Legacy manifest (written before root_hmac existed):
-            // accept on the root hash alone — old backups must stay
-            // restorable — and re-stamp in place so the window closes
-            // for any repo in active use. Best effort: a read-only
-            // location must not fail the load.
-            try { WriteManifest(manifest); }
-            catch { /* re-stamp is opportunistic; the load stands */ }
-        }
+        // recomputed by anyone who can write to the repo, so an
+        // absent or mismatched HMAC is exactly the silent-subset
+        // tamper the HMAC exists to catch. Fail closed. Manifests
+        // written before root_hmac existed (pre-release format) are
+        // refused outright: legacy repo support was dropped before
+        // the first release, so there is no grandfathered class.
+        if (manifest.RootHmac is null)
+            throw new InvalidDataException(
+                $"Manifest {backupId} carries no root_hmac: it uses the " +
+                "unsupported pre-release backup format and cannot be loaded.");
+        if (!manifest.VerifyRootHmac(_key))
+            throw new InvalidDataException(
+                $"Manifest {backupId} could not be authenticated — " +
+                "the passphrase is wrong or the manifest was tampered with.");
         return manifest;
     }
 
@@ -1907,7 +1918,8 @@ public sealed class BackupRepository : IDisposable
         Dictionary<string, IReadOnlyList<string>>? plan = null;
         // Post-set per volume, for batched backups: parity groups are
         // per-set, so reconstruction must scope groups to the volume's set.
-        // Null (legacy backups) means the whole backup was one set.
+        // Null (no volume carries a set name — a single-set upload)
+        // means the whole backup was one set.
         Dictionary<string, string?>? volumeSets = null;
         if (nzb.BackupId is not null)
         {
@@ -1938,7 +1950,8 @@ public sealed class BackupRepository : IDisposable
         var allVolumeIds = volumeIds.OrderBy(id => id, StringComparer.Ordinal).ToList();
 
         // Parity scope for a volume: its post set's volumes when the
-        // manifest records per-batch sets, else the whole backup (legacy).
+        // manifest records per-batch sets, else the whole backup
+        // (single set).
         IReadOnlyList<string> ParityScope(string vid)
         {
             if (volumeSets is not null &&
@@ -2298,10 +2311,94 @@ public sealed class BackupRepository : IDisposable
     public sealed record RemoteManifest(string BackupId, BackupManifest Manifest);
 
     /// <summary>
+    /// Fetches and decrypts one remote manifest for discovery. Returns
+    /// null — logging the skip to the operation log — when the manifest
+    /// article fails AES-GCM authentication (wrong passphrase, tampered,
+    /// or a forged/squatted article under this backup's deterministic
+    /// message ID), cannot be parsed, or carries a mismatched backup ID.
+    /// Discovery scans attacker-writable media (B-M1): one bad entry
+    /// must never abort the whole scan, so per-entry failures skip and
+    /// the caller continues with the remaining backups. A missing
+    /// article (null) is a plain skip with no log entry. Bad manifests
+    /// are never stored locally, exactly as before.
+    /// </summary>
+    private RemoteManifest? TryFetchRemoteManifest(NntpBlobStore remote, string backupId, string via)
+    {
+        byte[]? encrypted;
+        try
+        {
+            encrypted = remote.GetManifest(backupId);
+        }
+        catch (InvalidDataException ex)
+        {
+            OperationLog.Append(_root, "manifest-discovery-skip",
+                $"id={backupId} via={via} reason=fetch-failed: {ex.Message}");
+            return null;
+        }
+        if (encrypted is null)
+            return null;
+        byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
+        byte[] plaintext;
+        try
+        {
+            plaintext = ChunkCrypto.Decrypt(encrypted, _key, aad);
+        }
+        catch (CryptographicException ex)
+        {
+            OperationLog.Append(_root, "manifest-discovery-skip",
+                $"id={backupId} via={via} reason=authentication-failed: {ex.Message}");
+            return null;
+        }
+        try
+        {
+            string json = System.Text.Encoding.UTF8.GetString(plaintext);
+            var manifest = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupManifest);
+            if (manifest is null)
+            {
+                OperationLog.Append(_root, "manifest-discovery-skip",
+                    $"id={backupId} via={via} reason=corrupt-manifest");
+                return null;
+            }
+            if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
+            {
+                OperationLog.Append(_root, "manifest-discovery-skip",
+                    $"id={backupId} via={via} reason=backup-id-mismatch (got {manifest.BackupId})");
+                return null;
+            }
+            // The root HMAC must verify under this repo's key, exactly
+            // as ImportManifest will demand — checking here keeps an
+            // unstamped (pre-release format) or foreign-stamped
+            // manifest a per-entry skip instead of an exception when
+            // the caller saves the batch.
+            if (manifest.RootHmac is null || !manifest.VerifyRootHmac(_key))
+            {
+                OperationLog.Append(_root, "manifest-discovery-skip",
+                    $"id={backupId} via={via} reason=unauthenticated-manifest " +
+                    "(no valid root_hmac under this repo's key)");
+                return null;
+            }
+            return new RemoteManifest(backupId, manifest);
+        }
+        catch (JsonException ex)
+        {
+            OperationLog.Append(_root, "manifest-discovery-skip",
+                $"id={backupId} via={via} reason=malformed-manifest: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
+    /// <summary>
     /// Scans Usenet for encrypted manifests from this repo, downloads and
     /// decrypts any not present locally, and returns them newest-first.
-    /// Fails closed: wrong passphrase or tampering throws; bad manifests
-    /// are never stored locally.
+    /// Entries whose manifest is missing, undecryptable, or malformed
+    /// are skipped (and logged) rather than aborting the scan — see
+    /// <see cref="TryFetchRemoteManifest"/> (B-M1). With a wrong
+    /// passphrase every entry fails authentication, so discovery
+    /// returns empty instead of throwing on the first backup.
     /// </summary>
     public IReadOnlyList<RemoteManifest> DiscoverRemoteManifests(NntpBlobStore remote)
     {
@@ -2312,34 +2409,9 @@ public sealed class BackupRepository : IDisposable
             string localPath = Path.Combine(_root, "manifests", backupId + ".json");
             if (File.Exists(localPath))
                 continue; // already on USB
-            byte[]? encrypted = remote.GetManifest(backupId);
-            if (encrypted is null)
-                continue;
-            byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
-            byte[] plaintext;
-            try
-            {
-                plaintext = ChunkCrypto.Decrypt(encrypted, _key, aad);
-            }
-            catch (CryptographicException ex)
-            {
-                throw new InvalidDataException(
-                    $"Remote manifest {backupId} failed authentication (wrong passphrase or tampered).", ex);
-            }
-            try
-            {
-                string json = System.Text.Encoding.UTF8.GetString(plaintext);
-                var manifest = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupManifest)
-                    ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
-                if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
-                    throw new InvalidDataException(
-                        $"Remote manifest backup ID mismatch (expected {backupId}).");
-                result.Add(new RemoteManifest(backupId, manifest));
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(plaintext);
-            }
+            var found = TryFetchRemoteManifest(remote, backupId, "scan");
+            if (found is not null)
+                result.Add(found);
         }
         return result.OrderByDescending(m => m.Manifest.CreatedUtc).ToList();
     }
@@ -2375,34 +2447,12 @@ public sealed class BackupRepository : IDisposable
                 string localPath = Path.Combine(_root, "manifests", backupId + ".json");
                 if (File.Exists(localPath))
                     continue; // already on USB
-                byte[]? encrypted = remote.GetManifest(backupId);
-                if (encrypted is null)
-                    continue;
-                byte[] aad = Hashing.Sha256Bytes(System.Text.Encoding.UTF8.GetBytes(backupId));
-                byte[] plaintext;
-                try
-                {
-                    plaintext = ChunkCrypto.Decrypt(encrypted, _key, aad);
-                }
-                catch (CryptographicException ex)
-                {
-                    throw new InvalidDataException(
-                        $"Remote manifest {backupId} failed authentication (wrong passphrase or tampered).", ex);
-                }
-                try
-                {
-                    string json = System.Text.Encoding.UTF8.GetString(plaintext);
-                    var manifest = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupManifest)
-                        ?? throw new InvalidDataException($"Remote manifest {backupId} is corrupt.");
-                    if (!manifest.BackupId.Equals(backupId, StringComparison.Ordinal))
-                        throw new InvalidDataException(
-                            $"Remote manifest backup ID mismatch (expected {backupId}).");
-                    result.Add(new RemoteManifest(backupId, manifest));
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(plaintext);
-                }
+                // A listed entry whose manifest is missing, undecryptable,
+                // or malformed is skipped, not fatal (B-M1): the index is
+                // only a hint, and one forged entry must not hide the rest.
+                var found = TryFetchRemoteManifest(remote, backupId, "index");
+                if (found is not null)
+                    result.Add(found);
             }
         }
         return result.OrderByDescending(m => m.Manifest.CreatedUtc).ToList();

@@ -14,14 +14,17 @@ public sealed class NntpConfig
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
 
+    // TLS by default (security audit D-2): port and SSL defaults are the
+    // TLS pair (563 + on). An explicit "port"/"ssl" in a stored config is
+    // honored as written — these initializers only supply omitted fields.
     [JsonPropertyName("port")]
-    public int Port { get; set; } = 119;
+    public int Port { get; set; } = 563;
 
     [JsonPropertyName("username")]
     public string Username { get; set; } = "";
 
     [JsonPropertyName("ssl")]
-    public bool Ssl { get; set; }
+    public bool Ssl { get; set; } = true;
 
     [JsonPropertyName("connections")]
     public int Connections { get; set; } = 10;
@@ -88,11 +91,13 @@ public sealed class BackupLocation
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
 
+    // TLS by default (security audit D-2), same as NntpConfig: the
+    // defaults are the TLS pair (563 + on); explicit stored values win.
     [JsonPropertyName("port")]
-    public int Port { get; set; } = 119;
+    public int Port { get; set; } = 563;
 
     [JsonPropertyName("ssl")]
-    public bool Ssl { get; set; }
+    public bool Ssl { get; set; } = true;
 
     [JsonPropertyName("username")]
     public string Username { get; set; } = "";
@@ -257,8 +262,19 @@ public sealed class BackupJobConfig
     [JsonPropertyName("vssTimeoutSecs")]
     public int VssTimeoutSecs { get; set; }
 
-    /// <summary>Automatically upload the backup to Usenet via NNTP after it completes.</summary>
+    /// <summary>
+    /// RETIRED (Phase 6, legacy config-shape drop): the pre-locations
+    /// "upload to Usenet after the backup" flag. Upload behaviour is now
+    /// expressed entirely by <see cref="Targets"/> (location names).
+    /// The property remains ONLY as a parse shim: the config loader is
+    /// fail-closed on unrecognized members, so removing it would turn
+    /// every pre-locations service.json into a startup error instead of
+    /// an inert load. Nothing reads it; <see cref="ServiceConfig.Load"/>
+    /// zeroes it, and it is never written back out (written only if a
+    /// caller sets it in memory, which no code path does).
+    /// </summary>
     [JsonPropertyName("autoUpload")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool AutoUpload { get; set; }
 
     /// <summary>
@@ -274,35 +290,40 @@ public sealed class BackupJobConfig
     public bool Paused { get; set; }
 
     /// <summary>
-    /// Upload targets after a backup completes: any combination of
-    /// <c>"nntp"</c> (Usenet) and <c>"smb"</c> (network share). Default is
-    /// <c>["nntp"]</c> when <see cref="AutoUpload"/> is true, empty otherwise.
-    /// Set to <c>["smb"]</c> for SMB-only, or <c>["nntp","smb"]</c> for both.
+    /// Upload targets after a backup completes: the NAMES of
+    /// <see cref="ServiceConfig.Locations"/> entries. A name that matches
+    /// no location — including the legacy bare tokens <c>"nntp"</c> /
+    /// <c>"smb"</c> written by pre-locations configs — resolves to
+    /// nothing at run time (see <see cref="EffectiveTargets"/>).
     /// </summary>
     [JsonPropertyName("targets")]
     public List<string>? Targets { get; set; }
 
     /// <summary>
-    /// SMB share UNC path for the "smb" target (e.g. \\NAS\backups\filekeep).
+    /// RETIRED (Phase 6, legacy config-shape drop): the per-job SMB share
+    /// path. Share and credentials live on the job's SMB
+    /// <see cref="BackupLocation"/> now. Parse shim only — see
+    /// <see cref="AutoUpload"/> for why the property remains: nothing
+    /// reads it, <see cref="ServiceConfig.Load"/> zeroes it, and it is
+    /// not written back out at its default.
     /// </summary>
     [JsonPropertyName("smbShare")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string SmbShare { get; set; } = "";
 
-    /// <summary>Username for the SMB share (optional).</summary>
+    /// <summary>RETIRED: per-job SMB username. Parse shim only; see <see cref="SmbShare"/>.</summary>
     [JsonPropertyName("smbUser")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string SmbUser { get; set; } = "";
 
-    /// <summary>
-    /// DPAPI-encrypted SMB password (like the NNTP password). Set via the
-    /// dashboard; decrypted only on this machine.
-    /// </summary>
+    /// <summary>RETIRED: per-job DPAPI-encrypted SMB password. Parse shim only; see <see cref="SmbShare"/>.</summary>
     [JsonPropertyName("smbPasswordProtected")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string SmbPasswordProtected { get; set; } = "";
 
     /// <summary>
-    /// Plaintext SMB password on input only; the API encrypts it into
-    /// <see cref="SmbPasswordProtected"/> and nulls this before persisting.
-    /// Not written when null.
+    /// RETIRED: per-job plaintext SMB password input. Parse shim only;
+    /// see <see cref="SmbShare"/>. Not written when null.
     /// </summary>
     [JsonPropertyName("smbPassword")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -321,9 +342,14 @@ public sealed class BackupJobConfig
     }
 
     /// <summary>
-    /// Effective upload targets: explicit <see cref="Targets"/> (location
-    /// names), or the legacy <see cref="AutoUpload"/> default. The scheduler
-    /// resolves these against <see cref="ServiceConfig.Locations"/>.
+    /// Effective upload targets: the explicit <see cref="Targets"/>,
+    /// normalized (trimmed, non-empty, de-duplicated). There is no
+    /// fallback derivation (Phase 6 dropped the legacy
+    /// <see cref="AutoUpload"/> default): a job with no targets has no
+    /// destinations, and a target name that matches no location in
+    /// <see cref="ServiceConfig.Locations"/> resolves to nothing — the
+    /// job evaluates to the derived NeedsLocation state, exactly like a
+    /// job with an empty target list (<see cref="JobStateEvaluator"/>).
     /// </summary>
     [JsonIgnore]
     public IReadOnlyList<string> EffectiveTargets
@@ -336,10 +362,7 @@ public sealed class BackupJobConfig
                     .Where(t => t.Length > 0)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
-            // Legacy: AutoUpload without explicit targets. The migration in
-            // ServiceConfig.MigrateToLocations rewrites this to a location
-            // name on load; this fallback covers configs that bypass it.
-            return AutoUpload ? new List<string> { "nntp" } : new List<string>();
+            return new List<string>();
         }
     }
 
@@ -396,7 +419,7 @@ public sealed class ServiceConfig
 
     /// <summary>
     /// Guards concurrent access to ALL mutable config state — Jobs,
-    /// Locations, NntpProviders, the legacy Nntp, and the protection
+    /// Locations, NntpProviders, the top-level Nntp, and the protection
     /// fields (P2-C1/C2: Jobs were guarded; everything else was mutated
     /// unlocked while handlers and the scheduler read it lock-free,
     /// which tore saves and handed running jobs half-edited locations).
@@ -441,26 +464,32 @@ public sealed class ServiceConfig
 
     /// <summary>
     /// Named backup destinations (Usenet providers and SMB shares). Jobs
-    /// reference these by name in their <c>targets</c>. This replaces the
-    /// legacy per-job connection details and the top-level <see cref="Nntp"/>
-    /// config; see <see cref="MigrateToLocations"/> for the upgrade path.
+    /// reference these by name in their <c>targets</c>; connection details
+    /// and credentials for job uploads live here and nowhere else (the
+    /// per-job connection fields were retired in Phase 6).
     /// </summary>
     [JsonPropertyName("locations")]
     public List<BackupLocation> Locations { get; set; } = new();
 
     /// <summary>
-    /// Usenet provider for automatic uploads. Null/empty host means no Usenet
-    /// configured; jobs with auto-upload will fail with a clear error.
-    /// The password comes from USENETBACKUP_NNTP_PASSWORD, never from this file.
-    /// Legacy: migrated into <see cref="Locations"/> on load.
+    /// Global Usenet provider surface for the repo-scoped operations that
+    /// are not tied to a job's targets: remote-backup discovery, NZB
+    /// download, retention checks, and the dashboard's manual upload.
+    /// Written by POST /api/config/nntp; read via
+    /// <see cref="EffectiveProviders"/>. Jobs do NOT upload through this —
+    /// they upload to their target <see cref="Locations"/>. Null/empty
+    /// host means no global provider is configured. The password comes
+    /// from USENETBACKUP_NNTP_PASSWORD if set, else the DPAPI blob.
     /// </summary>
     [JsonPropertyName("nntp")]
     public NntpConfig? Nntp { get; set; }
 
     /// <summary>
-    /// Multiple Usenet providers for redundancy. If set, uploads go to all
-    /// providers; downloads try each in order until the chunk is found.
-    /// If empty, falls back to <see cref="Nntp"/> for backward compatibility.
+    /// Multiple global Usenet providers (same repo-scoped surface as
+    /// <see cref="Nntp"/>). If set, uploads go to all providers;
+    /// downloads try each in order until the chunk is found. If empty,
+    /// <see cref="EffectiveProviders"/> falls back to the singleton
+    /// <see cref="Nntp"/>.
     /// </summary>
     [JsonPropertyName("nntpProviders")]
     public List<NntpConfig> NntpProviders { get; set; } = new();
@@ -588,8 +617,8 @@ public sealed class ServiceConfig
     public List<string> YubiKeys { get; set; } = new();
 
     /// <summary>
-    /// Gets the effective list of Usenet providers: NntpProviders if non-empty,
-    /// otherwise the legacy single Nntp config as a singleton list.
+    /// Gets the effective list of global Usenet providers: NntpProviders
+    /// if non-empty, otherwise the single Nntp config as a singleton list.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<NntpConfig> EffectiveProviders
@@ -651,105 +680,27 @@ public sealed class ServiceConfig
         catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
         if (config is null)
             throw new InvalidOperationException($"Invalid service config '{path}': empty document.");
-        config.MigrateToLocations();
+        // Phase 6: the pre-locations config shapes are no longer
+        // migrated (MigrateToLocations is gone). A legacy file still
+        // loads: the top-level provider shape parses as the global
+        // provider surface it now is, and the retired per-job
+        // connection fields parse into inert shim properties — zero
+        // them here so no stale value can ever be observed or written
+        // back out. The strings are nulled (not just emptied) so their
+        // WhenWritingDefault ignore condition drops them from any later
+        // save entirely. Bare "nntp"/"smb" target tokens are NOT
+        // rewritten: they name no location, resolve to nothing at run
+        // time, and the job lands in the derived NeedsLocation state.
+        foreach (var job in config.Jobs)
+        {
+            job.AutoUpload = false;
+            job.SmbShare = null!;
+            job.SmbUser = null!;
+            job.SmbPasswordProtected = null!;
+            job.SmbPasswordPlaintext = null;
+        }
         config.Validate();
         return config;
-    }
-
-    /// <summary>
-    /// One-time migration from legacy config shapes to <see cref="Locations"/>:
-    /// <list type="bullet">
-    /// <item>The top-level <c>nntp</c> (and <c>nntpProviders</c>) become NNTP locations.</item>
-    /// <item>Per-job <c>smbShare</c>/<c>smbUser</c> become SMB locations.</item>
-    /// <item>Job <c>targets</c> of "nntp"/"smb" are rewritten to the new location names.</item>
-    /// </list>
-    /// Idempotent: if <see cref="Locations"/> is already populated, only fills gaps.
-    /// </summary>
-    public void MigrateToLocations()
-    {
-        // Migrate legacy NNTP configs.
-        var nntpSources = new List<(string Name, NntpConfig Cfg)>();
-        if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
-            nntpSources.Add(("Usenet", Nntp));
-        foreach (var p in NntpProviders)
-        {
-            if (!string.IsNullOrWhiteSpace(p.Host))
-                nntpSources.Add(($"Usenet {NntpProviders.IndexOf(p) + 1}", p));
-        }
-        foreach (var (name, cfg) in nntpSources)
-        {
-            if (Locations.Any(l => l.Type == "nntp" &&
-                l.Host.Equals(cfg.Host, StringComparison.OrdinalIgnoreCase) && l.Port == cfg.Port))
-                continue;
-            string locName = name;
-            int n = 2;
-            while (Locations.Any(l => l.Name.Equals(locName, StringComparison.OrdinalIgnoreCase)))
-                locName = $"{name} {n++}";
-            Locations.Add(new BackupLocation
-            {
-                Name = locName, Type = "nntp",
-                Host = cfg.Host, Port = cfg.Port, Ssl = cfg.Ssl,
-                Username = cfg.Username, Connections = cfg.Connections,
-                Newsgroup = cfg.Newsgroup, RetentionDays = cfg.RetentionDays,
-                PasswordProtected = cfg.PasswordProtected,
-                RedundancyMode = cfg.RedundancyMode,
-            });
-        }
-
-        // Migrate per-job SMB settings.
-        foreach (var job in Jobs)
-        {
-            if (string.IsNullOrWhiteSpace(job.SmbShare))
-                continue;
-            var existing = Locations.FirstOrDefault(l => l.Type == "smb" &&
-                l.Share.Equals(job.SmbShare, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-            {
-                string locName = $"{job.Name} share";
-                int n = 2;
-                while (Locations.Any(l => l.Name.Equals(locName, StringComparison.OrdinalIgnoreCase)))
-                    locName = $"{job.Name} share {n++}";
-                existing = new BackupLocation
-                {
-                    Name = locName, Type = "smb",
-                    Share = job.SmbShare, SmbUser = job.SmbUser,
-                    SmbPasswordProtected = job.SmbPasswordProtected,
-                };
-                Locations.Add(existing);
-            }
-            // Rewrite legacy "smb" target to the location name.
-            if (job.Targets is not null)
-            {
-                for (int i = 0; i < job.Targets.Count; i++)
-                {
-                    if (job.Targets[i].Equals("smb", StringComparison.OrdinalIgnoreCase))
-                        job.Targets[i] = existing.Name;
-                    else if (job.Targets[i].Equals("nntp", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var nntpLoc = Locations.FirstOrDefault(l => l.Type == "nntp");
-                        if (nntpLoc is not null)
-                            job.Targets[i] = nntpLoc.Name;
-                    }
-                }
-            }
-            else if (job.AutoUpload)
-            {
-                // Legacy AutoUpload (no explicit Targets): target the NNTP
-                // location, plus the SMB location migrated above (if any).
-                var targets = new List<string>();
-                var nntpLoc = Locations.FirstOrDefault(l => l.Type == "nntp");
-                if (nntpLoc is not null)
-                    targets.Add(nntpLoc.Name);
-                if (existing is not null)
-                    targets.Add(existing.Name);
-                if (targets.Count > 0)
-                    job.Targets = targets;
-            }
-            // Clear the legacy per-job fields (now on the location).
-            job.SmbShare = "";
-            job.SmbUser = "";
-            job.SmbPasswordProtected = "";
-        }
     }
 
     /// <summary>
@@ -878,10 +829,15 @@ public sealed class ServiceConfig
             if (xorInPlay && job.ParityGroupSize < 2)
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': parityGroupSize must be at least 2 when redundancyMode is \"xor\" (got {job.ParityGroupSize}).");
-            // Targets (SF-21): every named target must be a legacy bare
-            // target or a defined location — an unknown name was treated
-            // as Active by the gate and silently dropped by target
-            // resolution whenever another target resolved.
+            // Targets (SF-21): every named target must be a defined
+            // location — an unknown name was treated as Active by the
+            // gate and silently dropped by target resolution whenever
+            // another target resolved. The one exemption is the legacy
+            // bare tokens "nntp"/"smb" from pre-locations configs
+            // (Phase 6): they are not names at all, they resolve to
+            // nothing at run time, and the job lands in the derived
+            // NeedsLocation state — rejecting them here would fail the
+            // whole config load over a shape nothing converts anymore.
             foreach (string target in job.EffectiveTargets)
             {
                 if (target.Equals("nntp", StringComparison.OrdinalIgnoreCase) ||
@@ -894,29 +850,6 @@ public sealed class ServiceConfig
             if (job.Vss && !OperatingSystem.IsWindows())
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' requires Windows.");
-            // Auto-upload needs a Usenet provider: either a legacy global
-            // provider (EffectiveProviders) or an NNTP location referenced
-            // by the job's targets.
-            if (job.AutoUpload)
-            {
-                bool hasProvider = EffectiveProviders.Any(p => !string.IsNullOrWhiteSpace(p.Host));
-                if (!hasProvider)
-                {
-                    var targetNames = new HashSet<string>(job.EffectiveTargets, StringComparer.OrdinalIgnoreCase);
-                    hasProvider = Locations.Any(l =>
-                        l.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase) &&
-                        !string.IsNullOrWhiteSpace(l.Host) &&
-                        targetNames.Contains(l.Name));
-                    // Also accept a bare "nntp" target meaning "any NNTP location".
-                    if (!hasProvider && targetNames.Contains("nntp"))
-                        hasProvider = Locations.Any(l =>
-                            l.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase) &&
-                            !string.IsNullOrWhiteSpace(l.Host));
-                }
-                if (!hasProvider)
-                    throw new InvalidOperationException(
-                        $"Job '{job.Name}' has auto-upload enabled but no Usenet provider is configured.");
-            }
         }
         if (!string.IsNullOrEmpty(ProtectionLinkMode) &&
             !ProtectionLinkMode.Equals("or", StringComparison.OrdinalIgnoreCase) &&

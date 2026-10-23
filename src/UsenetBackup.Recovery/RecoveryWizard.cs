@@ -631,10 +631,13 @@ public sealed class RecoveryWizard : Form
         Row("Passphrase:", _passphrase, password: true);
         Row("Usenet host:", _nntpHost);
         Row("Port:", _nntpPort);
-        _nntpPort.Text = "119";
+        // TLS by default (security audit D-2): prefill the TLS port and
+        // pre-check SSL; the user can still switch to plaintext.
+        _nntpPort.Text = "563";
         _nntpPort.Size = new Size(80, 28);
         Row("Use SSL:", _nntpSsl);
         _nntpSsl.AutoSize = true;
+        _nntpSsl.Checked = true;
         Row("Username:", _nntpUser);
         Row("Password:", _nntpPassword, password: true);
         Row("Newsgroup:", _newsgroup);
@@ -747,7 +750,8 @@ public sealed class RecoveryWizard : Form
                     var repo = _state.OpenRepo();
                     using var store = new NntpBlobStore(
                         client, _state.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-                        providerKey: ChunkMessageIndex.MakeProviderKey(_state.NntpHost, _state.Newsgroup));
+                        providerKey: ChunkMessageIndex.MakeProviderKey(_state.NntpHost, _state.Newsgroup),
+                        indexAuth: repo.IndexAuth);
                     store.MaxArticleBytes = repo.MaxDownloadBytes;
                     return _state.DiscoverRemoteManifests(store);
                 }

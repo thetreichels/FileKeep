@@ -8,9 +8,9 @@ namespace UsenetBackup.Core.Tests;
 /// Manifests can arrive from untrusted sources (imported from Usenet, tampered
 /// repos), so every manifest-controlled path written during restore must be
 /// anchored inside the destination directory. Each test poisons a real
-/// manifest (recomputing the root hash so the manifest itself passes
-/// validation) and asserts the escape is blocked and nothing is written
-/// outside the destination.
+/// manifest (re-stamped under the repo's own key so the manifest itself
+/// passes authentication) and asserts the escape is blocked and nothing
+/// is written outside the destination.
 /// </summary>
 public sealed class RestorePathSecurityTests : IDisposable
 {
@@ -44,19 +44,20 @@ public sealed class RestorePathSecurityTests : IDisposable
 
     private void PoisonManifest(string backupId, Action<BackupManifest> mutate)
     {
-        string manifestPath = Path.Combine(_repoDir, "manifests", backupId + ".json");
-        var manifest = BackupManifest.FromJson(File.ReadAllText(manifestPath));
+        // The poisoned manifest is re-stamped through the repo's own
+        // write path (root hash + root HMAC under this repo's key).
+        // Unstamped ("legacy") manifests no longer load at all — that
+        // door closed when pre-release repo support was dropped — so
+        // the only hostile manifest that can reach Restore's path
+        // defenses is a validly stamped one: an attacker-authored repo
+        // restored under its own key (audit B-L1), or defense in depth
+        // against a future load-path bug. These tests pin that even a
+        // fully authenticated manifest cannot drive a write outside
+        // the restore destination.
+        using var repo = BackupRepository.Open(_repoDir, Passphrase);
+        var manifest = repo.LoadManifest(backupId);
         mutate(manifest);
-        manifest.RootSha256 = manifest.ComputeRootHash();
-        // Post-DL-8 framing: a keyless writer can no longer forge a
-        // STAMPED manifest (LoadManifest refuses it — see the DL-8
-        // tests in RepositoryTests). What remains reachable is a
-        // hostile LEGACY manifest — no HMAC, grandfathered on the root
-        // hash alone — which is exactly why the restore-time path
-        // defenses these tests exercise must keep working. Strip the
-        // HMAC so the poisoned manifest is of that class.
-        manifest.RootHmac = null;
-        File.WriteAllText(manifestPath, manifest.ToJson());
+        repo.SaveManifest(manifest);
     }
 
     [Fact]

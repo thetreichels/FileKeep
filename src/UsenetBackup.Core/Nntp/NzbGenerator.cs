@@ -73,12 +73,13 @@ public static class NzbGenerator
 
             if (volumeMode)
             {
-                string legacySetName = ArticleCodec.SetName(manifest.BackupId);
+                string singleSetName = ArticleCodec.SetName(manifest.BackupId);
                 // Batched backups post one set per batch; subjects and part
-                // numbers are per-set. Legacy manifests (no set names) keep
-                // the exact single-set layout as before.
+                // numbers are per-set. Volumes with no recorded set name
+                // (every single-set upload) form one group under the
+                // backup's derived set name.
                 var setGroups = manifest.Volumes!
-                    .GroupBy(v => v.SetName ?? legacySetName, StringComparer.Ordinal)
+                    .GroupBy(v => v.SetName ?? singleSetName, StringComparer.Ordinal)
                     .ToList();
                 foreach (var setGroup in setGroups)
                 {

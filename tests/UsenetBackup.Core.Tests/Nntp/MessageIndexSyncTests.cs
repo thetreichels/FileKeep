@@ -61,6 +61,24 @@ public sealed class MessageIndexSyncTests : IDisposable
     }
 
     [Fact]
+    public void FlatIndexFile_RejectedAsCorrupt()
+    {
+        // The pre-release flat format (chunkId -> messageId, a single
+        // global map) used to be migrated into the nested provider map
+        // under a "legacy" key. Legacy support was dropped before the
+        // first release: a flat file now takes the corrupt-file path
+        // (preserved with a .corrupt- suffix, loud error) like any
+        // other invalid payload — its records are NOT adopted.
+        string path = Path.Combine(_workDir, "chunk-message-ids.json");
+        File.WriteAllText(path,
+            """{"abc123":"<abc123.0123456789abcdef@invalid>"}""");
+        var ex = Assert.Throws<InvalidDataException>(() => new ChunkMessageIndex(_workDir));
+        Assert.Contains("corrupt", ex.Message);
+        Assert.False(File.Exists(path));
+        Assert.Single(Directory.GetFiles(_workDir, "chunk-message-ids.json.corrupt-*"));
+    }
+
+    [Fact]
     public void PostAndGetLatest_RoundTrips()
     {
         using var store = CreateStore();

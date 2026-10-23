@@ -361,10 +361,11 @@ public sealed class Par2RedundancyTests
     [Fact]
     public void Reconstruct_RejectsRS1Magic()
     {
-        // RS1 = handmade Vandermonde implementation (pre-57184b4).
-        // Different generator matrix, so RS1 parity is NOT decodable by
-        // the RS2 (ReedSolomonFast) implementation. It must be rejected,
-        // not silently mis-decoded.
+        // RS1 = the pre-release handmade Vandermonde format. The codec
+        // was dropped before the first release, so Reconstruct refuses
+        // RS1 blocks with an explicit unsupported-format error — not a
+        // silent null like ordinary corruption, and never a
+        // mis-decode by the RS2 (ReedSolomonFast) implementation.
         var chunks = MakeChunks(10, 1024);
         var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
 
@@ -384,12 +385,11 @@ public sealed class Par2RedundancyTests
         var remaining = new Dictionary<string, byte[]>(chunks);
         remaining.Remove(ids[0]);
 
-        var result = Par2Redundancy.Reconstruct(
+        var ex = Assert.Throws<InvalidDataException>(() => Par2Redundancy.Reconstruct(
             ids,
             id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
-            rs1Parity.Values.ToList());
-
-        // Must fail cleanly (null), not produce garbage
-        Assert.Null(result);
+            rs1Parity.Values.ToList()));
+        Assert.Contains("RS1", ex.Message);
+        Assert.Contains("no longer supported", ex.Message);
     }
 }

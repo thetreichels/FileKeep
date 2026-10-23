@@ -16,14 +16,7 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
-    public void EffectiveTargets_DefaultsToNntp_WhenAutoUpload()
-    {
-        var job = new BackupJobConfig { AutoUpload = true };
-        Assert.Equal(new[] { "nntp" }, job.EffectiveTargets);
-    }
-
-    [Fact]
-    public void EffectiveTargets_Empty_WhenNoAutoUploadNoTargets()
+    public void EffectiveTargets_Empty_WhenNoTargets()
     {
         var job = new BackupJobConfig();
         Assert.Empty(job.EffectiveTargets);
@@ -37,12 +30,11 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
-    public void EffectiveTargets_SupportsBoth_NormalizesAndDedups()
+    public void EffectiveTargets_NormalizesAndDedups()
     {
         var job = new BackupJobConfig
         {
-            AutoUpload = true, // explicit targets win over legacy flag
-            Targets = new List<string> { "Frugal Usenet", "NAS backups", "NAS backups" },
+            Targets = new List<string> { " Frugal Usenet ", "NAS backups", "NAS backups" },
         };
         Assert.Equal(new[] { "Frugal Usenet", "NAS backups" }, job.EffectiveTargets);
     }
@@ -54,47 +46,59 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
-    public void MigrateToLocations_MigratesNntpAndSmb()
+    public void Load_LegacyShapedConfig_Loads_RetiredJobFieldsInert()
     {
-        var config = new ServiceConfig
+        // Phase 6: pre-locations config shapes are no longer migrated.
+        // The file still loads (the retired job fields remain parse-only
+        // shims under the fail-closed loader), the top-level provider
+        // shape still parses (a kept surface), but the per-job
+        // connection fields are zeroed and read by no one, and bare
+        // "nntp"/"smb" targets resolve to no location — the job
+        // evaluates to NeedsLocation, exactly like a target-less job.
+        Directory.CreateDirectory(_tmp);
+        string repo = Path.Combine(_tmp, "repo");
+        string src = Path.Combine(_tmp, "src");
+        string path = Path.Combine(_tmp, "service.json");
+        string json = $$"""
         {
-            Nntp = new NntpConfig { Host = "news.example.com", Port = 119, Username = "user" },
-            Jobs = new List<BackupJobConfig>
-            {
-                new BackupJobConfig
-                {
-                    Name = "Docs", AutoUpload = true,
-                    SmbShare = @"\\NAS\backups", SmbUser = "u",
-                },
-            },
-        };
-        config.MigrateToLocations();
+          "dashboardPort": 15789,
+          "nntp": { "host": "news.example.com", "port": 119 },
+          "jobs": [
+            { "name": "docs", "repo": "{{repo}}", "source": "{{src}}",
+              "schedule": "daily 02:00", "autoUpload": true,
+              "smbShare": "\\\\NAS\\backups", "smbUser": "u",
+              "smbPasswordProtected": "AAAA",
+              "targets": ["nntp", "smb"] }
+          ]
+        }
+        """;
+        File.WriteAllText(path, json);
 
-        Assert.Equal(2, config.Locations.Count);
-        var nntp = config.Locations.First(l => l.Type == "nntp");
-        Assert.Equal("news.example.com", nntp.Host);
-        var smb = config.Locations.First(l => l.Type == "smb");
-        Assert.Equal(@"\\NAS\backups", smb.Share);
+        var config = ServiceConfig.Load(path);
 
-        var job = config.Jobs[0];
-        Assert.Equal(2, job.Targets!.Count);
-        Assert.Contains(nntp.Name, job.Targets);
-        Assert.Contains(smb.Name, job.Targets);
-        // Legacy per-job fields cleared.
-        Assert.Equal("", job.SmbShare);
-    }
+        // Kept surface: the global provider shape parses unchanged, and
+        // no locations are derived from it (the migration is gone).
+        Assert.Equal("news.example.com", config.Nntp?.Host);
+        Assert.Empty(config.Locations);
 
-    [Fact]
-    public void MigrateToLocations_IsIdempotent()
-    {
-        var config = new ServiceConfig
-        {
-            Nntp = new NntpConfig { Host = "news.example.com" },
-        };
-        config.MigrateToLocations();
-        int count = config.Locations.Count;
-        config.MigrateToLocations();
-        Assert.Equal(count, config.Locations.Count);
+        var job = Assert.Single(config.Jobs);
+        // Retired per-job fields: zeroed on load, never read.
+        Assert.False(job.AutoUpload);
+        Assert.True(string.IsNullOrEmpty(job.SmbShare));
+        Assert.True(string.IsNullOrEmpty(job.SmbUser));
+        Assert.True(string.IsNullOrEmpty(job.SmbPasswordProtected));
+        // Bare tokens stay in the target list as inert names that
+        // resolve to nothing.
+        Assert.Equal(new[] { "nntp", "smb" }, job.EffectiveTargets);
+        Assert.Equal(JobRunState.NeedsLocation,
+            JobStateEvaluator.Evaluate(job, JobStateEvaluator.BuildLookup(config)));
+
+        // A save never writes the retired fields back out.
+        string outPath = Path.Combine(_tmp, "service2.json");
+        config.Save(outPath);
+        string saved = File.ReadAllText(outPath);
+        Assert.DoesNotContain("smbShare", saved);
+        Assert.DoesNotContain("autoUpload", saved);
     }
 
     [Fact]

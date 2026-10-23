@@ -56,7 +56,7 @@ public sealed class NntpBatchUploader : IDisposable
         _store = new NntpBlobStore(_pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
             messageIndex: repo.MessageIndex,
             providerKey: ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
-            from: repo.GetOrCreatePoster());
+            from: repo.GetOrCreatePoster(), indexAuth: repo.IndexAuth);
         // Client-side article guard must match the provider's real limit,
         // not the 64 MB default: probed ceiling when known, else enough
         // headroom for the repo's configured volume size. (Previously the

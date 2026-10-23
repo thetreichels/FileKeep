@@ -136,8 +136,14 @@ public sealed class ManifestSyncTests : IDisposable
     }
 
     [Fact]
-    public void Discover_WrongPassphrase_Throws()
+    public void Discover_WrongPassphrase_SkipsEverything()
     {
+        // Behavior changed in Phase 3 (B-M1): discovery used to throw on
+        // the first undecryptable manifest, which meant ONE forged or
+        // squatted article aborted discovery for everyone. Per-entry
+        // failures now skip (and log), so a wrong passphrase — every
+        // entry failing authentication — yields an empty result instead
+        // of an exception. Bad manifests are still never accepted.
         using var repo = BackupRepository.Open(_repoDir, Passphrase);
         var manifest = repo.BackupDirectory(_srcDir);
 
@@ -150,14 +156,18 @@ public sealed class ManifestSyncTests : IDisposable
             File.Delete(f);
         using var wrongRepo = BackupRepository.Open(_repoDir, "wrong-passphrase");
         using var wrongStore = OpenStore(client, wrongRepo, "journal2.db");
-        var ex = Assert.Throws<InvalidDataException>(() =>
-            wrongRepo.DiscoverRemoteManifests(wrongStore));
-        Assert.Contains("authentication", ex.Message);
+        var found = wrongRepo.DiscoverRemoteManifests(wrongStore);
+        Assert.Empty(found);
     }
 
     [Fact]
-    public void Discover_TamperedManifest_Throws()
+    public void Discover_TamperedManifest_Skipped()
     {
+        // Behavior changed in Phase 3 (B-M1): the tampered entry is
+        // skipped (yEnc CRC catches it at parse time, before decrypt)
+        // instead of aborting the whole discovery. IndexAuthenticationTests
+        // covers the companion case: a genuine second backup alongside
+        // the bad entry is still discovered.
         using var repo = BackupRepository.Open(_repoDir, Passphrase);
         var manifest = repo.BackupDirectory(_srcDir);
 
@@ -177,8 +187,8 @@ public sealed class ManifestSyncTests : IDisposable
 
         foreach (string f in Directory.GetFiles(Path.Combine(_repoDir, "manifests")))
             File.Delete(f);
-        // yEnc CRC catches it at parse time (fails closed before decrypt).
-        Assert.Throws<InvalidDataException>(() => repo.DiscoverRemoteManifests(store));
+        var found = repo.DiscoverRemoteManifests(store);
+        Assert.Empty(found);
     }
 
     [Fact]

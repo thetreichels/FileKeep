@@ -555,6 +555,15 @@ public static partial class DashboardApi
         if (!manifest.VerifyRootHash())
             return (400, new ErrorDto(
                 "The discovered manifest failed its integrity check (root hash mismatch) and was not imported."));
+        // A manifest without a root_hmac uses the pre-release format —
+        // LoadManifest refuses it on first open, so importing it here
+        // would only plant a backup that can never load. Refuse it at
+        // the door instead. (Presence only: this path deliberately
+        // does not open the repo, so it cannot verify the HMAC; the
+        // load-time verification remains the real gate.)
+        if (manifest.RootHmac is null)
+            return (400, new ErrorDto(
+                "The discovered manifest uses the unsupported pre-release backup format (no root_hmac) and was not imported."));
 
         string destDir = Path.Combine(repo, "manifests");
         string destManifest = Path.Combine(destDir, backupId + ".json");
@@ -631,7 +640,8 @@ public static partial class DashboardApi
             string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
             using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
                 client, provider.Newsgroup, r.RepoId, r.CatalogPath,
-                messageIndex: r.MessageIndex, providerKey: providerKey);
+                messageIndex: r.MessageIndex, providerKey: providerKey,
+                indexAuth: r.IndexAuth);
             var remote = r.DiscoverRemoteManifests(store);
             var localIds = new HashSet<string>(r.ListBackups().Select(b => b.BackupId));
             var fresh = remote
@@ -686,7 +696,8 @@ public static partial class DashboardApi
             string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
             using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
                 client, provider.Newsgroup, r.RepoId, r.CatalogPath,
-                messageIndex: r.MessageIndex, providerKey: providerKey);
+                messageIndex: r.MessageIndex, providerKey: providerKey,
+                indexAuth: r.IndexAuth);
             var remote = r.DiscoverRemoteManifests(store);
             var wanted = new HashSet<string>(backupIds ?? Array.Empty<string>());
             int imported = 0;
@@ -739,9 +750,10 @@ public static partial class DashboardApi
     }
 
     /// <summary>
-    /// Starts a manual SMB sync in the background. The password comes from the
-    /// service config (per-job or global env var); the dashboard never handles
-    /// it. Returns (202, accepted) or (400, error).
+    /// Starts a manual SMB sync in the background. The password comes from
+    /// the service config (the SMB location for the share, or the global
+    /// env var); the dashboard never handles it. Returns (202, accepted)
+    /// or (400, error).
     /// </summary>
     public static (int Status, object Payload) StartSmbSync(
         ServiceConfig config, string share, string user,
@@ -752,13 +764,16 @@ public static partial class DashboardApi
         var repos = AllJobRepos(config);
         if (repos.Count == 0)
             return (400, new ErrorDto("No backup jobs configured."));
-        // Find SMB credentials: first matching job's stored password, else env var.
-        var job = config.SnapshotJobs().FirstOrDefault(j =>
-            !string.IsNullOrWhiteSpace(j.SmbShare));
+        // Find SMB credentials: the location whose share matches the
+        // requested share is the credential home (the per-job smb*
+        // fields were retired in Phase 6); the env var overrides.
+        var loc = config.SnapshotLocations().FirstOrDefault(l =>
+            l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase) &&
+            l.Share.Equals(share, StringComparison.OrdinalIgnoreCase));
         string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-        if (string.IsNullOrEmpty(password) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
-            password = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
-        string effectiveUser = string.IsNullOrWhiteSpace(user) ? job?.SmbUser ?? "" : user;
+        if (string.IsNullOrEmpty(password) && loc is not null && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
+            password = UsenetBackup.Core.Dpapi.Unprotect(loc.SmbPasswordProtected);
+        string effectiveUser = string.IsNullOrWhiteSpace(user) ? loc?.SmbUser ?? "" : user;
         Task.Run(() =>
         {
             // P2-C3: serialize against scheduled runs and every other
@@ -859,15 +874,15 @@ public static partial class DashboardApi
 
     /// <summary>
     /// Resolves a restore's SMB share, user and password. The job's SMB
-    /// target LOCATION is the modern credential home: when the request
-    /// names no share, the location's share is used automatically (with
-    /// local chunks pruned after upload, the banked location is the only
+    /// target LOCATION is the credential home: when the request names
+    /// no share, the location's share is used automatically (with local
+    /// chunks pruned after upload, the banked location is the only
     /// place the chunks can come from), and its stored user/password
-    /// fill any gaps the request and the job's legacy smb* fields leave.
-    /// Explicit request values always win. (WALK-3: restores previously
-    /// read only the job's legacy fields, which location-based jobs
-    /// leave empty, so no restore could pull from an auth-required
-    /// share.)
+    /// fill any gaps the request leaves. Explicit request values always
+    /// win. (WALK-3: restores previously read only the job's legacy
+    /// per-job smb* fields, which location-based jobs leave empty, so
+    /// no restore could pull from an auth-required share; those fields
+    /// were retired in Phase 6 and the location is now the only source.)
     /// </summary>
     public static (string? Share, string? User, string? Password) ResolveRestoreSmb(
         ServiceConfig config, string repo, string? smbShare, string? smbUser)
@@ -890,12 +905,8 @@ public static partial class DashboardApi
         if (!string.IsNullOrWhiteSpace(smbShare))
         {
             smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-            if (string.IsNullOrEmpty(smbPassword) && job is not null && !string.IsNullOrEmpty(job.SmbPasswordProtected))
-                smbPassword = UsenetBackup.Core.Dpapi.Unprotect(job.SmbPasswordProtected);
             if (string.IsNullOrEmpty(smbPassword) && smbLoc is not null && !string.IsNullOrEmpty(smbLoc.SmbPasswordProtected))
                 smbPassword = UsenetBackup.Core.Dpapi.Unprotect(smbLoc.SmbPasswordProtected);
-            if (string.IsNullOrWhiteSpace(smbUser))
-                smbUser = job?.SmbUser;
             if (string.IsNullOrWhiteSpace(smbUser))
                 smbUser = smbLoc?.SmbUser;
         }

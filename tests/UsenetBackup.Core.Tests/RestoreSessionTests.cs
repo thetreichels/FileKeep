@@ -88,10 +88,15 @@ public sealed class RestoreSessionTests
                 PassphraseProtected = UsenetBackup.Core.Dpapi.Protect("the-real-passphrase"),
             };
             // Enroll the phone (staged → promoted by a verified code).
-            var (ss, sp) = DashboardApi.SetupPhoneTotp(config, path);
+            // YubiKey + phone are already enabled methods here, so the
+            // enrollment carries proof of the existing passphrase —
+            // resolvable from the stored DPAPI copy on Windows.
+            var (ss, sp) = DashboardApi.SetupPhoneTotp(config, path,
+                proofPassphrase: "the-real-passphrase");
             Assert.Equal(200, ss);
             string secret = Assert.IsType<PhoneSetupDto>(sp).Secret.Replace(" ", "");
-            var (vs, okp) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret), path);
+            var (vs, okp) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret), path,
+                proofPassphrase: "the-real-passphrase");
             Assert.Equal(200, vs);
             Assert.True(Assert.IsType<OkDto>(okp).Ok);
 

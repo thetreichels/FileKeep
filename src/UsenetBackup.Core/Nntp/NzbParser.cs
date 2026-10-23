@@ -18,7 +18,7 @@ public sealed record NzbFile(
     IReadOnlyList<NzbSegment> Segments)
 {
     /// <summary>
-    /// Chunk ID parsed from the first segment's usenet-backup message-ID,
+    /// Chunk ID parsed from the first segment's FileKeep message-ID,
     /// or null when the file doesn't reference our article format.
     /// </summary>
     public string? ChunkId => Segments.Count == 0
@@ -26,7 +26,7 @@ public sealed record NzbFile(
         : NzbParser.ChunkIdFromMessageId(Segments[0].MessageId);
 
     /// <summary>
-    /// Volume ID parsed from the first segment's usenet-backup message-ID,
+    /// Volume ID parsed from the first segment's FileKeep message-ID,
     /// or null when the file doesn't reference our article format.
     /// Only meaningful for volume NZBs (<see cref="NzbDocument.IsVolumeNzb"/>);
     /// the message-ID shape is identical to chunk articles.
@@ -153,18 +153,15 @@ public static class NzbParser
 
     /// <summary>
     /// Extracts the chunk ID from a FileKeep deterministic message-ID
-    /// (&lt;{64 hex}.{16 hex}@invalid&gt;, or the legacy @usenet-backup&gt;).
-    /// Returns null for anything else.
+    /// (&lt;{64 hex}.{16 hex}@invalid&gt;). The pre-release
+    /// @usenet-backup domain is not accepted (legacy support dropped
+    /// before the first release). Returns null for anything else.
     /// </summary>
     internal static string? ChunkIdFromMessageId(string messageId)
     {
         // '<' + 64 hex + '.' + 16 hex + "@" + domain + ">"
-        string? domain = null;
-        foreach (string d in new[] { "invalid", "usenet-backup" })
-        {
-            if (messageId.EndsWith("@" + d + ">", StringComparison.Ordinal)) { domain = d; break; }
-        }
-        if (domain is null)
+        const string domain = "invalid";
+        if (!messageId.EndsWith("@" + domain + ">", StringComparison.Ordinal))
             return null;
         if (messageId.Length != 1 + 64 + 1 + 16 + 1 + domain.Length + 1)
             return null;

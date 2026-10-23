@@ -637,11 +637,11 @@
             <option value="easynews">Easynews</option>
           </select></label>
           <label title="Your Usenet provider's server address, e.g. news.frugalusenet.com. Use the preset dropdown above to fill this automatically.">Host<input id="lf-host" type="text" placeholder="news.example.com"></label>
-          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="119"></label>
+          <label title="119 for standard connections, 563 for SSL-encrypted connections. The preset dropdown sets this automatically.">Port<input id="lf-port" type="number" min="1" max="65535" value="563"></label>
           <label title="Your Usenet account username. Leave blank for providers that don't require authentication.">Username<input id="lf-user" type="text" placeholder="(optional)"></label>
           <label title="Your Usenet account password. Stored encrypted on this machine. Leave blank to keep the existing saved password.">Password<input id="lf-pass" type="password" placeholder="(unchanged)" autocomplete="new-password"></label>
           <label title="How many simultaneous connections to use. More is faster but some providers limit this. 10 is a safe default.">Connections<input id="lf-conn" type="number" min="1" max="100" value="10"></label>
-          <label class="check"><input id="lf-ssl" type="checkbox"> Use SSL (port 563)</label>
+          <label class="check"><input id="lf-ssl" type="checkbox" checked> Use SSL (port 563)</label>
         </div>
         <div class="form-grid" id="lf-smb-fields" style="display:none">
           <label title="Network path to the shared folder, e.g. \\NAS\backups\filekeep. Click Browse to pick it from the network.">Share (UNC path)<span class="folder-row"><input id="lf-share" type="text" placeholder="\\NAS\backups\filekeep"><button type="button" class="browse-btn" onclick="browseFolder('lf-share', 'Select network share')">Browse…</button></span></label>
@@ -2110,12 +2110,15 @@ async function addAnotherYubiKey() {
   const status = document.getElementById('yubikeys-status');
   status.textContent = 'Insert the new YubiKey and touch it when it flashes…';
   try {
-    await api('/api/yubikey/program-spare', { method: 'POST' });
+    await api('/api/yubikey/program-spare', {
+      method: 'POST',
+      body: JSON.stringify({ ...secProofFields(true) }),
+    });
     const p = await api('/api/protection/profile');
     const n = (p.yubiKeys || []).length + 1;
     await api('/api/protection/yubikey/add', {
       method: 'POST',
-      body: JSON.stringify({ name: 'YubiKey ' + n }),
+      body: JSON.stringify({ name: 'YubiKey ' + n, ...secProofFields(true) }),
     });
     status.textContent = `YubiKey ${n} added — it can now unlock restores, just like your other keys.`;
     loadYubiKeys();
@@ -2783,7 +2786,7 @@ function folderName(p) {
 // missed the last backup) renders dimmed, with the note as its tooltip.
 function jobChips(j, locByName) {
   const targets = (j.targets && j.targets.length) ? j.targets : [];
-  if (!targets.length) return j.autoUpload ? '<span class="meta">auto-upload</span>' : '';
+  if (!targets.length) return '';
   const note = (lastDegraded[j.name] || '').toLowerCase();
   return targets.map(t => {
     const loc = locByName[t];
@@ -3032,6 +3035,7 @@ async function programSpareKey() {
     await api('/api/yubikey/program-spare', {
       method: 'POST',
       headers: { 'X-CSRF-Token': csrf },
+      body: JSON.stringify({ ...secProofFields(true) }),
     });
     toast('Spare key programmed successfully.', 'ok');
   } catch (e) { toast(e.message, 'err'); }
@@ -3040,7 +3044,11 @@ async function programSpareKey() {
 async function clearPassphrase() {
   if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
   try {
-    await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: '' }) });
+    // Clearing the passphrase wipes the unlock configuration, so the
+    // server demands proof of the current passphrase (or recovery
+    // secret) in the same request — prompted here. Without it the
+    // server refuses and the error toast shows its message.
+    await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: '', ...secProofFields(true) }) });
   } catch (e) { toast(e.message, 'err'); }
 }
 // ---- Vault storage locations (simplified list for Banked Vault tab) ----
@@ -3294,11 +3302,11 @@ function showLocationForm(type, loc) {
   }
   if (type === 'nntp') {
     document.getElementById('lf-host').value = loc ? loc.host : '';
-    document.getElementById('lf-port').value = loc ? loc.port : 119;
+    document.getElementById('lf-port').value = loc ? loc.port : 563;
     document.getElementById('lf-user').value = loc ? loc.username : '';
     document.getElementById('lf-pass').value = '';
     document.getElementById('lf-conn').value = loc ? loc.connections : 10;
-    document.getElementById('lf-ssl').checked = loc ? !!loc.ssl : false;
+    document.getElementById('lf-ssl').checked = loc ? !!loc.ssl : true;
   } else if (type === 'smb') {
     document.getElementById('lf-share').value = loc ? loc.share : '';
     document.getElementById('lf-smbuser').value = loc ? loc.smbUser : '';
@@ -3322,7 +3330,7 @@ async function testLocationConnection() {
     let result;
     if (type === 'nntp') {
       const host = document.getElementById('lf-host').value.trim();
-      const port = parseInt(document.getElementById('lf-port').value, 10) || 119;
+      const port = parseInt(document.getElementById('lf-port').value, 10) || 563;
       const user = document.getElementById('lf-user').value.trim();
       const pass = document.getElementById('lf-pass').value;
       const ssl = document.getElementById('lf-ssl').checked;
@@ -3380,7 +3388,7 @@ async function saveLocation() {
   if (!loc.name) markInvalid('lf-name');
   if (type === 'nntp') {
     loc.host = document.getElementById('lf-host').value.trim();
-    loc.port = parseInt(document.getElementById('lf-port').value) || 119;
+    loc.port = parseInt(document.getElementById('lf-port').value) || 563;
     loc.username = document.getElementById('lf-user').value.trim();
     loc.password = document.getElementById('lf-pass').value;
     loc.connections = parseInt(document.getElementById('lf-conn').value) || 10;
@@ -3689,10 +3697,15 @@ async function secLoadProfile() {
   // it again after the setup response.
   secGeneratedSecret = '';
   secGeneratedSetup = false;
+  secWizardPassphrase = '';
+  secProofHeld = '';
   try {
     const p = await api('/api/protection/profile');
     secProfile = p;
     secProfileLoaded = true;
+    // Server truth for the proof gate: did any unlock method exist
+    // before this wizard run touched anything?
+    secServerHadMethod = !!(p.passphraseEnabled || p.yubiKeyEnabled || p.phoneEnabled);
     document.getElementById('sec-passphrase-toggle').checked = p.passphraseEnabled;
     document.getElementById('sec-yubikey-toggle').checked = p.yubiKeyEnabled;
     document.getElementById('sec-phone-toggle').checked = p.phoneEnabled;
@@ -3784,6 +3797,9 @@ async function secSaveProfile() {
         // but keep the wire honest about what the wizard is saving.
         yubiKeyOnly: !!secProfile.yubiKeyOnly,
         linkMode: secProfile.linkMode,
+        // Proof of an existing method (server gate): the credential
+        // this wizard run collected, or a prompt when it has none.
+        ...secProofFields(secServerHadMethod),
       }),
     });
     return true;
@@ -3859,8 +3875,16 @@ async function secSavePassphrase() {
   try {
     await api('/api/config/passphrase', {
       method: 'POST',
-      body: JSON.stringify({ passphrase: p1 }),
+      // When a method already exists this is a CHANGE, so the request
+      // carries proof of the current one (prompted if not held); on
+      // first-time setup secServerHadMethod is false and no proof is
+      // sent or required.
+      body: JSON.stringify({ passphrase: p1, ...secProofFields(secServerHadMethod) }),
     });
+    // From here on the server HAS a method; this run's passphrase is
+    // the proof later wizard steps (link, profile save) send back.
+    secWizardPassphrase = p1;
+    secServerHadMethod = true;
     toast('Passphrase saved.', 'ok');
     document.getElementById('sec-pp-pass').value = '';
     document.getElementById('sec-pp-confirm').value = '';
@@ -4059,6 +4083,38 @@ function secUpdateWizardNext() {
   nextBtn.onclick = (secCurrentStep === steps.length) ? secFinishWizard : secNext;
 }
 
+// ---- Proof of an existing unlock method (server security gate) ----
+// Once any unlock method is enabled, the server refuses to change
+// security settings unless the request carries a fresh proof: the
+// current passphrase, or the recovery secret in YubiKey-only mode
+// (a phone code is never accepted). secServerHadMethod records
+// whether the SERVER had a method when the profile was loaded (the
+// wizard's local toggles are intent, not server state); credentials
+// collected during the run — the passphrase just saved, the secret
+// just generated — are reused as proof, so the user is prompted only
+// when nothing suitable is at hand. Held in memory only, never stored.
+let secServerHadMethod = false;
+let secWizardPassphrase = '';
+let secProofHeld = '';
+
+function secHeldProof() {
+  return secWizardPassphrase || secGeneratedSecret || secProofHeld;
+}
+
+// Returns the proof fields to merge into a gated security call's
+// JSON body. required=false (no method on the server yet — first-time
+// setup) yields no fields and never prompts.
+function secProofFields(required) {
+  if (!required) return {};
+  let proof = secHeldProof();
+  if (!proof) {
+    proof = prompt('To change security settings, enter your current passphrase.\n' +
+      'In YubiKey-only mode, enter your recovery secret instead.') || '';
+    if (proof) secProofHeld = proof;
+  }
+  return proof ? { proofPassphrase: proof } : {};
+}
+
 // YubiKey state
 let secYubiKeyLinked = false;
 let secProgrammedKeys = [];
@@ -4086,7 +4142,10 @@ async function secLinkYubiKey() {
   try {
     await api('/api/yubikey/link', {
       method: 'POST',
-      body: JSON.stringify({ slot }),
+      // Proof: the passphrase the wizard just saved (held in memory),
+      // or the recovery secret on the YubiKey-only path; prompted when
+      // neither is held (e.g. re-linking in a later session).
+      body: JSON.stringify({ slot, ...secProofFields(secServerHadMethod) }),
     });
     secYubiKeyLinked = true;
     secProfile.yubiKeyEnabled = true;
@@ -4164,10 +4223,13 @@ async function secGenerateSecret() {
   try {
     const r = await api('/api/yubikey/setup-generated', {
       method: 'POST',
-      body: JSON.stringify({ slot }),
+      body: JSON.stringify({ slot, ...secProofFields(secServerHadMethod) }),
     });
     secGeneratedSecret = r.recoverySecret || '';
     secGeneratedSetup = true;
+    // The server now HAS a method; the label registration below (and
+    // every later gated call) proves with the secret just generated.
+    secServerHadMethod = true;
     secProfile.yubiKeyEnabled = true;
     secProfile.yubiKeyOnly = true;
     // Register the first key's label, the same way step 3b registers
@@ -4177,7 +4239,7 @@ async function secGenerateSecret() {
     try {
       const reg = await api('/api/protection/yubikey/add', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, ...secProofFields(true) }),
       });
       secProfile.yubiKeys = reg.yubiKeys || [name];
     } catch (e2) {
@@ -4230,12 +4292,15 @@ async function secProgramKey() {
   btn.disabled = true;
   status.textContent = 'Waiting for touch — touch the key when it blinks…';
   try {
-    await api('/api/yubikey/program-spare', { method: 'POST' });
+    await api('/api/yubikey/program-spare', {
+      method: 'POST',
+      body: JSON.stringify({ ...secProofFields(secServerHadMethod) }),
+    });
     const name = 'YubiKey ' + ((secProfile.yubiKeys || []).length + 1);
     try {
       const r = await api('/api/protection/yubikey/add', {
         method: 'POST',
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, ...secProofFields(secServerHadMethod) }),
       });
       secProfile.yubiKeys = r.yubiKeys || [name];
     } catch (e2) {
@@ -4304,7 +4369,12 @@ async function secLoadPhoneSetup() {
   secEl.textContent = '····';
   msg.textContent = '';
   try {
-    const setup = await api('/api/protection/phone/setup', { method: 'POST' });
+    const setup = await api('/api/protection/phone/setup', {
+      method: 'POST',
+      // Proof of an existing method (server gate): enrolling a phone
+      // must never be possible for someone who knows no other method.
+      body: JSON.stringify({ ...secProofFields(secServerHadMethod) }),
+    });
     qr.innerHTML = setup.qrSvg;
     secEl.textContent = setup.secret;
     secPhoneSecretRaw = setup.secret;
@@ -4326,7 +4396,9 @@ async function secVerifyPhoneCode() {
   btn.disabled = true;
   try {
     const r = await api('/api/protection/phone/verify', {
-      method: 'POST', body: JSON.stringify({ code })
+      // The proof fields ride alongside the code: the code proves the
+      // new phone works, the proof is what authorizes the enrollment.
+      method: 'POST', body: JSON.stringify({ code, ...secProofFields(secServerHadMethod) })
     });
     if (r.ok) {
       secPhoneVerified = true;

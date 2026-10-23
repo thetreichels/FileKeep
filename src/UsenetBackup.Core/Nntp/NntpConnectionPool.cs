@@ -33,10 +33,12 @@ public sealed class NntpConnectionPool : IDisposable
     public string Host { get; }
     public int Port { get; }
 
+    // TLS by default (security audit D-2), same as NntpClient: an omitted
+    // choice means the TLS pair (port 563 + TLS on), never plaintext.
     public NntpConnectionPool(
         string host,
-        int port = 119,
-        bool useTls = false,
+        int port = 563,
+        bool useTls = true,
         string? username = null,
         string? password = null,
         int size = 10,

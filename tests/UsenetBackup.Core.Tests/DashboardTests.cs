@@ -469,12 +469,11 @@ public sealed class DashboardTests : IDisposable
     public void ResolveRestoreSmb_UsesJobsLocationWhenRequestIsBlank()
     {
         // WALK-3: a location-based job's restore must source its share
-        // and user from the job's SMB target location — the job's own
-        // legacy fields are empty for such jobs.
+        // and user from the job's SMB target location (the job's retired
+        // per-job fields are not a credential source at all).
         var config = MakeConfig();
         var job = config.Jobs[0];
         job.Targets = new List<string> { "vault" };
-        job.SmbUser = "";
         config.Locations = new List<BackupLocation>
         {
             new()
@@ -1211,39 +1210,6 @@ public sealed class DashboardTests : IDisposable
     }
 
     [Fact]
-    public void ServiceConfig_RejectsAutoUploadWithoutProvider()
-    {
-        var config = new ServiceConfig
-        {
-            DashboardPort = 15789,
-            Jobs = new List<BackupJobConfig>
-            {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
-                        Schedule = "daily 02:00", AutoUpload = true },
-            },
-            Nntp = null,
-        };
-        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
-        Assert.Contains("auto-upload", ex.Message);
-    }
-
-    [Fact]
-    public void ServiceConfig_AcceptsAutoUploadWithProvider()
-    {
-        var config = new ServiceConfig
-        {
-            DashboardPort = 15789,
-            Jobs = new List<BackupJobConfig>
-            {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
-                        Schedule = "daily 02:00", AutoUpload = true },
-            },
-            Nntp = new NntpConfig { Host = "news.example.com", Port = 119 },
-        };
-        config.Validate(); // should not throw
-    }
-
-    [Fact]
     public void SaveResponses_NeverCarryPasswordBlobs()
     {
         // CX-6: UpsertJob/UpsertLocation used to return the raw config
@@ -1289,7 +1255,9 @@ public sealed class DashboardTests : IDisposable
         var (jobStatus, jobPayload) = DashboardApi.UpsertJob(config, scheduler, configPath, job);
         Assert.Equal(200, jobStatus);
         Assert.IsType<ConfigJobDto>(jobPayload);
-        config.Jobs.Single(j => j.Name == "blob-job").SmbPasswordProtected = "FAKE-JOB-BLOB";
+        // Jobs carry no credentials at all (Phase 6): the job DTO has
+        // no password surface, so the location's blob must not ride a
+        // job response either.
         var (jobStatus2, jobPayload2) = DashboardApi.UpsertJob(config, scheduler, configPath,
             new BackupJobConfig
             {
@@ -1299,20 +1267,25 @@ public sealed class DashboardTests : IDisposable
             });
         Assert.Equal(200, jobStatus2);
         var jobDto2 = Assert.IsType<ConfigJobDto>(jobPayload2);
-        Assert.True(jobDto2.HasSmbPassword);
         string jobJson = System.Text.Json.JsonSerializer.Serialize(jobDto2,
             UsenetBackup.Service.DashboardJsonContext.Default.ConfigJobDto);
-        Assert.DoesNotContain("FAKE-JOB-BLOB", jobJson);
+        Assert.DoesNotContain("FAKE", jobJson);
     }
 
     [Fact]
-    public void UpsertJob_AcceptsAutoUploadWhenProviderConfigured()
+    public void UpsertJob_AcceptsJobTargetingNntpLocation()
     {
-        // Regression: UpsertJob built its validation config without Nntp,
-        // so any job with AutoUpload=true failed with 400 even when a
-        // provider was configured.
+        // Regression (modern dress): UpsertJob validates against a temp
+        // config that must mirror the live one — the historical bug
+        // omitted the provider state, so a perfectly valid upload job
+        // failed with 400. Today the equivalent fidelity requirement is
+        // the locations list: a job targeting a defined NNTP location
+        // must validate and save.
         var config = MakeConfig();
-        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
+        config.Locations.Add(new BackupLocation
+        {
+            Name = "usenet", Type = "nntp", Host = "news.example.com", Port = 119,
+        });
         var scheduler = new BackupScheduler(config);
         string configPath = Path.Combine(_workDir, "service.json");
         config.Save(configPath);
@@ -1321,21 +1294,27 @@ public sealed class DashboardTests : IDisposable
         {
             Name = "upload-job", Repo = _repoDir, Source = _srcDir,
             Schedule = "interval 60", Mode = "incremental",
-            BackupPrivilege = false, AutoUpload = true,
+            BackupPrivilege = false,
+            Targets = new List<string> { "usenet" },
         };
         var (status, _) = DashboardApi.UpsertJob(config, scheduler, configPath, job);
         Assert.Equal(200, status);
-        Assert.Contains(config.Jobs, j => j.Name == "upload-job" && j.AutoUpload);
+        Assert.Contains(config.Jobs, j => j.Name == "upload-job" &&
+            j.Targets != null && j.Targets.Contains("usenet"));
     }
 
     [Fact]
-    public void UpsertJob_PreservesAutoUploadOnUpdate()
+    public void UpsertJob_PreservesTargetsOnUpdate()
     {
-        // Regression: UpsertJob did not copy AutoUpload when updating an
-        // existing job, silently clearing the flag.
+        // Regression (modern dress): an update replaces the stored job
+        // wholesale; the fields the caller sent — targets included —
+        // must survive exactly (the historical bug silently cleared the
+        // retired AutoUpload flag the same way).
         var config = MakeConfig();
-        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
-        config.Jobs[0].AutoUpload = true;
+        config.Locations.Add(new BackupLocation
+        {
+            Name = "spare", Type = "smb", Share = Path.Combine(_workDir, "spare"),
+        });
         var scheduler = new BackupScheduler(config);
         string configPath = Path.Combine(_workDir, "service.json");
         config.Save(configPath);
@@ -1344,11 +1323,12 @@ public sealed class DashboardTests : IDisposable
         {
             Name = "docs", Repo = _repoDir, Source = _srcDir,
             Schedule = "interval 120", Mode = "incremental",
-            BackupPrivilege = true, AutoUpload = true,
+            BackupPrivilege = true,
+            Targets = new List<string> { "spare" },
         };
         var (status, _) = DashboardApi.UpsertJob(config, scheduler, configPath, updated);
         Assert.Equal(200, status);
-        Assert.True(config.Jobs[0].AutoUpload);
+        Assert.Equal(new[] { "spare" }, config.Jobs[0].Targets);
         Assert.True(config.Jobs[0].BackupPrivilege);
         Assert.Equal("interval 120", config.Jobs[0].Schedule);
     }
@@ -1388,12 +1368,12 @@ public sealed class DashboardTests : IDisposable
     public void BackupJobConfig_JsonRoundTripsCamelCaseFlags()
     {
         // The dashboard UI sends camelCase; the model must accept it.
-        string uiJson = @"{""name"":""Test"",""repo"":""/tmp/r"",""source"":""/tmp/s"",""schedule"":""daily 02:00"",""mode"":""incremental"",""backupPrivilege"":true,""autoUpload"":true}";
+        string uiJson = @"{""name"":""Test"",""repo"":""/tmp/r"",""source"":""/tmp/s"",""schedule"":""daily 02:00"",""mode"":""incremental"",""backupPrivilege"":true,""targets"":[""nas""]}";
         var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var job = JsonSerializer.Deserialize<BackupJobConfig>(uiJson, opts);
         Assert.NotNull(job);
         Assert.True(job.BackupPrivilege);
-        Assert.True(job.AutoUpload);
+        Assert.Equal(new[] { "nas" }, job.Targets);
     }
 
     [Fact]

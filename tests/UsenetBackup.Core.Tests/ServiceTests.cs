@@ -235,7 +235,7 @@ public sealed class ServiceTests : IDisposable
     }
 
     [Fact]
-    public void Validate_JobTargets_MustBeBareOrDefinedLocations()
+    public void Validate_JobTargets_MustBeDefinedLocations_BareTokensToleratedInert()
     {
         // SF-21: an unknown target name was treated as Active by the
         // gate and silently dropped whenever another target resolved.
@@ -245,15 +245,21 @@ public sealed class ServiceTests : IDisposable
         var ex = Assert.Throws<InvalidOperationException>(() => bad.Validate());
         Assert.Contains("typo-location", ex.Message);
 
-        // Defined locations and legacy bare targets validate fine.
+        // Defined locations validate fine.
         var ok = ValidObjectConfig();
         ok.Locations = new List<BackupLocation> { SmbLocation("nas") };
         ok.Jobs[0].Targets = new List<string> { "nas" };
         ok.Validate();
 
+        // Bare legacy tokens ("nntp"/"smb") still validate — a
+        // pre-locations service.json loads rather than erroring the
+        // whole service — but since Phase 6 they resolve to no location
+        // anywhere: the job behaves as target-less (NeedsLocation).
         var bare = ValidObjectConfig();
         bare.Jobs[0].Targets = new List<string> { "nntp" };
         bare.Validate();
+        Assert.Equal(JobRunState.NeedsLocation,
+            JobStateEvaluator.Evaluate(bare.Jobs[0], JobStateEvaluator.BuildLookup(bare)));
     }
 
     [Fact]

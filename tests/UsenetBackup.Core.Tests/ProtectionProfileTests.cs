@@ -31,6 +31,15 @@ public sealed class ProtectionProfileTests : IDisposable
 
     private string ConfigPath() => Path.Combine(_workDir, "service-" + Guid.NewGuid().ToString("N") + ".json");
 
+    // Security-proof fixtures: configs below carry a fake DPAPI blob
+    // (unresolvable), so proof resolution goes through the env var —
+    // which BackupScheduler.GetPassphrase checks first. Setting the
+    // env var to this value makes ProofPass a valid proof.
+    private const string ProofPass = "proof-pass-123";
+
+    private void ArmProof() =>
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, ProofPass);
+
     private static string ErrorMessage((int Status, object Payload) result)
     {
         Assert.NotEqual(200, result.Status);
@@ -121,11 +130,13 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_RejectsAndWithSingleMethod()
     {
+        ArmProof();
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
         var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = true, YubiKeyEnabled = false,
             PhoneEnabled = false, LinkMode = "and",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(400, result.Status);
         Assert.Contains("\"and\"", ErrorMessage(result));
@@ -149,11 +160,13 @@ public sealed class ProtectionProfileTests : IDisposable
     {
         // Clearing a passphrase is destructive; it stays on the passphrase
         // settings, not the profile wizard.
+        ArmProof();
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob", PassphraseYubiKey = true };
         var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = false, YubiKeyEnabled = true,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(400, result.Status);
         Assert.Contains("Clear it", ErrorMessage(result));
@@ -162,11 +175,13 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_RejectsYubiKeyEnabledWithoutSetup()
     {
+        ArmProof();
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
         var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = true, YubiKeyEnabled = true,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(400, result.Status);
         Assert.Contains("not set up", ErrorMessage(result));
@@ -175,12 +190,14 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_SavesValidProfile()
     {
+        ArmProof();
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob", PassphraseYubiKey = true };
         string path = ConfigPath();
         var (status, payload) = DashboardApi.SetProtectionProfile(config, path, new ProtectionProfileRequest
         {
             PassphraseEnabled = true, YubiKeyEnabled = true,
             PhoneEnabled = true, LinkMode = "and",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(200, status);
         var profile = Assert.IsType<ProtectionProfileResponse>(payload);
@@ -198,6 +215,10 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_CanDisableYubiKey()
     {
+        // The owner CAN turn the YubiKey gate off — with proof of the
+        // existing passphrase. (The same call with no proof is the C-1
+        // attack; SecurityProofTests covers its refusal.)
+        ArmProof();
         var config = new ServiceConfig
         {
             PassphraseProtected = "dpapi-blob",
@@ -208,6 +229,7 @@ public sealed class ProtectionProfileTests : IDisposable
         {
             PassphraseEnabled = true, YubiKeyEnabled = false,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(200, status);
         Assert.False(config.PassphraseYubiKey);
@@ -217,11 +239,13 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_NormalizesLinkModeCase()
     {
+        ArmProof();
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob", PassphraseYubiKey = true };
         var (status, payload) = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = true, YubiKeyEnabled = true,
             PhoneEnabled = false, LinkMode = "AND",
+            ProofPassphrase = ProofPass,
         });
         Assert.Equal(200, status);
         Assert.Equal("and", Assert.IsType<ProtectionProfileResponse>(payload).LinkMode);

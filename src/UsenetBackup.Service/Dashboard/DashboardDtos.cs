@@ -131,7 +131,9 @@ public sealed record NntpProbeResponseDto(
     [property: JsonPropertyName("fallback")] NntpProbeResultDto? Fallback,
     [property: JsonPropertyName("diagnosis")] string Diagnosis);
 
-/// <summary>Job summary for /api/config response.</summary>
+/// <summary>Job summary for /api/config response. Jobs carry no
+/// credentials or connection details (Phase 6): targets are location
+/// names, and everything else lives on the locations.</summary>
 public sealed record ConfigJobDto(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("repo")] string? Repo,
@@ -141,11 +143,7 @@ public sealed record ConfigJobDto(
     [property: JsonPropertyName("jobType")] string? JobType,
     [property: JsonPropertyName("backupPrivilege")] bool BackupPrivilege,
     [property: JsonPropertyName("vss")] bool Vss,
-    [property: JsonPropertyName("autoUpload")] bool AutoUpload,
     [property: JsonPropertyName("targets")] List<string>? Targets,
-    [property: JsonPropertyName("smbShare")] string? SmbShare,
-    [property: JsonPropertyName("smbUser")] string? SmbUser,
-    [property: JsonPropertyName("hasSmbPassword")] bool HasSmbPassword,
     [property: JsonPropertyName("autoVerify")] bool AutoVerify,
     [property: JsonPropertyName("verificationMode")] string? VerificationMode,
     [property: JsonPropertyName("redundancyMode")] string? RedundancyMode,

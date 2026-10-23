@@ -44,11 +44,13 @@ public sealed class VolumeEntry
     public long SizeBytes { get; set; }
 
     /// <summary>
-    /// NNTP post-set name this volume was uploaded in. Null for legacy
-    /// (pre-batched-staging) backups, where the whole backup was one set.
-    /// Batched backups post one set per batch; the NZB generator and parity
-    /// reconstruction use this to keep per-batch subjects and parity groups
-    /// aligned.
+    /// NNTP post-set name this volume was uploaded in. Null for volumes
+    /// posted by a single-set (non-batched) upload — the CLI/scheduler
+    /// single-set paths and the streaming path record no set name, and
+    /// the whole backup is one set. Batched backups post one set per
+    /// batch and stamp each volume with its set name; the NZB generator
+    /// and parity reconstruction use this to keep per-batch subjects
+    /// and parity groups aligned.
     /// </summary>
     [JsonPropertyName("set_name")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -203,10 +205,12 @@ public sealed class BackupManifest
     /// repo (a share, a USB drive) could edit the file list and
     /// recompute it, silently shrinking what a restore brings back.
     /// The HMAC makes that edit detectable by anyone holding the
-    /// passphrase, on every load path (LoadManifest verifies it
-    /// whenever present). Additive and WhenWritingNull: manifests
-    /// written before this field existed serialize and verify exactly
-    /// as before, and are re-stamped opportunistically on load.
+    /// passphrase, on every load path: LoadManifest and ImportManifest
+    /// require it and verify it — a manifest without one uses the
+    /// pre-release format and is refused (legacy repo support was
+    /// dropped before the first release). Every write path stamps it
+    /// (WriteManifest is the single funnel), so a persisted manifest
+    /// always carries one.
     /// </summary>
     [JsonPropertyName("root_hmac")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -243,9 +247,9 @@ public sealed class BackupManifest
     /// The canonical JSON both root fields cover: this manifest with
     /// root_sha256 blanked and root_hmac omitted. Property declaration
     /// order is the serialization order, which makes the canonical
-    /// form deterministic. Blanking the HMAC as well keeps the root
-    /// hash stable across re-stamping — a legacy manifest's root hash
-    /// verifies identically before and after it gains an HMAC.
+    /// form deterministic. Blanking both fields keeps the root hash a
+    /// pure function of the manifest content, independent of the stamp
+    /// it carries.
     /// </summary>
     private string CanonicalJson()
     {

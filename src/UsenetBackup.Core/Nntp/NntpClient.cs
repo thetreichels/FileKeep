@@ -29,7 +29,9 @@ public sealed class NntpClient : IDisposable
     public string? Greeting { get; private set; }
     public bool IsConnected => _reader is not null;
 
-    public NntpClient(string host, int port = 119, bool useTls = false,
+    // TLS by default (security audit D-2): a caller that does not state a
+    // choice gets the TLS pair (port 563 + TLS on), never plaintext.
+    public NntpClient(string host, int port = 563, bool useTls = true,
         TimeSpan? timeout = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(host);
@@ -76,7 +78,25 @@ public sealed class NntpClient : IDisposable
             if (_useTls)
             {
                 var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
-                ssl.AuthenticateAsClient(_host!);
+                try
+                {
+                    ssl.AuthenticateAsClient(_host!);
+                }
+                catch (Exception ex)
+                {
+                    // Name the likely cause: with TLS now the default, a
+                    // plaintext-only server (or the wrong port) is the
+                    // common failure, and the raw handshake exception
+                    // doesn't say so. No plaintext fallback — that would
+                    // silently defeat the TLS default.
+                    try { ssl.Dispose(); } catch { }
+                    try { _tcp.Dispose(); } catch { }
+                    _tcp = null;
+                    throw new NntpException(
+                        $"TLS (SSL) handshake with {_host}:{_port} failed: {ex.Message} " +
+                        "The server may not support TLS on this port — NNTP over TLS " +
+                        "normally uses port 563.", ex);
+                }
                 stream = ssl;
             }
             _ownedStream = stream;

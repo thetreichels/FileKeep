@@ -40,8 +40,17 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) SetPassphrase(ServiceConfig config,
         string configPath, string? passphrase, bool useYubiKey,
-        IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null)
+        IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false)
     {
+        // Security fix (C-2): clearing or replacing the passphrase wipes
+        // or replaces the whole unlock configuration — once a method is
+        // enabled it requires a fresh proof of an existing method.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         if (!string.IsNullOrEmpty(passphrase) && config.GeneratedSecretMode)
             return (400, new ErrorDto("YubiKey-only mode is active: the repository secret was generated, not typed. Clear the generated secret before setting a passphrase."));
         // P2-C2: field mutations + save under the config lock. The
@@ -184,8 +193,19 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) LinkYubiKey(ServiceConfig config,
         string configPath, int? slot, IYubiKeyProvider? yubiKeyProvider,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false)
     {
+        // Security fix (C-1 class): linking (or re-linking) a key
+        // re-programs the slot and re-wraps the secret — a security
+        // change requiring proof once a method is enabled. In the
+        // wizard's own sequence the passphrase step just saved the
+        // passphrase, and the page sends it back as this proof.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         if (yubiKeyProvider is null)
             return (400, new ErrorDto("YubiKey support is unavailable in this build."));
         int useSlot = slot ?? config.YubiKeySlot;
@@ -224,8 +244,19 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) SetupGeneratedSecret(ServiceConfig config,
         string configPath, int? slot, IYubiKeyProvider? yubiKeyProvider,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false)
     {
+        // Security fix (C-1 class): gated like every security-config
+        // change. In practice this operation only ever runs when NO
+        // method is enabled (it refuses while one is configured), so
+        // the gate is a no-op on its real path — it stays for
+        // uniformity with the rest of the surface.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         if (yubiKeyProvider is null)
             return (400, new ErrorDto("YubiKey support is unavailable in this build."));
         int useSlot = slot ?? config.YubiKeySlot;
@@ -376,8 +407,17 @@ public static partial class DashboardApi
     /// set up (the secret is stored at setup time).
     /// </summary>
     public static (int Status, object Payload) ProgramSpareKey(ServiceConfig config,
-        string configPath, IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null)
+        string configPath, IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false)
     {
+        // Security fix (C-1 class): programming a spare clones the slot
+        // secret onto another key, so it takes proof once a method is
+        // enabled — like the rest of the security-config surface.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         if (yubiKeyProvider is null)
             return (400, new ErrorDto("YubiKey support is unavailable in this build."));
         if (!config.PassphraseYubiKey || string.IsNullOrEmpty(config.YubiKeySlotSecretProtected))

@@ -15,24 +15,12 @@ public static class ArticleCodec
     public const string FormatVersion = "v2";
     /// <summary>
     /// Neutral message-ID domain (.invalid is RFC 2606 reserved: guaranteed
-    /// unresolvable, and advertises nothing). Was "usenet-backup" before the
-    /// v2 neutralization; <see cref="LegacyMessageIdDomain"/> keeps old
-    /// articles discoverable.
+    /// unresolvable, and advertises nothing). This is the only domain
+    /// generated, probed, or parsed: the pre-neutralization
+    /// "usenet-backup" domain belonged to the pre-release format, and
+    /// support for it was dropped before the first release.
     /// </summary>
     private const string MessageIdDomain = "invalid";
-    /// <summary>Message-ID domain used before neutralization. Still probed
-    /// and parsed so articles posted by older versions remain reachable.</summary>
-    public const string LegacyMessageIdDomain = "usenet-backup";
-
-    /// <summary>
-    /// Rewrites a generated message ID to its legacy-domain form, for
-    /// probing/fetching articles posted before the domain was neutralized.
-    /// </summary>
-    public static string WithLegacyDomain(string messageId) =>
-        messageId.EndsWith($"@{MessageIdDomain}>", StringComparison.Ordinal)
-            ? string.Concat(messageId.AsSpan(0, messageId.Length - MessageIdDomain.Length - 1),
-                LegacyMessageIdDomain, ">")
-            : messageId;
 
     /// <summary>
     /// Neutral post-set name: first 8 alphanumeric chars of the backup ID,
@@ -125,18 +113,13 @@ public static class ArticleCodec
     /// </summary>
     public static string? TryParseManifestMessageId(string messageId, string repoId)
     {
-        // Accepts both the current and legacy domains (old articles).
         string prefix = $"<manifest.";
-        foreach (string domain in new[] { MessageIdDomain, LegacyMessageIdDomain })
-        {
-            string suffix = $".{repoId}@{domain}>";
-            if (!messageId.StartsWith(prefix, StringComparison.Ordinal) ||
-                !messageId.EndsWith(suffix, StringComparison.Ordinal))
-                continue;
-            string backupId = messageId[prefix.Length..^suffix.Length];
-            return backupId.Length == 32 && backupId.All(Uri.IsHexDigit) ? backupId : null;
-        }
-        return null;
+        string suffix = $".{repoId}@{MessageIdDomain}>";
+        if (!messageId.StartsWith(prefix, StringComparison.Ordinal) ||
+            !messageId.EndsWith(suffix, StringComparison.Ordinal))
+            return null;
+        string backupId = messageId[prefix.Length..^suffix.Length];
+        return backupId.Length == 32 && backupId.All(Uri.IsHexDigit) ? backupId : null;
     }
 
     /// <summary>
@@ -164,18 +147,13 @@ public static class ArticleCodec
     /// </summary>
     public static (string YearMonth, int Version)? TryParseManifestIndexMessageId(string messageId, string repoId)
     {
-        // Format: <YYYY-MM.<repoid>.index.<version>@invalid> (or legacy @usenet-backup>)
+        // Format: <YYYY-MM.<repoid>.index.<version>@invalid>
         if (!messageId.StartsWith("<", StringComparison.Ordinal))
             return null;
-        string? domain = null;
-        foreach (string d in new[] { MessageIdDomain, LegacyMessageIdDomain })
-        {
-            if (messageId.EndsWith($"@{d}>", StringComparison.Ordinal)) { domain = d; break; }
-        }
-        if (domain is null)
+        if (!messageId.EndsWith($"@{MessageIdDomain}>", StringComparison.Ordinal))
             return null;
         string suffix = $".{repoId}.index.";
-        string inner = messageId[1..^(domain.Length + 2)]; // strip < and @domain>
+        string inner = messageId[1..^(MessageIdDomain.Length + 2)]; // strip < and @domain>
         int idx = inner.IndexOf(suffix, StringComparison.Ordinal);
         if (idx < 0)
             return null;

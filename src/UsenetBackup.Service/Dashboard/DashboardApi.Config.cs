@@ -258,8 +258,7 @@ public static partial class DashboardApi
     /// </summary>
     internal static ConfigJobDto ToDto(BackupJobConfig j) => new(
         j.Name, j.Repo, j.Source, j.Schedule, j.Mode, j.JobType,
-        j.BackupPrivilege, j.Vss, j.AutoUpload, j.Targets,
-        j.SmbShare, j.SmbUser, !string.IsNullOrEmpty(j.SmbPasswordProtected),
+        j.BackupPrivilege, j.Vss, j.Targets,
         j.AutoVerify, j.VerificationMode, j.RedundancyMode, j.Sources, j.Paused);
 
     internal static ConfigLocationDto ToDto(ServiceConfig config, BackupLocation l) => new(
@@ -335,14 +334,10 @@ public static partial class DashboardApi
         {
             var existing = config.Jobs.FirstOrDefault(j =>
                 j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
-            // Encrypt a supplied SMB password via DPAPI; blank keeps the stored blob.
-            // Note: per-job SMB fields (SmbShare/SmbUser/SmbPasswordProtected) are
-            // legacy — migrated to BackupLocations on config load. New jobs use
-            // location names in Targets; credentials live on the location.
-            string smbPwBlob = existing?.SmbPasswordProtected ?? "";
-            if (!string.IsNullOrEmpty(job.SmbPasswordPlaintext))
-                smbPwBlob = UsenetBackup.Core.Dpapi.Protect(job.SmbPasswordPlaintext) ?? "";
-            job.SmbPasswordProtected = smbPwBlob;
+            // Jobs carry no credentials: jobs name locations in Targets,
+            // and connection details + passwords live on the location.
+            // (The per-job SMB fields were retired in Phase 6; nothing
+            // reads them, so there is no blob to carry over here.)
             job.SmbPasswordPlaintext = null;
             if (existing is null)
                 config.Jobs.Add(job);
@@ -670,11 +665,11 @@ public static partial class DashboardApi
         }
         try
         {
-            // Validate NNTP fields if a host is set; Validate() also checks that
-            // no job has auto-upload without a provider.
+            // Validate NNTP fields if a host is set (Validate() checks
+            // the whole config, this included).
             config.Validate();
-            // Sync the migrated "Usenet" location with the new settings so
-            // scheduled uploads (which now use locations) don't go stale.
+            // Sync the "Usenet" location with the new settings so
+            // scheduled uploads (which use locations) don't go stale.
             var usenetLoc = config.Locations.FirstOrDefault(l =>
                 l.Type == "nntp" && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
             if (usenetLoc is not null && config.Nntp is not null)

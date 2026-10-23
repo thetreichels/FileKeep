@@ -674,8 +674,8 @@ public sealed class RetentionManager
                 .Where(v => v.SetName == setName).ToList();
             if (batchVolumes.Count == 0)
             {
-                // Legacy manifests record no set name (null) for the
-                // single post set — that set is batch 0.
+                // Single-set manifests record no set name (null) for
+                // their one post set — that set is batch 0.
                 if (batchIndex == 0)
                     batchVolumes = manifest.Volumes
                         .Where(v => v.SetName is null).ToList();

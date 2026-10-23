@@ -73,8 +73,12 @@ public sealed class YubiKeyLinkTests : IDisposable
     public void LinkYubiKey_BadSlot_Rejects400()
     {
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-pass");
+        // The env passphrase is an enabled method, so the proof gate
+        // runs first; the valid env proof passes it and the slot
+        // validation is what surfaces.
         var result = DashboardApi.LinkYubiKey(
-            new ServiceConfig(), ConfigPath(), 3, new SimulatedYubiKeyProvider());
+            new ServiceConfig(), ConfigPath(), 3, new SimulatedYubiKeyProvider(),
+            proofPassphrase: "env-pass");
         Assert.Equal(400, result.Status);
         Assert.Contains("slot", ErrorMessage(result));
     }
@@ -84,7 +88,8 @@ public sealed class YubiKeyLinkTests : IDisposable
     {
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-pass");
         var result = DashboardApi.LinkYubiKey(
-            new ServiceConfig(), ConfigPath(), 2, new NoDeviceProvider());
+            new ServiceConfig(), ConfigPath(), 2, new NoDeviceProvider(),
+            proofPassphrase: "env-pass");
         Assert.Equal(400, result.Status);
         Assert.Contains("No YubiKey detected", ErrorMessage(result));
     }
@@ -101,7 +106,11 @@ public sealed class YubiKeyLinkTests : IDisposable
         var config = new ServiceConfig();
         string path = ConfigPath();
 
-        var (status, payload) = DashboardApi.LinkYubiKey(config, path, 2, provider);
+        // The env passphrase is already an enabled method, so the link
+        // carries it as proof — the wizard sequence in production: the
+        // passphrase was established first, the key links against it.
+        var (status, payload) = DashboardApi.LinkYubiKey(config, path, 2, provider,
+            proofPassphrase: "wizard-pass-123");
         Assert.Equal(200, status);
         var ok = Assert.IsType<OkYubiKeyDto>(payload);
         Assert.True(ok.Ok);
@@ -126,6 +135,7 @@ public sealed class YubiKeyLinkTests : IDisposable
         {
             PassphraseEnabled = true, YubiKeyEnabled = true,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = "wizard-pass-123",
         });
         Assert.Equal(200, pStatus);
 

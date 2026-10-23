@@ -846,7 +846,7 @@ static int NntpUpload(string[] args)
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
             providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
-            from: poster);
+            from: poster, indexAuth: repo.IndexAuth);
         store.MaxArticleBytes = repo.MaxDownloadBytes;
         int uploaded = 0, skipped = 0;
         if (useVolumes)
@@ -952,7 +952,8 @@ static int ManifestDiscover(string[] args)
     try
     {
         using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            indexAuth: repo.IndexAuth);
         store.MaxArticleBytes = repo.MaxDownloadBytes;
         // Use the monthly index (STAT probes) instead of LISTGROUP, which is
         // infeasible on large groups (e.g., alt.binaries.test has billions).
@@ -1062,7 +1063,8 @@ static int Download(string[] args)
     try
     {
         using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup));
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            indexAuth: repo.IndexAuth);
         // Volume articles are volume-sized, not chunk-sized.
         remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
         // Fetch the latest published message-identity index before
@@ -1190,7 +1192,8 @@ static int RetentionCheck(string[] args)
         using var remote = new UsenetBackup.Core.Nntp.NntpBlobStore(
             client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
             messageIndex: repo.MessageIndex,
-            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
+            providerKey: UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
+            indexAuth: repo.IndexAuth);
 
         if (dryRun)
         {

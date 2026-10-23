@@ -18,9 +18,11 @@ namespace UsenetBackup.Core.Redundancy;
 ///   [parity bytes...] (maxLen bytes)
 ///
 /// Magic history:
-///   "RS1 " = handmade Vandermonde implementation (2026-10-05 to 2026-10-08).
-///            NOT decodable by this implementation — different generator
-///            matrix. The old code is in git history (pre-57184b4) if needed.
+///   "RS1 " = handmade Vandermonde implementation, used only during
+///            the pre-release period (2026-10-05 to 2026-10-08).
+///            Support was dropped before the first release:
+///            <see cref="Reconstruct"/> refuses RS1 blocks with an
+///            explicit unsupported-format error.
 ///   "RS2 " = ReedSolomonFast (Cauchy matrix, Backblaze-compatible).
 ///            Current. This is what GenerateParity produces.
 /// </remarks>
@@ -34,11 +36,6 @@ public static class Par2Redundancy
     private static readonly byte[] Magic = "RS2 "u8.ToArray();
     private static readonly byte[] MagicRS1 = "RS1 "u8.ToArray();
     private const int HeaderFixedSize = 8; // magic(4) + numChunks(4)
-
-    /// <summary>
-    /// Parity format version detected from magic bytes.
-    /// </summary>
-    private enum ParityVersion { RS1, RS2 }
 
     /// <summary>
     /// Generates PAR2 parity blocks for a set of chunk IDs.
@@ -124,6 +121,10 @@ public static class Par2Redundancy
     /// Reconstructs missing data shards using parity blocks.
     /// Returns dictionary of chunk ID -> reconstructed bytes (trimmed to original length),
     /// or null if reconstruction is not possible.
+    /// Throws <see cref="InvalidDataException"/> when the parity blocks
+    /// use the pre-release RS1 format: that is a format refusal, not
+    /// ordinary corruption, and callers must not mistake it for a
+    /// transient parity failure.
     /// </summary>
     public static Dictionary<string, byte[]>? Reconstruct(
         IReadOnlyList<string> groupChunkIds,
@@ -133,17 +134,18 @@ public static class Par2Redundancy
         if (parityDatas.Count == 0)
             return null;
 
-        // Parse header from first parity block, detecting RS1 vs RS2.
-        if (!TryParseHeader(parityDatas[0], out int[]? originalLengths, out _, out ParityVersion version))
-            return null;
+        // RS1 parity (pre-release handmade Vandermonde codec) is no
+        // longer decodable — support was dropped before the first
+        // release. Refuse explicitly instead of returning null like
+        // ordinary corruption.
+        if (HasMagic(parityDatas[0], MagicRS1))
+            throw new InvalidDataException(
+                "Parity data uses the RS1 format from the pre-release period; " +
+                "it is no longer supported and cannot be used for reconstruction.");
 
-        // RS1 (legacy handmade Vandermonde) uses a different code path.
-        if (version == ParityVersion.RS1)
-        {
-            if (originalLengths is null)
-                return null;
-            return ReconstructRS1(groupChunkIds, getChunkBytesOrNull, parityDatas, originalLengths);
-        }
+        // Parse header from first parity block.
+        if (!TryParseHeader(parityDatas[0], out int[]? originalLengths, out _))
+            return null;
 
         if (originalLengths!.Length != groupChunkIds.Count)
             return null;
@@ -252,91 +254,6 @@ public static class Par2Redundancy
         }
     }
 
-    /// <summary>
-    /// Reconstructs using the legacy RS1 (handmade Vandermonde) codec.
-    /// Only for parity blocks written 2026-10-05 to 2026-10-08.
-    /// </summary>
-    private static Dictionary<string, byte[]>? ReconstructRS1(
-        IReadOnlyList<string> groupChunkIds,
-        Func<string, byte[]?> getChunkBytesOrNull,
-        IReadOnlyList<byte[]> parityDatas,
-        int[] originalLengths)
-    {
-        var rs = new LegacyReedSolomon(DataShards, ParityShards);
-
-        var parityShards = new List<byte[]>();
-        int maxLen = 0;
-        foreach (byte[] data in parityDatas)
-        {
-            if (!TryParseHeader(data, out _, out byte[]? parity, out ParityVersion v) || v != ParityVersion.RS1)
-                return null;
-            parityShards.Add(parity!);
-            if (parity!.Length > maxLen)
-                maxLen = parity.Length;
-        }
-        if (parityShards.Any(p => p.Length != maxLen))
-            return null;
-
-        var shards = new byte[DataShards][];
-        var shardPresent = new bool[DataShards];
-        var missingIndices = new List<int>();
-
-        for (int j = 0; j < DataShards; j++)
-        {
-            if (j < groupChunkIds.Count)
-            {
-                byte[]? bytes = getChunkBytesOrNull(groupChunkIds[j]);
-                if (bytes is not null)
-                {
-                    shards[j] = new byte[maxLen];
-                    Array.Copy(bytes, shards[j], Math.Min(bytes.Length, maxLen));
-                    shardPresent[j] = true;
-                }
-                else
-                {
-                    missingIndices.Add(j);
-                    shardPresent[j] = false;
-                }
-            }
-            else
-            {
-                shards[j] = new byte[maxLen];
-                shardPresent[j] = true;
-            }
-        }
-
-        try
-        {
-            byte[][] reconstructed = rs.Reconstruct(
-                BuildFullShardArray(shards, shardPresent, parityShards, maxLen),
-                BuildPresentArray(shardPresent, parityShards.Count, maxLen));
-
-            var result = new Dictionary<string, byte[]>();
-            foreach (int idx in missingIndices)
-            {
-                if (idx < groupChunkIds.Count)
-                {
-                    int originalLen = originalLengths[idx];
-                    if (originalLen < 0 || originalLen > maxLen)
-                        return null;
-                    byte[] trimmed = new byte[originalLen];
-                    Array.Copy(reconstructed[idx], trimmed, Math.Min(originalLen, reconstructed[idx].Length));
-                    // Validate reconstructed chunk against its content hash.
-                    string expectedId = groupChunkIds[idx];
-                    string actualId = UsenetBackup.Core.Hashing.Sha256Hex(trimmed);
-                    if (!string.Equals(actualId, expectedId, StringComparison.OrdinalIgnoreCase))
-                        return null;
-                    result[groupChunkIds[idx]] = trimmed;
-                }
-            }
-            return result;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     private static byte[][] BuildFullShardArray(byte[][] dataShards, bool[] dataPresent, List<byte[]> parityShards, int maxLen)
     {
         var all = new byte[DataShards + ParityShards][];
@@ -367,21 +284,18 @@ public static class Par2Redundancy
         return data;
     }
 
-    private static bool TryParseHeader(byte[] data, out int[]? lengths, out byte[]? parity) =>
-        TryParseHeader(data, out lengths, out parity, out _);
+    private static bool HasMagic(byte[] data, byte[] magic) =>
+        data.Length >= magic.Length &&
+        data[0] == magic[0] && data[1] == magic[1] && data[2] == magic[2] && data[3] == magic[3];
 
-    private static bool TryParseHeader(byte[] data, out int[]? lengths, out byte[]? parity, out ParityVersion version)
+    private static bool TryParseHeader(byte[] data, out int[]? lengths, out byte[]? parity)
     {
         lengths = null;
         parity = null;
-        version = ParityVersion.RS2;
         if (data.Length < HeaderFixedSize)
             return false;
-        bool isRS2 = data[0] == Magic[0] && data[1] == Magic[1] && data[2] == Magic[2] && data[3] == Magic[3];
-        bool isRS1 = data[0] == MagicRS1[0] && data[1] == MagicRS1[1] && data[2] == MagicRS1[2] && data[3] == MagicRS1[3];
-        if (!isRS2 && !isRS1)
+        if (!HasMagic(data, Magic))
             return false;
-        version = isRS1 ? ParityVersion.RS1 : ParityVersion.RS2;
 
         int numChunks = BitConverter.ToInt32(data, 4);
         if (numChunks <= 0 || numChunks > 100)

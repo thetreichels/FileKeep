@@ -1,3 +1,6 @@
+using System.Text.Json;
+using UsenetBackup.Core.Json;
+
 namespace UsenetBackup.Core.Nntp;
 
 /// <summary>
@@ -19,6 +22,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     private readonly Catalog _journal;
     private readonly ChunkMessageIndex? _messageIndex;
     private readonly string? _providerKey;
+    private readonly IndexAuth? _indexAuth;
     private bool _disposed;
 
     public NntpBlobStore(
@@ -28,7 +32,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string catalogDbPath,
         string from = "poster",
         ChunkMessageIndex? messageIndex = null,
-        string? providerKey = null)
+        string? providerKey = null,
+        IndexAuth? indexAuth = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
@@ -44,6 +49,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
         _providerKey = providerKey;
+        _indexAuth = indexAuth;
     }
 
     /// <summary>
@@ -57,7 +63,8 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         string catalogDbPath,
         string from = "poster",
         ChunkMessageIndex? messageIndex = null,
-        string? providerKey = null)
+        string? providerKey = null,
+        IndexAuth? indexAuth = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(newsgroup);
         ArgumentException.ThrowIfNullOrEmpty(repoId);
@@ -73,6 +80,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         _journal = new Catalog(catalogDbPath);
         _messageIndex = messageIndex;
         _providerKey = providerKey;
+        _indexAuth = indexAuth;
     }
 
     /// <summary>True if this store uses a connection pool (parallel-capable).</summary>
@@ -467,10 +475,6 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         string messageId = ArticleCodec.MakeManifestMessageId(backupId, _repoId);
         string? article = UseClient(c => c.GetArticle(messageId, MaxArticleBytes));
-        // Manifests posted before the message-ID domain was neutralized
-        // live under the legacy domain.
-        article ??= UseClient(c => c.GetArticle(
-            ArticleCodec.WithLegacyDomain(messageId), MaxArticleBytes));
         if (article is null)
             return null;
         var (id, blob) = ArticleCodec.ParseManifestArticle(article);
@@ -497,8 +501,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         // Find the latest version by probing (tolerates expired versions).
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v),
-            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v)));
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
         int version = latestVersion + 1;
         // If the latest version already has identical content, don't re-post.
         // This makes re-upload idempotent.
@@ -510,6 +513,14 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         }
         string messageId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, version);
         string body = string.Join("\n", backupIds);
+        if (_indexAuth is not null)
+        {
+            // Authenticate the index (B-M1): the HMAC covers the canonical
+            // payload (the ID list exactly as joined above) and rides as a
+            // trailer line. Keyed readers refuse an index without a valid
+            // trailer, so a forged higher version cannot hide backups.
+            body += "\n" + IndexHmacLinePrefix + _indexAuth.ComputeManifestIndexHmac(body);
+        }
         string article = BuildIndexArticle(yearMonth, version, body);
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
@@ -523,18 +534,43 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     public IReadOnlyList<string>? GetLatestManifestIndex(string yearMonth)
     {
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v),
-            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v)));
+            v => ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, v));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeManifestIndexMessageId(_repoId, yearMonth, latestVersion);
         string? article = UseClient(c => c.GetArticle(latestId, MaxArticleBytes));
         if (article is null)
             return null;
-        // Parse the body: one backup ID per line.
+        // Parse the body: one backup ID per line, plus (when posted by a
+        // keyed store) a trailing HMAC line authenticating the list.
         var (_, body) = ParseIndexArticle(article);
-        return body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string[] lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (_indexAuth is not null)
+        {
+            // Authenticated mode (B-M1): a missing or invalid HMAC means
+            // this index was not posted by a holder of the repo key —
+            // treat it as NOT THERE (never adopt a forged index), exactly
+            // as if no index existed for the month.
+            if (lines.Length == 0 ||
+                !lines[^1].StartsWith(IndexHmacLinePrefix, StringComparison.Ordinal))
+                return null;
+            string[] ids = lines[..^1];
+            string canonical = string.Join("\n", ids);
+            if (!_indexAuth.VerifyManifestIndexHmac(canonical,
+                    lines[^1][IndexHmacLinePrefix.Length..]))
+                return null;
+            return ids;
+        }
+        // Keyless store: accept both formats; strip an HMAC trailer this
+        // store cannot verify.
+        if (lines.Length > 0 &&
+            lines[^1].StartsWith(IndexHmacLinePrefix, StringComparison.Ordinal))
+            lines = lines[..^1];
+        return lines;
     }
+
+    /// <summary>Trailer line prefix authenticating a manifest-index body.</summary>
+    private const string IndexHmacLinePrefix = "index-hmac:";
 
     /// <summary>
     /// Posts a versioned chunk-message-identity index. Each version
@@ -547,12 +583,34 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     {
         // Find the latest version by probing (tolerates expired versions).
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v),
-            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeMessageIndexMessageId(_repoId, v)));
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
         int version = latestVersion + 1;
-        // If the latest version already has identical content, don't re-post.
-        if (latestVersion > 0)
+        string postedBody = indexJson;
+        if (_indexAuth is not null)
         {
+            // Authenticate the index (B-H1): the posted body is an envelope
+            // {"index": <map>, "index_hmac": "<hex>"} whose HMAC covers the
+            // canonical index JSON (the field-blanking mirror of the
+            // manifest root_hmac pattern — the canonical form is the index
+            // content with the HMAC field absent). Canonicalizing here
+            // (parse + re-serialize) makes the dedup comparison and every
+            // future verification byte-stable.
+            string canonical = CanonicalizeChunkIndexJson(indexJson);
+            // If the latest AUTHENTIC version already has identical
+            // content, don't re-post. (A forged latest version reads as
+            // "not there" and never suppresses a legitimate re-post.)
+            if (latestVersion > 0)
+            {
+                var existing = GetLatestMessageIndex();
+                if (existing is not null && existing == canonical)
+                    return latestVersion;
+            }
+            postedBody = "{\"index\":" + canonical + ",\"index_hmac\":\"" +
+                _indexAuth.ComputeChunkIndexHmac(canonical) + "\"}";
+        }
+        else if (latestVersion > 0)
+        {
+            // If the latest version already has identical content, don't re-post.
             var existing = GetLatestMessageIndex();
             if (existing is not null && existing.Trim() == indexJson.Trim())
                 return latestVersion;
@@ -566,7 +624,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("Content-Type: application/json; charset=utf-8\r\n");
         sb.Append("\r\n");
-        sb.Append(indexJson);
+        sb.Append(postedBody);
         UseClient(c => c.Post(sb.ToString()));
         WaitForArticle(messageId);
         return version;
@@ -584,15 +642,47 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// the index is then expected-but-broken, and the caller must surface
     /// an explicit recovery error rather than silently falling back to
     /// stale message IDs.
+    ///
+    /// When this store carries an <see cref="IndexAuth"/>, the contract
+    /// tightens (B-H1): the latest version is adopted only if it is an
+    /// envelope whose HMAC verifies under the repo key. Anything else —
+    /// unsigned, forged, tampered, unfetchable, unparseable — is treated
+    /// as NOT THERE and this returns null, because attacker noise is
+    /// indistinguishable from a broken article and neither may be
+    /// adopted. On success the returned string is the canonical inner
+    /// index JSON (the envelope is unwrapped).
     /// </summary>
     public string? GetLatestMessageIndex()
     {
         int latestVersion = ProbeLatestVersion(
-            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v),
-            v => ArticleCodec.WithLegacyDomain(ArticleCodec.MakeMessageIndexMessageId(_repoId, v)));
+            v => ArticleCodec.MakeMessageIndexMessageId(_repoId, v));
         if (latestVersion == 0)
             return null;
         string latestId = ArticleCodec.MakeMessageIndexMessageId(_repoId, latestVersion);
+        if (_indexAuth is not null)
+        {
+            string? raw;
+            try
+            {
+                raw = UseClient(c => c.GetArticle(latestId, MaxArticleBytes));
+            }
+            catch
+            {
+                return null; // unauthenticated outcome: treat as not there
+            }
+            if (raw is null)
+                return null;
+            string authBody;
+            try
+            {
+                (_, authBody) = ParseIndexArticle(raw);
+            }
+            catch
+            {
+                return null; // unparseable: cannot authenticate, not there
+            }
+            return TryUnwrapAuthenticatedChunkIndex(authBody);
+        }
         string? article;
         try
         {
@@ -619,7 +709,74 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 $"Message-identity index v{latestVersion} ({latestId}) could not be parsed: " +
                 ex.Message, ex);
         }
-        return body.Trim();
+        // Keyless store: unwrap an authenticated envelope if one was
+        // posted (the mappings are readable without the key; only
+        // adoption under authentication requires it), else the raw body.
+        return TryExtractChunkIndexEnvelope(body, out _) ?? body.Trim();
+    }
+
+    /// <summary>
+    /// Canonical form of a chunk message index: the map parsed and
+    /// re-serialized through the same source-generated context
+    /// ChunkMessageIndex.ToJson uses, so poster and verifier derive
+    /// byte-identical payloads for the HMAC regardless of the input
+    /// string's whitespace or key ordering.
+    /// </summary>
+    private static string CanonicalizeChunkIndexJson(string json)
+    {
+        var map = JsonSerializer.Deserialize(json,
+            FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
+        if (map is null)
+            throw new InvalidDataException("Chunk message index JSON deserialized to null.");
+        return JsonSerializer.Serialize(map,
+            FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
+    }
+
+    /// <summary>
+    /// Extracts the payload of a chunk-index envelope
+    /// ({"index": {...}, "index_hmac": "..."}): returns the canonical
+    /// inner index JSON and the presented HMAC, or null when the body
+    /// is not a well-formed envelope.
+    /// </summary>
+    private static string? TryExtractChunkIndexEnvelope(string body, out string? hmacHex)
+    {
+        hmacHex = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+            if (!root.TryGetProperty("index", out var indexEl) ||
+                indexEl.ValueKind != JsonValueKind.Object)
+                return null;
+            if (root.TryGetProperty("index_hmac", out var hmacEl) &&
+                hmacEl.ValueKind == JsonValueKind.String)
+                hmacHex = hmacEl.GetString();
+            return CanonicalizeChunkIndexJson(indexEl.GetRawText());
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Verifies a chunk-index envelope against this store's
+    /// <see cref="IndexAuth"/>: returns the canonical inner index JSON,
+    /// or null when the envelope is missing, malformed, or its HMAC
+    /// does not verify (forged/tampered — treated as not there).
+    /// </summary>
+    private string? TryUnwrapAuthenticatedChunkIndex(string body)
+    {
+        string? canonical = TryExtractChunkIndexEnvelope(body, out string? hmacHex);
+        if (canonical is null)
+            return null;
+        return _indexAuth!.VerifyChunkIndexHmac(canonical, hmacHex) ? canonical : null;
     }
 
     /// <summary>
@@ -634,6 +791,11 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// error when an index exists on the server but cannot be retrieved
     /// or parsed — continuing with stale IDs in that case would turn an
     /// index problem into later chunk-download failures.
+    ///
+    /// With an <see cref="IndexAuth"/> on this store, an index that
+    /// fails authentication is treated as never published (B-H1): the
+    /// sync no-ops and the local index is left exactly as it was —
+    /// never replaced, never persisted over.
     /// </summary>
     public void SyncMessageIndex(ChunkMessageIndex index)
     {
@@ -674,7 +836,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// hide newer surviving versions. Stops after a run of consecutive
     /// misses so a long-dead series still terminates quickly.
     /// </summary>
-    private int ProbeLatestVersion(Func<int, string> makeMessageId, Func<int, string>? makeLegacyMessageId = null)
+    private int ProbeLatestVersion(Func<int, string> makeMessageId)
     {
         const int maxConsecutiveMisses = 5;
         const int hardCap = 1000;
@@ -682,11 +844,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         int misses = 0;
         for (int version = 1; version <= hardCap; version++)
         {
-            // Articles posted before the message-ID domain was neutralized
-            // live under the legacy domain; probe both.
             bool exists = UseClient(c => c.Stat(makeMessageId(version)));
-            if (!exists && makeLegacyMessageId is not null)
-                exists = UseClient(c => c.Stat(makeLegacyMessageId(version)));
             if (exists)
             {
                 latest = version;

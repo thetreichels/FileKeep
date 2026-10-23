@@ -137,37 +137,24 @@ public sealed class ArticleCodecTests
     }
 
     [Fact]
-    public void WithLegacyDomain_RewritesNewIds()
-    {
-        const string repoId = "0123456789abcdef";
-        string chunkId = ChunkIdOf(RandomBytes(10));
-        string fresh = ArticleCodec.MakeMessageId(chunkId, repoId);
-        Assert.EndsWith("@invalid>", fresh);
-        string legacy = ArticleCodec.WithLegacyDomain(fresh);
-        Assert.Equal($"<{chunkId}.{repoId}@usenet-backup>", legacy);
-        // Already-legacy IDs pass through unchanged.
-        Assert.Equal(legacy, ArticleCodec.WithLegacyDomain(legacy));
-    }
-
-    [Fact]
-    public void TryParseManifestMessageId_AcceptsLegacyDomain()
+    public void TryParseManifestMessageId_RejectsLegacyDomain()
     {
         const string repoId = "0123456789abcdef";
         string backupId = Guid.NewGuid().ToString("N");
-        // New-domain ID parses.
+        // Current-domain ID parses.
         Assert.Equal(backupId,
             ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@invalid>", repoId));
-        // Legacy-domain ID (posted before neutralization) still parses.
-        Assert.Equal(backupId,
+        // Legacy-domain ID (pre-release @usenet-backup) no longer
+        // parses: legacy repo support was dropped before the first
+        // release, so discovery must not see those articles at all.
+        Assert.Null(
             ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@usenet-backup>", repoId));
     }
 
     [Fact]
-    public void TryParseManifestIndexMessageId_AcceptsLegacyDomain()
+    public void TryParseManifestIndexMessageId_RejectsLegacyDomain()
     {
-        var parsed = ArticleCodec.TryParseManifestIndexMessageId(
-            "<2026-10.abc123.index.3@usenet-backup>", "abc123");
-        Assert.NotNull(parsed);
-        Assert.Equal(("2026-10", 3), parsed.Value);
+        Assert.Null(ArticleCodec.TryParseManifestIndexMessageId(
+            "<2026-10.abc123.index.3@usenet-backup>", "abc123"));
     }
 }

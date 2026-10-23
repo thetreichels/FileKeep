@@ -136,8 +136,12 @@ public sealed class GeneratedSecretModeTests : IDisposable
     public void SetupGeneratedSecret_EnvPassphraseConfigured_Rejects400()
     {
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-pass");
+        // The env passphrase is an enabled method, so the proof gate
+        // runs first; the (valid) env proof passes it and the
+        // already-configured refusal is what surfaces.
         var result = DashboardApi.SetupGeneratedSecret(
-            new ServiceConfig(), ConfigPath(), 2, new SimulatedYubiKeyProvider());
+            new ServiceConfig(), ConfigPath(), 2, new SimulatedYubiKeyProvider(),
+            proofPassphrase: "env-pass");
         Assert.Equal(400, result.Status);
         Assert.Contains("already configured", ErrorMessage(result));
     }
@@ -145,11 +149,15 @@ public sealed class GeneratedSecretModeTests : IDisposable
     [Fact]
     public void SetupGeneratedSecret_StoredPassphraseConfigured_Rejects400()
     {
+        // A stored passphrase is configured, so the proof gate runs
+        // first — and no proof can verify here (the fake blob does not
+        // resolve), so the gate's 403 is the refusal that surfaces,
+        // ahead of the operation's own already-configured check.
         var config = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
         var result = DashboardApi.SetupGeneratedSecret(
             config, ConfigPath(), 2, new SimulatedYubiKeyProvider());
-        Assert.Equal(400, result.Status);
-        Assert.Contains("already configured", ErrorMessage(result));
+        Assert.Equal(403, result.Status);
+        Assert.Contains("proof", ErrorMessage(result));
     }
 
     [Fact]
@@ -197,8 +205,11 @@ public sealed class GeneratedSecretModeTests : IDisposable
         Assert.Equal(canonical, DashboardApi.GetRestorePassphrase(config, session));
 
         // Generation is once-ever: a second attempt is rejected now that
-        // a secret exists.
-        var again = DashboardApi.SetupGeneratedSecret(config, path, 2, provider);
+        // a secret exists. The generated mode is an enabled method, so
+        // the call carries the secret itself as proof (the gate passes;
+        // the once-ever refusal is what surfaces).
+        var again = DashboardApi.SetupGeneratedSecret(config, path, 2, provider,
+            proofPassphrase: canonical);
         Assert.Equal(400, again.Status);
         Assert.Contains("already configured", ErrorMessage(again));
     }
@@ -208,9 +219,15 @@ public sealed class GeneratedSecretModeTests : IDisposable
     [Fact]
     public void SetPassphrase_TypedPassphrase_RejectsInGeneratedMode()
     {
+        // Generated mode counts as an enabled method, so the proof gate
+        // runs first; the env-held secret is the valid proof and the
+        // generated-mode guard is what surfaces.
+        string canonical = GeneratedSecret.Generate();
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, canonical);
         var config = new ServiceConfig { GeneratedSecretMode = true };
         var result = DashboardApi.SetPassphrase(
-            config, ConfigPath(), "typed-pass", useYubiKey: false, null);
+            config, ConfigPath(), "typed-pass", useYubiKey: false, null,
+            proofPassphrase: canonical);
         Assert.Equal(400, result.Status);
         Assert.Contains("generated", ErrorMessage(result));
         Assert.True(config.GeneratedSecretMode);
@@ -219,9 +236,16 @@ public sealed class GeneratedSecretModeTests : IDisposable
     [Fact]
     public void SetPassphrase_Clear_ResetsGeneratedMode()
     {
+        // The owner CAN clear in generated mode — with proof: the typed
+        // recovery secret, in its grouped sheet form (the gate
+        // normalizes it the way the restore unlock does). The same call
+        // with no proof is the C-2 wipe; SecurityProofTests covers it.
+        string canonical = GeneratedSecret.Generate();
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, canonical);
         var config = GeneratedModeConfig();
         var (status, _) = DashboardApi.SetPassphrase(
-            config, ConfigPath(), "", useYubiKey: false, null);
+            config, ConfigPath(), "", useYubiKey: false, null,
+            proofPassphrase: GeneratedSecret.FormatForDisplay(canonical));
         Assert.Equal(200, status);
         Assert.False(config.GeneratedSecretMode);
         Assert.False(config.PassphraseYubiKey);
@@ -246,11 +270,14 @@ public sealed class GeneratedSecretModeTests : IDisposable
     [Fact]
     public void SetProtectionProfile_GeneratedMode_AcceptsYubiKeyOnly()
     {
+        string canonical = GeneratedSecret.Generate();
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, canonical);
         var config = GeneratedModeConfig();
         var (status, payload) = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = false, YubiKeyEnabled = true, YubiKeyOnly = true,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = canonical,
         });
         Assert.Equal(200, status);
         var profile = Assert.IsType<ProtectionProfileResponse>(payload);
@@ -263,12 +290,17 @@ public sealed class GeneratedSecretModeTests : IDisposable
     public void SetProtectionProfile_GeneratedMode_RejectsYubiKeyWithoutSetupData()
     {
         // Mode flag set but the setup data is missing: enablement must
-        // be refused — the check is on the data, not the flag.
+        // be refused — the check is on the data, not the flag. (The env
+        // secret passes the proof gate so the enablement check is what
+        // surfaces.)
+        string canonical = GeneratedSecret.Generate();
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, canonical);
         var config = new ServiceConfig { GeneratedSecretMode = true };
         var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
             PassphraseEnabled = false, YubiKeyEnabled = true,
             PhoneEnabled = false, LinkMode = "or",
+            ProofPassphrase = canonical,
         });
         Assert.Equal(400, result.Status);
         Assert.Contains("not set up", ErrorMessage(result));

@@ -30,9 +30,11 @@ public enum JobRunState
     HeldNoSecurity,
 
     /// <summary>
-    /// The job has no backup location at all (its target list is empty —
-    /// the state a job lands in when its locations are deleted out from
-    /// under it). Repaired by attaching a location.
+    /// The job has no usable backup location at all: its target list is
+    /// empty (the state a job lands in when its locations are deleted
+    /// out from under it) or none of its target names resolves to a
+    /// location (a pre-locations config's bare "nntp"/"smb" tokens).
+    /// Repaired by attaching a location.
     /// </summary>
     NeedsLocation,
 
@@ -97,18 +99,22 @@ public static class JobStateEvaluator
             return JobRunState.NeedsLocation;
         // A target is usable when its location exists, is not an absent
         // USB drive, and is not a network location currently considered
-        // away. A target naming no location at all (a legacy bare
-        // "nntp" token the migration left alone) defers to the
-        // executor's own resolution, exactly as before this state
-        // machine existed — location deletion strips names from target
-        // lists in the same operation, so a dangling name is never a
-        // product state, only a hand-edited one.
+        // away. A target naming no location at all — a legacy bare
+        // "nntp"/"smb" token from a pre-locations config, or a name left
+        // dangling by a hand edit — resolves to NOTHING (Phase 6 dropped
+        // the bare-token fallback): it can never make the job Active.
+        // When every target is unresolvable the job is NeedsLocation,
+        // exactly like a job with no targets at all. (Location deletion
+        // strips names from target lists in the same operation, so in
+        // product flows a dangling name only ever comes from an old or
+        // hand-edited config.)
         bool anyUsbAway = false;
+        bool anyNetworkAway = false;
         foreach (string target in targets)
         {
             LocationFacts facts = locationLookup(target);
             if (!facts.Exists)
-                return JobRunState.Active;
+                continue;
             if (facts.IsUsb)
             {
                 if (facts.UsbPresent)
@@ -119,8 +125,16 @@ public static class JobStateEvaluator
             {
                 return JobRunState.Active;
             }
+            else
+            {
+                anyNetworkAway = true;
+            }
         }
-        return anyUsbAway ? JobRunState.WaitingForDrive : JobRunState.WaitingForNetwork;
+        if (anyUsbAway)
+            return JobRunState.WaitingForDrive;
+        if (anyNetworkAway)
+            return JobRunState.WaitingForNetwork;
+        return JobRunState.NeedsLocation;
     }
 
     /// <summary>Short human reason for a non-Active state, for logs and errors.</summary>

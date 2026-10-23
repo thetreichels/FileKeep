@@ -776,15 +776,18 @@ public sealed class BackupScheduler
                 if (!TryGetPassphrase(_config, out string? passphrase, out string? problem))
                     throw new InvalidOperationException(
                         problem ?? $"No passphrase (set {PassphraseEnvVar}).");
-            // Reuse the per-job upload path with a synthetic job config.
+            // Manual upload is a repo-scoped operation: it posts to the
+            // configured global Usenet providers directly. It does not
+            // go through job target resolution (there is no job — the
+            // synthetic config only carries the repo/name the upload
+            // path logs against).
             var job = new BackupJobConfig
             {
                 Name = "manual-upload",
                 Repo = repoPath,
                 Source = "",
-                AutoUpload = true,
             };
-            UploadToTargets(job, backupId, passphrase, token);
+            AutoUploadToUsenet(job, backupId, passphrase, token);
             }
             finally { EndOperation(); }
         }
@@ -838,7 +841,8 @@ public sealed class BackupScheduler
             string providerKey = Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup);
             using var remote = new Nntp.NntpBlobStore(
                 client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
-                messageIndex: repo.MessageIndex, providerKey: providerKey);
+                messageIndex: repo.MessageIndex, providerKey: providerKey,
+                indexAuth: repo.IndexAuth);
             // Volume articles are volume-sized, not chunk-sized.
             remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
             // Fetch the latest published message-identity index before
@@ -966,7 +970,8 @@ public sealed class BackupScheduler
                 var store = new Nntp.NntpBlobStore(
                     pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
                     messageIndex: messageIndex,
-                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup));
+                    providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
+                    indexAuth: repo.IndexAuth);
                 stores[record.ProviderHost] = (pool, store);
                 return store;
             }
@@ -1055,12 +1060,18 @@ public sealed class BackupScheduler
         foreach (string t in job.EffectiveTargets)
         {
             var f = lookup(t);
-            if (!f.Exists || (f.IsUsb ? f.UsbPresent : !f.NetworkAway))
+            // A target naming no location resolves to nothing (Phase 6):
+            // never usable, and when another target IS usable it is
+            // reported as skipped so the run's degraded note names it
+            // instead of silently dropping it (SF-21).
+            if (f.Exists && (f.IsUsb ? f.UsbPresent : !f.NetworkAway))
                 usable.Add(t);
             else
-                skipped.Add((t, f.IsUsb
-                    ? "USB drive not connected"
-                    : "network location unavailable"));
+                skipped.Add((t, !f.Exists
+                    ? "backup location not found"
+                    : f.IsUsb
+                        ? "USB drive not connected"
+                        : "network location unavailable"));
         }
         return (state, usable.Count == job.EffectiveTargets.Count
             ? job
@@ -1715,7 +1726,7 @@ public sealed class BackupScheduler
     /// </summary>
     /// <summary>
     /// Uploads a completed backup to each of the job's configured targets
-    /// ("nntp" and/or "smb"). Each target runs independently: one failing
+    /// (location names). Each target runs independently: one failing
     /// doesn't stop the other, but all failures are collected and thrown
     /// together so the caller sees the full picture.
     /// </summary>
@@ -1749,19 +1760,19 @@ public sealed class BackupScheduler
             // below ran uninterruptibly and a service stop killed the
             // process mid-post/mid-copy with no run outcome recorded.
             token.ThrowIfCancellationRequested();
-            // Resolve the target name to a location. Fall back to legacy
-            // "nntp"/"smb" type names for configs that bypassed migration.
+            // Resolve the target name to a location. A name matching no
+            // location — including a legacy bare "nntp"/"smb" token —
+            // resolves to nothing and lands in the error outcome below;
+            // there is no bare-token fallback (Phase 6).
             BackupLocation? loc = _config.SnapshotLocations().FirstOrDefault(l =>
                 l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
-            string type = loc?.Type ??
-                (targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" :
-                 targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" : "");
+            string type = loc?.Type ?? "";
             try
             {
                 if (type == "nntp")
-                    UploadToNntpLocation(job, backupId, passphrase, loc, token);
+                    UploadToNntpLocation(job, backupId, passphrase, loc!, token);
                 else if (type == "smb")
-                    SyncToSmbLocation(job, backupId, loc, token);
+                    SyncToSmbLocation(job, backupId, loc!, token);
                 else if (type == "usb")
                     SyncToUsbLocation(job, backupId, loc, token);
                 else
@@ -1781,19 +1792,13 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
-    /// Uploads to a Usenet location. If <paramref name="loc"/> is null (legacy
-    /// "nntp" target), falls back to the scheduler's configured providers.
+    /// Uploads to a Usenet location, using the location's own
+    /// host/port/credentials.
     /// </summary>
     private void UploadToNntpLocation(
-        BackupJobConfig job, string backupId, string passphrase, BackupLocation? loc,
+        BackupJobConfig job, string backupId, string passphrase, BackupLocation loc,
         CancellationToken token = default)
     {
-        if (loc is null)
-        {
-            AutoUploadToUsenet(job, backupId, passphrase, token);
-            return;
-        }
-        // Use the location's own host/port/credentials, not the legacy fields.
         var provider = new NntpConfig
         {
             Host = loc.Host,
@@ -1810,12 +1815,6 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
-    /// Syncs the repo to an SMB location. The share receives chunks,
-    /// manifests, and repo.json — enough for a recovery wizard to open it
-    /// directly as a read-only repo. If <paramref name="loc"/> is null
-    /// (legacy "smb" target), falls back to the job's own SMB settings.
-    /// </summary>
-    /// <summary>
     /// Runs a whole-disk image job. If SMB is the only target (or the only
     /// network target), streams chunks directly to the share (sparse: used
     /// space only) — no local staging. If NNTP is also targeted, falls back
@@ -1825,7 +1824,8 @@ public sealed class BackupScheduler
     private BackupManifest RunDiskImageJob(
         BackupJobConfig job, BackupRepository repo, CancellationToken token)
     {
-        // Find SMB and NNTP targets.
+        // Find SMB and NNTP targets. Only names that resolve to a
+        // location count — a legacy bare token resolves to nothing.
         bool hasSmb = false;
         bool hasNntp = false;
         BackupLocation? smbLoc = null;
@@ -1834,9 +1834,7 @@ public sealed class BackupScheduler
         {
             var loc = _config.SnapshotLocations().FirstOrDefault(l =>
                 l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
-            string type = loc?.Type ??
-                (targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" :
-                 targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" : "");
+            string type = loc?.Type ?? "";
             if (type == "smb") { hasSmb = true; smbLoc ??= loc; }
             if (type == "nntp") { hasNntp = true; nntpLoc ??= loc; }
         }
@@ -1846,9 +1844,9 @@ public sealed class BackupScheduler
         // Stream to a single target when possible; fall back to local staging
         // when both are targeted (fan-out) or neither is.
         if (hasSmb && !hasNntp)
-            return StreamDiskImageToSmb(job, repo, imageName, smbLoc, token);
+            return StreamDiskImageToSmb(job, repo, imageName, smbLoc!, token);
         if (hasNntp && !hasSmb)
-            return StreamDiskImageToNntp(job, repo, imageName, nntpLoc, token);
+            return StreamDiskImageToNntp(job, repo, imageName, nntpLoc!, token);
 
         if (hasSmb && hasNntp)
             Log($"job '{job.Name}': SMB+NNTP targets — using local staging for fan-out.");
@@ -1858,19 +1856,21 @@ public sealed class BackupScheduler
     }
 
     /// <summary>
-    /// Resolves a job's effective targets into typed locations, with the same
-    /// legacy "nntp"/"smb" fallback as <see cref="UploadToTargets"/>.
+    /// Resolves a job's effective targets into typed locations. A target
+    /// name that matches no location resolves to nothing and is simply
+    /// absent from the result — there is no bare-token fallback
+    /// (Phase 6), so every returned entry carries a real location.
     /// </summary>
-    private List<(string Name, string Type, BackupLocation? Loc)> ResolveTargets(BackupJobConfig job)
+    private List<(string Name, string Type, BackupLocation Loc)> ResolveTargets(BackupJobConfig job)
     {
-        var result = new List<(string, string, BackupLocation?)>();
+        var result = new List<(string, string, BackupLocation)>();
         foreach (string targetName in job.EffectiveTargets)
         {
             BackupLocation? loc = _config.SnapshotLocations().FirstOrDefault(l =>
                 l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
-            string type = loc?.Type ??
-                (targetName.Equals("nntp", StringComparison.OrdinalIgnoreCase) ? "nntp" :
-                 targetName.Equals("smb", StringComparison.OrdinalIgnoreCase) ? "smb" : "");
+            if (loc is null)
+                continue;
+            string type = loc.Type ?? "";
             if (type == "nntp" || type == "smb" || type == "usb")
                 result.Add((targetName, type, loc));
         }
@@ -1971,32 +1971,26 @@ public sealed class BackupScheduler
         var smbConns = new List<(string Name, SmbShare Share)>();
         try
         {
-            // NNTP uploaders (one per provider).
+            // NNTP uploaders (one per NNTP location — ResolveTargets
+            // only returns located targets, so the provider always
+            // comes from the location itself).
             foreach (var (name, type, loc) in targets)
             {
                 if (type != "nntp")
                     continue;
-                if (loc is null)
+                var provider = new NntpConfig
                 {
-                    foreach (var provider in _nntpProviders)
-                        uploaders.Add((name, CreateBatchUploader(repo, backupId, job, provider)));
-                }
-                else
-                {
-                    var provider = new NntpConfig
-                    {
-                        Host = loc.Host,
-                        Port = loc.Port,
-                        Ssl = loc.Ssl,
-                        Username = loc.Username,
-                        Connections = loc.Connections,
-                        Newsgroup = loc.Newsgroup,
-                        RetentionDays = loc.RetentionDays,
-                        PasswordProtected = loc.PasswordProtected,
-                        RedundancyMode = loc.RedundancyMode,
-                    };
-                    uploaders.Add((name, CreateBatchUploader(repo, backupId, job, provider)));
-                }
+                    Host = loc.Host,
+                    Port = loc.Port,
+                    Ssl = loc.Ssl,
+                    Username = loc.Username,
+                    Connections = loc.Connections,
+                    Newsgroup = loc.Newsgroup,
+                    RetentionDays = loc.RetentionDays,
+                    PasswordProtected = loc.PasswordProtected,
+                    RedundancyMode = loc.RedundancyMode,
+                };
+                uploaders.Add((name, CreateBatchUploader(repo, backupId, job, provider)));
             }
 
             // Batch size: smallest probed ceiling across providers (90%
@@ -2008,15 +2002,17 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': batched staging (batch={FormatBatchSize(batchSize)}, " +
                 $"volumes={(useVolumes ? "on" : "off")}, targets={targets.Count})...");
 
-            // SMB connections, held open for the whole backup.
+            // SMB connections, held open for the whole backup. Share
+            // and credentials come from the location — the per-job SMB
+            // fields were retired in Phase 6.
             var smbSync = new SmbSync(Log);
             foreach (var (name, type, loc) in targets)
             {
                 if (type != "smb")
                     continue;
-                string share = loc?.Share ?? job.SmbShare;
-                string user = loc?.SmbUser ?? job.SmbUser;
-                string? passwordProtected = loc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+                string share = loc.Share;
+                string user = loc.SmbUser;
+                string? passwordProtected = loc.SmbPasswordProtected;
                 if (string.IsNullOrWhiteSpace(share))
                     throw new InvalidOperationException(
                         $"Job '{job.Name}' targets SMB but no share is configured.");
@@ -2025,11 +2021,11 @@ public sealed class BackupScheduler
                     smbPassword = Dpapi.Unprotect(passwordProtected);
                 try
                 {
-                    smbConns.Add((loc?.Name ?? name, SmbShare.Connect(share, user, smbPassword)));
+                    smbConns.Add((loc.Name, SmbShare.Connect(share, user, smbPassword)));
                 }
                 catch (Exception ex)
                 {
-                    MarkFailed(loc?.Name ?? name, ex);
+                    MarkFailed(loc.Name, ex);
                 }
             }
 
@@ -2041,15 +2037,15 @@ public sealed class BackupScheduler
                 throw new InvalidOperationException(failedTargets.Values.First());
 
             var usbLocs = targets
-                .Where(t => t.Type == "usb" && t.Loc is not null)
-                .Select(t => t.Loc!)
+                .Where(t => t.Type == "usb")
+                .Select(t => t.Loc)
                 .ToList();
 
-            // A resolved target with no concrete deliverer — a legacy
-            // bare "nntp" while no providers are configured is the
-            // reachable case — must not pass as a silent success: mark
-            // it failed now so the run's outcome (and, if it is the
-            // only target, the batch prune guard) treats it honestly.
+            // A resolved target with no concrete deliverer — an SMB
+            // location whose connection just failed is the reachable
+            // case — must not pass as a silent success: mark it failed
+            // now so the run's outcome (and, if it is the only target,
+            // the batch prune guard) treats it honestly.
             foreach (var (name, type, loc) in targets)
             {
                 if (failedTargets.ContainsKey(name))
@@ -2057,12 +2053,12 @@ public sealed class BackupScheduler
                 bool hasDeliverer = type switch
                 {
                     "nntp" => uploaders.Any(u => u.Target == name),
-                    "smb" => smbConns.Any(c => c.Name == (loc?.Name ?? name)),
+                    "smb" => smbConns.Any(c => c.Name == loc.Name),
                     _ => true, // usb: delivery is decided per batch (drive presence)
                 };
                 if (!hasDeliverer)
                     MarkFailed(name, new InvalidOperationException(
-                        $"Backup location '{name}' has no deliverer: no NNTP providers are configured."));
+                        $"Backup location '{name}' has no deliverer for this run."));
             }
 
             // USB self-backup guard: resolve once up front (drive letters
@@ -2095,12 +2091,8 @@ public sealed class BackupScheduler
                 {
                     bool confirmed = type switch
                     {
-                        "nntp" => loc is not null
-                            ? repo.IsChunkUploadedToProvider(chunkId,
-                                Nntp.ChunkMessageIndex.MakeProviderKey(loc.Host, loc.Newsgroup))
-                            : _nntpProviders.Count > 0 && _nntpProviders.All(p =>
-                                repo.IsChunkUploadedToProvider(chunkId,
-                                    Nntp.ChunkMessageIndex.MakeProviderKey(p.Host, p.Newsgroup))),
+                        "nntp" => repo.IsChunkUploadedToProvider(chunkId,
+                                Nntp.ChunkMessageIndex.MakeProviderKey(loc.Host, loc.Newsgroup)),
                         // File destinations: the blob must VERIFY at the
                         // destination (decrypt + hash) — presence or size
                         // alone is not evidence (DL-4).
@@ -2247,10 +2239,9 @@ public sealed class BackupScheduler
                 //    pruned. A destination that missed it gets nothing
                 //    later (no catch-up). If NO destination received
                 //    the batch — every deliverer failed, or the targets
-                //    resolved to no concrete deliverer at all (e.g. a
-                //    legacy bare "nntp" with no providers configured)
-                //    — the staged chunks are the only copy: fail the
-                //    run here and prune nothing.
+                //    resolved to no concrete deliverer at all — the
+                //    staged chunks are the only copy: fail the run
+                //    here and prune nothing.
                 if (!batchDelivered)
                     throw new InvalidOperationException(
                         $"Batch {batchIndex}: no backup location received it; the run cannot continue.");
@@ -2510,12 +2501,12 @@ public sealed class BackupScheduler
     /// Streams a disk image directly to an SMB share (sparse: used space only).
     /// </summary>
     private BackupManifest StreamDiskImageToSmb(
-        BackupJobConfig job, BackupRepository repo, string imageName, BackupLocation? smbLoc,
+        BackupJobConfig job, BackupRepository repo, string imageName, BackupLocation smbLoc,
         CancellationToken token = default)
     {
-        string share = smbLoc?.Share ?? job.SmbShare;
-        string user = smbLoc?.SmbUser ?? job.SmbUser;
-        string? passwordProtected = smbLoc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+        string share = smbLoc.Share;
+        string user = smbLoc.SmbUser;
+        string? passwordProtected = smbLoc.SmbPasswordProtected;
         if (string.IsNullOrWhiteSpace(share))
             throw new InvalidOperationException(
                 $"Job '{job.Name}' targets SMB but no share is configured.");
@@ -2548,32 +2539,18 @@ public sealed class BackupScheduler
     /// </summary>
     private BackupManifest StreamDiskImageToNntp(
         BackupJobConfig job, BackupRepository repo, string imageName,
-        BackupLocation? nntpLoc, CancellationToken token)
+        BackupLocation nntpLoc, CancellationToken token)
     {
-        // Build the NNTP provider from the location or legacy config.
-        NntpConfig provider;
-        string newsgroup;
-        if (nntpLoc is null)
+        // Build the NNTP provider from the location.
+        var provider = new NntpConfig
         {
-            // Legacy: use the scheduler's configured providers.
-            if (_nntpProviders.Count == 0)
-                throw new InvalidOperationException(
-                    $"Job '{job.Name}' targets NNTP but no provider is configured.");
-            provider = _nntpProviders[0];
-            newsgroup = provider.Newsgroup;
-        }
-        else
-        {
-            provider = new NntpConfig
-            {
-                Host = nntpLoc.Host ?? "",
-                Port = nntpLoc.Port,
-                Ssl = nntpLoc.Ssl,
-                Username = nntpLoc.Username ?? "",
-                PasswordProtected = nntpLoc.PasswordProtected,
-            };
-            newsgroup = nntpLoc.Newsgroup ?? provider.Newsgroup;
-        }
+            Host = nntpLoc.Host ?? "",
+            Port = nntpLoc.Port,
+            Ssl = nntpLoc.Ssl,
+            Username = nntpLoc.Username ?? "",
+            PasswordProtected = nntpLoc.PasswordProtected,
+        };
+        string newsgroup = nntpLoc.Newsgroup ?? provider.Newsgroup;
 
         string? volumeLetter = GetVolumeLetterForDevice(job.Source);
 
@@ -2598,7 +2575,8 @@ public sealed class BackupScheduler
             client, newsgroup, repo.RepoId, repo.CatalogPath,
             from: repo.GetOrCreatePoster(),
             messageIndex: repo.MessageIndex,
-            providerKey: ChunkMessageIndex.MakeProviderKey(provider.Host, newsgroup));
+            providerKey: ChunkMessageIndex.MakeProviderKey(provider.Host, newsgroup),
+            indexAuth: repo.IndexAuth);
         using var streaming = new StreamingVolumeBlobStore(nntp,
             onFlushError: ex => Log($"job '{job.Name}': final volume flush on dispose failed: {ex.Message}"));
         var manifest = repo.BackupDiskImageStreaming(
@@ -2674,12 +2652,18 @@ public sealed class BackupScheduler
             : null;
     }
 
-    private void SyncToSmbLocation(BackupJobConfig job, string backupId, BackupLocation? loc,
+    /// <summary>
+    /// Syncs the repo to an SMB location. The share receives chunks,
+    /// manifests, and repo.json — enough for a recovery wizard to open
+    /// it directly as a read-only repo. Share and credentials come from
+    /// the location; the per-job SMB fields were retired in Phase 6.
+    /// </summary>
+    private void SyncToSmbLocation(BackupJobConfig job, string backupId, BackupLocation loc,
         CancellationToken token = default)
     {
-        string share = loc?.Share ?? job.SmbShare;
-        string user = loc?.SmbUser ?? job.SmbUser;
-        string? passwordProtected = loc?.SmbPasswordProtected ?? job.SmbPasswordProtected;
+        string share = loc.Share;
+        string user = loc.SmbUser;
+        string? passwordProtected = loc.SmbPasswordProtected;
         if (string.IsNullOrWhiteSpace(share))
             throw new InvalidOperationException(
                 $"Job '{job.Name}' targets an SMB location but no share is configured.");
@@ -2687,7 +2671,7 @@ public sealed class BackupScheduler
         if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
             smbPassword = Dpapi.Unprotect(passwordProtected);
 
-        string locName = loc?.Name ?? "smb";
+        string locName = loc.Name;
         Log($"job '{job.Name}': syncing backup {backupId} to '{locName}' ({share})");
         using var smb = SmbShare.Connect(share, user, smbPassword);
         var sync = new SmbSync(Log);
@@ -2863,7 +2847,7 @@ public sealed class BackupScheduler
                     nntp.Username, nntpPassword, nntp.Connections);
                 using var store = new Nntp.NntpBlobStore(pool, nntp.Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
                     providerKey: Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
-                    from: repo.GetOrCreatePoster());
+                    from: repo.GetOrCreatePoster(), indexAuth: repo.IndexAuth);
                 // Determine redundancy mode: per-provider override, else job default
                 string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
                     ? nntp.RedundancyMode

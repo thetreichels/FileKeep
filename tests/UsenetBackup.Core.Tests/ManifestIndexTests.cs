@@ -28,7 +28,7 @@ public sealed class ManifestIndexTests
     public void TryParseManifestIndexMessageId_ParsesValid()
     {
         var result = ArticleCodec.TryParseManifestIndexMessageId(
-            "<2026-10.abc123.index.1@usenet-backup>", "abc123");
+            "<2026-10.abc123.index.1@invalid>", "abc123");
         Assert.NotNull(result);
         Assert.Equal("2026-10", result.Value.YearMonth);
         Assert.Equal(1, result.Value.Version);
@@ -38,7 +38,7 @@ public sealed class ManifestIndexTests
     public void TryParseManifestIndexMessageId_RejectsWrongRepoId()
     {
         var result = ArticleCodec.TryParseManifestIndexMessageId(
-            "<2026-10.abc123.index.1@usenet-backup>", "different-repo");
+            "<2026-10.abc123.index.1@invalid>", "different-repo");
         Assert.Null(result);
     }
 
@@ -50,14 +50,17 @@ public sealed class ManifestIndexTests
             "<not-an-index>", "abc123"));
         // Manifest (not index) message ID
         Assert.Null(ArticleCodec.TryParseManifestIndexMessageId(
-            "<backup123@usenet-backup>", "abc123"));
+            "<backup123@invalid>", "abc123"));
+        // Legacy pre-release domain is not parsed (support dropped)
+        Assert.Null(ArticleCodec.TryParseManifestIndexMessageId(
+            "<2026-10.abc123.index.1@usenet-backup>", "abc123"));
     }
 
     [Fact]
     public void TryParseManifestIndexMessageId_HandlesMultiDigitVersion()
     {
         var result = ArticleCodec.TryParseManifestIndexMessageId(
-            "<2026-10.abc123.index.42@usenet-backup>", "abc123");
+            "<2026-10.abc123.index.42@invalid>", "abc123");
         Assert.NotNull(result);
         Assert.Equal(42, result.Value.Version);
     }

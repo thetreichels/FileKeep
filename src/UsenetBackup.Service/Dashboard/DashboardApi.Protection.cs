@@ -1,5 +1,6 @@
 using QRCoder;
 using UsenetBackup.Core;
+using UsenetBackup.Core.Security;
 using UsenetBackup.Core.Service;
 using UsenetBackup.Service.Security;
 
@@ -70,11 +71,21 @@ public static partial class DashboardApi
     /// generated-secret setup is actually present.
     /// </summary>
     public static (int Status, object Payload) SetProtectionProfile(ServiceConfig config,
-        string configPath, ProtectionProfileRequest request, Action<string>? log = null)
+        string configPath, ProtectionProfileRequest request, Action<string>? log = null,
+        IYubiKeyProvider? yubiKeyProvider = null)
     {
         string linkMode = (request.LinkMode ?? "or").Trim().ToLowerInvariant();
         if (linkMode is not ("or" or "and"))
             return (400, new ErrorDto("linkMode must be \"or\" or \"and\"."));
+
+        // Security fix (C-1): once any unlock method is enabled, saving
+        // the profile — e.g. flipping the YubiKey gate off — requires a
+        // fresh proof of an existing method carried by this request.
+        // Outside the config lock: a touch proof waits on hardware.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            request.ProofPassphrase, request.ProofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
 
         // P2-C2: profile validation reads config fields that other
         // handlers mutate; the whole validate → mutate → save sequence
@@ -133,8 +144,18 @@ public static partial class DashboardApi
     /// registered key works interchangeably.
     /// </summary>
     public static (int Status, object Payload) AddYubiKeyName(ServiceConfig config,
-        string configPath, string? name, Action<string>? log = null)
+        string configPath, string? name, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false,
+        IYubiKeyProvider? yubiKeyProvider = null)
     {
+        // Security fix (C-1 class): registering a key label changes the
+        // unlock-method set, so it takes the same proof as any other
+        // security-config change once a method is enabled.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         string clean = (name ?? "").Trim();
         if (clean.Length == 0)
             return (400, new ErrorDto("A YubiKey name is required."));
@@ -173,8 +194,19 @@ public static partial class DashboardApi
     /// (see <see cref="VerifyPhoneTotp"/>).
     /// </summary>
     public static (int Status, object Payload) SetupPhoneTotp(ServiceConfig config,
-        string configPath, Action<string>? log = null)
+        string configPath, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false,
+        IYubiKeyProvider? yubiKeyProvider = null)
     {
+        // Security fix (C-3): starting a phone enrollment hands the
+        // caller a fresh TOTP secret; once a method is enabled that is
+        // only allowed with proof of an existing method, or anyone
+        // could enroll their own phone and unlock with it.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         try
         {
             byte[] secret = TotpCrypto.GenerateSecret();
@@ -225,8 +257,21 @@ public static partial class DashboardApi
     /// method via <c>SetProtectionProfile</c> after a successful verify.
     /// </summary>
     public static (int Status, object Payload) VerifyPhoneTotp(ServiceConfig config, string? code,
-        string? configPath = null, Action<string>? log = null)
+        string? configPath = null, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false,
+        IYubiKeyProvider? yubiKeyProvider = null)
     {
+        // Security fix (C-3): a verified code PROMOTES the pending
+        // secret to live — the step that completes a takeover — so it
+        // takes the same proof as setup. Note the TOTP code itself is
+        // the enrollment artifact being verified, never the proof: a
+        // code from the just-issued secret proves nothing about an
+        // existing method.
+        var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log);
+        if (proofRefusal is not null)
+            return proofRefusal.Value;
+
         bool hasPending = !string.IsNullOrWhiteSpace(config.PendingPhoneTotpSecretProtected);
         string? target = hasPending
             ? config.PendingPhoneTotpSecretProtected

@@ -31,6 +31,25 @@ public sealed class ProtectionProfileRequest
     /// <summary><c>"or"</c> (default) or <c>"and"</c>.</summary>
     [JsonPropertyName("linkMode")]
     public string? LinkMode { get; set; }
+
+    /// <summary>
+    /// Proof of an existing unlock method, required before the server
+    /// changes security settings once any method is enabled (security
+    /// fix, findings C-1..C-3): the current passphrase, or the typed
+    /// recovery secret in generated-secret mode. Ignored during
+    /// first-time setup, when no method exists to prove against.
+    /// </summary>
+    [JsonPropertyName("proofPassphrase")]
+    public string? ProofPassphrase { get; set; }
+
+    /// <summary>
+    /// When true, the caller asks to prove an existing method by a
+    /// fresh YubiKey touch (the server touch-unwraps the stored blob)
+    /// instead of a typed proof. A phone/TOTP code is never accepted
+    /// as proof for changing security settings.
+    /// </summary>
+    [JsonPropertyName("proofYubiKey")]
+    public bool ProofYubiKey { get; set; }
 }
 
 /// <summary>
@@ -72,6 +91,14 @@ public sealed class AddYubiKeyRequest
 {
     [JsonPropertyName("name")]
     public string? Name { get; set; }
+
+    /// <summary>Proof of an existing unlock method (see <see cref="ProtectionProfileRequest.ProofPassphrase"/>).</summary>
+    [JsonPropertyName("proofPassphrase")]
+    public string? ProofPassphrase { get; set; }
+
+    /// <summary>Prove by a fresh YubiKey touch instead of a typed proof.</summary>
+    [JsonPropertyName("proofYubiKey")]
+    public bool ProofYubiKey { get; set; }
 }
 
 /// <summary>
@@ -84,6 +111,14 @@ public sealed class YubiKeyLinkRequest
 {
     [JsonPropertyName("slot")]
     public int? Slot { get; set; }
+
+    /// <summary>Proof of an existing unlock method (see <see cref="ProtectionProfileRequest.ProofPassphrase"/>).</summary>
+    [JsonPropertyName("proofPassphrase")]
+    public string? ProofPassphrase { get; set; }
+
+    /// <summary>Prove by a fresh YubiKey touch instead of a typed proof.</summary>
+    [JsonPropertyName("proofYubiKey")]
+    public bool ProofYubiKey { get; set; }
 }
 
 /// <summary>

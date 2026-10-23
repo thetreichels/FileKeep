@@ -124,8 +124,10 @@ public sealed class WizardState : IDisposable
     public (bool ok, string note) ValidateCredentials() => ValidatePassphrase();
 
     public string NntpHost { get; set; } = "";
-    public int NntpPort { get; set; } = 119;
-    public bool NntpSsl { get; set; }
+    // TLS by default (security audit D-2): the NNTP defaults are the TLS
+    // pair (563 + on); the recovery UI/user can still choose plaintext.
+    public int NntpPort { get; set; } = 563;
+    public bool NntpSsl { get; set; } = true;
     public string NntpUser { get; set; } = "";
     public string NntpPassword { get; set; } = "";
     public string Newsgroup { get; set; } = "";
@@ -347,7 +349,8 @@ public sealed class WizardState : IDisposable
             if (!string.IsNullOrEmpty(NntpUser))
                 client.Authenticate(NntpUser, NntpPassword);
             using var remote = new NntpBlobStore(client, Newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
-                providerKey: ChunkMessageIndex.MakeProviderKey(NntpHost, Newsgroup));
+                providerKey: ChunkMessageIndex.MakeProviderKey(NntpHost, Newsgroup),
+                indexAuth: repo.IndexAuth);
             // Volume articles are volume-sized, not chunk-sized.
             remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
             // Fetch the latest published message-identity index BEFORE

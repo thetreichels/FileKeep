@@ -302,11 +302,14 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
-    public void LoadManifest_LegacyManifest_LoadsAndIsRestamped()
+    public void LoadManifest_UnstampedManifest_Refused()
     {
-        // DL-8 grandfathering: a pre-HMAC manifest (root_hmac absent)
-        // stays loadable on the root hash alone, and the load
-        // re-stamps it in place so its window closes.
+        // Pre-release format drop: a manifest without root_hmac was
+        // once grandfathered on the root hash alone (and re-stamped
+        // in place by the load). Legacy repo support was dropped
+        // before the first release — the load must now refuse it,
+        // and must not write anything (no re-stamp laundering: the
+        // file on disk stays exactly as unstamped as it was).
         WriteSrc("a.txt", "alpha"u8.ToArray());
         string backupId;
         using (var repo = InitRepo())
@@ -318,16 +321,39 @@ public sealed class RepositoryTests : IDisposable
         File.WriteAllText(path, legacy.ToJson());
         Assert.Null(BackupManifest.FromJson(File.ReadAllText(path)).RootHmac);
         // The root hash is unchanged by the strip (canonical form
-        // blanks the HMAC), so the legacy file still verifies.
+        // blanks the HMAC), so the refusal below is the HMAC rule,
+        // not a hash failure.
         Assert.True(BackupManifest.FromJson(File.ReadAllText(path)).VerifyRootHash());
+        string before = File.ReadAllText(path);
 
         using (var repo = BackupRepository.Open(_repoDir, Passphrase))
         {
-            var loaded = repo.LoadManifest(backupId);
-            Assert.Equal(backupId, loaded.BackupId);
+            var ex = Assert.Throws<InvalidDataException>(() => repo.LoadManifest(backupId));
+            Assert.Contains("pre-release", ex.Message);
         }
-        var restamped = BackupManifest.FromJson(File.ReadAllText(path));
-        Assert.NotNull(restamped.RootHmac);
+        Assert.Equal(before, File.ReadAllText(path));
+        Assert.Null(BackupManifest.FromJson(File.ReadAllText(path)).RootHmac);
+    }
+
+    [Fact]
+    public void ImportManifest_UnstampedManifest_Refused()
+    {
+        // The import door enforces the same rule as LoadManifest: an
+        // unstamped (pre-release format) manifest is refused, not
+        // stamped over by the import's write.
+        WriteSrc("a.txt", "alpha"u8.ToArray());
+        string backupId;
+        using (var repo = InitRepo())
+            backupId = repo.BackupDirectory(_srcDir).BackupId;
+
+        using var repo2 = BackupRepository.Open(_repoDir, Passphrase);
+        var stamped = repo2.LoadManifest(backupId);
+        repo2.ImportManifest(stamped); // control: a stamped manifest imports
+
+        var unstamped = BackupManifest.FromJson(stamped.ToJson());
+        unstamped.RootHmac = null;
+        var ex = Assert.Throws<InvalidDataException>(() => repo2.ImportManifest(unstamped));
+        Assert.Contains("pre-release", ex.Message);
     }
 
     [Fact]
