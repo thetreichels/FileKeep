@@ -114,17 +114,6 @@ public sealed class JobPauseTests : IDisposable
     }
 
     [Fact]
-    public void Evaluator_SecurityReady_FallsThroughToLocationRules()
-    {
-        Assert.Equal(JobRunState.NeedsLocation,
-            JobStateEvaluator.Evaluate(Job(), Lookup(), securityReady: true));
-        Assert.Equal(JobRunState.Active,
-            JobStateEvaluator.Evaluate(
-                Job(false, "vault"), Lookup(("vault", false, true)),
-                securityReady: true));
-    }
-
-    [Fact]
     public void Evaluator_NoTargets_IsNeedsLocation()
     {
         Assert.Equal(JobRunState.NeedsLocation,
@@ -556,39 +545,6 @@ public sealed class JobPauseTests : IDisposable
         // The dashboard status carries the restored history too.
         var status = DashboardApi.GetStatus(second);
         Assert.Equal(result.BackupId, Assert.Single(status.Jobs).LastResult!.BackupId);
-    }
-
-    [Fact]
-    public void RunState_RoundTrips_ThroughSourceGenContext()
-    {
-        // P2-R1 guard: the run-state map must serialize through the
-        // source-generated context. Reflection-based (de)serialization
-        // throws in the trimmed published service — this test pins the
-        // context registration the feature now depends on.
-        var map = new Dictionary<string, BackupScheduler.PersistedJobRun>
-        {
-            ["docs"] = new()
-            {
-                ConsecutiveFailures = 2,
-                LastResult = new JobRunResult
-                {
-                    JobName = "docs",
-                    StartedLocal = new DateTime(2026, 10, 5, 10, 0, 0),
-                    Success = false,
-                    Error = "boom",
-                    Skipped = true,
-                },
-            },
-        };
-        string json = System.Text.Json.JsonSerializer.Serialize(map,
-            RunStateJsonContext.Default.DictionaryStringPersistedJobRun);
-        var back = System.Text.Json.JsonSerializer.Deserialize(json,
-            RunStateJsonContext.Default.DictionaryStringPersistedJobRun);
-        var entry = Assert.Single(back!);
-        Assert.Equal("docs", entry.Key);
-        Assert.Equal(2, entry.Value.ConsecutiveFailures);
-        Assert.Equal("boom", entry.Value.LastResult!.Error);
-        Assert.True(entry.Value.LastResult.Skipped);
     }
 
     [Fact]

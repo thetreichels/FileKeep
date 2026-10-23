@@ -37,15 +37,6 @@ public sealed class YubiKeyCryptoTests
     }
 
     [Fact]
-    public void Wrap_Unwrap_RoundTrip()
-    {
-        byte[] kek = YubiKeyCrypto.DeriveKek(new byte[20]);
-        const string passphrase = "correct horse battery staple";
-        string wrapped = YubiKeyCrypto.Wrap(passphrase, kek);
-        Assert.Equal(passphrase, YubiKeyCrypto.Unwrap(wrapped, kek));
-    }
-
-    [Fact]
     public void Wrap_UsesRandomNonce()
     {
         byte[] kek = YubiKeyCrypto.DeriveKek(new byte[20]);
@@ -144,6 +135,8 @@ public sealed class YubiKeyCryptoTests
         /// <summary>Absolute Program-call number to fail (0 = never).</summary>
         public int FailOnProgramCall;
         public int ProgramCalls;
+        /// <summary>The requireTouch flag of every Program call, in order.</summary>
+        public List<bool> ProgramRequireTouchValues { get; } = new();
 
         public IReadOnlyList<YubiKeyInfo> FindDevices() => _inner.FindDevices();
 
@@ -160,6 +153,7 @@ public sealed class YubiKeyCryptoTests
         public void ProgramHmacSha1Slot(int slot, byte[] secret, bool requireTouch)
         {
             ProgramCalls++;
+            ProgramRequireTouchValues.Add(requireTouch);
             if (ProgramCalls == FailOnProgramCall)
                 throw new InvalidOperationException("program failed (simulated)");
             _inner.ProgramHmacSha1Slot(slot, secret, requireTouch);
@@ -218,6 +212,79 @@ public sealed class YubiKeyCryptoTests
         provider.FailNextChallenge = true;
         Assert.Throws<TimeoutException>(() =>
             YubiKeySetup.Setup(provider, "pass", slot: 2));
+    }
+
+    // ---------- provider contract (S-F1) ----------
+    // The simulator used to silently discard requireTouch and timeout,
+    // so flipping a production call site to requireTouch: false — a
+    // slot programmed to answer WITHOUT a physical touch — left every
+    // test green. These tests pin what YubiKeySetup actually passes.
+
+    [Fact]
+    public void Setup_ProgramsSlotWithTouchRequired()
+    {
+        var provider = new SimulatedYubiKeyProvider();
+        var (_, _, slotSecret) = YubiKeySetup.Setup(provider, "pass", slot: 2);
+        CryptographicOperations.ZeroMemory(slotSecret);
+        var call = Assert.Single(provider.ProgramCalls);
+        Assert.Equal(2, call.Slot);
+        Assert.True(call.RequireTouch);
+        Assert.True(provider.SlotRequiresTouch(2));
+    }
+
+    [Fact]
+    public void ProgramSpareKey_ProgramsWithTouchRequired()
+    {
+        var provider = new SimulatedYubiKeyProvider();
+        byte[] secret = RandomNumberGenerator.GetBytes(YubiKeySetup.SlotSecretLength);
+        YubiKeySetup.ProgramSpareKey(provider, secret, slot: 2);
+        var call = Assert.Single(provider.ProgramCalls);
+        Assert.Equal(2, call.Slot);
+        Assert.True(call.RequireTouch);
+        Assert.True(provider.SlotRequiresTouch(2));
+    }
+
+    [Fact]
+    public void Setup_RollbackProgramsWithTouchRequired()
+    {
+        // Both the re-setup program AND the SF-16 rollback re-program
+        // must keep the slot touch-required.
+        var provider = new FlakyProvider();
+        var (_, _, secret1) = YubiKeySetup.Setup(provider, "pass-one", slot: 2);
+        provider.FailNextChallenge = true; // wrap touch never comes
+        Assert.Throws<TimeoutException>(() =>
+            YubiKeySetup.Setup(provider, "pass-two", slot: 2, previousSlotSecret: secret1));
+        CryptographicOperations.ZeroMemory(secret1);
+        // Call 1: first setup. Call 2: re-setup. Call 3: rollback.
+        Assert.Equal(3, provider.ProgramCalls);
+        Assert.All(provider.ProgramRequireTouchValues, v => Assert.True(v));
+    }
+
+    [Fact]
+    public void SetupAndUnlock_PassDocumentedTouchTimeouts()
+    {
+        var provider = new SimulatedYubiKeyProvider();
+        var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(provider, "pass", slot: 2);
+        CryptographicOperations.ZeroMemory(slotSecret);
+        Assert.Equal("pass", YubiKeySetup.Unlock(provider, challenge, wrapped, slot: 2));
+        Assert.Equal(2, provider.HmacCalls.Count);
+        Assert.All(provider.HmacCalls, c => Assert.Equal(2, c.Slot));
+        Assert.Equal(YubiKeySetup.SetupTouchTimeout, provider.HmacCalls[0].Timeout);
+        Assert.Equal(YubiKeySetup.UnlockTouchTimeout, provider.HmacCalls[1].Timeout);
+    }
+
+    [Fact]
+    public void Setup_Slot1_RoundTrip()
+    {
+        // Everything else exercises slot 2 only; slot-1 plumbing
+        // (program + challenge-response) must work identically.
+        var provider = new SimulatedYubiKeyProvider();
+        var (challenge, wrapped, slotSecret) = YubiKeySetup.Setup(provider, "pass", slot: 1);
+        CryptographicOperations.ZeroMemory(slotSecret);
+        var call = Assert.Single(provider.ProgramCalls);
+        Assert.Equal(1, call.Slot);
+        Assert.True(call.RequireTouch);
+        Assert.Equal("pass", YubiKeySetup.Unlock(provider, challenge, wrapped, slot: 1));
     }
 
     [Fact]

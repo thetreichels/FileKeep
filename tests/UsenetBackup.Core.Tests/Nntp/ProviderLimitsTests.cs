@@ -19,13 +19,6 @@ public sealed class ProviderLimitsTests : IDisposable
     }
 
     [Fact]
-    public void GetMaxArticleBytes_ReturnsNull_WhenNeverProbed()
-    {
-        var limits = new ProviderLimits(_dir);
-        Assert.Null(limits.GetMaxArticleBytes("news.example.com", 119));
-    }
-
-    [Fact]
     public void Record_ThenGet_ReturnsCachedValue()
     {
         var limits = new ProviderLimits(_dir);

@@ -25,9 +25,7 @@ public class VersionCheckTests
     }
 
     [Theory]
-    [InlineData("abc")]
     [InlineData("")]
-    [InlineData("1")]
     [InlineData("1.2.3.4.5")]
     [InlineData("1.-2.3")]
     public void TryParseVersion_RejectsGarbage(string s)

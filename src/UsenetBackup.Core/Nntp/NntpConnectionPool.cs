@@ -26,6 +26,7 @@ public sealed class NntpConnectionPool : IDisposable
     private readonly string _password;
     private readonly bool _useTls;
     private readonly TimeSpan? _timeout;
+    private readonly Func<NntpClient>? _clientFactory;
     private bool _disposed;
 
     public int Size => _size;
@@ -40,6 +41,19 @@ public sealed class NntpConnectionPool : IDisposable
         string? password = null,
         int size = 10,
         TimeSpan? timeout = null)
+        : this(host, port, useTls, username, password, size, timeout, clientFactory: null)
+    {
+    }
+
+    private NntpConnectionPool(
+        string host,
+        int port,
+        bool useTls,
+        string? username,
+        string? password,
+        int size,
+        TimeSpan? timeout,
+        Func<NntpClient>? clientFactory)
     {
         ArgumentException.ThrowIfNullOrEmpty(host);
         if (size < 1 || size > 100)
@@ -52,6 +66,7 @@ public sealed class NntpConnectionPool : IDisposable
         _username = username ?? "";
         _password = password ?? "";
         _timeout = timeout;
+        _clientFactory = clientFactory;
         _semaphore = new SemaphoreSlim(size, size);
 
         // Connect all clients upfront so failures surface early.
@@ -74,11 +89,31 @@ public sealed class NntpConnectionPool : IDisposable
 
     private NntpClient CreateConnectedClient()
     {
+        // Test seam (C-H1): tests inject already-connected clients over
+        // an in-memory transport; production always takes the TCP path.
+        if (_clientFactory is not null)
+            return _clientFactory();
         var client = new NntpClient(Host, Port, _useTls, _timeout);
         client.Connect();
         if (!string.IsNullOrEmpty(_username))
             client.Authenticate(_username, _password);
         return client;
+    }
+
+    /// <summary>
+    /// Builds a pool over caller-supplied connected clients instead of
+    /// opening TCP connections. Internal test seam (the test assembly
+    /// has InternalsVisibleTo); production code uses the public
+    /// constructor. <see cref="Host"/>/<see cref="Port"/> are inert
+    /// labels on a factory-backed pool.
+    /// </summary>
+    internal static NntpConnectionPool CreateWithClientFactory(
+        int size, Func<NntpClient> clientFactory)
+    {
+        ArgumentNullException.ThrowIfNull(clientFactory);
+        return new NntpConnectionPool(
+            "in-memory", 0, useTls: false, username: null, password: null,
+            size, timeout: null, clientFactory);
     }
 
     /// <summary>

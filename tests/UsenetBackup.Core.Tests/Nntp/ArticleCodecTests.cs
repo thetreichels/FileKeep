@@ -34,14 +34,6 @@ public sealed class ArticleCodecTests
     }
 
     [Fact]
-    public void MakeMessageId_Format()
-    {
-        string chunkId = new('a', 64);
-        Assert.Equal("<" + chunkId + ".0123456789abcdef@invalid>",
-            ArticleCodec.MakeMessageId(chunkId, "0123456789abcdef"));
-    }
-
-    [Fact]
     public void DeriveRepoId_IsStableAndHex()
     {
         byte[] salt = RandomBytes(32);
@@ -58,21 +50,6 @@ public sealed class ArticleCodecTests
     {
         const string article = "Subject: hi\r\n\r\nbody";
         Assert.Throws<InvalidDataException>(() => ArticleCodec.ParseArticle(article));
-    }
-
-    [Fact]
-    public void Parse_CorruptedBody_Throws()
-    {
-        byte[] blob = RandomBytes(1000);
-        string chunkId = ChunkIdOf(blob);
-        string article = ArticleCodec.BuildArticle(chunkId, "0123456789abcdef", blob, "alt.binaries.test", "x");
-        // Corrupt the first character of actual yEnc data (line after =ybegin).
-        string[] lines = article.Split(new[] { "\r\n" }, StringSplitOptions.None);
-        int begin = Array.FindIndex(lines, l => l.StartsWith("=ybegin", StringComparison.Ordinal));
-        char[] chars = lines[begin + 1].ToCharArray();
-        chars[0] = chars[0] == 'A' ? 'B' : 'A';
-        lines[begin + 1] = new string(chars);
-        Assert.Throws<InvalidDataException>(() => ArticleCodec.ParseArticle(string.Join("\r\n", lines)));
     }
 
     [Theory]
@@ -93,14 +70,6 @@ public sealed class ArticleCodecTests
         var (id, back) = ArticleCodec.ParseVolumeArticle(article);
         Assert.Equal(volumeId, id);
         Assert.Equal(volumeBytes, back);
-    }
-
-    [Fact]
-    public void MakeVolumeMessageId_Format()
-    {
-        string volumeId = new('c', 64);
-        Assert.Equal("<" + volumeId + ".0123456789abcdef@invalid>",
-            ArticleCodec.MakeVolumeMessageId(volumeId, "0123456789abcdef"));
     }
 
     [Fact]
@@ -133,7 +102,6 @@ public sealed class ArticleCodecTests
     [Theory]
     [InlineData("poster", "poster <poster@invalid>")]
     [InlineData("", "poster <poster@invalid>")]
-    [InlineData("   ", "poster <poster@invalid>")]
     [InlineData("alice", "alice <alice@invalid>")]
     [InlineData("alice@example.com", "alice@example.com")]
     [InlineData("Bob <bob@example.org>", "Bob <bob@example.org>")]

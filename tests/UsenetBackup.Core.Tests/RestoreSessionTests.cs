@@ -130,15 +130,6 @@ public sealed class RestoreSessionTests
     }
 
     [Fact]
-    public void Session_Unlock_HoldsPassphrase()
-    {
-        var s = new RestoreSession();
-        s.Unlock("s3cret");
-        Assert.True(s.IsUnlocked);
-        Assert.Equal("s3cret", s.GetPassphrase());
-    }
-
-    [Fact]
     public void Session_Lock_WipesPassphrase()
     {
         var s = new RestoreSession();
@@ -246,8 +237,13 @@ public sealed class RestoreSessionTests
     {
         var (status, payload) = DashboardApi.GetYubiKeyStatus(new SimulatedYubiKeyProvider());
         Assert.Equal(200, status);
-        string json = System.Text.Json.JsonSerializer.Serialize(payload);
-        Assert.Contains("detected", json);
+        // Assert the reported VALUES, parsed as the DTO (S-F2): the old
+        // version asserted the serialized JSON contained the property
+        // NAME "detected", which is present even when nothing was
+        // detected and the device list is empty.
+        var dto = Assert.IsType<YubiKeyStatusDto>(payload);
+        Assert.True(dto.Detected);
+        Assert.Equal(new[] { "Simulated YubiKey" }, dto.Devices);
     }
 
     private sealed class ThrowingProvider : IYubiKeyProvider

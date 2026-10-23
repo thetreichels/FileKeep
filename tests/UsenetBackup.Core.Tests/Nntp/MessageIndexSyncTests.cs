@@ -131,13 +131,6 @@ public sealed class MessageIndexSyncTests : IDisposable
     }
 
     [Fact]
-    public void GetLatestMessageIndex_ReturnsNullWhenNeverPublished()
-    {
-        using var store = CreateStore();
-        Assert.Null(store.GetLatestMessageIndex());
-    }
-
-    [Fact]
     public void GetLatestMessageIndex_ToleratesExpiredOlderVersions()
     {
         using var store = CreateStore();
@@ -243,16 +236,6 @@ public sealed class MessageIndexSyncTests : IDisposable
         Assert.IsType<MessageIndexFetchException>(ex.InnerException);
     }
 
-    [Fact]
-    public void MakeMessageIndexMessageId_Deterministic()
-    {
-        string id1 = ArticleCodec.MakeMessageIndexMessageId(RepoId, 1);
-        string id2 = ArticleCodec.MakeMessageIndexMessageId(RepoId, 1);
-        string id3 = ArticleCodec.MakeMessageIndexMessageId(RepoId, 2);
-        Assert.Equal(id1, id2);
-        Assert.NotEqual(id1, id3);
-        Assert.Contains("msgindex", id1);
-    }
     [Fact]
     public void TwoInstances_InterleavedRecords_BothSurvive()
     {

@@ -43,6 +43,30 @@ public interface IYubiKeyProvider
 public sealed class SimulatedYubiKeyProvider : IYubiKeyProvider
 {
     private readonly Dictionary<int, byte[]> _slots = new();
+    private readonly Dictionary<int, bool> _slotRequireTouch = new();
+    private readonly List<(int Slot, bool RequireTouch)> _programCalls = new();
+    private readonly List<(int Slot, TimeSpan Timeout)> _hmacCalls = new();
+
+    /// <summary>
+    /// Every <see cref="ProgramHmacSha1Slot"/> call, in order, with the
+    /// requireTouch flag it carried. The simulator used to silently
+    /// discard that flag, so a production call site programming a slot
+    /// WITHOUT touch-required (YubiKeySetup passes
+    /// <c>requireTouch: true</c>) left the whole suite green (S-F1).
+    /// Tests now assert on this record.
+    /// </summary>
+    public IReadOnlyList<(int Slot, bool RequireTouch)> ProgramCalls => _programCalls;
+
+    /// <summary>
+    /// Every <see cref="CalculateHmacSha1"/> call, in order, with the
+    /// timeout it carried (also previously discarded). Tests assert the
+    /// setup/unlock flows pass their documented touch timeouts.
+    /// </summary>
+    public IReadOnlyList<(int Slot, TimeSpan Timeout)> HmacCalls => _hmacCalls;
+
+    /// <summary>Whether the slot was programmed touch-required.</summary>
+    public bool SlotRequiresTouch(int slot) =>
+        _slotRequireTouch.TryGetValue(slot, out bool requireTouch) && requireTouch;
 
     /// <summary>Programs a slot directly (test setup).</summary>
     public void ProgramSlot(int slot, byte[] secret) => _slots[slot] = (byte[])secret.Clone();
@@ -56,6 +80,12 @@ public sealed class SimulatedYubiKeyProvider : IYubiKeyProvider
             throw new InvalidOperationException($"Simulated slot {slot} is not programmed for HMAC-SHA1.");
         if (challenge is null || challenge.Length == 0)
             throw new ArgumentException("Challenge must not be empty.", nameof(challenge));
+        _hmacCalls.Add((slot, timeout));
+        // The touch itself is simulated as immediate, but a non-positive
+        // timeout still means no touch could have happened in time —
+        // the real provider's race would have timed out too.
+        if (timeout <= TimeSpan.Zero)
+            throw new TimeoutException("No touch within the timeout (simulated).");
         using var hmac = new System.Security.Cryptography.HMACSHA1(secret);
         return hmac.ComputeHash(challenge);
     }
@@ -64,6 +94,8 @@ public sealed class SimulatedYubiKeyProvider : IYubiKeyProvider
     {
         if (slot is not 1 and not 2)
             throw new ArgumentOutOfRangeException(nameof(slot), "Slot must be 1 or 2.");
+        _programCalls.Add((slot, requireTouch));
+        _slotRequireTouch[slot] = requireTouch;
         ProgramSlot(slot, secret);
     }
 }

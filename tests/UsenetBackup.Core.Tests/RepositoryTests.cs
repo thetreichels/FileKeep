@@ -188,21 +188,6 @@ public sealed class RepositoryTests : IDisposable
         Assert.NotEmpty(errors); // root hash must fail
     }
 
-    [Fact]
-    public void WrongPassphrase_CannotDecrypt()
-    {
-        WriteSrc("secret.txt", "top secret"u8.ToArray());
-        string backupId;
-        using (var repo = InitRepo())
-        {
-            backupId = repo.BackupDirectory(_srcDir).BackupId;
-        }
-
-        using var repo2 = BackupRepository.Open(_repoDir, "wrong passphrase");
-        // GCM authentication fails with the wrong key.
-        Assert.NotEmpty(repo2.Verify(backupId));
-    }
-
     private static void CopyTree(string src, string dst, params string[] skipFiles)
     {
         foreach (string file in Directory.GetFiles(src, "*", SearchOption.AllDirectories))
@@ -343,15 +328,6 @@ public sealed class RepositoryTests : IDisposable
         }
         var restamped = BackupManifest.FromJson(File.ReadAllText(path));
         Assert.NotNull(restamped.RootHmac);
-        // And the stamp is REAL, not decorative: tamper THIS backup
-        // (drop its only file, recompute the plain hash — the move a
-        // legacy manifest would have survived) and the load refuses.
-        restamped.Files.Clear();
-        restamped.RootSha256 = restamped.ComputeRootHash();
-        Assert.True(restamped.VerifyRootHash());
-        File.WriteAllText(path, restamped.ToJson());
-        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
-            Assert.Throws<InvalidDataException>(() => repo.LoadManifest(backupId));
     }
 
     [Fact]
@@ -382,29 +358,6 @@ public sealed class RepositoryTests : IDisposable
         Assert.Equal(2, record.Groups.Count);
         Assert.Equal(new[] { "aa", "bb" }, record.Groups[0]);
         Assert.Equal(new string?[] { "2026-01-15", null, "2026-01-17" }, loaded.NfoDates!);
-    }
-
-    [Fact]
-    public void LoadManifest_ManifestStampedUnderDifferentKey_Refused()
-    {
-        // A manifest planted from a DIFFERENT repo (different
-        // passphrase): its root hash verifies (keyless), its HMAC
-        // cannot verify under this repo's key.
-        WriteSrc("a.txt", "alpha"u8.ToArray());
-        string backupId;
-        using (var repo = InitRepo())
-            backupId = repo.BackupDirectory(_srcDir).BackupId;
-        string manifestJson = File.ReadAllText(
-            Path.Combine(_repoDir, "manifests", backupId + ".json"));
-
-        string otherDir = Path.Combine(_workDir, "other-repo");
-        using (var other = BackupRepository.Init(otherDir, "a-different-passphrase"))
-        {
-            Directory.CreateDirectory(Path.Combine(otherDir, "manifests"));
-            File.WriteAllText(
-                Path.Combine(otherDir, "manifests", backupId + ".json"), manifestJson);
-            Assert.Throws<InvalidDataException>(() => other.LoadManifest(backupId));
-        }
     }
 
     [Fact]

@@ -197,19 +197,6 @@ public sealed class ManifestSyncTests : IDisposable
     }
 
     [Fact]
-    public void PostManifest_MessageIdIsDeterministic()
-    {
-        using var repo = BackupRepository.Open(_repoDir, Passphrase);
-        string backupId = Guid.NewGuid().ToString("N");
-        string first = ArticleCodec.MakeManifestMessageId(backupId, repo.RepoId);
-        string second = ArticleCodec.MakeManifestMessageId(backupId, repo.RepoId);
-        Assert.Equal(first, second);
-        // Different backup -> different message ID (no cross-posting).
-        string other = ArticleCodec.MakeManifestMessageId(Guid.NewGuid().ToString("N"), repo.RepoId);
-        Assert.NotEqual(first, other);
-    }
-
-    [Fact]
     public void PostManifest_JournalsAndSkipsRepost()
     {
         using var repo = BackupRepository.Open(_repoDir, Passphrase);

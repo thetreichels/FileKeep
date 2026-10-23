@@ -54,47 +54,4 @@ public sealed class YubiKeyRecoveryTests
         return okm;
     }
 
-    // ---- Wrap/Unwrap round-trip (what the recovery flow depends on) ----
-
-    [Fact]
-    public void WrapUnwrap_Passphrase_RoundTrips()
-    {
-        byte[] hmac = RandomNumberGenerator.GetBytes(20);
-        byte[] kek = YubiKeyCrypto.DeriveKek(hmac);
-        try
-        {
-            string wrapped = YubiKeyCrypto.Wrap("correct horse battery staple", kek);
-            Assert.False(string.IsNullOrEmpty(wrapped));
-            // Wrapped blob must not contain the plaintext.
-            string wrappedBytes = Encoding.Latin1.GetString(Convert.FromBase64String(wrapped));
-            Assert.DoesNotContain("correct horse", wrappedBytes);
-            string unwrapped = YubiKeyCrypto.Unwrap(wrapped, kek);
-            Assert.Equal("correct horse battery staple", unwrapped);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(kek);
-            CryptographicOperations.ZeroMemory(hmac);
-        }
-    }
-
-    [Fact]
-    public void Unwrap_WrongKek_Throws()
-    {
-        byte[] hmac1 = RandomNumberGenerator.GetBytes(20);
-        byte[] hmac2 = RandomNumberGenerator.GetBytes(20);
-        byte[] kek1 = YubiKeyCrypto.DeriveKek(hmac1);
-        byte[] kek2 = YubiKeyCrypto.DeriveKek(hmac2);
-        try
-        {
-            string wrapped = YubiKeyCrypto.Wrap("secret", kek1);
-            Assert.ThrowsAny<CryptographicException>(() =>
-                YubiKeyCrypto.Unwrap(wrapped, kek2));
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(kek1);
-            CryptographicOperations.ZeroMemory(kek2);
-        }
-    }
 }

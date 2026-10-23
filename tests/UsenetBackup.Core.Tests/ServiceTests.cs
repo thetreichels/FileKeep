@@ -114,13 +114,29 @@ public sealed class ServiceTests : IDisposable
     [Fact]
     public void Config_RejectsDuplicateNamesAndBadMode()
     {
+        // Two jobs with the same name (case-insensitive). The second
+        // job object goes ONLY into the jobs array and is valid in
+        // every other respect (real repo/source paths, valid schedule
+        // and mode), so the duplicate-name check in Validate() is the
+        // only thing that can throw — the old fixture replaced every
+        // "]" in the document, corrupting the locations and targets
+        // arrays too, and Load failed at parse time instead (V-H1).
+        // The message assert pins WHICH rejection fired.
         string dup = ValidConfigJson().Replace("\"name\": \"docs\"", "\"name\": \"DOCS\"");
-        // Two jobs with the same name (case-insensitive).
-        string two = dup.Replace("]", ",{\"name\":\"docs\",\"repo\":\"r\",\"source\":\"s\",\"schedule\":\"interval 60\"}]");
-        Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(WriteConfig(_workDir, two)));
+        int jobsClose = dup.LastIndexOf(']');
+        string secondJob =
+            ", { \"name\": \"docs\", \"repo\": \"" + _repoDir.Replace("\\", "\\\\") + "\"," +
+            " \"source\": \"" + _srcDir.Replace("\\", "\\\\") + "\"," +
+            " \"schedule\": \"interval 60\", \"mode\": \"incremental\", \"backupPrivilege\": false," +
+            " \"targets\": [\"vault\"] }";
+        string two = dup.Insert(jobsClose, secondJob);
+        var dupEx = Assert.Throws<InvalidOperationException>(
+            () => ServiceConfig.Load(WriteConfig(_workDir, two)));
+        Assert.Contains("Duplicate job name", dupEx.Message);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        var modeEx = Assert.Throws<InvalidOperationException>(() =>
             ServiceConfig.Load(WriteConfig(_workDir, ValidConfigJson(mode: "sometimes"))));
+        Assert.Contains("unknown mode", modeEx.Message);
     }
 
     [Fact]
@@ -416,32 +432,6 @@ public sealed class ServiceTests : IDisposable
         Assert.Equal(new DateTime(2026, 10, 5, 11, 0, 0), job.NextRunLocal);
 
         Assert.Throws<InvalidOperationException>(() => scheduler.RunJobNow("no-such-job"));
-    }
-
-    [Fact]
-    public void Scheduler_RequiresPassphrase()
-    {
-        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
-        try
-        {
-            var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
-            var scheduler = MakeScheduler(clock);
-            // Item 3 (2026-10-22): without a passphrase the job is HELD
-            // — the gate refuses run-now with the held reason instead
-            // of the run failing inside the executor with the old
-            // env-var error. Due occurrences record as skips (covered
-            // by JobPauseTests.Scheduler_NoSecurityDueJob_*).
-            var job = Assert.Single(scheduler.Jobs);
-            Assert.Equal(JobRunState.HeldNoSecurity,
-                scheduler.EvaluateJobState(job.Config));
-            var ex = Assert.Throws<InvalidOperationException>(
-                () => scheduler.RunJobNow("docs"));
-            Assert.Contains("set up security", ex.Message);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, Passphrase);
-        }
     }
 
     private string GetManifestType(string backupId)

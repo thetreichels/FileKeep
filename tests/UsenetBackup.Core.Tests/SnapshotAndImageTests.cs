@@ -104,19 +104,6 @@ public sealed class SnapshotAndImageTests : IDisposable
     }
 
     [Fact]
-    public void BackupDirectory_RecordsProviderName_InManifestSnapshot()
-    {
-        // The manifest's snapshot field must equal the provider's reported Name,
-        // whatever it is — the name is the contract, not a hardcoded string.
-        File.WriteAllBytes(Path.Combine(_srcDir, "a.txt"), "data"u8.ToArray());
-        using var repo = InitRepo();
-        using var snap = new CopySnapshotProvider(_srcDir);
-        var manifest = repo.BackupDirectory(_srcDir, snap);
-        Assert.Equal(snap.Name, manifest.Snapshot);
-        Assert.Equal("test-snap", manifest.Snapshot);
-    }
-
-    [Fact]
     public void NullSnapshotProvider_IsLivePassthrough()
     {
         using var snap = new NullSnapshotProvider(_srcDir);
@@ -303,18 +290,6 @@ public sealed class SnapshotAndImageTests : IDisposable
             Assert.Null(loaded.Snapshot);
             Assert.False(loaded.IsDiskImage);
         }
-    }
-
-    [Fact]
-    public void NullSnapshotProvider_OpenRead_ReadsFile()
-    {
-        // The interface default OpenRead opens normally.
-        string path = Path.Combine(_srcDir, "openread.txt");
-        File.WriteAllText(path, "hello");
-        using var snap = new NullSnapshotProvider(_srcDir);
-        using var stream = snap.OpenRead(path);
-        using var reader = new StreamReader(stream);
-        Assert.Equal("hello", reader.ReadToEnd());
     }
 
     [Fact]

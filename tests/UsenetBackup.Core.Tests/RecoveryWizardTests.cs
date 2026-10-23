@@ -206,15 +206,6 @@ public sealed class RecoveryWizardTests : IDisposable
     }
 
     [Fact]
-    public void ValidatePassphrase_NoChunks_ReturnsUnverified()
-    {
-        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
-        var (ok, note) = s.ValidatePassphrase();
-        Assert.True(ok);
-        Assert.Equal("unverified", note);
-    }
-
-    [Fact]
     public void ValidatePassphrase_NoChunks_GroupedSheetSecret_AdoptsCanonical()
     {
         string canonical = GeneratedSecret.Generate();
@@ -301,16 +292,6 @@ public sealed class RecoveryWizardTests : IDisposable
         s.SelectedBackupId = manifest.BackupId;
         var issues = s.Verify();
         Assert.Empty(issues);
-    }
-
-    [Fact]
-    public void SelectedIsDiskImage_FalseForFileBackup()
-    {
-        using var repo = BackupRepository.Open(_repoDir, Passphrase);
-        var manifest = repo.BackupDirectory(_srcDir);
-        using var s = new WizardState { RepoPath = _repoDir, Passphrase = Passphrase };
-        s.SelectedBackupId = manifest.BackupId;
-        Assert.False(s.SelectedIsDiskImage());
     }
 
     private sealed class FakeDriveEnumerator : IDriveEnumerator

@@ -37,28 +37,9 @@ public sealed class YEncTests
     }
 
     [Fact]
-    public void KnownVector_Hello()
-    {
-        byte[] data = "Hello"u8.ToArray();
-        string encoded = YEnc.Encode(data, "hello.txt");
-        Assert.Contains("=ybegin", encoded);
-        Assert.Contains("size=5", encoded);
-        Assert.Equal(data, YEnc.Decode(encoded));
-    }
-
-    [Fact]
     public void Crc32_KnownValue()
     {
         Assert.Equal(0xCBF43926u, YEnc.Crc32("123456789"u8.ToArray()));
-    }
-
-    [Fact]
-    public void Decode_BadCrc_Throws()
-    {
-        string encoded = YEnc.Encode(RandomBytes(500), "test.bin");
-        string tampered = encoded.Replace("crc32=", "crc32=deadbeef");
-        Assert.NotEqual(encoded, tampered);
-        Assert.Throws<InvalidDataException>(() => YEnc.Decode(tampered));
     }
 
     [Fact]

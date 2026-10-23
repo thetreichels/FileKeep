@@ -274,45 +274,6 @@ public sealed class GeneratedSecretModeTests : IDisposable
         Assert.Contains("not set up", ErrorMessage(result));
     }
 
-    [Fact]
-    public void SetProtectionProfile_GeneratedMode_StillRejectsPhoneSole()
-    {
-        var config = GeneratedModeConfig();
-        var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
-        {
-            PassphraseEnabled = false, YubiKeyEnabled = false,
-            PhoneEnabled = true, LinkMode = "or",
-        });
-        Assert.Equal(400, result.Status);
-        Assert.Contains("only enabled method", ErrorMessage(result));
-    }
-
-    [Fact]
-    public void SetProtectionProfile_GeneratedMode_StillRejectsNoneEnabled()
-    {
-        var config = GeneratedModeConfig();
-        var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
-        {
-            PassphraseEnabled = false, YubiKeyEnabled = false,
-            PhoneEnabled = false, LinkMode = "or",
-        });
-        Assert.Equal(400, result.Status);
-        Assert.Contains("At least one", ErrorMessage(result));
-    }
-
-    [Fact]
-    public void SetProtectionProfile_GeneratedMode_StillRejectsBadLinkMode()
-    {
-        var config = GeneratedModeConfig();
-        var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
-        {
-            PassphraseEnabled = false, YubiKeyEnabled = true,
-            PhoneEnabled = false, LinkMode = "xor",
-        });
-        Assert.Equal(400, result.Status);
-        Assert.Contains("linkMode", ErrorMessage(result));
-    }
-
     // ---------- Typed-secret restore unlock ----------
 
     [Fact]

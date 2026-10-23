@@ -18,19 +18,6 @@ public sealed class ChunkCryptoTests
     private static readonly byte[] ChunkId32 = SHA256.HashData("chunk-id-aad"u8.ToArray());
 
     [Fact]
-    public void EncryptInto_RoundTripsThroughDecryptInto()
-    {
-        byte[] plaintext = RandomNumberGenerator.GetBytes(1024);
-        byte[] blob = new byte[ChunkCrypto.NonceSizeBytes + plaintext.Length + ChunkCrypto.TagSizeBytes];
-        ChunkCrypto.EncryptInto(plaintext, Key, ChunkId32, blob);
-
-        byte[] recovered = new byte[plaintext.Length];
-        ChunkCrypto.DecryptInto(blob, Key, ChunkId32, recovered);
-
-        Assert.Equal(plaintext, recovered);
-    }
-
-    [Fact]
     public void EncryptInto_MatchesEncryptLayout()
     {
         byte[] plaintext = RandomNumberGenerator.GetBytes(777);

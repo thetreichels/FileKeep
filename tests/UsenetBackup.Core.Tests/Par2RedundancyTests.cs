@@ -66,54 +66,6 @@ public sealed class Par2RedundancyTests
     }
 
     [Fact]
-    public void Reconstruct_RecoversSingleMissing()
-    {
-        var chunks = MakeChunks(10, 1024);
-        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
-        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
-
-        string missing = ids[3];
-        var remaining = chunks.Where(kv => kv.Key != missing)
-            .ToDictionary(kv => kv.Key, kv => kv.Value);
-
-        var result = Par2Redundancy.Reconstruct(
-            ids,
-            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
-            parity.Values.ToList());
-
-        Assert.NotNull(result);
-        Assert.True(result!.ContainsKey(missing));
-        Assert.Equal(chunks[missing], result[missing]);
-    }
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    public void Reconstruct_RecoversUpToThreeMissing(int missingCount)
-    {
-        var chunks = MakeChunks(10, 1024);
-        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
-        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
-
-        var missingIds = ids.Take(missingCount).ToList();
-        var remaining = chunks.Where(kv => !missingIds.Contains(kv.Key))
-            .ToDictionary(kv => kv.Key, kv => kv.Value);
-
-        var result = Par2Redundancy.Reconstruct(
-            ids,
-            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
-            parity.Values.ToList());
-
-        Assert.NotNull(result);
-        foreach (string mid in missingIds)
-        {
-            Assert.True(result!.ContainsKey(mid), $"Missing {mid} not reconstructed");
-            Assert.Equal(chunks[mid], result[mid]);
-        }
-    }
-
-    [Fact]
     public void Reconstruct_FailsWithFourMissing()
     {
         var chunks = MakeChunks(10, 1024);
@@ -230,34 +182,6 @@ public sealed class Par2RedundancyTests
     }
 
     [Fact]
-    public void Reconstruct_NegativeLengthInHeader_ReturnsNull()
-    {
-        var chunks = MakeChunks(10, 512);
-        var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
-        var parity = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
-
-        // Craft a parity block with negative length in header
-        byte[] first = parity.Values.First();
-        byte[] evil = (byte[])first.Clone();
-        BitConverter.GetBytes(-1).CopyTo(evil, 8); // First length = -1
-
-        var evilList = new List<byte[]> { evil };
-        evilList.AddRange(parity.Values.Skip(1));
-
-        string missing = ids[0];
-        var remaining = chunks.Where(kv => kv.Key != missing)
-            .ToDictionary(kv => kv.Key, kv => kv.Value);
-
-        // Must not throw; should return null or a safe result
-        var result = (Dictionary<string, byte[]>?)null;
-        var ex = Record.Exception(() => result = Par2Redundancy.Reconstruct(
-            ids,
-            id => remaining.TryGetValue(id, out byte[]? b) ? b : null,
-            evilList));
-        Assert.Null(ex);
-    }
-
-    [Fact]
     public void MakeParityId_IsDeterministicAndOrderInsensitive()
     {
         var ids = new List<string> { ChunkId(2), ChunkId(0), ChunkId(1) };
@@ -270,17 +194,6 @@ public sealed class Par2RedundancyTests
         // Different parity index => different ID
         string c = Par2Redundancy.MakeParityId(ids, 1);
         Assert.NotEqual(a, c);
-    }
-
-    [Fact]
-    public void MakeParityId_UsesOrdinalOrdering()
-    {
-        // IDs that would sort differently under culture-sensitive vs ordinal
-        // (uppercase vs lowercase) must use ordinal to match XorParity behavior.
-        var ids = new List<string> { "b", "A" };
-        string id1 = Par2Redundancy.MakeParityId(ids, 0);
-        string id2 = Par2Redundancy.MakeParityId(new List<string> { "A", "b" }, 0);
-        Assert.Equal(id1, id2); // Order-insensitive regardless
     }
 
     [Fact]

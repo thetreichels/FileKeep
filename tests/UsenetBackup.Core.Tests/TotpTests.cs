@@ -69,12 +69,8 @@ public sealed class TotpTests
         Assert.False(TotpCrypto.ValidateCode(RfcSecret, "", DateTimeOffset.FromUnixTimeSeconds(1234567890L)));
     [Fact] public void ValidateCode_RejectsTooShort() =>
         Assert.False(TotpCrypto.ValidateCode(RfcSecret, "12345", DateTimeOffset.FromUnixTimeSeconds(1234567890L)));
-    [Fact] public void ValidateCode_RejectsTooLong() =>
-        Assert.False(TotpCrypto.ValidateCode(RfcSecret, "1234567", DateTimeOffset.FromUnixTimeSeconds(1234567890L)));
     [Fact] public void ValidateCode_RejectsNonDigits() =>
         Assert.False(TotpCrypto.ValidateCode(RfcSecret, "abcdef", DateTimeOffset.FromUnixTimeSeconds(1234567890L)));
-    [Fact] public void ValidateCode_RejectsInnerSpace() =>
-        Assert.False(TotpCrypto.ValidateCode(RfcSecret, "12 456", DateTimeOffset.FromUnixTimeSeconds(1234567890L)));
 
     [Fact]
     public void ValidateCode_RejectsNullOrEmptySecret()

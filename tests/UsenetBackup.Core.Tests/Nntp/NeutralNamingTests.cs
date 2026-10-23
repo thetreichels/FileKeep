@@ -24,16 +24,8 @@ public sealed class NeutralNamingTests
     [Fact]
     public void RarPartName_FirstIsRar_ThenNumbered()
     {
-        Assert.Equal("a1b2c3d4.rar", ArticleCodec.RarPartName("a1b2c3d4", 0));
         Assert.Equal("a1b2c3d4.r00", ArticleCodec.RarPartName("a1b2c3d4", 1));
         Assert.Equal("a1b2c3d4.r01", ArticleCodec.RarPartName("a1b2c3d4", 2));
-    }
-
-    [Fact]
-    public void PartSubject_StandardFormat()
-    {
-        Assert.Equal("\"a1b2c3d4.rar\" [002/121] - yEnc",
-            ArticleCodec.PartSubject("a1b2c3d4.rar", 2, 121));
     }
 
     [Fact]

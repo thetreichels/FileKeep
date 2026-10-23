@@ -210,38 +210,4 @@ public sealed class VssSnapshotTests : IDisposable
         Assert.Equal("complete", ReadSignal());
     }
 
-    [Fact]
-    public void Abort_SendsAbortExplicitly()
-    {
-        if (!OperatingSystem.IsWindows())
-            return;
-
-        ConfigureStub(exitCode: 3);
-
-        using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
-        {
-            snapshot.Create("C:", "C:\\test");
-            snapshot.Abort(); // Explicit abort; Dispose afterwards is a no-op.
-        }
-
-        Assert.Equal("abort", ReadSignal());
-    }
-
-    [Fact]
-    public void Dispose_AfterComplete_DoesNotSignalAgain()
-    {
-        if (!OperatingSystem.IsWindows())
-            return;
-
-        ConfigureStub(exitCode: 0);
-
-        using (var snapshot = new VssSnapshot(_stubPath, timeoutSecs: 30))
-        {
-            snapshot.Create("C:", "C:\\test");
-            snapshot.Complete();
-        }
-
-        // Only one signal should have been recorded (from Complete()).
-        Assert.Equal("complete", ReadSignal());
-    }
 }

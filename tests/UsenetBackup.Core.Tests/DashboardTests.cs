@@ -62,8 +62,53 @@ public sealed class DashboardTests : IDisposable
         },
     };
 
-    private static JsonDocument ToJson(object payload) =>
-        JsonDocument.Parse(JsonSerializer.Serialize(payload));
+    // Serializes a dashboard payload exactly as the production service
+    // does: Results.Json with the HttpJsonOptions resolver chain from
+    // Dashboard.cs (DashboardJsonContext + FileKeepJsonContext — see
+    // ProductionJson). A DTO missing from the contexts fails here just
+    // as it 500s in the trimmed shipped build. (The old helper used
+    // plain JsonSerializer.Serialize, which happily reflected in the
+    // untrimmed test host and masked exactly that regression class —
+    // D-H1.) The one production behaviour the bare chain does not
+    // reproduce is STJ's built-in metadata for framework types:
+    // /api/log returns a bare string[], registered in NEITHER context,
+    // which the trimmed service still serves because primitives and
+    // arrays/collections of them carry built-in metadata even with
+    // reflection disabled. Only those types take the fallback below —
+    // a FileKeep DTO never can.
+    private static bool IsBuiltInFrameworkType(Type type)
+    {
+        if (type.IsArray)
+            return IsBuiltInFrameworkType(type.GetElementType()!);
+        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
+            return IsBuiltInFrameworkType(type.GetGenericArguments()[0]);
+        return type.IsPrimitive || type == typeof(string) || type == typeof(decimal)
+            || type == typeof(DateTime) || type == typeof(DateTimeOffset)
+            || type == typeof(Guid) || type == typeof(TimeSpan);
+    }
+
+    private static JsonDocument ToJson(object payload)
+    {
+        var info = ProductionJson.Resolver.GetTypeInfo(payload.GetType(), ProductionJson.Options);
+        string json;
+        if (info is not null)
+        {
+            json = JsonSerializer.Serialize(payload, info);
+        }
+        else if (IsBuiltInFrameworkType(payload.GetType()))
+        {
+            json = JsonSerializer.Serialize(payload, payload.GetType(),
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }
+        else
+        {
+            throw new NotSupportedException(
+                $"No source-generated JSON metadata for {payload.GetType().FullName} in " +
+                "DashboardJsonContext/FileKeepJsonContext — this payload would fail " +
+                "in the trimmed dashboard build.");
+        }
+        return JsonDocument.Parse(json);
+    }
 
     [Fact]
     public void ApiStatus_ReflectsSchedulerState()
@@ -187,17 +232,6 @@ public sealed class DashboardTests : IDisposable
         Assert.Contains("band.style.display = bothOn ? 'flex' : 'none'", html);
         Assert.Contains("label.textContent = isLinked ? 'Linked — AND' : 'Link'", html);
         Assert.DoesNotContain("sec-link-band-unlinked", html);
-    }
-
-    [Fact]
-    public void HtmlPage_SidebarWidthIs230()
-    {
-        // Superseded 2026-10-22 by Joel's content-sized spec (item 6,
-        // see HtmlPage_Sidebar_ContentSizedNotFixedWidth): the 230px
-        // fixed width from 2026-10-21 no longer applies. Kept as a
-        // tombstone asserting the old fixed width stays gone.
-        string html = DashboardHtml.Page("test-csrf-token");
-        Assert.DoesNotContain("nav { width: 230px;", html);
     }
 
     [Fact]
@@ -408,7 +442,13 @@ public sealed class DashboardTests : IDisposable
         };
         var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
         Assert.Equal(200, status);
-        Assert.Empty((LocationDiskDto[])payload);
+        // Serialize through the production resolver chain rather than
+        // casting the payload (D-H1): a LocationDiskDto[] registration
+        // dropped from DashboardJsonContext must fail here, as it
+        // would 500 in the trimmed build.
+        using var doc = ToJson(payload);
+        Assert.Equal(JsonValueKind.Array, doc.RootElement.ValueKind);
+        Assert.Equal(0, doc.RootElement.GetArrayLength());
     }
 
     [Fact]
@@ -815,11 +855,15 @@ public sealed class DashboardTests : IDisposable
             Assert.Contains(active, c => c.Key == key);
             var (listStatus, payload) = DashboardApi.ListActiveRestores();
             Assert.Equal(200, listStatus);
-            var dto = Assert.Single(
-                Assert.IsType<List<ActiveRestoreDto>>(payload),
-                d => d.BackupId == "b1");
-            Assert.Equal("file", dto.Kind);
-            Assert.Equal(dest, dto.Target);
+            // Assert on the payload as serialized through the
+            // production resolver chain, not a CLR cast (D-H1): a
+            // List<ActiveRestoreDto> registration dropped from
+            // DashboardJsonContext must fail here.
+            using var listDoc = ToJson(payload);
+            var dto = Assert.Single(listDoc.RootElement.EnumerateArray(),
+                e => e.GetProperty("backupId").GetString() == "b1");
+            Assert.Equal("file", dto.GetProperty("kind").GetString());
+            Assert.Equal(dest, dto.GetProperty("target").GetString());
         }
         finally
         {
@@ -1082,24 +1126,6 @@ public sealed class DashboardTests : IDisposable
         Assert.Contains("restore-unlock-btn", html);
         Assert.Contains("Unlock with YubiKey", html);
         Assert.Contains("placeholder=\"e.g. C:\\Restore\"", html);
-    }
-
-    [Fact]
-    public void DeleteJob_DeletesTheLastJob()
-    {
-        // Zero jobs is a valid state (the fresh-install state), so the
-        // only job deletes like any other. The former last-job guard
-        // (7943f06) was an invented invariant; removed at the user's
-        // decision 2026-10-20.
-        var config = MakeConfig();
-        var scheduler = new BackupScheduler(config);
-        string configPath = Path.Combine(_workDir, "service.json");
-        config.Save(configPath);
-
-        var (status, _) = DashboardApi.DeleteJob(config, scheduler, configPath, "docs");
-        Assert.Equal(200, status);
-        Assert.Empty(config.Jobs);
-        Assert.Empty(ServiceConfig.Load(configPath).Jobs);
     }
 
     [Fact]

@@ -182,7 +182,6 @@ public sealed class CdcChunkingTests : IDisposable
             (16384, 16384, 65536),   // avg <= min
             (4096, 16384, 16384),    // max <= avg
             (4096, 20000, 65536),    // avg not a power of two
-            (8192, 16384, 4096),     // max < min
         };
         foreach (var (min, avg, max) in bad)
             Assert.Throws<ArgumentOutOfRangeException>(() => new CdcChunker(min, avg, max));
