@@ -32,6 +32,29 @@ public sealed class Par2RedundancyTests
             System.Text.Encoding.UTF8.GetBytes($"chunk-{i}"))).ToLowerInvariant();
 
     [Fact]
+    public void GroupsFor_MatchesGenerateParityIds()
+    {
+        // P2-V2a: the same producer/consumer contract as the XOR side —
+        // groups recorded at upload must yield exactly the parity IDs
+        // GenerateParity produced.
+        foreach (int count in new[] { 0, 1, 2, 5, 10, 11, 20, 25 })
+        {
+            var chunks = MakeChunks(count, 64, seed: count);
+            var ids = chunks.Keys.OrderBy(id => id, StringComparer.Ordinal).ToList();
+
+            var generated = Par2Redundancy.GenerateParity(ids, id => chunks[id]);
+            var fromGroups = Par2Redundancy.GroupsFor(ids)
+                .SelectMany(g => Enumerable.Range(0, Par2Redundancy.ParityShards)
+                    .Select(p => Par2Redundancy.MakeParityId(g, p)))
+                .ToList();
+
+            Assert.Equal(
+                generated.Keys.OrderBy(k => k, StringComparer.Ordinal),
+                fromGroups.OrderBy(k => k, StringComparer.Ordinal));
+        }
+    }
+
+    [Fact]
     public void GenerateParity_CreatesThreePerGroup()
     {
         var chunks = MakeChunks(10, 1024);

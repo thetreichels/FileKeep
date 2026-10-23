@@ -21,6 +21,31 @@ public sealed class XorParityTests
     }
 
     [Fact]
+    public void GroupsFor_MatchesGenerateParityIds()
+    {
+        // P2-V2a: upload paths record GroupsFor(...) in the manifest
+        // and retention derives parity IDs from the recorded groups.
+        // The recorded groups must therefore produce EXACTLY the IDs
+        // GenerateParity produces, for every shape and group size.
+        foreach (int count in new[] { 0, 1, 2, 5, 9, 10, 11, 20, 25 })
+        foreach (int groupSize in new[] { 4, 10 })
+        {
+            var chunkIds = Enumerable.Range(0, count)
+                .Select(i => i.ToString("x64")).ToList();
+            var chunks = chunkIds.ToDictionary(id => id, id => new byte[16]);
+
+            var generated = XorParity.GenerateParity(
+                chunkIds, id => chunks[id], null, groupSize);
+            var fromGroups = XorParity.GroupsFor(chunkIds, groupSize)
+                .Select(g => XorParity.MakeParityId(g)).ToList();
+
+            Assert.Equal(
+                generated.Keys.OrderBy(k => k, StringComparer.Ordinal),
+                fromGroups.OrderBy(k => k, StringComparer.Ordinal));
+        }
+    }
+
+    [Fact]
     public void Reconstruct_RecoversMissingChunk()
     {
         var chunkIds = Enumerable.Range(0, 10).Select(i => i.ToString("x64")).ToList();

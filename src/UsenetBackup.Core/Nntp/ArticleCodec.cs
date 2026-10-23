@@ -477,6 +477,21 @@ public static class ArticleCodec
     public static string BuildNfoArticle(
         string nfoText, string backupId, string repoId,
         string newsgroup, string from, string setName, int totalParts)
+        => BuildNfoArticle(nfoText, backupId, batchIndex: 0, repoId,
+            newsgroup, from, setName, totalParts);
+
+    /// <summary>
+    /// Builds one batch's NFO article. The Message-ID header MUST be
+    /// the per-batch ID the poster registers and STAT-verifies
+    /// (MakeNfoMessageId with the batch index): servers index articles
+    /// by the posted header, so a batch ≥ 1 NFO carrying the batch-0
+    /// ID lands under the wrong identity — overwriting batch 0's NFO
+    /// where it doesn't collide outright — and can never be found
+    /// under its own ID. (Pre-P2-V2b the header always used batch 0.)
+    /// </summary>
+    public static string BuildNfoArticle(
+        string nfoText, string backupId, int batchIndex, string repoId,
+        string newsgroup, string from, string setName, int totalParts)
     {
         ArgumentException.ThrowIfNullOrEmpty(nfoText);
         string fileName = $"{setName}.nfo";
@@ -485,7 +500,7 @@ public static class ArticleCodec
         sb.Append("Date: ").Append(Rfc2822DateNow()).Append("\r\n");
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: ").Append(PartSubject(fileName, 1, totalParts)).Append("\r\n");
-        sb.Append("Message-ID: ").Append(MakeNfoMessageId(backupId, repoId)).Append("\r\n");
+        sb.Append("Message-ID: ").Append(MakeNfoMessageId(backupId, batchIndex, repoId)).Append("\r\n");
         sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");
         sb.Append(YEnc.Encode(Encoding.UTF8.GetBytes(nfoText), fileName));

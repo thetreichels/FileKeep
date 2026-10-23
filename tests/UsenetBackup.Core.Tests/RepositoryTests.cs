@@ -355,6 +355,36 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
+    public void Manifest_ParityRecordAndNfoDates_RoundTripThroughSaveLoad()
+    {
+        // P2-V2a/V2b: the upload record stamped into the manifest
+        // survives save/load intact (and the load's root-hash + HMAC
+        // verification covers it — a tampered record would throw).
+        WriteSrc("a.txt", "alpha"u8.ToArray());
+        using var repo = InitRepo();
+        var manifest = repo.BackupDirectory(_srcDir);
+        manifest.ParityByProvider = new Dictionary<string, ManifestParityRecord>
+        {
+            ["news.example.com/alt.binaries.test"] = new ManifestParityRecord
+            {
+                Mode = "xor",
+                GroupSize = 4,
+                Groups = new List<List<string>> { new() { "aa", "bb" }, new() { "cc", "dd" } },
+            },
+        };
+        manifest.NfoDates = new List<string?> { "2026-01-15", null, "2026-01-17" };
+        repo.SaveManifest(manifest);
+
+        var loaded = repo.LoadManifest(manifest.BackupId);
+        var record = Assert.Single(loaded.ParityByProvider!).Value;
+        Assert.Equal("xor", record.Mode);
+        Assert.Equal(4, record.GroupSize);
+        Assert.Equal(2, record.Groups.Count);
+        Assert.Equal(new[] { "aa", "bb" }, record.Groups[0]);
+        Assert.Equal(new string?[] { "2026-01-15", null, "2026-01-17" }, loaded.NfoDates!);
+    }
+
+    [Fact]
     public void LoadManifest_ManifestStampedUnderDifferentKey_Refused()
     {
         // A manifest planted from a DIFFERENT repo (different

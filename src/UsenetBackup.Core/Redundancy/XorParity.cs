@@ -30,6 +30,26 @@ public static class XorParity
     /// parity chunk ID to the parity bytes (including length header).
     /// The parity chunk ID is derived deterministically from group chunk IDs.
     /// </summary>
+    /// <summary>
+    /// The parity groups formed over <paramref name="ids"/>: consecutive
+    /// slices of <paramref name="groupSize"/>, groups of fewer than 2
+    /// dropped. Single source of truth for group composition —
+    /// <see cref="GenerateParity"/> builds exactly these groups, and
+    /// upload paths record them in the manifest so retention can
+    /// enumerate and regenerate parity articles later (P2-V2a).
+    /// </summary>
+    public static List<List<string>> GroupsFor(IReadOnlyList<string> ids, int groupSize)
+    {
+        var groups = new List<List<string>>();
+        for (int i = 0; i < ids.Count; i += groupSize)
+        {
+            var group = ids.Skip(i).Take(groupSize).ToList();
+            if (group.Count >= 2)
+                groups.Add(group);
+        }
+        return groups;
+    }
+
     public static IReadOnlyDictionary<string, byte[]> GenerateParity(
         IReadOnlyList<string> chunkIds,
         Func<string, byte[]> getChunkBytes,
@@ -37,12 +57,8 @@ public static class XorParity
         int groupSize = DefaultGroupSize)
     {
         var result = new Dictionary<string, byte[]>();
-        for (int i = 0; i < chunkIds.Count; i += groupSize)
+        foreach (var group in GroupsFor(chunkIds, groupSize))
         {
-            var group = chunkIds.Skip(i).Take(groupSize).ToList();
-            if (group.Count < 2)
-                continue; // Need at least 2 for parity to be useful
-
             // Collect chunks and find max length
             var chunks = new List<byte[]>();
             int maxLen = 0;

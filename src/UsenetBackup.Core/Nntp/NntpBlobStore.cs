@@ -311,7 +311,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             return false;
         }
         string article = ArticleCodec.BuildNfoArticle(
-            nfoText, backupId, _repoId, _newsgroup, _from, setName, totalParts);
+            nfoText, backupId, batchIndex, _repoId, _newsgroup, _from, setName, totalParts);
         UseClient(c => c.Post(article));
         WaitForArticle(messageId);
         _journal.RecordUpload(messageId, backupId, JournalKey);

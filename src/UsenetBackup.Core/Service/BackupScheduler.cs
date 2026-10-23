@@ -2321,6 +2321,27 @@ public sealed class BackupScheduler
             StampYubiKeyChallenge(manifest);
             manifest = repo.FinalizeBatchedManifest(manifest);
 
+            // P2-V2a/V2b: stamp each uploader's parity record and the
+            // per-batch NFO dates into the manifest BEFORE the manifest
+            // article is posted below, so the posted manifest carries
+            // them. Retention reads both from the manifest; neither is
+            // reconstructible from config or batch layout afterwards.
+            bool uploadRecordStamped = false;
+            foreach (var (tName, uploader) in uploaders)
+            {
+                if (failedTargets.ContainsKey(tName))
+                    continue;
+                manifest.ParityByProvider ??=
+                    new Dictionary<string, ManifestParityRecord>();
+                manifest.ParityByProvider[uploader.ProviderKey] =
+                    uploader.ParityRecord;
+                if (manifest.NfoDates is null && uploader.NfoDates is { } dates)
+                    manifest.NfoDates = dates;
+                uploadRecordStamped = true;
+            }
+            if (uploadRecordStamped)
+                repo.SaveManifest(manifest);
+
             // NNTP: post the manifest + index per provider.
             foreach (var (tName, uploader) in uploaders)
             {
@@ -2957,6 +2978,10 @@ public sealed class BackupScheduler
                     // In volume mode parity is generated per group and posted
                     // immediately, so a volume-sized shard never multiplies
                     // into gigabytes held in memory.
+                    // P2-V2a: the groups generated here are collected and
+                    // stamped into the manifest below (before the manifest
+                    // article posts), keyed by provider.
+                    var parityGroupLists = new List<List<string>>();
                     int parityUploaded = 0, paritySkipped = 0;
                     if (parityUnits > 0)
                     {
@@ -2975,6 +3000,9 @@ public sealed class BackupScheduler
                                 string[] group = sortedVolIds.Skip(g).Take(10).ToArray();
                                 if (group.Length < 2)
                                     continue;
+                                parityGroupLists.AddRange(redundancy == "xor"
+                                    ? Redundancy.XorParity.GroupsFor(group, job.ParityGroupSize)
+                                    : Redundancy.Par2Redundancy.GroupsFor(group));
                                 IReadOnlyDictionary<string, byte[]> blocks =
                                     redundancy == "xor"
                                         ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes, null, job.ParityGroupSize)
@@ -2997,6 +3025,9 @@ public sealed class BackupScheduler
                         }
                         else
                         {
+                            parityGroupLists.AddRange(redundancy == "xor"
+                                ? Redundancy.XorParity.GroupsFor(chunkIds, job.ParityGroupSize)
+                                : Redundancy.Par2Redundancy.GroupsFor(chunkIds));
                             IReadOnlyDictionary<string, byte[]> parityBlocks =
                                 redundancy == "xor"
                                     ? Redundancy.XorParity.GenerateParity(
@@ -3021,6 +3052,24 @@ public sealed class BackupScheduler
                         Log($"job '{job.Name}': uploaded {parityUploaded} {parityLabel} parity blocks to {nntp.Host}" +
                             (paritySkipped > 0 ? $" ({paritySkipped} already present)" : ""));
                     }
+
+                    // P2-V2a: stamp this provider's parity record into
+                    // the manifest BEFORE the manifest article posts, so
+                    // the posted manifest carries it. (An explicit
+                    // "none" record distinguishes no-parity-by-design
+                    // from a legacy backup with no record at all.)
+                    manifest.ParityByProvider ??=
+                        new Dictionary<string, ManifestParityRecord>();
+                    manifest.ParityByProvider[
+                        Nntp.ChunkMessageIndex.MakeProviderKey(
+                            nntp.Host, nntp.Newsgroup)] =
+                        new ManifestParityRecord
+                        {
+                            Mode = redundancy,
+                            GroupSize = job.ParityGroupSize,
+                            Groups = parityGroupLists,
+                        };
+                    repo.SaveManifest(manifest);
 
                     // Manifest + index (tracked; previously invisible)
                     progress.SetPhase("manifest");

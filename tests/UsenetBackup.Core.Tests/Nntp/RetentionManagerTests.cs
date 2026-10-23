@@ -1,4 +1,6 @@
+using UsenetBackup.Core;
 using UsenetBackup.Core.Nntp;
+using UsenetBackup.Core.Redundancy;
 using Xunit;
 
 namespace UsenetBackup.Core.Tests.Nntp;
@@ -747,6 +749,273 @@ public sealed class RetentionManagerTests : IDisposable
         string providerKey = ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
         Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, prunedChunk));
         Assert.NotEmpty(fx.Store.Get(prunedChunk));
+    }
+
+    private static string ProviderKey =>
+        ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup);
+
+    /// <summary>
+    /// Simulates a completed parity upload for the chunk-mode Fixture:
+    /// generates the backup's parity blocks over the canonical chunk
+    /// order, posts them, and stamps the manifest's parity record
+    /// exactly as the upload paths now do (P2-V2a). Returns the parity
+    /// block IDs.
+    /// </summary>
+    private List<string> SimulateParityUpload(Fixture fx, string mode)
+    {
+        string[] ordered = ChunkOrdering.GetOrderedChunkIds(fx.Manifest);
+        List<List<string>> groups;
+        IReadOnlyDictionary<string, byte[]> blocks;
+        if (mode == "xor")
+        {
+            groups = XorParity.GroupsFor(ordered, 10);
+            blocks = XorParity.GenerateParity(ordered, fx.Repo.GetChunkBlob, null, 10);
+        }
+        else
+        {
+            groups = Par2Redundancy.GroupsFor(ordered);
+            blocks = Par2Redundancy.GenerateParity(ordered, fx.Repo.GetChunkBlob);
+        }
+        foreach (var (id, bytes) in blocks)
+            fx.Store.Put(id, bytes);
+        fx.Manifest.ParityByProvider = new Dictionary<string, ManifestParityRecord>
+        {
+            [ProviderKey] = new ManifestParityRecord
+            {
+                Mode = mode,
+                GroupSize = 10,
+                Groups = groups,
+            },
+        };
+        fx.Repo.SaveManifest(fx.Manifest);
+        return blocks.Keys.ToList();
+    }
+
+    [Fact]
+    public void MissingParity_DataHealthy_RepairedOnly_TimestampUnchanged()
+    {
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+        var parityIds = SimulateParityUpload(fx, "xor");
+        string parityId = Assert.Single(parityIds);
+
+        // Parity article lost early; the data is untouched.
+        Assert.True(_server.Articles.TryRemove(
+            ArticleCodec.MakeMessageId(parityId, RepoId), out _));
+
+        // 65 days left: checked, but inside the healthy window.
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+        int postsBefore = _server.PostCount;
+
+        var report = CreateManager(new List<string>()).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        Assert.Equal(1, report.ArticlesRepublished); // just the parity block
+        // +1 parity post, +1 message-identity index publication.
+        Assert.Equal(postsBefore + 2, _server.PostCount);
+
+        // Parity is fetchable again, under a NEW identity; the data
+        // articles were not touched.
+        Assert.True(fx.MessageIndex.HasNewIdentity(ProviderKey, parityId));
+        Assert.True(fx.Store.ExistsOnServer(parityId));
+        Assert.NotEmpty(fx.Store.Get(parityId));
+        foreach (string chunkId in fx.ChunkIds)
+            Assert.False(fx.MessageIndex.HasNewIdentity(ProviderKey, chunkId));
+
+        // The retention clock tracks DATA freshness: unmoved by a
+        // parity-only repair.
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void ExpiringBackup_ParityRepublishedWithNewIdentity()
+    {
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+        var parityIds = SimulateParityUpload(fx, "xor");
+
+        // 25 days left <= threshold: full refresh.
+        var uploaded = DateTime.UtcNow.AddDays(-1070);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+        int postsBefore = _server.PostCount;
+
+        var report = CreateManager(new List<string>()).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        // Every chunk AND every parity block republished.
+        Assert.Equal(fx.ChunkIds.Count + parityIds.Count, report.ArticlesRepublished);
+        // + index publication + monthly manifest-index republication.
+        Assert.Equal(postsBefore + fx.ChunkIds.Count + parityIds.Count + 2,
+            _server.PostCount);
+        foreach (string parityId in parityIds)
+        {
+            Assert.True(fx.MessageIndex.HasNewIdentity(ProviderKey, parityId));
+            Assert.True(fx.Store.ExistsOnServer(parityId));
+        }
+
+        // The clock advanced — parity rode the same transaction.
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.True(record.UploadedUtc > uploaded);
+    }
+
+    [Fact]
+    public void MissingParity_Par2Blocks_Repaired()
+    {
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+        var parityIds = SimulateParityUpload(fx, "par2");
+        Assert.Equal(3, parityIds.Count);
+
+        // Lose ONE of the three PAR2 blocks.
+        Assert.True(_server.Articles.TryRemove(
+            ArticleCodec.MakeMessageId(parityIds[1], RepoId), out _));
+
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        var report = CreateManager(new List<string>()).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        // A sampled miss regenerates ALL parity (the sample is a window).
+        Assert.Equal(3, report.ArticlesRepublished);
+        foreach (string parityId in parityIds)
+        {
+            Assert.True(fx.MessageIndex.HasNewIdentity(ProviderKey, parityId));
+            Assert.True(fx.Store.ExistsOnServer(parityId));
+            Assert.NotEmpty(fx.Store.Get(parityId));
+        }
+        var record = new UsenetUploadTracker(fx.Repo.RepoRoot).GetAll().Single();
+        Assert.Equal(uploaded, record.UploadedUtc, TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void ParityRecordNone_HealthyBackup_NoAction()
+    {
+        using var fx = new Fixture(this);
+        fx.UploadAll();
+        fx.Manifest.ParityByProvider = new Dictionary<string, ManifestParityRecord>
+        {
+            [ProviderKey] = new ManifestParityRecord { Mode = "none", GroupSize = 10 },
+        };
+        fx.Repo.SaveManifest(fx.Manifest);
+        int postsBefore = _server.PostCount;
+
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        var report = CreateManager(new List<string>()).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsHealthy);
+        Assert.Equal(0, report.ArticlesRepublished);
+        Assert.Equal(postsBefore, _server.PostCount);
+    }
+
+    /// <summary>
+    /// Volume-mode fixture with TWO post sets (batches) of one volume
+    /// each, per-batch NFOs posted with recorded dates that differ from
+    /// the backup's creation date — the state a batched upload leaves
+    /// behind (P2-V2b).
+    /// </summary>
+    private sealed class BatchedVolumeFixture : IDisposable
+    {
+        public BackupRepository Repo { get; }
+        public NntpBlobStore Store { get; }
+        public UsenetUploadTracker Tracker { get; }
+        public BackupManifest Manifest { get; }
+        public List<VolumeEntry> Volumes { get; }
+        private readonly NntpClient _client;
+
+        public const string Batch0Date = "2026-01-15";
+        public const string Batch1Date = "2026-01-16";
+
+        public BatchedVolumeFixture(RetentionManagerTests outer)
+        {
+            Repo = BackupRepository.Init(outer._repoDir, Passphrase, 64 * 1024, 10_000);
+            Manifest = Repo.BackupDirectory(outer._srcDir);
+            var chunkIds = Manifest.Files.SelectMany(f => f.Chunks).Distinct().ToList();
+            Assert.Equal(2, chunkIds.Count);
+
+            _client = outer.Connect();
+            var messageIndex = new ChunkMessageIndex(outer._repoDir);
+            Store = new NntpBlobStore(_client, Newsgroup, RepoId,
+                Path.Combine(outer._workDir, "journal.db"),
+                messageIndex: messageIndex,
+                providerKey: ChunkMessageIndex.MakeProviderKey(ProviderHost, Newsgroup));
+            Tracker = new UsenetUploadTracker(outer._repoDir);
+
+            var entries = new List<VolumeEntry>();
+            for (int batch = 0; batch < 2; batch++)
+            {
+                var volume = VolumePacker.BuildVolume(
+                    new[] { chunkIds[batch] }, Repo.GetChunkBlob);
+                string setName = ArticleCodec.SetName(Manifest.BackupId, batch);
+                Store.PutVolume(volume.Id, volume.Bytes, setName, 2, 2);
+                entries.Add(new VolumeEntry
+                {
+                    Id = volume.Id,
+                    ChunkIds = volume.ChunkIds.ToList(),
+                    SizeBytes = volume.Bytes.Length,
+                    SetName = setName,
+                });
+                string nfoText = ArticleCodec.BuildNfoText(
+                    Manifest.BackupId, batch == 0 ? Batch0Date : Batch1Date,
+                    1, Repo.GetOrCreatePoster());
+                Store.PostNfo(Manifest.BackupId, batch, nfoText, setName, 2);
+            }
+            Volumes = entries;
+            Manifest.Volumes = entries;
+            Manifest.NfoDates = new List<string?> { Batch0Date, Batch1Date };
+            Repo.SaveManifest(Manifest);
+            Repo.UploadManifest(Manifest.BackupId, Store);
+        }
+
+        public void Dispose()
+        {
+            Store.Dispose();
+            _client.Dispose();
+            Repo.Dispose();
+        }
+    }
+
+    [Fact]
+    public void BatchedNfo_MissingBatchNfo_RepostedIdentical()
+    {
+        using var fx = new BatchedVolumeFixture(this);
+
+        string nfo0Id = ArticleCodec.MakeNfoMessageId(fx.Manifest.BackupId, 0, RepoId);
+        string nfo1Id = ArticleCodec.MakeNfoMessageId(fx.Manifest.BackupId, 1, RepoId);
+        Assert.True(_server.Articles.TryGetValue(nfo0Id, out string? originalNfo0));
+        Assert.True(_server.Articles.TryGetValue(nfo1Id, out string? originalNfo1));
+        string originalText1 = ArticleCodec.ParseNfoArticle(originalNfo1!, fx.Manifest.BackupId);
+        Assert.Contains(BatchedVolumeFixture.Batch1Date, originalText1);
+
+        // Lose batch 1's NFO, and one data volume to trigger a refresh.
+        Assert.True(_server.Articles.TryRemove(nfo1Id, out _));
+        Assert.True(_server.Articles.TryRemove(
+            ArticleCodec.MakeVolumeMessageId(fx.Volumes[0].Id, RepoId), out _));
+
+        var uploaded = DateTime.UtcNow.AddDays(-1030);
+        fx.Tracker.RecordUpload(fx.Manifest.BackupId, ProviderHost, Newsgroup, uploaded);
+
+        var report = CreateManager(new List<string>()).CheckAndRepost(
+            fx.Repo, fx.Store, warnDays: 90, repostThresholdDays: 30, sampleSize: 100);
+
+        Assert.Equal(1, report.BackupsRefreshed);
+        // Batch 1's NFO is back with identical text — the recorded
+        // posting date was used, not the creation-date fallback
+        // (which would carry today's date).
+        Assert.True(_server.Articles.TryGetValue(nfo1Id, out string? repostedNfo1));
+        string repostedText1 = ArticleCodec.ParseNfoArticle(repostedNfo1!, fx.Manifest.BackupId);
+        Assert.Equal(originalText1, repostedText1);
+        // Batch 0's NFO was never lost and is untouched.
+        Assert.True(_server.Articles.TryGetValue(nfo0Id, out string? currentNfo0));
+        Assert.Equal(originalNfo0, currentNfo0);
     }
 
     [Fact]

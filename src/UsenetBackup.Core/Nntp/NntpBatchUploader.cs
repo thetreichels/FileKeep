@@ -26,6 +26,11 @@ public sealed class NntpBatchUploader : IDisposable
     private readonly NntpBlobStore _store;
     private readonly ProviderLimits _limits;
     private bool _disposed;
+    // P2-V2a/V2b: the parity groups generated and the per-batch NFO
+    // dates used across all batches, for the caller to stamp into the
+    // manifest (retention cannot reconstruct either after the fact).
+    private readonly List<List<string>> _parityGroups = new();
+    private readonly List<string?> _nfoDates = new();
 
     public NntpBatchUploader(
         BackupRepository repo,
@@ -61,6 +66,45 @@ public sealed class NntpBatchUploader : IDisposable
         _store.MaxArticleBytes = probed.HasValue && probed.Value > 0
             ? probed.Value
             : Math.Max(repo.VolumeSizeBytes * 2, NntpBlobStore.DefaultMaxArticleBytes);
+    }
+
+    /// <summary>Provider key ("host/newsgroup") for manifest records.</summary>
+    public string ProviderKey =>
+        ChunkMessageIndex.MakeProviderKey(_nntp.Host, _nntp.Newsgroup);
+
+    /// <summary>
+    /// P2-V2a: the parity record for this uploader's uploads — the
+    /// redundancy mode and group size used, plus every parity group
+    /// generated across all batches — for the caller to stamp into the
+    /// manifest before the manifest article is posted.
+    /// </summary>
+    public ManifestParityRecord ParityRecord => new()
+    {
+        Mode = _redundancy,
+        GroupSize = _parityGroupSize,
+        Groups = _parityGroups,
+    };
+
+    /// <summary>
+    /// P2-V2b: the posting date each batch's NFO was built with, by
+    /// batch index; null when no volume batch posted an NFO.
+    /// </summary>
+    public List<string?>? NfoDates =>
+        _nfoDates.Any(d => d is not null) ? _nfoDates : null;
+
+    private void RecordParityGroups(IReadOnlyList<string> slice)
+    {
+        if (_redundancy == "xor")
+            _parityGroups.AddRange(XorParity.GroupsFor(slice, _parityGroupSize));
+        else if (_redundancy == "par2")
+            _parityGroups.AddRange(Par2Redundancy.GroupsFor(slice));
+    }
+
+    private void RecordNfoDate(int batchIndex, string date)
+    {
+        while (_nfoDates.Count <= batchIndex)
+            _nfoDates.Add(null);
+        _nfoDates[batchIndex] = date;
     }
 
     /// <summary>
@@ -172,12 +216,14 @@ public sealed class NntpBatchUploader : IDisposable
 
         string setName = ArticleCodec.SetName(_backupId, batchIndex);
         int totalParts = groups.Count + 1;
+        string nfoDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
         string nfoText = ArticleCodec.BuildNfoText(
             _backupId,
-            DateTime.UtcNow.ToString("yyyy-MM-dd"),
+            nfoDate,
             groups.Count,
             _repo.GetOrCreatePoster());
         _store.PostNfo(_backupId, batchIndex, nfoText, setName, totalParts);
+        RecordNfoDate(batchIndex, nfoDate);
         _log($"batch {batchIndex}: posting {groups.Count} volumes to {_nntp.Host}...");
 
         var volumeEntries = new List<(int Index, VolumeEntry Entry)>();
@@ -240,6 +286,7 @@ public sealed class NntpBatchUploader : IDisposable
             string[] group = sortedVolIds.Skip(g).Take(10).ToArray();
             if (group.Length < 2)
                 continue;
+            RecordParityGroups(group);
             IReadOnlyDictionary<string, byte[]> blocks =
                 _redundancy == "xor"
                     ? XorParity.GenerateParity(group, GetVolumeBytes, null, _parityGroupSize)
@@ -291,6 +338,7 @@ public sealed class NntpBatchUploader : IDisposable
                 string[] group = orderedChunkIds.Skip(g).Take(10).ToArray();
                 if (group.Length < 2)
                     continue;
+                RecordParityGroups(group);
                 IReadOnlyDictionary<string, byte[]> blocks =
                     _redundancy == "xor"
                         ? XorParity.GenerateParity(group, id => _repo.GetChunkBlob(id), null, _parityGroupSize)

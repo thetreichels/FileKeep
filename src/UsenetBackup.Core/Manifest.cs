@@ -55,6 +55,30 @@ public sealed class VolumeEntry
     public string? SetName { get; set; }
 }
 
+/// <summary>
+/// One provider's parity record for a backup (P2-V2a): the redundancy
+/// mode and XOR group size used at upload time, plus the parity group
+/// member lists exactly as the parity block IDs were derived from
+/// them (chunk IDs in chunk mode, volume IDs in volume mode; each
+/// inner list is one MakeParityId input). Retention enumerates parity
+/// article IDs from these groups and regenerates missing blocks from
+/// the members' bytes — no derivation from config or batch layout is
+/// needed, so the record cannot drift from what was actually posted.
+/// </summary>
+public sealed class ManifestParityRecord
+{
+    /// <summary>"xor", "par2", or "none" (explicit: no parity by design).</summary>
+    [JsonPropertyName("mode")]
+    public string Mode { get; set; } = "none";
+
+    /// <summary>XOR group size used at upload (PAR2's is fixed at 10).</summary>
+    [JsonPropertyName("group_size")]
+    public int GroupSize { get; set; }
+
+    [JsonPropertyName("groups")]
+    public List<List<string>> Groups { get; set; } = new();
+}
+
 public sealed class BackupManifest
 {
     [JsonPropertyName("format_version")]
@@ -137,6 +161,37 @@ public sealed class BackupManifest
     [JsonPropertyName("volume_size")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public long? VolumeSize { get; set; }
+
+    /// <summary>
+    /// P2-V2a: the Usenet parity this backup was uploaded with, per
+    /// provider (key = ChunkMessageIndex.MakeProviderKey: "host/newsgroup").
+    /// Parity composition — redundancy mode, XOR group size, and the
+    /// group member lists the parity block IDs were derived from — used
+    /// to be upload-time knowledge only (job/provider config), so
+    /// retention could never enumerate, health-check, or regenerate
+    /// parity articles: data articles refreshed while parity silently
+    /// aged out and the reconstruction safety net disappeared. Recorded
+    /// by the upload paths and stamped via SaveManifest before the
+    /// manifest article is posted. Additive and WhenWritingNull: legacy
+    /// manifests have no record and retention treats them exactly as
+    /// before (parity unrefreshable — the information was never kept).
+    /// </summary>
+    [JsonPropertyName("parity_by_provider")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, ManifestParityRecord>? ParityByProvider { get; set; }
+
+    /// <summary>
+    /// P2-V2b: the posting date ("yyyy-MM-dd") each batch's NFO article
+    /// was built with, by batch index (null entries = no NFO posted for
+    /// that batch). Batched uploads build each batch's NFO with that
+    /// day's date; without this record retention could only rebuild the
+    /// single-set NFO (whose date is the backup's creation date).
+    /// Additive; when absent, retention falls back to the creation
+    /// date for every batch.
+    /// </summary>
+    [JsonPropertyName("nfo_dates")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string?>? NfoDates { get; set; }
 
     [JsonPropertyName("root_sha256")]
     public string RootSha256 { get; set; } = "";

@@ -1,3 +1,4 @@
+using UsenetBackup.Core.Redundancy;
 using UsenetBackup.Core.Service;
 
 namespace UsenetBackup.Core.Nntp;
@@ -19,6 +20,13 @@ namespace UsenetBackup.Core.Nntp;
 ///
 /// The "article" unit is the packed volume for volume-packed backups and
 /// the chunk otherwise (see the manifest's volumes list).
+///
+/// Parity articles (P2-V2a) ride the same cycle when the manifest
+/// carries the provider's parity record: they are sampled alongside
+/// data, republished under new identities in every full refresh, and
+/// repaired on their own when data is healthy but parity was lost
+/// early (that repair does not move the retention timestamp — the
+/// data clock it tracks was not refreshed).
 ///
 /// The retention timestamp is advanced ONLY after every republished article
 /// has been STAT-verified. A partial failure leaves the old timestamp in
@@ -261,13 +269,122 @@ public sealed class RetentionManager
         if (manifestMissing)
             report.ArticlesMissing++;
 
+        // P2-V2a: parity articles are health-checked too, when the
+        // manifest carries this provider's parity record. (Backups
+        // uploaded before the record existed have none — their parity
+        // composition was never kept, so it stays unrefreshable.)
+        // Parity IDs derive from the recorded groups exactly as the
+        // upload derived them.
+        ManifestParityRecord? parityRecord = null;
+        if (manifest.ParityByProvider is { } byProvider)
+            byProvider.TryGetValue(
+                ChunkMessageIndex.MakeProviderKey(
+                    record.ProviderHost, record.Newsgroup),
+                out parityRecord);
+        var parityIds = new List<string>();
+        var parityGroupOf = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        if (parityRecord is { Mode: "xor" or "par2" })
+        {
+            foreach (var group in parityRecord.Groups)
+            {
+                if (parityRecord.Mode == "xor")
+                {
+                    string id = XorParity.MakeParityId(group);
+                    parityIds.Add(id);
+                    parityGroupOf[id] = group;
+                }
+                else
+                {
+                    for (int p = 0; p < Par2Redundancy.ParityShards; p++)
+                    {
+                        string id = Par2Redundancy.MakeParityId(group, p);
+                        parityIds.Add(id);
+                        parityGroupOf[id] = group;
+                    }
+                }
+            }
+        }
+        var missingParity = new List<string>();
+        int paritySampled = 0;
+        if (parityIds.Count > 0)
+        {
+            var paritySample = SampleChunks(parityIds, sampleSize,
+                StableSampleSeed(record.BackupId + ":parity"));
+            paritySampled = paritySample.Count;
+            foreach (string parityId in paritySample)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                report.ArticlesChecked++;
+                bool exists;
+                try
+                {
+                    exists = remote.ExistsOnServer(parityId);
+                }
+                catch
+                {
+                    exists = false; // Treat check failure as missing (conservative)
+                }
+
+                if (!exists)
+                {
+                    missingParity.Add(parityId);
+                    report.ArticlesMissing++;
+                }
+            }
+        }
+
         _log($"Backup {record.BackupId}: {sample.Count - missingArticles.Count}/{sample.Count} " +
              $"sampled articles present on server, {daysLeft} days retention remaining" +
-             (manifestMissing ? "; manifest article MISSING" : ""));
+             (manifestMissing ? "; manifest article MISSING" : "") +
+             (parityIds.Count > 0
+                 ? $"; parity sample: {paritySampled - missingParity.Count}/{paritySampled} present ({parityIds.Count} total)"
+                 : ""));
 
         // Outcome 1: present and healthy — nothing to do.
         if (missingArticles.Count == 0 && !manifestMissing && daysLeft > repostThresholdDays)
-            return BackupOutcome.Healthy;
+        {
+            if (missingParity.Count == 0)
+                return BackupOutcome.Healthy;
+
+            // P2-V2a: data is healthy and its clock honest, but parity
+            // was lost early (provider drop, partial propagation). As
+            // with data, a missing sample triggers regenerating ALL
+            // parity — the sample is only a window. The new identities
+            // are published in the message-identity index so
+            // reconstruction can find them. The retention clock does
+            // NOT move: the data it tracks was not refreshed.
+            if (dryRun)
+            {
+                _log($"Backup {record.BackupId}: would regenerate {parityIds.Count} " +
+                     $"parity article(s) ({missingParity.Count} sampled missing)");
+                return BackupOutcome.RefreshedMissing;
+            }
+            _log($"Backup {record.BackupId}: {missingParity.Count} sampled parity " +
+                 $"article(s) missing; regenerating all {parityIds.Count} parity articles");
+            var parityFailures = RepublishParityArticles(repo, remote,
+                parityRecord!, parityIds, volumeMode, volumeChunks,
+                report, cancellationToken);
+            if (parityFailures.Count > 0)
+            {
+                _log($"Backup {record.BackupId}: {parityFailures.Count} parity " +
+                     "republication(s) failed; retention timestamp NOT advanced");
+                return BackupOutcome.Failed;
+            }
+            try
+            {
+                string indexJson = repo.MessageIndex.ToJson();
+                int version = remote.PostMessageIndex(indexJson);
+                _log($"  published message-identity index v{version}");
+            }
+            catch (Exception ex)
+            {
+                _log($"Backup {record.BackupId}: message-identity index publication failed: " +
+                     $"{ex.Message}; retention timestamp NOT advanced");
+                report.Errors.Add($"Index publish {record.BackupId}: {ex.Message}");
+                return BackupOutcome.Failed;
+            }
+            return BackupOutcome.RefreshedMissing;
+        }
 
         // Outcome 2 vs 3: missing articles, or merely approaching expiry.
         bool isMissing = missingArticles.Count > 0 || manifestMissing;
@@ -308,67 +425,11 @@ public sealed class RetentionManager
                 // and update the message index before returning. Volume bytes
                 // are rebuilt deterministically from local chunks — only the
                 // message ID is new.
-                string newMessageId;
-                if (volumeMode)
-                {
-                    var chunkIds = volumeChunks![articleId];
-                    byte[] volumeBytes;
-                    if (chunkIds.Any(id => LocalChunkMissing(repo, id)))
-                    {
-                        // Some local chunks are gone (e.g. wiped after
-                        // upload to save space). Volume bytes are
-                        // deterministic, so a server download is
-                        // byte-identical to a local rebuild.
-                        _log($"  local chunks for volume {articleId[..12]}… missing, " +
-                             "downloading volume from server for republish");
-                        volumeBytes = remote.GetVolume(articleId);
-                    }
-                    else
-                    {
-                        // DL-7: verify every local blob (decrypt + hash)
-                        // BEFORE packing. BuildVolume packs raw blobs with
-                        // no integrity check, so a locally corrupted blob
-                        // would otherwise be republished, the message index
-                        // repointed to it, and the retention timestamp
-                        // advanced — orphaning the healthy server article.
-                        // A verification failure throws into the per-article
-                        // failure handling below: nothing is posted for
-                        // this volume, the index keeps the old identity,
-                        // and the retention clock does not move.
-                        foreach (string chunkId in chunkIds)
-                            repo.VerifyChunk(chunkId);
-                        volumeBytes = VolumePacker.BuildVolume(
-                            chunkIds, repo.GetChunkBlob).Bytes;
-                    }
-                    newMessageId = remote.RepublishVolumeWithNewIdentity(articleId, volumeBytes);
-                }
-                else
-                {
-                    byte[] blob;
-                    if (LocalChunkMissing(repo, articleId))
-                    {
-                        // SF-10: chunk mode had no server-download
-                        // fallback (volume mode did), so for a pruned
-                        // chunk-mode backup every republish threw on the
-                        // missing local blob and the backup aged to
-                        // expiry unrefreshed. Download the blob back —
-                        // it is exactly the bytes republication posts.
-                        _log($"  local chunk {articleId[..12]}… missing, " +
-                             "downloading from server for republish");
-                        blob = remote.Get(articleId);
-                    }
-                    else
-                    {
-                        // DL-7: the same guard as the volume path —
-                        // verify the local blob before republishing it
-                        // under a new identity, so a corrupted blob
-                        // fails this article instead of replacing the
-                        // healthy server copy.
-                        repo.VerifyChunk(articleId);
-                        blob = repo.GetChunkBlob(articleId);
-                    }
-                    newMessageId = remote.RepublishWithNewIdentity(articleId, blob);
-                }
+                byte[] articleBytes = AcquireArticleBytes(
+                    repo, remote, articleId, volumeMode, volumeChunks);
+                string newMessageId = volumeMode
+                    ? remote.RepublishVolumeWithNewIdentity(articleId, articleBytes)
+                    : remote.RepublishWithNewIdentity(articleId, articleBytes);
                 republished++;
                 report.ArticlesRepublished++;
                 _log($"  republished {articleId[..12]}… as {newMessageId}");
@@ -387,6 +448,25 @@ public sealed class RetentionManager
             _log($"Backup {record.BackupId}: {failures.Count}/{toRepublish.Count} republications " +
                  $"failed; retention timestamp NOT advanced");
             return BackupOutcome.Failed;
+        }
+
+        // P2-V2a: parity rides the full refresh — every parity block is
+        // regenerated and republished under a new identity alongside
+        // the data (a present article cannot be re-issued under its
+        // deterministic ID, so parity would age out on the old clock
+        // while data refreshed). Failures fail the transaction exactly
+        // like data failures: no index publication, no clock advance.
+        if (parityIds.Count > 0)
+        {
+            var parityFailures = RepublishParityArticles(repo, remote,
+                parityRecord!, parityIds, volumeMode, volumeChunks,
+                report, cancellationToken);
+            if (parityFailures.Count > 0)
+            {
+                _log($"Backup {record.BackupId}: {parityFailures.Count} parity " +
+                     "republication(s) failed; retention timestamp NOT advanced");
+                return BackupOutcome.Failed;
+            }
         }
 
         // Publish the updated message-identity index BEFORE advancing the
@@ -451,6 +531,103 @@ public sealed class RetentionManager
     }
 
     /// <summary>
+    /// Acquires one article's bytes for republication. Local blobs are
+    /// verified before use (DL-7 — a corrupt local blob must fail the
+    /// article, never replace the healthy server copy); when local
+    /// chunks were pruned, the bytes come from the server instead
+    /// (deterministic packing makes them identical in volume mode;
+    /// in chunk mode the downloaded blob IS the republication bytes —
+    /// the SF-10 fallback).
+    /// </summary>
+    private byte[] AcquireArticleBytes(
+        BackupRepository repo, NntpBlobStore remote, string articleId,
+        bool volumeMode, Dictionary<string, IReadOnlyList<string>>? volumeChunks)
+    {
+        if (volumeMode)
+        {
+            var chunkIds = volumeChunks![articleId];
+            if (chunkIds.Any(id => LocalChunkMissing(repo, id)))
+            {
+                // Some local chunks are gone (e.g. wiped after upload to
+                // save space). Volume bytes are deterministic, so a
+                // server download is byte-identical to a local rebuild.
+                _log($"  local chunks for volume {articleId[..12]}… missing, " +
+                     "downloading volume from server for republish");
+                return remote.GetVolume(articleId);
+            }
+            foreach (string chunkId in chunkIds)
+                repo.VerifyChunk(chunkId);
+            return VolumePacker.BuildVolume(chunkIds, repo.GetChunkBlob).Bytes;
+        }
+        if (LocalChunkMissing(repo, articleId))
+        {
+            _log($"  local chunk {articleId[..12]}… missing, " +
+                 "downloading from server for republish");
+            return remote.Get(articleId);
+        }
+        repo.VerifyChunk(articleId);
+        return repo.GetChunkBlob(articleId);
+    }
+
+    /// <summary>
+    /// Regenerates the given parity articles from their recorded
+    /// groups and republishes each under a new message identity
+    /// (P2-V2a). Group member bytes are acquired exactly like data
+    /// republication acquires them. Returns per-article failure
+    /// descriptions (empty = full success).
+    /// </summary>
+    private List<string> RepublishParityArticles(
+        BackupRepository repo, NntpBlobStore remote,
+        ManifestParityRecord parityRecord, IReadOnlyList<string> parityIds,
+        bool volumeMode, Dictionary<string, IReadOnlyList<string>>? volumeChunks,
+        RetentionReport report, CancellationToken cancellationToken)
+    {
+        var failures = new List<string>();
+        var wanted = new HashSet<string>(parityIds, StringComparer.Ordinal);
+        // Regenerate group by group; a group whose data cannot be
+        // acquired fails all of its wanted blocks at once.
+        foreach (var group in parityRecord.Groups)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string[] groupIds = parityRecord.Mode == "xor"
+                ? new[] { XorParity.MakeParityId(group) }
+                : Enumerable.Range(0, Par2Redundancy.ParityShards)
+                    .Select(p => Par2Redundancy.MakeParityId(group, p)).ToArray();
+            if (!groupIds.Any(wanted.Contains))
+                continue;
+            try
+            {
+                byte[] GetBytes(string dataId) => AcquireArticleBytes(
+                    repo, remote, dataId, volumeMode, volumeChunks);
+                IReadOnlyDictionary<string, byte[]> blocks =
+                    parityRecord.Mode == "xor"
+                        ? XorParity.GenerateParity(
+                            group, GetBytes, null, parityRecord.GroupSize)
+                        : Par2Redundancy.GenerateParity(group, GetBytes);
+                foreach (var (parityId, bytes) in blocks)
+                {
+                    if (!wanted.Contains(parityId))
+                        continue;
+                    string newMessageId = volumeMode
+                        ? remote.RepublishVolumeWithNewIdentity(parityId, bytes)
+                        : remote.RepublishWithNewIdentity(parityId, bytes);
+                    report.ArticlesRepublished++;
+                    _log($"  republished parity {parityId[..12]}… as {newMessageId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                foreach (string parityId in groupIds.Where(wanted.Contains))
+                {
+                    failures.Add($"{parityId}: {ex.Message}");
+                    report.Errors.Add($"Republish parity {parityId}: {ex.Message}");
+                }
+            }
+        }
+        return failures;
+    }
+
+    /// <summary>
     /// True when a chunk's blob is not present in the local repository
     /// (both blob stores report a missing chunk as
     /// <see cref="InvalidDataException"/> from the size probe). Used to
@@ -472,13 +649,16 @@ public sealed class RetentionManager
     }
 
     /// <summary>
-    /// SF-10: reposts the backup's NFO article if the server has lost
-    /// it — only for the single-post-set shape (the non-batched upload
-    /// path, and legacy manifests): one NFO whose text is rebuilt from
-    /// the manifest exactly as the upload built it. Batched uploads
-    /// post one NFO per staging batch with batch-specific dates and
-    /// part counts the manifest does not record, so their NFOs cannot
-    /// be faithfully rebuilt here and are skipped. The NFO is
+    /// SF-10 / P2-V2b: reposts the backup's NFO article(s) if the
+    /// server has lost them. One NFO per post set (batch): each is
+    /// rebuilt from the manifest exactly as the upload built it — the
+    /// batch's volume count from its volume entries, the poster from
+    /// the repo, and the posting date from the manifest's recorded
+    /// per-batch NFO dates. Manifests written before the dates were
+    /// recorded fall back to the backup's creation date for every
+    /// batch (the date the single-set upload path uses). Batches are
+    /// found by this backup's own set names, in batch order; the loop
+    /// stops at the first batch index with no volumes. The NFO is
     /// informational (newsreader metadata); remote discovery never
     /// reads it, so this is completeness, not recovery-critical.
     /// </summary>
@@ -487,20 +667,37 @@ public sealed class RetentionManager
     {
         if (!volumeMode || manifest.Volumes is not { Count: > 0 })
             return;
-        int distinctSets = manifest.Volumes
-            .Select(v => v.SetName).Distinct(StringComparer.Ordinal).Count();
-        if (distinctSets > 1)
-            return; // batched shape: per-batch NFOs are not reproducible here
-
-        string nfoText = ArticleCodec.BuildNfoText(
-            manifest.BackupId,
-            manifest.CreatedUtc.ToString("yyyy-MM-dd"),
-            manifest.Volumes.Count,
-            repo.GetOrCreatePoster());
-        if (remote.PostNfo(manifest.BackupId, batchIndex: 0, nfoText,
-                ArticleCodec.SetName(manifest.BackupId), manifest.Volumes.Count + 1,
-                recheckServer: true))
-            _log("  reposted NFO article (was missing from server)");
+        for (int batchIndex = 0; ; batchIndex++)
+        {
+            string setName = ArticleCodec.SetName(manifest.BackupId, batchIndex);
+            var batchVolumes = manifest.Volumes
+                .Where(v => v.SetName == setName).ToList();
+            if (batchVolumes.Count == 0)
+            {
+                // Legacy manifests record no set name (null) for the
+                // single post set — that set is batch 0.
+                if (batchIndex == 0)
+                    batchVolumes = manifest.Volumes
+                        .Where(v => v.SetName is null).ToList();
+                if (batchVolumes.Count == 0)
+                    break;
+            }
+            string date =
+                manifest.NfoDates is { } dates
+                && batchIndex < dates.Count
+                && dates[batchIndex] is { } recorded
+                    ? recorded
+                    : manifest.CreatedUtc.ToString("yyyy-MM-dd");
+            string nfoText = ArticleCodec.BuildNfoText(
+                manifest.BackupId,
+                date,
+                batchVolumes.Count,
+                repo.GetOrCreatePoster());
+            if (remote.PostNfo(manifest.BackupId, batchIndex, nfoText,
+                    setName, batchVolumes.Count + 1,
+                    recheckServer: true))
+                _log($"  reposted NFO article for batch {batchIndex} (was missing from server)");
+        }
     }
 
     /// <summary>
