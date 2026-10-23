@@ -290,6 +290,94 @@ public sealed class RepositoryTests : IDisposable
     }
 
     [Fact]
+    public void Manifest_Tampered_RecomputedHashOnly_RefusedByHmac()
+    {
+        // DL-8, the exact attack: a writer WITHOUT the passphrase
+        // deletes a file from the manifest and recomputes the plain
+        // root hash (public algorithm — anyone can). Pre-DL-8 that
+        // manifest verified perfectly and the restore silently
+        // brought back a subset. The HMAC cannot be recomputed
+        // without the key, so the load must now refuse.
+        WriteSrc("keep.txt", "keep"u8.ToArray());
+        WriteSrc("drop.txt", "drop"u8.ToArray());
+        string backupId;
+        using (var repo = InitRepo())
+            backupId = repo.BackupDirectory(_srcDir).BackupId;
+
+        string path = Path.Combine(_repoDir, "manifests", backupId + ".json");
+        var manifest = BackupManifest.FromJson(File.ReadAllText(path));
+        Assert.NotNull(manifest.RootHmac); // new manifests are stamped
+        manifest.Files.RemoveAll(f => f.Path == "drop.txt");
+        manifest.RootSha256 = manifest.ComputeRootHash(); // attacker's move
+        Assert.True(manifest.VerifyRootHash()); // the unkeyed check passes!
+        File.WriteAllText(path, manifest.ToJson());
+
+        using var repo2 = BackupRepository.Open(_repoDir, Passphrase);
+        Assert.Throws<InvalidDataException>(() => repo2.LoadManifest(backupId));
+    }
+
+    [Fact]
+    public void LoadManifest_LegacyManifest_LoadsAndIsRestamped()
+    {
+        // DL-8 grandfathering: a pre-HMAC manifest (root_hmac absent)
+        // stays loadable on the root hash alone, and the load
+        // re-stamps it in place so its window closes.
+        WriteSrc("a.txt", "alpha"u8.ToArray());
+        string backupId;
+        using (var repo = InitRepo())
+            backupId = repo.BackupDirectory(_srcDir).BackupId;
+
+        string path = Path.Combine(_repoDir, "manifests", backupId + ".json");
+        var legacy = BackupManifest.FromJson(File.ReadAllText(path));
+        legacy.RootHmac = null;
+        File.WriteAllText(path, legacy.ToJson());
+        Assert.Null(BackupManifest.FromJson(File.ReadAllText(path)).RootHmac);
+        // The root hash is unchanged by the strip (canonical form
+        // blanks the HMAC), so the legacy file still verifies.
+        Assert.True(BackupManifest.FromJson(File.ReadAllText(path)).VerifyRootHash());
+
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+        {
+            var loaded = repo.LoadManifest(backupId);
+            Assert.Equal(backupId, loaded.BackupId);
+        }
+        var restamped = BackupManifest.FromJson(File.ReadAllText(path));
+        Assert.NotNull(restamped.RootHmac);
+        // And the stamp is REAL, not decorative: tamper THIS backup
+        // (drop its only file, recompute the plain hash — the move a
+        // legacy manifest would have survived) and the load refuses.
+        restamped.Files.Clear();
+        restamped.RootSha256 = restamped.ComputeRootHash();
+        Assert.True(restamped.VerifyRootHash());
+        File.WriteAllText(path, restamped.ToJson());
+        using (var repo = BackupRepository.Open(_repoDir, Passphrase))
+            Assert.Throws<InvalidDataException>(() => repo.LoadManifest(backupId));
+    }
+
+    [Fact]
+    public void LoadManifest_ManifestStampedUnderDifferentKey_Refused()
+    {
+        // A manifest planted from a DIFFERENT repo (different
+        // passphrase): its root hash verifies (keyless), its HMAC
+        // cannot verify under this repo's key.
+        WriteSrc("a.txt", "alpha"u8.ToArray());
+        string backupId;
+        using (var repo = InitRepo())
+            backupId = repo.BackupDirectory(_srcDir).BackupId;
+        string manifestJson = File.ReadAllText(
+            Path.Combine(_repoDir, "manifests", backupId + ".json"));
+
+        string otherDir = Path.Combine(_workDir, "other-repo");
+        using (var other = BackupRepository.Init(otherDir, "a-different-passphrase"))
+        {
+            Directory.CreateDirectory(Path.Combine(otherDir, "manifests"));
+            File.WriteAllText(
+                Path.Combine(otherDir, "manifests", backupId + ".json"), manifestJson);
+            Assert.Throws<InvalidDataException>(() => other.LoadManifest(backupId));
+        }
+    }
+
+    [Fact]
     public void Open_CorruptCatalog_QuarantinedAndRebuilt()
     {
         // P2-D2: a torn catalog.db used to brick every operation with a

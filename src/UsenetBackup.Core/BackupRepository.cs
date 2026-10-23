@@ -360,9 +360,9 @@ public sealed class BackupRepository : IDisposable
     private BackupManifest FinalizeManifest(BackupManifest manifest)
     {
         // Root hash covers type + parent_id, so compute it last.
-        manifest.RootSha256 = manifest.ComputeRootHash();
-        if (!manifest.VerifyRootHash())
-            throw new InvalidOperationException("Internal error: manifest root hash did not verify.");
+        StampManifestAuth(manifest);
+        if (!manifest.VerifyRootHash() || !manifest.VerifyRootHmac(_key))
+            throw new InvalidOperationException("Internal error: manifest root hash/HMAC did not verify.");
 
         WriteManifest(manifest);
         _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source, manifest.CreatedUtc);
@@ -586,8 +586,21 @@ public sealed class BackupRepository : IDisposable
         return manifest;
     }
 
+    /// <summary>
+    /// DL-8: (re)computes the manifest's root hash and root HMAC.
+    /// WriteManifest is the single funnel every manifest file write
+    /// passes through (finalize, save, import), so stamping here
+    /// means no write path can produce an unauthenticated manifest.
+    /// </summary>
+    private void StampManifestAuth(BackupManifest manifest)
+    {
+        manifest.RootSha256 = manifest.ComputeRootHash();
+        manifest.RootHmac = manifest.ComputeRootHmac(_key);
+    }
+
     private void WriteManifest(BackupManifest manifest)
     {
+        StampManifestAuth(manifest);
         string manifestPath = Path.Combine(_root, "manifests", manifest.BackupId + ".json");
         // Atomic write via temp file: a crash mid-write must not leave a
         // truncated manifest that the catalog already references.
@@ -612,6 +625,15 @@ public sealed class BackupRepository : IDisposable
         if (!manifest.VerifyRootHash())
             throw new InvalidDataException(
                 $"Imported manifest {manifest.BackupId} failed root-hash verification.");
+        // DL-8: the manifest arrived AES-GCM-authenticated, so a
+        // present-but-wrong HMAC means it was stamped under a
+        // different repo key — refuse it rather than re-stamping over
+        // the discrepancy in WriteManifest. A legacy import (no HMAC)
+        // is stamped by WriteManifest like any other write.
+        if (manifest.RootHmac is not null && !manifest.VerifyRootHmac(_key))
+            throw new InvalidDataException(
+                $"Imported manifest {manifest.BackupId} could not be authenticated " +
+                "(stamped under a different passphrase, or tampered).");
         WriteManifest(manifest);
         _catalog.RecordBackup(manifest.BackupId, manifest.Type, manifest.Source ?? "",
             manifest.CreatedUtc);
@@ -1410,6 +1432,28 @@ public sealed class BackupRepository : IDisposable
         var manifest = BackupManifest.FromJson(File.ReadAllText(path));
         if (!manifest.VerifyRootHash())
             throw new InvalidDataException($"Manifest {backupId} failed root-hash verification (tampered or corrupt).");
+        // DL-8: when the manifest carries an HMAC, it must verify
+        // under this repo's key — the plain root hash alone can be
+        // recomputed by anyone who can write to the repo, so a
+        // mismatch here is exactly the silent-subset tamper the HMAC
+        // exists to catch. Fail closed.
+        if (manifest.RootHmac is not null)
+        {
+            if (!manifest.VerifyRootHmac(_key))
+                throw new InvalidDataException(
+                    $"Manifest {backupId} could not be authenticated — " +
+                    "the passphrase is wrong or the manifest was tampered with.");
+        }
+        else
+        {
+            // Legacy manifest (written before root_hmac existed):
+            // accept on the root hash alone — old backups must stay
+            // restorable — and re-stamp in place so the window closes
+            // for any repo in active use. Best effort: a read-only
+            // location must not fail the load.
+            try { WriteManifest(manifest); }
+            catch { /* re-stamp is opportunistic; the load stands */ }
+        }
         return manifest;
     }
 
@@ -1602,7 +1646,7 @@ public sealed class BackupRepository : IDisposable
     public void SaveManifest(BackupManifest manifest)
     {
         ArgumentNullException.ThrowIfNull(manifest);
-        manifest.RootSha256 = manifest.ComputeRootHash();
+        // Root hash + HMAC are (re)stamped by WriteManifest.
         WriteManifest(manifest);
     }
 

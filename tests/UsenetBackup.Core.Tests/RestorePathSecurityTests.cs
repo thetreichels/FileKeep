@@ -48,6 +48,14 @@ public sealed class RestorePathSecurityTests : IDisposable
         var manifest = BackupManifest.FromJson(File.ReadAllText(manifestPath));
         mutate(manifest);
         manifest.RootSha256 = manifest.ComputeRootHash();
+        // Post-DL-8 framing: a keyless writer can no longer forge a
+        // STAMPED manifest (LoadManifest refuses it — see the DL-8
+        // tests in RepositoryTests). What remains reachable is a
+        // hostile LEGACY manifest — no HMAC, grandfathered on the root
+        // hash alone — which is exactly why the restore-time path
+        // defenses these tests exercise must keep working. Strip the
+        // HMAC so the poisoned manifest is of that class.
+        manifest.RootHmac = null;
         File.WriteAllText(manifestPath, manifest.ToJson());
     }
 

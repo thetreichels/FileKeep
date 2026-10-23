@@ -142,6 +142,22 @@ public sealed class BackupManifest
     public string RootSha256 { get; set; } = "";
 
     /// <summary>
+    /// DL-8: HMAC-SHA-256 over the same canonical form the root hash
+    /// covers, keyed by a subkey derived from the repo key. The plain
+    /// root hash is a public checksum — anyone who can write to a
+    /// repo (a share, a USB drive) could edit the file list and
+    /// recompute it, silently shrinking what a restore brings back.
+    /// The HMAC makes that edit detectable by anyone holding the
+    /// passphrase, on every load path (LoadManifest verifies it
+    /// whenever present). Additive and WhenWritingNull: manifests
+    /// written before this field existed serialize and verify exactly
+    /// as before, and are re-stamped opportunistically on load.
+    /// </summary>
+    [JsonPropertyName("root_hmac")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RootHmac { get; set; }
+
+    /// <summary>
     /// YubiKey HMAC-SHA1 challenge (base64) used to derive the decryption key.
     /// Not secret — posted with the backup so recovery can use a YubiKey
     /// without access to the original service.json. Null when YubiKey mode
@@ -169,29 +185,71 @@ public sealed class BackupManifest
     };
 
     /// <summary>
-    /// Computes root_sha256 = SHA-256 over the canonical JSON of this manifest
-    /// with the root_sha256 field itself excluded (it is serialized as "").
-    /// Property declaration order is the serialization order, which makes the
-    /// canonical form deterministic.
+    /// The canonical JSON both root fields cover: this manifest with
+    /// root_sha256 blanked and root_hmac omitted. Property declaration
+    /// order is the serialization order, which makes the canonical
+    /// form deterministic. Blanking the HMAC as well keeps the root
+    /// hash stable across re-stamping — a legacy manifest's root hash
+    /// verifies identically before and after it gains an HMAC.
     /// </summary>
-    public string ComputeRootHash()
+    private string CanonicalJson()
     {
-        string saved = RootSha256;
+        string savedHash = RootSha256;
+        string? savedHmac = RootHmac;
         try
         {
             RootSha256 = "";
-            string canonical = FileKeepJsonOptions.Serialize(this,
+            RootHmac = null;
+            return FileKeepJsonOptions.Serialize(this,
                 CanonicalOptions, FileKeepJsonContext.Default.BackupManifest);
-            return Hashing.Sha256Hex(Encoding.UTF8.GetBytes(canonical));
         }
         finally
         {
-            RootSha256 = saved;
+            RootSha256 = savedHash;
+            RootHmac = savedHmac;
         }
     }
 
+    /// <summary>
+    /// Computes root_sha256 = SHA-256 over the canonical JSON.
+    /// </summary>
+    public string ComputeRootHash() =>
+        Hashing.Sha256Hex(Encoding.UTF8.GetBytes(CanonicalJson()));
+
     public bool VerifyRootHash() =>
         string.Equals(ComputeRootHash(), RootSha256, StringComparison.OrdinalIgnoreCase);
+
+    private static readonly byte[] RootHmacDomainLabel =
+        Encoding.UTF8.GetBytes("FileKeep manifest root_hmac v1");
+
+    /// <summary>
+    /// Computes root_hmac = HMAC-SHA-256 over the canonical JSON,
+    /// keyed by SHA-256(repo key ‖ domain label) — a labeled subkey,
+    /// so the raw repo key is never used directly as an HMAC key.
+    /// </summary>
+    public string ComputeRootHmac(byte[] repoKey)
+    {
+        byte[] subkeyInput = new byte[repoKey.Length + RootHmacDomainLabel.Length];
+        Buffer.BlockCopy(repoKey, 0, subkeyInput, 0, repoKey.Length);
+        Buffer.BlockCopy(RootHmacDomainLabel, 0, subkeyInput, repoKey.Length,
+            RootHmacDomainLabel.Length);
+        byte[] subkey = System.Security.Cryptography.SHA256.HashData(subkeyInput);
+        byte[] mac = System.Security.Cryptography.HMACSHA256.HashData(
+            subkey, Encoding.UTF8.GetBytes(CanonicalJson()));
+        return Convert.ToHexString(mac).ToLowerInvariant();
+    }
+
+    public bool VerifyRootHmac(byte[] repoKey)
+    {
+        if (RootHmac is null)
+            return false;
+        byte[] expected = Convert.FromHexString(ComputeRootHmac(repoKey));
+        byte[] actual;
+        try { actual = Convert.FromHexString(RootHmac); }
+        catch (FormatException) { return false; }
+        return System.Security.Cryptography.CryptographicOperations
+            .FixedTimeEquals(expected, actual);
+    }
 
     public string ToJson() => FileKeepJsonOptions.Serialize(this,
         CanonicalOptions, FileKeepJsonContext.Default.BackupManifest);
