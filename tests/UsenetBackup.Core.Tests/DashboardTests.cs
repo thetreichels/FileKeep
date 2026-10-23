@@ -1411,8 +1411,9 @@ public sealed class DashboardTests : IDisposable
                 Ssl = true, Connections = 8,
             });
         Assert.Equal(200, status);
-        string json = System.Text.Json.JsonSerializer.Serialize(
-            payload, DashboardJsonContext.Default.GetTypeInfo(payload.GetType()));
+        var typeInfo = DashboardJsonContext.Default.GetTypeInfo(payload.GetType());
+        Assert.NotNull(typeInfo);
+        string json = System.Text.Json.JsonSerializer.Serialize(payload, typeInfo);
         Assert.Contains("\"host\":\"news.example.com\"", json);
         Assert.Contains("\"port\":563", json);
         Assert.Contains("\"ssl\":true", json);

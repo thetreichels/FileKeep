@@ -267,7 +267,7 @@ public static class Dashboard
                 try { scheduler.RunJobNow(name); }
                 catch (Exception ex)
                 {
-                    log($"dashboard: manual run of job '{name}' FAILED: {ex.Message}");
+                    log?.Invoke($"dashboard: manual run of job '{name}' FAILED: {ex.Message}");
                 }
             });
             return Results.Accepted();

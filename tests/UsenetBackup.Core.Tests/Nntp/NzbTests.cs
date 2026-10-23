@@ -255,7 +255,7 @@ public sealed class NzbVolumeTests
         NzbDocument doc = NzbParser.Parse(xml);
         Assert.True(doc.IsVolumeNzb);
         Assert.Equal(manifest.Volumes.Count, doc.Files.Count);
-        var parsedIds = doc.Files.Select(f => f.VolumeId).OrderBy(id => id, StringComparer.Ordinal).ToList();
+        var parsedIds = doc.Files.Select(f => f.VolumeId!).OrderBy(id => id, StringComparer.Ordinal).ToList();
         var expectedIds = manifest.Volumes.Select(v => v.Id).OrderBy(id => id, StringComparer.Ordinal).ToList();
         Assert.Equal(expectedIds, parsedIds);
         foreach (var file in doc.Files)
