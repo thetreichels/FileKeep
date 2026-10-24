@@ -292,7 +292,7 @@ public static partial class DashboardApi
         scheduler.Jobs.Select(j => new StatusJobDto(
             j.Config.Name,
             j.Config.Repo,
-            j.Config.Source,
+            j.Config.Sources,
             j.Schedule.ToString(),
             j.Config.Mode,
             j.Config.BackupPrivilege,

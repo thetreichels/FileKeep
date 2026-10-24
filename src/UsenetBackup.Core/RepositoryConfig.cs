@@ -30,8 +30,11 @@ public sealed class RepositoryConfig
     /// Chunk IDs are SHA-256 of plaintext either way, so deduplication,
     /// encryption, restore and verification are scheme-agnostic.
     /// </summary>
+    // No default: a repo file without this key is rejected at open (see
+    // BackupRepository.Open). Init always writes the key, so a missing
+    // key means a pre-CDC repo file.
     [JsonPropertyName("chunking_scheme")]
-    public string ChunkingScheme { get; set; } = "fixed";
+    public string ChunkingScheme { get; set; } = "";
 
     /// <summary>
     /// Target packed-volume size in bytes for Usenet uploads (default 100 MB, the scene-standard DVD9 RAR size).

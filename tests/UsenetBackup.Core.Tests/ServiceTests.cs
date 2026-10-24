@@ -62,7 +62,7 @@ public sealed class ServiceTests : IDisposable
           ],
           "jobs": [
             { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
-              "source": "{{_srcDir.Replace("\\", "\\\\")}}",
+              "sources": ["{{_srcDir.Replace("\\", "\\\\")}}"],
               "schedule": "{{schedule}}", "mode": "{{mode}}", "backupPrivilege": false,
               "targets": ["vault"] }
           ]
@@ -126,7 +126,7 @@ public sealed class ServiceTests : IDisposable
         int jobsClose = dup.LastIndexOf(']');
         string secondJob =
             ", { \"name\": \"docs\", \"repo\": \"" + _repoDir.Replace("\\", "\\\\") + "\"," +
-            " \"source\": \"" + _srcDir.Replace("\\", "\\\\") + "\"," +
+            " \"sources\": [\"" + _srcDir.Replace("\\", "\\\\") + "\"]," +
             " \"schedule\": \"interval 60\", \"mode\": \"incremental\", \"backupPrivilege\": false," +
             " \"targets\": [\"vault\"] }";
         string two = dup.Insert(jobsClose, secondJob);
@@ -155,7 +155,7 @@ public sealed class ServiceTests : IDisposable
     {
         Jobs = new List<BackupJobConfig>
         {
-            new() { Name = "docs", Repo = "r", Source = "s", Schedule = "interval 60" },
+            new() { Name = "docs", Repo = "r", Sources = new List<string> { "s" }, Schedule = "interval 60" },
         },
     };
 
@@ -235,7 +235,7 @@ public sealed class ServiceTests : IDisposable
     }
 
     [Fact]
-    public void Validate_JobTargets_MustBeDefinedLocations_BareTokensToleratedInert()
+    public void Validate_JobTargets_MustBeDefinedLocations_BareTokensRejected()
     {
         // SF-21: an unknown target name was treated as Active by the
         // gate and silently dropped whenever another target resolved.
@@ -251,15 +251,13 @@ public sealed class ServiceTests : IDisposable
         ok.Jobs[0].Targets = new List<string> { "nas" };
         ok.Validate();
 
-        // Bare legacy tokens ("nntp"/"smb") still validate — a
-        // pre-locations service.json loads rather than erroring the
-        // whole service — but since Phase 6 they resolve to no location
-        // anywhere: the job behaves as target-less (NeedsLocation).
+        // No backwards compatibility: bare legacy tokens ("nntp"/"smb")
+        // no longer validate — a pre-locations service.json fails to
+        // load instead of loading with inert targets.
         var bare = ValidObjectConfig();
         bare.Jobs[0].Targets = new List<string> { "nntp" };
-        bare.Validate();
-        Assert.Equal(JobRunState.NeedsLocation,
-            JobStateEvaluator.Evaluate(bare.Jobs[0], JobStateEvaluator.BuildLookup(bare)));
+        var bareEx = Assert.Throws<InvalidOperationException>(() => bare.Validate());
+        Assert.Contains("nntp", bareEx.Message);
     }
 
     [Fact]

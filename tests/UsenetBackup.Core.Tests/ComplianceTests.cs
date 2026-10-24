@@ -183,7 +183,7 @@ public sealed class ComplianceTests : IDisposable
             },
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "audit", Repo = repoDir, Source = srcDir,
+                new() { Name = "audit", Repo = repoDir, Sources = new List<string> { srcDir },
                         Schedule = schedule, Mode = "incremental", BackupPrivilege = false,
                         Targets = new List<string> { "vault" } },
             },
@@ -246,7 +246,7 @@ public sealed class ComplianceTests : IDisposable
         string json = """
             { "dashboardBind": "127.0.0.1", "dashboardPort": 15789,
               "passphrase": "hunter2",
-              "jobs": [ { "name": "audit", "repo": "r", "source": "s",
+              "jobs": [ { "name": "audit", "repo": "r", "sources": ["s"],
                           "schedule": "interval 60", "passphrase": "hunter2" } ] }
             """;
         string path = Path.Combine(_workDir, "service.json");

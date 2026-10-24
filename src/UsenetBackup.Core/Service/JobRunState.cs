@@ -99,10 +99,10 @@ public static class JobStateEvaluator
             return JobRunState.NeedsLocation;
         // A target is usable when its location exists, is not an absent
         // USB drive, and is not a network location currently considered
-        // away. A target naming no location at all — a legacy bare
-        // "nntp"/"smb" token from a pre-locations config, or a name left
-        // dangling by a hand edit — resolves to NOTHING (Phase 6 dropped
-        // the bare-token fallback): it can never make the job Active.
+        // away. A target naming no location at all — e.g. a name left
+        // dangling by a hand edit — resolves to NOTHING: it can never
+        // make the job Active. (Loaded configs reject unknown names at
+        // validation; this path covers in-memory jobs.)
         // When every target is unresolvable the job is NeedsLocation,
         // exactly like a job with no targets at all. (Location deletion
         // strips names from target lists in the same operation, so in

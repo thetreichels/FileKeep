@@ -814,7 +814,6 @@ public sealed class BackupScheduler
             {
                 Name = "manual-upload",
                 Repo = repoPath,
-                Source = "",
             };
             AutoUploadToUsenet(job, backupId, passphrase, token);
             }
@@ -1300,7 +1299,6 @@ public sealed class BackupScheduler
         var job = new BackupJobConfig
         {
             Name = "One-time backup",
-            Source = sources[0],
             Sources = sources,
             Repo = repoPath,
             Mode = "full",
@@ -1427,14 +1425,14 @@ public sealed class BackupScheduler
                         // NS-3: the operation token reaches into the
                         // backup itself — a stop aborts at the next file
                         // boundary instead of waiting for the whole run.
-                        manifest = repo.BackupDirectory(srcJob.Source, snap, token);
+                        manifest = repo.BackupDirectory(srcJob.FirstSource, snap, token);
                     }
                     else
                     {
-                        string? parent = LatestBackupIdForSource(repo, srcJob.Source);
+                        string? parent = LatestBackupIdForSource(repo, srcJob.FirstSource);
                         manifest = parent is null
-                            ? repo.BackupDirectory(srcJob.Source, snap, token)
-                            : repo.BackupIncremental(srcJob.Source, parent, snap,
+                            ? repo.BackupDirectory(srcJob.FirstSource, snap, token)
+                            : repo.BackupIncremental(srcJob.FirstSource, parent, snap,
                                 VerificationModeParser.Parse(srcJob.VerificationMode),
                                 cancellationToken: token);
                     }
@@ -1485,7 +1483,6 @@ public sealed class BackupScheduler
         string json = JsonSerializer.Serialize(job, FileKeepJsonContext.Default.BackupJobConfig);
         var clone = JsonSerializer.Deserialize(json, FileKeepJsonContext.Default.BackupJobConfig)
             ?? throw new InvalidOperationException($"Failed to clone job '{job.Name}'.");
-        clone.Source = source;
         clone.Sources = new List<string> { source };
         return clone;
     }
@@ -1763,21 +1760,21 @@ public sealed class BackupScheduler
             throw new InvalidOperationException(
                 $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");
         if (job.BackupPrivilege)
-            return new BackupPrivilegeSnapshotProvider(job.Source);
+            return new BackupPrivilegeSnapshotProvider(job.FirstSource);
         if (job.Vss)
         {
             if (!OperatingSystem.IsWindows())
                 throw new PlatformNotSupportedException(
                     $"Job '{job.Name}': VSS snapshots require Windows.");
             string helper = LocateVssHelper();
-            string volume = Path.GetPathRoot(Path.GetFullPath(job.Source))
+            string volume = Path.GetPathRoot(Path.GetFullPath(job.FirstSource))
                 ?? throw new InvalidOperationException(
-                    $"Job '{job.Name}': cannot determine volume for '{job.Source}'.");
+                    $"Job '{job.Name}': cannot determine volume for '{job.FirstSource}'.");
             // Scale the snapshot hold time: the helper aborts (deleting the
             // snapshot mid-backup) on timeout. Default 2h; configurable per job.
             int timeoutSecs = job.VssTimeoutSecs > 0 ? job.VssTimeoutSecs : 7200;
             var vss = new Recovery.VssSnapshot(helper, timeoutSecs);
-            vss.Create(volume, job.Source);
+            vss.Create(volume, job.FirstSource);
             return vss;
         }
         return null;
@@ -1849,9 +1846,9 @@ public sealed class BackupScheduler
             // process mid-post/mid-copy with no run outcome recorded.
             token.ThrowIfCancellationRequested();
             // Resolve the target name to a location. A name matching no
-            // location — including a legacy bare "nntp"/"smb" token —
-            // resolves to nothing and lands in the error outcome below;
-            // there is no bare-token fallback (Phase 6).
+            // location resolves to nothing and lands in the error
+            // outcome below (loaded configs reject unknown names at
+            // validation; this covers in-memory jobs).
             BackupLocation? loc = _config.SnapshotLocations().FirstOrDefault(l =>
                 l.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
             string type = loc?.Type ?? "";
@@ -1915,7 +1912,7 @@ public sealed class BackupScheduler
         BackupJobConfig job, BackupRepository repo, CancellationToken token)
     {
         // Find SMB and NNTP targets. Only names that resolve to a
-        // location count — a legacy bare token resolves to nothing.
+        // location count — unknown names resolve to nothing.
         bool hasSmb = false;
         bool hasNntp = false;
         BackupLocation? smbLoc = null;
@@ -1942,7 +1939,7 @@ public sealed class BackupScheduler
             Log($"job '{job.Name}': SMB+NNTP targets — using local staging for fan-out.");
         else
             Log($"job '{job.Name}': no network target — staging disk image locally.");
-        return repo.BackupDiskImage(job.Source, imageName, token);
+        return repo.BackupDiskImage(job.FirstSource, imageName, token);
     }
 
     /// <summary>
@@ -1986,7 +1983,7 @@ public sealed class BackupScheduler
 
         if (!job.IsDiskImage && job.Mode != "full")
         {
-            string? parentId = LatestBackupIdForSource(repo, job.Source);
+            string? parentId = LatestBackupIdForSource(repo, job.FirstSource);
             if (parentId is not null)
             {
                 parentManifest = repo.LoadManifest(parentId);
@@ -2164,8 +2161,8 @@ public sealed class BackupScheduler
             foreach (var usbLoc in usbLocs)
             {
                 string? usbPath = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
-                if (usbPath is not null && !string.IsNullOrWhiteSpace(job.Source))
-                    StorageGuard.EnsureUsbDriveNotSource(usbPath, job.Source, job.Name);
+                if (usbPath is not null && !string.IsNullOrWhiteSpace(job.FirstSource))
+                    StorageGuard.EnsureUsbDriveNotSource(usbPath, job.FirstSource, job.Name);
             }
 
             // DL-1 delivery evidence for staging dedup: a chunk may be
@@ -2396,15 +2393,15 @@ public sealed class BackupScheduler
             if (job.IsDiskImage)
             {
                 string imageName = DiskImageName(job.Name);
-                string? volumeLetter = GetVolumeLetterForDevice(job.Source);
+                string? volumeLetter = GetVolumeLetterForDevice(job.FirstSource);
                 manifest = repo.BackupDiskImageBatched(
-                    job.Source, imageName, job.Sparse, volumeLetter, batchCtx, backupId,
+                    job.FirstSource, imageName, job.Sparse, volumeLetter, batchCtx, backupId,
                     cancellationToken: token);
             }
             else
             {
                 manifest = repo.BackupDirectoryBatched(
-                    job.Source, parentManifest, snap, batchCtx,
+                    job.FirstSource, parentManifest, snap, batchCtx,
                     VerificationModeParser.Parse(job.VerificationMode), backupId,
                     cancellationToken: token);
             }
@@ -2630,14 +2627,14 @@ public sealed class BackupScheduler
         if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
             smbPassword = Dpapi.Unprotect(passwordProtected);
 
-        string? volumeLetter = GetVolumeLetterForDevice(job.Source);
+        string? volumeLetter = GetVolumeLetterForDevice(job.FirstSource);
 
         Log($"job '{job.Name}': streaming disk image to SMB share '{share}' " +
             $"(sparse={job.Sparse})...");
         using var smb = SmbShare.Connect(share, user, smbPassword);
         var store = new SmbBlobStore(smb);
         var manifest = repo.BackupDiskImageStreaming(
-            job.Source, store, imageName, sparse: job.Sparse, volumeLetter: volumeLetter,
+            job.FirstSource, store, imageName, sparse: job.Sparse, volumeLetter: volumeLetter,
             cancellationToken: token);
         Log($"job '{job.Name}': disk image {manifest.BackupId} streamed to SMB.");
         OperationLog.Append(job.Repo, "disk-image-stream",
@@ -2667,7 +2664,7 @@ public sealed class BackupScheduler
         };
         string newsgroup = nntpLoc.Newsgroup ?? provider.Newsgroup;
 
-        string? volumeLetter = GetVolumeLetterForDevice(job.Source);
+        string? volumeLetter = GetVolumeLetterForDevice(job.FirstSource);
 
         Log($"job '{job.Name}': streaming disk image to Usenet " +
             $"(sparse={job.Sparse}, volumes=100MB)...");
@@ -2695,7 +2692,7 @@ public sealed class BackupScheduler
         using var streaming = new StreamingVolumeBlobStore(nntp,
             onFlushError: ex => Log($"job '{job.Name}': final volume flush on dispose failed: {ex.Message}"));
         var manifest = repo.BackupDiskImageStreaming(
-            job.Source, streaming, imageName, sparse: job.Sparse, volumeLetter: volumeLetter,
+            job.FirstSource, streaming, imageName, sparse: job.Sparse, volumeLetter: volumeLetter,
             cancellationToken: token);
         streaming.Flush();
 

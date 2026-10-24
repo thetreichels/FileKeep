@@ -269,6 +269,8 @@ public sealed class BackupRepository : IDisposable
             ?? throw new InvalidDataException("repo.json is corrupt.");
         if (config.FormatVersion != FormatVersion)
             throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
+        if (config.ChunkingScheme is not (ChunkingSchemeFixed or ChunkingSchemeCdc))
+            throw new NotSupportedException($"Repository chunking scheme '{config.ChunkingScheme}' is not supported by this build (supports {ChunkingSchemeFixed}, {ChunkingSchemeCdc}).");
 
         byte[] key = KeyDerivation.DeriveKey(
             passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);

@@ -1733,7 +1733,7 @@ async function load() {
       <div class="grow">
         <div class="name">${esc(j.name)} ${fmtLast(j)}</div>
         <div class="meta">${esc(j.schedule)} · ${esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}<br>
-        ${esc(j.source)} → ${esc(j.repo)}<br>
+        ${esc(j.sources && j.sources.length ? j.sources[0] : '')} → ${esc(j.repo)}<br>
         ${stateNote ? `<span style="color:var(--bad)">${stateNote}</span>` : `Next run: ${esc(fmtWhen(j.nextRunLocal))}`}${j.consecutiveFailures ? ` · <span style="color:var(--bad)">${j.consecutiveFailures} consecutive failures</span>` : ''}${!stateNote && j.lastResult && j.lastResult.degradedNote ? `<br><span style="color:var(--warn)">⚠ ${esc(j.lastResult.degradedNote)}</span>` : ''}</div>
       </div>
       <button onclick="runJob(${jsAttr(j.name)})" ${stateNote ? 'disabled title="This job is paused."' : ''}>Run now</button>
@@ -3029,7 +3029,7 @@ async function loadSettings() {
       <div class="job-main">
         <div class="name">${esc(j.name)} ${sj ? fmtLast(sj) : ''} <span class="run-chip" data-run-chip="${esc(j.name)}" style="display:none" title="This backup is running now.">● Running</span></div>
         <div class="meta">🕐 ${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}</div>
-        <div class="meta"><span title="${esc(j.source)}">📂 ${esc(folderName(j.source))}</span>${dest ? ' → ' + dest : ''}</div>
+        <div class="meta"><span title="${esc(j.sources && j.sources.length ? j.sources[0] : '')}">📂 ${esc(folderName(j.sources && j.sources.length ? j.sources[0] : ''))}</span>${dest ? ' → ' + dest : ''}</div>
         <div class="job-health">${jobHealthLine(sj, state)}</div>
         <div class="job-progress" data-jobprog="${esc(j.name)}" style="display:none">
           <div class="track"><div class="fill" data-jobprog-fill></div></div>
@@ -3497,9 +3497,9 @@ async function showJobForm(job) {
   jobTypeChanged();
   if (jobType === 'disk') {
     await refreshDiskList();
-    document.getElementById('jf-disk').value = job ? job.source : '';
+    document.getElementById('jf-disk').value = job && job.sources && job.sources.length ? job.sources[0] : '';
   } else {
-    const srcs = job ? (job.sources && job.sources.length ? job.sources : (job.source ? [job.source] : [])) : [];
+    const srcs = job ? (job.sources || []) : [];
     jfFolders.setFolders(srcs.length ? srcs : ['']);
   }
   document.getElementById('jf-mode').value = job ? job.mode : 'incremental';
@@ -3588,12 +3588,11 @@ async function saveJob() {
   const markInvalid = id => { document.getElementById(id).classList.add('invalid'); valid = false; };
   const name = document.getElementById('jf-name').value.trim();
   const isDiskJob = document.querySelector('input[name="jf-type"]:checked').value === 'disk';
-  const sources = isDiskJob ? [] : jfFolders.getFolders();
-  const source = isDiskJob
-    ? document.getElementById('jf-disk').value
-    : (sources[0] || '');
+  const sources = isDiskJob
+    ? [document.getElementById('jf-disk').value]
+    : jfFolders.getFolders();
   if (!name) markInvalid('jf-name');
-  if (isDiskJob) { if (!source) markInvalid('jf-disk'); }
+  if (isDiskJob) { if (!sources[0]) markInvalid('jf-disk'); }
   else if (!sources.length) { jfFolders.markInvalid(); valid = false; }
   if (schedType === 'daily') {
     if (!dailyTime) markInvalid('jf-daily');
@@ -3634,7 +3633,6 @@ async function saveJob() {
   }
   const job = {
     name,
-    source,
     sources,
     jobType: isDiskJob ? 'disk' : 'files',
     schedule,

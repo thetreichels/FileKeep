@@ -124,7 +124,6 @@ public sealed record BrowseFoldersDto(
 public sealed record ConfigJobDto(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("repo")] string? Repo,
-    [property: JsonPropertyName("source")] string? Source,
     [property: JsonPropertyName("schedule")] string? Schedule,
     [property: JsonPropertyName("mode")] string? Mode,
     [property: JsonPropertyName("jobType")] string? JobType,
@@ -211,7 +210,7 @@ public sealed record StatusLastResultDto(
 public sealed record StatusJobDto(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("repo")] string? Repo,
-    [property: JsonPropertyName("source")] string? Source,
+    [property: JsonPropertyName("sources")] List<string>? Sources,
     [property: JsonPropertyName("schedule")] string Schedule,
     [property: JsonPropertyName("mode")] string? Mode,
     [property: JsonPropertyName("backupPrivilege")] bool BackupPrivilege,

@@ -109,38 +109,10 @@ public sealed class Catalog : IDisposable
                 downloaded_utc TEXT NOT NULL);
             """;
         cmd.ExecuteNonQuery();
-        MigrateUploadsToProviderScope(conn);
-    }
-
-    /// <summary>
-    /// DL-2 migration: catalogs written before the upload journal was
-    /// provider-scoped have an uploads table keyed by message_id alone,
-    /// with no provider column. Rebuild it with the composite key;
-    /// existing rows keep provider '' (unknown) — they no longer count
-    /// as delivery evidence for any provider, and the stores' STAT
-    /// fallback re-adopts each article under its real provider on the
-    /// next upload, so the journal heals itself provider by provider.
-    /// </summary>
-    private static void MigrateUploadsToProviderScope(SqliteConnection conn)
-    {
-        using var check = conn.CreateCommand();
-        check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('uploads') WHERE name = 'provider'";
-        if ((long)check.ExecuteScalar()! != 0)
-            return;
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE uploads_scoped(
-                message_id TEXT NOT NULL,
-                chunk_id TEXT NOT NULL,
-                uploaded_utc TEXT NOT NULL,
-                provider TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY(message_id, provider));
-            INSERT OR IGNORE INTO uploads_scoped(message_id, chunk_id, uploaded_utc, provider)
-                SELECT message_id, chunk_id, uploaded_utc, '' FROM uploads;
-            DROP TABLE uploads;
-            ALTER TABLE uploads_scoped RENAME TO uploads;
-            """;
-        cmd.ExecuteNonQuery();
+        // No backwards compatibility: catalogs written before the upload
+        // journal was provider-scoped are not migrated — a pre-scope
+        // uploads table (no provider column) fails on first use instead
+        // of being rebuilt.
     }
 
     /// <summary>

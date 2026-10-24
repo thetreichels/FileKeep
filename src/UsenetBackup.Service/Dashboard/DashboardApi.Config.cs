@@ -206,7 +206,7 @@ public static partial class DashboardApi
     /// while the snapshot deliberately stripped them).
     /// </summary>
     internal static ConfigJobDto ToDto(BackupJobConfig j) => new(
-        j.Name, j.Repo, j.Source, j.Schedule, j.Mode, j.JobType,
+        j.Name, j.Repo, j.Schedule, j.Mode, j.JobType,
         j.BackupPrivilege, j.Vss, j.Targets,
         j.AutoVerify, j.VerificationMode, j.RedundancyMode, j.Sources, j.Paused);
 
@@ -242,12 +242,16 @@ public static partial class DashboardApi
             job.Repo = Path.Combine(programData, "FileKeep", "repos", safeName);
         }
         if (job.EffectiveSources.Count == 0)
-            return (400, new ErrorDto("Add at least one source folder."));
+            return (400, new ErrorDto(job.IsDiskImage ? "Select a disk." : "Add at least one source folder."));
         if (job.IsDiskImage && job.EffectiveSources.Count > 1)
             return (400, new ErrorDto("Disk-image jobs back up a single device."));
-        foreach (string src in job.EffectiveSources)
-            if (!Directory.Exists(src))
-                return (400, new ErrorDto($"Source folder does not exist: {src}"));
+        // A disk device is not a directory, so the existence check below
+        // applies to file jobs only; the disk picker offers real devices
+        // and the imaging path fails clearly if one vanishes.
+        if (!job.IsDiskImage)
+            foreach (string src in job.EffectiveSources)
+                if (!Directory.Exists(src))
+                    return (400, new ErrorDto($"Source folder does not exist: {src}"));
         try { ServiceConfig.ValidateNoNestedSources(job); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         // Validate schedule format and mode via a temporary config.

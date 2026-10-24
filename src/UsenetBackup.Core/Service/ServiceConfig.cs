@@ -177,35 +177,35 @@ public sealed class BackupJobConfig
     [JsonPropertyName("repo")]
     public string Repo { get; set; } = "";
 
-    [JsonPropertyName("source")]
-    public string Source { get; set; } = "";
-
     /// <summary>
-    /// Source folders to back up. When non-empty, this job backs up every
-    /// folder in the list (one manifest per folder per run). When empty,
-    /// the legacy <see cref="Source"/> is used. The dashboard guarantees
-    /// the folders are not nested inside each other (a folder already
-    /// includes everything below it).
+    /// Sources to back up. For file jobs, the folders (one manifest per
+    /// folder per run). For disk-image jobs, exactly one entry: the
+    /// device path (e.g. <c>\\.\PhysicalDrive1</c>). The dashboard
+    /// guarantees file-job folders are not nested inside each other (a
+    /// folder already includes everything below it).
     /// </summary>
     [JsonPropertyName("sources")]
     public List<string> Sources { get; set; } = new();
 
     /// <summary>
-    /// Effective source folders: <see cref="Sources"/> when set, otherwise
-    /// the legacy single <see cref="Source"/>. Never null; may be empty
-    /// (validated on save).
+    /// Effective sources: <see cref="Sources"/> trimmed of blank entries.
+    /// Never null; may be empty (validated on save).
     /// </summary>
     [JsonIgnore]
     public List<string> EffectiveSources
     {
         get
         {
-            var list = Sources.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
-            if (list.Count > 0)
-                return list;
-            return string.IsNullOrWhiteSpace(Source) ? new List<string>() : new List<string> { Source };
+            return Sources.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
         }
     }
+
+    /// <summary>
+    /// First effective source: the disk device for disk-image jobs, the
+    /// snapshot root for file jobs. Empty when the job has no sources.
+    /// </summary>
+    [JsonIgnore]
+    public string FirstSource => EffectiveSources.Count > 0 ? EffectiveSources[0] : "";
 
     /// <summary>
     /// <c>"daily HH:mm"</c> (local time, e.g. <c>"daily 02:00"</c>) or
@@ -277,9 +277,8 @@ public sealed class BackupJobConfig
     /// <summary>
     /// Upload targets after a backup completes: the NAMES of
     /// <see cref="ServiceConfig.Locations"/> entries. A name that matches
-    /// no location — including the legacy bare tokens <c>"nntp"</c> /
-    /// <c>"smb"</c> written by pre-locations configs — resolves to
-    /// nothing at run time (see <see cref="EffectiveTargets"/>).
+    /// no location fails config validation — unknown targets are
+    /// rejected at load (see <see cref="ServiceConfig.Validate"/>).
     /// </summary>
     [JsonPropertyName("targets")]
     public List<string>? Targets { get; set; }
@@ -773,19 +772,11 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': parityGroupSize must be at least 2 when redundancyMode is \"xor\" (got {job.ParityGroupSize}).");
             // Targets (SF-21): every named target must be a defined
-            // location — an unknown name was treated as Active by the
-            // gate and silently dropped by target resolution whenever
-            // another target resolved. The one exemption is the legacy
-            // bare tokens "nntp"/"smb" from pre-locations configs
-            // (Phase 6): they are not names at all, they resolve to
-            // nothing at run time, and the job lands in the derived
-            // NeedsLocation state — rejecting them here would fail the
-            // whole config load over a shape nothing converts anymore.
+            // location. No backwards compatibility: the bare "nntp"/"smb"
+            // tokens from pre-locations configs are unknown names and
+            // fail here like any other unknown target.
             foreach (string target in job.EffectiveTargets)
             {
-                if (target.Equals("nntp", StringComparison.OrdinalIgnoreCase) ||
-                    target.Equals("smb", StringComparison.OrdinalIgnoreCase))
-                    continue;
                 if (!locationNames.Contains(target))
                     throw new InvalidOperationException(
                         $"Job '{job.Name}' targets unknown backup location '{target}'.");

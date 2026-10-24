@@ -50,7 +50,7 @@ public sealed class JobPauseTests : IDisposable
 
     private static BackupJobConfig Job(bool paused = false, params string[] targets) => new()
     {
-        Name = "j", Repo = "r", Source = "s", Schedule = "interval 60",
+        Name = "j", Repo = "r", Sources = new List<string> { "s" }, Schedule = "interval 60",
         Paused = paused, Targets = targets.ToList(),
     };
 
@@ -217,7 +217,7 @@ public sealed class JobPauseTests : IDisposable
               "dashboardBind": "127.0.0.1",
               "jobs": [
                 { "name": "docs", "repo": "{{_repoDir.Replace("\\", "\\\\")}}",
-                  "source": "{{_srcDir.Replace("\\", "\\\\")}}",
+                  "sources": ["{{_srcDir.Replace("\\", "\\\\")}}"],
                   "schedule": "interval 60", "mode": "incremental",
                   {{jobFields}} }
               ]
@@ -248,7 +248,7 @@ public sealed class JobPauseTests : IDisposable
             },
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Paused = true,
                         Targets = new List<string> { "vault" } },
@@ -324,7 +324,7 @@ public sealed class JobPauseTests : IDisposable
                 },
                 Jobs = new List<BackupJobConfig>
                 {
-                    new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                    new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                             Schedule = "interval 60", Mode = "incremental",
                             Targets = new List<string> { "vault" } },
                 },
@@ -368,8 +368,11 @@ public sealed class JobPauseTests : IDisposable
     public void Scheduler_RunJobNow_PausedJob_Throws()
     {
         var clock = new ManualClock { Now = new DateTime(2026, 10, 5, 10, 0, 0) };
+        // No targets: the pause check must fire before any target
+        // evaluation. (The fixture used to carry a bare "nntp" token
+        // as a dummy target; bare tokens no longer load.)
         var config = ServiceConfig.Load(WriteConfigJson(
-            "\"paused\": true, \"targets\": [\"nntp\"]"));
+            "\"paused\": true, \"targets\": []"));
         var scheduler = new BackupScheduler(config, clock);
         var ex = Assert.Throws<InvalidOperationException>(() => scheduler.RunJobNow("docs"));
         Assert.Contains("paused", ex.Message);
@@ -393,7 +396,7 @@ public sealed class JobPauseTests : IDisposable
             },
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Targets = new List<string> { "vault" } },
             },
@@ -456,7 +459,7 @@ public sealed class JobPauseTests : IDisposable
             Locations = locations.ToList(),
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Targets = locations.Select(l => l.Name).ToList() },
             },
@@ -666,7 +669,7 @@ public sealed class JobPauseTests : IDisposable
             DashboardPort = 15789,
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Targets = new List<string> { "nntp" } },
             },
@@ -951,7 +954,7 @@ public sealed class JobPauseTests : IDisposable
             },
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Targets = new List<string> { "vault", "nntp" } },
             },
@@ -980,7 +983,7 @@ public sealed class JobPauseTests : IDisposable
             },
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "interval 60", Mode = "incremental",
                         Targets = new List<string> { "vault" } },
             },
@@ -1022,7 +1025,7 @@ public sealed class JobPauseTests : IDisposable
         var scheduler = new BackupScheduler(config);
         var job = new BackupJobConfig
         {
-            Name = "new1", Source = _srcDir, Schedule = "interval 60",
+            Name = "new1", Sources = new List<string> { _srcDir }, Schedule = "interval 60",
             Mode = "incremental", Targets = new List<string>(),
         };
         var (status, _) = DashboardApi.UpsertJob(config, scheduler, path, job);
@@ -1038,7 +1041,7 @@ public sealed class JobPauseTests : IDisposable
         var scheduler = new BackupScheduler(config);
         var updated = new BackupJobConfig
         {
-            Name = "docs", Repo = _repoDir, Source = _srcDir,
+            Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
             Schedule = "interval 60", Mode = "incremental",
             Targets = new List<string>(),
         };

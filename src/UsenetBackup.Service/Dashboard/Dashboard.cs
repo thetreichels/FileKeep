@@ -286,13 +286,6 @@ public static class Dashboard
                 foreach (var el in srcEl.EnumerateArray())
                     if (el.GetString() is string s && !string.IsNullOrWhiteSpace(s))
                         sources.Add(s);
-            if (sources.Count == 0)
-            {
-                // Backward compat: older dashboard sends a single sourceDir.
-                string legacy = GetBodyString(body, "sourceDir");
-                if (!string.IsNullOrWhiteSpace(legacy))
-                    sources.Add(legacy);
-            }
             string repoPath = GetBodyString(body, "repoPath");
             var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sources, repoPath, config);
             return Results.Json(payload, statusCode: status);

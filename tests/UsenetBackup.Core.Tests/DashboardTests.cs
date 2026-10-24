@@ -56,7 +56,7 @@ public sealed class DashboardTests : IDisposable
         },
         Jobs = new List<BackupJobConfig>
         {
-            new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+            new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                     Schedule = "interval 60", Mode = "incremental", BackupPrivilege = false,
                     Targets = new List<string> { "vault" } },
         },
@@ -1248,7 +1248,7 @@ public sealed class DashboardTests : IDisposable
 
         var job = new BackupJobConfig
         {
-            Name = "blob-job", Repo = _repoDir, Source = _srcDir,
+            Name = "blob-job", Repo = _repoDir, Sources = new List<string> { _srcDir },
             Schedule = "interval 60", Mode = "full",
             Targets = new List<string> { "nas" },
         };
@@ -1261,7 +1261,7 @@ public sealed class DashboardTests : IDisposable
         var (jobStatus2, jobPayload2) = DashboardApi.UpsertJob(config, scheduler, configPath,
             new BackupJobConfig
             {
-                Name = "blob-job", Repo = _repoDir, Source = _srcDir,
+                Name = "blob-job", Repo = _repoDir, Sources = new List<string> { _srcDir },
                 Schedule = "interval 60", Mode = "full",
                 Targets = new List<string> { "nas" },
             });
@@ -1292,7 +1292,7 @@ public sealed class DashboardTests : IDisposable
 
         var job = new BackupJobConfig
         {
-            Name = "upload-job", Repo = _repoDir, Source = _srcDir,
+            Name = "upload-job", Repo = _repoDir, Sources = new List<string> { _srcDir },
             Schedule = "interval 60", Mode = "incremental",
             BackupPrivilege = false,
             Targets = new List<string> { "usenet" },
@@ -1321,7 +1321,7 @@ public sealed class DashboardTests : IDisposable
 
         var updated = new BackupJobConfig
         {
-            Name = "docs", Repo = _repoDir, Source = _srcDir,
+            Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
             Schedule = "interval 120", Mode = "incremental",
             BackupPrivilege = true,
             Targets = new List<string> { "spare" },
@@ -1341,7 +1341,7 @@ public sealed class DashboardTests : IDisposable
             DashboardPort = 15789,
             Jobs = new List<BackupJobConfig>
             {
-                new() { Name = "docs", Repo = _repoDir, Source = _srcDir,
+                new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "daily 02:00" },
             },
             Nntp = new NntpConfig

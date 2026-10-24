@@ -38,17 +38,17 @@ public sealed class MultiSourceTests : IDisposable
     }
 
     [Fact]
-    public void EffectiveSources_FallsBackToLegacySource()
+    public void EffectiveSources_ReturnsSourcesList()
     {
-        var job = new BackupJobConfig { Source = _srcA };
-        Assert.Equal(new[] { _srcA }, job.EffectiveSources);
+        var job = new BackupJobConfig { Sources = new List<string> { _srcA, _srcB } };
+        Assert.Equal(new[] { _srcA, _srcB }, job.EffectiveSources);
     }
 
     [Fact]
-    public void EffectiveSources_PrefersSourcesList()
+    public void EffectiveSources_DropsBlankEntries()
     {
-        var job = new BackupJobConfig { Source = _srcA, Sources = new List<string> { _srcA, _srcB } };
-        Assert.Equal(new[] { _srcA, _srcB }, job.EffectiveSources);
+        var job = new BackupJobConfig { Sources = new List<string> { "", "  ", _srcA } };
+        Assert.Equal(new[] { _srcA }, job.EffectiveSources);
     }
 
     [Fact]

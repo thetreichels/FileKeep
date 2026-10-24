@@ -76,10 +76,12 @@ public sealed class CatalogJournalTests : IDisposable
     }
 
     [Fact]
-    public void Journal_LegacyUnscopedRows_AreNotEvidenceForAnyProvider()
+    public void Journal_PreScopeCatalog_Throws()
     {
-        // Build a pre-scoping catalog: uploads keyed by message_id
-        // alone, no provider column, one row already recorded.
+        // No backwards compatibility: a pre-scoping catalog (uploads
+        // keyed by message_id alone, no provider column) is not
+        // migrated — the first provider-scoped query fails instead of
+        // healing the journal.
         string db = Path.Combine(_workDir, "legacy.db");
         {
             using var conn = new SqliteConnection($"Data Source={db};Pooling=false");
@@ -95,18 +97,7 @@ public sealed class CatalogJournalTests : IDisposable
             cmd.ExecuteNonQuery();
         }
 
-        using var catalog = new Catalog(db); // migration runs here
-        // The legacy row names no provider: it must not satisfy any
-        // provider's evidence check (callers fall back to STAT and
-        // re-adopt the article under its real provider).
-        Assert.False(catalog.IsUploaded("<mid@x>", "provider-a"));
-        // History survives for informational lookups...
-        Assert.NotNull(catalog.GetUploadTimeUtc("chunk1"));
-        Assert.Equal(1, catalog.UploadedCount());
-        // ...and the same message ID can now be recorded per provider
-        // without colliding with the legacy row.
-        catalog.RecordUpload("<mid@x>", "chunk1", "provider-a");
-        Assert.True(catalog.IsUploaded("<mid@x>", "provider-a"));
-        Assert.False(catalog.IsUploaded("<mid@x>", "provider-b"));
+        using var catalog = new Catalog(db);
+        Assert.Throws<SqliteException>(() => catalog.IsUploaded("<mid@x>", "provider-a"));
     }
 }

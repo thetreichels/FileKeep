@@ -30,8 +30,8 @@ public sealed class GuiRefreshTests : IDisposable
     }
 
     private static string JobJson(string jobType) => $$"""
-        { "jobs": [{ "name": "d", "repo": "r", "source": "s",
-          "schedule": "interval 60", "jobType": "{{jobType}}", "targets": ["nntp"] }] }
+        { "jobs": [{ "name": "d", "repo": "r", "sources": ["s"],
+          "schedule": "interval 60", "jobType": "{{jobType}}", "targets": [] }] }
         """;
 
     [Fact]
@@ -54,8 +54,8 @@ public sealed class GuiRefreshTests : IDisposable
     public void Config_JobTypeDefaultsToFiles()
     {
         string json = """
-            { "jobs": [{ "name": "d", "repo": "r", "source": "s",
-              "schedule": "interval 60", "targets": ["nntp"] }] }
+            { "jobs": [{ "name": "d", "repo": "r", "sources": ["s"],
+              "schedule": "interval 60", "targets": [] }] }
             """;
         var config = ServiceConfig.Load(WriteConfig(json));
         var job = Assert.Single(config.Jobs);
@@ -106,9 +106,9 @@ public sealed class GuiRefreshTests : IDisposable
     {
         string json = """
             { "jobs": [
-              { "name": "a", "repo": "r1", "source": "s", "schedule": "interval 60", "targets": ["nntp"] },
-              { "name": "b", "repo": "r2", "source": "s", "schedule": "interval 60", "targets": ["nntp"] },
-              { "name": "c", "repo": "r1", "source": "s", "schedule": "interval 60", "targets": ["nntp"] }
+              { "name": "a", "repo": "r1", "sources": ["s"], "schedule": "interval 60", "targets": [] },
+              { "name": "b", "repo": "r2", "sources": ["s"], "schedule": "interval 60", "targets": [] },
+              { "name": "c", "repo": "r1", "sources": ["s"], "schedule": "interval 60", "targets": [] }
             ] }
             """;
         var config = ServiceConfig.Load(WriteConfig(json));
