@@ -429,8 +429,9 @@ public sealed class ServiceConfig
     /// Global Usenet provider surface for the repo-scoped operations that
     /// are not tied to a job's targets: remote-backup discovery, NZB
     /// download, retention checks, and the dashboard's manual upload.
-    /// Written by POST /api/config/nntp; read via
-    /// <see cref="EffectiveProviders"/>. Jobs do NOT upload through this —
+    /// Read via <see cref="EffectiveProviders"/> (fallback when
+    /// <see cref="NntpProviders"/> is empty); no dashboard route writes
+    /// it anymore. Jobs do NOT upload through this —
     /// they upload to their target <see cref="Locations"/>. Null/empty
     /// host means no global provider is configured. The password comes
     /// from USENETBACKUP_NNTP_PASSWORD if set, else the DPAPI blob.

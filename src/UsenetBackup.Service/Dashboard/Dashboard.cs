@@ -299,18 +299,6 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
-        app.MapPost("/api/backups/remote/import", async (string repo, HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            string[] ids = body.TryGetProperty("backupIds", out var el) && el.ValueKind == JsonValueKind.Array
-                ? el.EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s != "").ToArray()
-                : Array.Empty<string>();
-            var (status, payload) = DashboardApi.ImportRemoteBackups(config, repo, ids, restoreSession);
-            return Results.Json(payload, statusCode: status);
-        });
-
         app.MapGet("/api/log", (string repo, int lines = 100) =>
         {
             var (status, payload) = DashboardApi.GetLog(config, repo, lines);
@@ -704,19 +692,6 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
-        app.MapPost("/api/config/nntp", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            NntpConfig? nntp;
-            try { nntp = await request.ReadFromJsonAsync<NntpConfig>(); }
-            catch { return Results.BadRequest(new ErrorDto("Invalid NNTP JSON.")); }
-            if (nntp is null)
-                return Results.BadRequest(new ErrorDto("Empty NNTP config."));
-            var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
-            return Results.Json(payload, statusCode: status);
-        });
-
         app.MapGet("/api/config/passphrase-status", (HttpRequest request) =>
         {
             var (status, payload) = DashboardApi.GetPassphraseStatus(config);
@@ -808,14 +783,6 @@ public static class Dashboard
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
             var (proofPassphrase, proofYubiKey) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider);
-            return Results.Json(payload, statusCode: status);
-        });
-
-        app.MapGet("/api/yubikey/status", () =>
-        {
-            var (status, payload) = DashboardApi.GetYubiKeyStatus(yubiKeyProvider);
-            // SF-23: honor the status — a provider failure must reach
-            // the wire as an error, not as a 200 "no devices" body.
             return Results.Json(payload, statusCode: status);
         });
 

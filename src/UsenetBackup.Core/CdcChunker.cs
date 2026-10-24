@@ -90,7 +90,6 @@ public sealed class CdcChunker
     };
 
     public int MinSize { get; }
-    public int AvgSize { get; }
     public int MaxSize { get; }
 
     /// <summary>Bytes accumulated in the currently open chunk.</summary>
@@ -110,7 +109,6 @@ public sealed class CdcChunker
         if ((avgSize & (avgSize - 1)) != 0)
             throw new ArgumentOutOfRangeException(nameof(avgSize), "CDC target chunk size must be a power of two.");
         MinSize = minSize;
-        AvgSize = avgSize;
         MaxSize = maxSize;
         _mask = (uint)(avgSize - 1);
     }

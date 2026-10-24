@@ -94,10 +94,6 @@ public sealed record HasPasswordDto(
 /// <summary>Empty response (replaces new { }).</summary>
 public sealed record EmptyDto;
 
-/// <summary>Import result for /api/import-remote.</summary>
-public sealed record ImportedDto(
-    [property: JsonPropertyName("imported")] int Imported);
-
 /// <summary>Folder entry for /api/user-folders.</summary>
 public sealed record FolderDto(
     [property: JsonPropertyName("name")] string Name,

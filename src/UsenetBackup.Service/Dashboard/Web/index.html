@@ -280,18 +280,14 @@
   }
   .yk-badge.unlocked { background: #e6f4ea; color: var(--ok); }
   .yk-badge.locked { background: #f0f0f0; color: var(--text-2); }
-  /* Windows 11 InfoBar: colored banner for info/warning/error messages. */
+  /* Windows 11 InfoBar: colored warning banner. */
   .infobar {
     display: flex; align-items: flex-start; gap: 12px;
     padding: 12px 16px; border-radius: 4px; margin: 0 0 12px;
     border: 1px solid var(--border); border-left-width: 3px;
     background: var(--card); font-size: 13px;
   }
-  .infobar.info { border-left-color: var(--accent); }
-  .infobar.success { border-left-color: var(--ok); }
   .infobar.warning { border-left-color: #ca5010; background: #fdf6f0; }
-  .infobar.error { border-left-color: var(--bad); background: #fdf0ef; }
-  .infobar .title { font-weight: 600; margin-bottom: 2px; }
   select {
     font-family: inherit; font-size: 14px; padding: 6px 10px;
     border: 1px solid #d1d1d1; border-radius: 4px; background: #fbfbfb;
@@ -360,7 +356,6 @@
     & .infobar.warning { background: #2d2419; }
     & .yk-badge.unlocked { background: #1d3325; }
     & .yk-badge.locked { background: #2d2d2d; }
-    & .infobar.error { background: #2d1f1e; }
     & select { background: #2d2d2d; border-color: #3a3a3a; color: var(--text); }
     & pre { background: #242424; }
     & .pill { background: #1d3325; }

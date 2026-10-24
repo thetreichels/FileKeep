@@ -30,7 +30,6 @@ public sealed class SmbSync
         public int ManifestsCopied { get; set; }
         public int ManifestsSkipped { get; set; }
         public int ParityCopied { get; set; }
-        public int ParitySkipped { get; set; }
         public long BytesCopied { get; set; }
     }
 
@@ -136,10 +135,6 @@ public sealed class SmbSync
             {
                 result.ParityCopied++;
                 result.BytesCopied += bytes;
-            }
-            else
-            {
-                result.ParitySkipped++;
             }
             done++;
             if (done % 25 == 0) Report();

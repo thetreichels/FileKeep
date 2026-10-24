@@ -51,32 +51,6 @@ public class NativeBridge
     }
 
     /// <summary>
-    /// Shows the native Windows file picker. Returns the selected file path,
-    /// or empty string if the user cancelled.
-    /// </summary>
-    public string PickFile(string title, string filter)
-    {
-        string result = "";
-        if (_owner.InvokeRequired)
-        {
-            _owner.Invoke(() => result = PickFile(title, filter));
-            return result;
-        }
-
-        using var dialog = new OpenFileDialog
-        {
-            Title = string.IsNullOrEmpty(title) ? "Select a file" : title,
-            Filter = string.IsNullOrEmpty(filter) ? "All files (*.*)|*.*" : filter,
-            CheckFileExists = true,
-        };
-
-        if (dialog.ShowDialog(_owner) == DialogResult.OK)
-            result = dialog.FileName;
-
-        return result;
-    }
-
-    /// <summary>
     /// Shows the native Windows save-file dialog. Returns the chosen path,
     /// or empty string if the user cancelled.
     /// </summary>
@@ -444,13 +418,6 @@ public class MainForm : Form
                     try {
                         const bridge = chrome.webview.hostObjects.fileKeep;
                         const path = await bridge.PickFolder(title || 'Select a folder');
-                        return path || '';
-                    } catch (e) { return ''; }
-                };
-                window.fileKeepPickFile = async function(title, filter) {
-                    try {
-                        const bridge = chrome.webview.hostObjects.fileKeep;
-                        const path = await bridge.PickFile(title || 'Select a file', filter || '');
                         return path || '';
                     } catch (e) { return ''; }
                 };

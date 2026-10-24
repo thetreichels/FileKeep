@@ -16,7 +16,6 @@ namespace UsenetBackup.Core.Json;
 /// everything and nothing is removed.
 /// </summary>
 [JsonSerializable(typeof(List<UsenetUploadTracker.UploadRecord>))]
-[JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(Dictionary<string, Dictionary<string, string>>))]
 [JsonSerializable(typeof(Dictionary<string, ProviderLimits.LimitEntry>))]
 [JsonSerializable(typeof(ServiceConfig))]

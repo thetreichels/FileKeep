@@ -608,59 +608,6 @@ public static partial class DashboardApi
         }
     }
 
-    /// <summary>
-    /// Imports remote-discovered manifests into the local repo so they can
-    /// be downloaded/restored like local backups.
-    /// </summary>
-    public static (int Status, object Payload) ImportRemoteBackups(ServiceConfig config, string repo, string[] backupIds, RestoreSession? session = null)
-    {
-        if (!IsKnownRepo(config, repo))
-            return (400, new ErrorDto("Unknown repo (not a configured job)."));
-        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
-        if (provider is null)
-            return (400, new ErrorDto("No Usenet provider configured."));
-        string? passphrase = GetRestorePassphrase(config, session);
-        if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
-        try
-        {
-            string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
-            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
-                nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
-
-            using var client = new UsenetBackup.Core.Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
-            client.Connect();
-            if (!string.IsNullOrEmpty(provider.Username))
-                client.Authenticate(provider.Username, nntpPassword ?? "");
-
-            using var r = BackupRepository.Open(repo, passphrase);
-            string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
-            using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
-                client, provider.Newsgroup, r.RepoId, r.CatalogPath,
-                messageIndex: r.MessageIndex, providerKey: providerKey,
-                indexAuth: r.IndexAuth);
-            var remote = r.DiscoverRemoteManifests(store);
-            var wanted = new HashSet<string>(backupIds ?? Array.Empty<string>());
-            int imported = 0;
-            foreach (var m in remote)
-            {
-                if (wanted.Contains(m.Manifest.BackupId))
-                {
-                    r.ImportManifest(m.Manifest);
-                    imported++;
-                }
-            }
-            OperationLog.Append(repo, "import-remote",
-                $"imported={imported} host={provider.Host}");
-            return (200, new ImportedDto(imported));
-        }
-        catch (Exception ex)
-        {
-            return (500, new ErrorDto(ex.Message));
-        }
-    }
 
     /// <summary>
     /// Starts a manual NNTP upload of a backup in the background.

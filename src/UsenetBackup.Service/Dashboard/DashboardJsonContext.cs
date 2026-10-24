@@ -32,7 +32,6 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(CancelledDto))]
 [JsonSerializable(typeof(HasPasswordDto))]
 [JsonSerializable(typeof(EmptyDto))]
-[JsonSerializable(typeof(ImportedDto))]
 [JsonSerializable(typeof(FolderDto))]
 [JsonSerializable(typeof(List<FolderDto>))]
 [JsonSerializable(typeof(BrowseFoldersDto))]

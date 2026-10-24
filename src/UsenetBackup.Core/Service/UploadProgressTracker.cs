@@ -181,7 +181,8 @@ public sealed class UploadProgressTracker : IDisposable
     }
 
     /// <summary>
-    /// Returns current progress snapshot for dashboard API.
+    /// Returns the current progress snapshot for the run-progress
+    /// tracker lambda (totals + observed rate only).
     /// </summary>
     public UploadProgressSnapshot GetSnapshot()
     {
@@ -189,39 +190,16 @@ public sealed class UploadProgressTracker : IDisposable
         {
             PruneOld();
             int done = _uploaded + _skipped;
-            double pct = _totalChunks > 0 ? 100.0 * done / _totalChunks : 0;
             var elapsed = DateTime.UtcNow - _startTime;
 
             long windowBytes = _recent.Sum(r => r.Bytes);
             double windowSecs = Math.Min(Window.TotalSeconds, Math.Max(1, elapsed.TotalSeconds));
             double bytesPerSec = windowBytes / windowSecs;
 
-            bool hasEnoughData = _uploaded >= 10 && elapsed.TotalSeconds >= 30;
-
-            string? eta = null;
-            if (hasEnoughData && bytesPerSec > 0)
-            {
-                double avgBytesPerChunk = _uploaded > 0 ? (double)_bytesUploaded / _uploaded : 0;
-                int remainingChunks = _totalChunks - done;
-                long estRemainingBytes = (long)(remainingChunks * avgBytesPerChunk);
-                if (estRemainingBytes > 0)
-                {
-                    var remaining = TimeSpan.FromSeconds(estRemainingBytes / bytesPerSec);
-                    eta = FormatDuration(remaining);
-                }
-            }
-
             return new UploadProgressSnapshot(
-                _jobName,
-                _host,
                 done,
                 _totalChunks,
-                Math.Round(pct, 1),
-                (long)bytesPerSec,
-                eta, // null if still measuring
-                !hasEnoughData,
-                (int)elapsed.TotalSeconds,
-                _phase);
+                (long)bytesPerSec);
         }
     }
 }
