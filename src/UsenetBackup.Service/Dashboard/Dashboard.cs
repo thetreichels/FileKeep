@@ -650,12 +650,24 @@ public static class Dashboard
             }
         });
 
-        app.MapGet("/api/upload-progress", () =>
+        app.MapGet("/api/run-progress", () =>
         {
-            var tracker = scheduler.ActiveUpload;
-            if (tracker is null)
+            var progress = scheduler.GetRunProgress();
+            if (progress is null)
                 return Results.Json(new ActiveDto(false));
-            return Results.Json(new ActiveProgressDto(true, tracker.GetSnapshot()));
+            return Results.Json(new RunProgressDto(true, progress));
+        });
+
+        app.MapPost("/api/jobs/{name}/cancel", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!DashboardApi.IsKnownJob(scheduler, name))
+                return Results.NotFound(new ErrorDto($"Unknown job '{name}'."));
+            return scheduler.CancelRun(name)
+                ? Results.Json(new OkDto(true))
+                : Results.Json(new ErrorDto($"Job '{name}' is not running."),
+                    statusCode: StatusCodes.Status409Conflict);
         });
 
         app.MapPost("/api/config/jobs", async (HttpRequest request) =>

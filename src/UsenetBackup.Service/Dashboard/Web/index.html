@@ -154,8 +154,21 @@
   .chip.dim { opacity: .45; }
   .job-health { font-size: 13px; margin-top: 4px; }
   .job-progress { margin-top: 10px; }
-  .job-progress .track { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
-  .job-progress .fill { height: 100%; background: var(--ok); width: 0; transition: width .3s ease; }
+  .job-progress .track { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .job-progress .fill { height: 100%; background: var(--accent); width: 0; transition: width .3s ease; }
+  .job-progress .fill.warn { background: var(--warn); }
+  .job-progress .fill.indet { width: 35%; animation: prog-indet 1.2s ease-in-out infinite alternate; }
+  @keyframes prog-indet { from { margin-left: 0; } to { margin-left: 65%; } }
+  .run-chip { color: var(--accent); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  /* Per-destination slim bars (Overview's running-job card). A failed
+     destination freezes amber with its note; the run continues without it. */
+  .dest-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); margin-top: 5px; }
+  .dest-row .dname { min-width: 110px; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dest-row .dtrack { flex: 1; height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .dest-row .dfill { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
+  .dest-row.failed { color: var(--warn); }
+  .dest-row.failed .dfill { background: var(--warn); }
+  .dest-row .dcount { white-space: nowrap; }
   /* Location disk-usage meter: filled in lazily from
      /api/config/location-disk once the locations card has rendered;
      stays hidden for locations with no measurable disk. */
@@ -490,6 +503,7 @@
           <div id="upBar" style="background:var(--accent); height:100%; width:0%; transition:width 0.5s"></div>
         </div>
         <div class="meta" id="upEta" style="margin-top:4px"></div>
+        <div id="upDests"></div>
       </div>
     </div>
     <div class="view" id="view-vault">
@@ -1818,59 +1832,147 @@ function currentRepo() {
 function startUploadPolling() {
   if (uploadPollTimer) return;
   // MU-5: remember the last active snapshot so the active→inactive
-  // transition can say the upload ENDED (and how far it got) instead
-  // of the card silently vanishing, completed or failed alike. The
+  // transition can say the run ENDED (and how far it got) instead of
+  // the card silently vanishing, completed or failed alike. The
   // verdict itself arrives via the outcome watchers / job status.
   let wasActive = false;
   let lastPercent = 0;
+  const phaseNames = { preparing: 'Preparing', uploading: 'Uploading', verifying: 'Verifying', finishing: 'Finishing up' };
+  const restoreRunButtons = () => {
+    document.querySelectorAll('[data-runbtn]').forEach(btn => {
+      if (!btn.dataset.origText) return;
+      btn.textContent = btn.dataset.origText;
+      btn.setAttribute('onclick', btn.dataset.origOnclick);
+      btn.title = '';
+      delete btn.dataset.origText;
+      delete btn.dataset.origOnclick;
+    });
+  };
   const poll = async () => {
     try {
-      const res = await api('/api/upload-progress');
+      const res = await api('/api/run-progress');
       const card = document.getElementById('uploadProgress');
-      // The Backup jobs card for the job currently uploading shows the
-      // same progress in place (its bar slot is keyed by job name).
       const bars = document.querySelectorAll('[data-jobprog]');
-      if (!res.active) {
+      if (!res.active || !res.progress) {
         bars.forEach(b => { b.style.display = 'none'; });
+        document.querySelectorAll('[data-run-chip]').forEach(c => { c.style.display = 'none'; });
+        restoreRunButtons();
         if (wasActive) {
           wasActive = false;
           document.getElementById('upTitle').textContent = lastPercent >= 100
-            ? 'Upload complete'
-            : 'Upload ended at ' + Math.round(lastPercent) + '% — see the job status / Operations log for the outcome';
+            ? 'Backup complete'
+            : 'Backup ended — see the job status / Operations log for the outcome';
           document.getElementById('upMeta').textContent = '';
           document.getElementById('upSpeed').textContent = '';
           document.getElementById('upEta').textContent = '';
+          document.getElementById('upDests').innerHTML = '';
           setTimeout(() => { card.style.display = 'none'; }, 8000);
+          // Refresh health lines with the finished run's result —
+          // unless the user is mid-edit in the job form.
+          const form = document.getElementById('jobFormCard');
+          if (!form || form.style.display === 'none')
+            setTimeout(() => { load(); }, 1200);
         } else {
           card.style.display = 'none';
         }
         return;
       }
       wasActive = true;
-      lastPercent = res.progress ? res.progress.percent : 0;
       const p = res.progress;
+      if (p.percent >= 0) lastPercent = p.percent;
+      // The Backup jobs card for the running job shows its progress in
+      // place (its slot is keyed by job name); every other card hides.
       bars.forEach(b => {
         if (b.dataset.jobprog === p.jobName) {
           b.style.display = '';
-          b.querySelector('[data-jobprog-fill]').style.width = p.percent + '%';
-          b.querySelector('[data-jobprog-label]').textContent =
-            'Uploading ' + p.phase + ' to ' + p.host + ' — ' + p.doneChunks + '/' + p.totalChunks + ' items · ' + p.percent + '%';
+          const fill = b.querySelector('[data-jobprog-fill]');
+          fill.style.width = p.percent >= 0 ? p.percent + '%' : '';
+          fill.classList.toggle('indet', p.percent < 0);
+          fill.classList.toggle('warn', !!p.degraded);
+          const label = b.querySelector('[data-jobprog-label]');
+          label.textContent = runProgressLabel(p);
+          label.title = p.doneByText ? 'Done by ' + p.doneByText + ' at the latest' : '';
         } else b.style.display = 'none';
       });
+      // Running chip on the running job's card; its Run now becomes
+      // Cancel for the duration of the run (the mockup's swap).
+      document.querySelectorAll('[data-run-chip]').forEach(c => {
+        c.style.display = c.dataset.runChip === p.jobName ? '' : 'none';
+      });
+      document.querySelectorAll('[data-runbtn]').forEach(btn => {
+        if (btn.dataset.runbtn !== p.jobName || btn.dataset.origText) return;
+        btn.dataset.origText = btn.textContent;
+        btn.dataset.origOnclick = btn.getAttribute('onclick');
+        btn.textContent = 'Cancel';
+        btn.disabled = false;
+        btn.setAttribute('onclick', 'cancelJob(' + JSON.stringify(p.jobName) + ')');
+        btn.title = 'Stop this backup now. Work already delivered stays delivered; nothing is caught up later.';
+      });
+      // The Overview's single running-job card: same progress, plus a
+      // slim bar per destination.
       card.style.display = 'block';
-      document.getElementById('upTitle').textContent = 'Uploading ' + p.phase + ' to ' + p.host;
-      document.getElementById('upMeta').textContent = p.jobName + ' — ' + p.doneChunks + '/' + p.totalChunks + ' items';
-      document.getElementById('upBar').style.width = p.percent + '%';
-      const bps = p.bytesPerSec;
-      const speed = bps >= 1024*1024 ? (bps/(1024*1024)).toFixed(1) + ' MB/s' : Math.round(bps/1024) + ' KB/s';
-      document.getElementById('upSpeed').textContent = speed;
-      document.getElementById('upEta').textContent = p.measuring
-        ? 'Measuring throughput...'
-        : (p.eta ? '~' + p.eta + ' remaining' : 'Almost done');
+      document.getElementById('upTitle').textContent =
+        (phaseNames[p.phase] || 'Backing up') + ' — ' + p.jobName;
+      document.getElementById('upMeta').textContent = runCountsText(p);
+      const bar = document.getElementById('upBar');
+      bar.style.width = p.percent >= 0 ? p.percent + '%' : '35%';
+      bar.style.background = p.degraded ? 'var(--warn)' : 'var(--accent)';
+      document.getElementById('upSpeed').textContent =
+        p.percent >= 0 ? Math.round(p.percent) + '%' : '';
+      const eta = document.getElementById('upEta');
+      eta.textContent = [degradedLine(p), p.estimateText].filter(Boolean).join(' · ');
+      eta.title = p.doneByText ? 'Done by ' + p.doneByText + ' at the latest' : '';
+      document.getElementById('upDests').innerHTML =
+        (p.destinations || []).map(destRowHtml).join('');
     } catch (e) { /* ignore poll errors */ }
   };
   poll();
-  uploadPollTimer = setInterval(poll, 5000); // Poll every 5 seconds
+  uploadPollTimer = setInterval(poll, 3000); // Poll every 3 seconds
+}
+// The phase + counts line for a run-progress snapshot. Totals are
+// final in the non-batched paths and planned-so-far in batched runs
+// (the walk is still discovering chunks), hence "so far" there.
+function runCountsText(p) {
+  if (p.phase === 'preparing')
+    return p.filesScanned > 0 ? 'Preparing — ' + p.filesScanned + ' files scanned' : 'Preparing…';
+  if (p.phase === 'verifying') return 'Verifying — reading the backup back';
+  if (p.phase === 'finishing') return 'Finishing up…';
+  if (p.totalUnits > 0) return 'Uploading — ' + p.doneUnits + ' of ' + p.totalUnits + ' ' + p.headlineUnit;
+  if (p.doneUnits > 0) return 'Uploading — ' + p.doneUnits + ' ' + p.headlineUnit + ' so far';
+  return 'Uploading…';
+}
+function runProgressLabel(p) {
+  let t = runCountsText(p);
+  if (p.phase === 'uploading' && p.percent >= 0) t += ' · ' + Math.round(p.percent) + '%';
+  if (p.estimateText) t += ' · ' + p.estimateText;
+  return t;
+}
+// "USB stick unreachable — continuing with Usenet" when a destination
+// dropped out mid-run (the run itself continues, degraded).
+function degradedLine(p) {
+  if (!p.degraded) return '';
+  const failed = (p.destinations || []).filter(d => d.failed).map(d => d.name);
+  const left = (p.destinations || []).filter(d => !d.failed).map(d => d.name);
+  if (!failed.length) return '';
+  return failed.join(', ') + ' unreachable' +
+    (left.length ? ' — continuing with ' + left.join(', ') : '');
+}
+function destRowHtml(d) {
+  const pct = d.percent >= 0 ? d.percent : 0;
+  const count = d.failed
+    ? 'Failed this run' + (d.failureNote ? ' — ' + d.failureNote : '')
+    : d.totalUnits > 0
+      ? d.doneUnits + ' / ' + d.totalUnits + ' ' + d.unit
+      : d.doneUnits + ' ' + d.unit + ' so far';
+  return `<div class="dest-row${d.failed ? ' failed' : ''}"><span class="dname" title="${esc(d.name)}">${esc(d.name)}</span><span class="dtrack"><span class="dfill" style="width:${pct}%"></span></span><span class="dcount">${esc(count)}</span></div>`;
+}
+async function cancelJob(name) {
+  const csrf = document.querySelector('meta[name=csrf-token]').content;
+  try {
+    await api('/api/jobs/' + encodeURIComponent(name) + '/cancel',
+      { method: 'POST', headers: { 'X-CSRF-Token': csrf } });
+    toast('Cancelling backup "' + name + '"…', '');
+  } catch (e) { toast(e.message, 'err'); }
 }
 async function runJob(name) {
   const csrf = document.querySelector('meta[name=csrf-token]').content;
@@ -1893,6 +1995,7 @@ async function runJob(name) {
     const j = (st.jobs || []).find(x => x.name === name);
     if (j && j.lastResult && new Date(j.lastResult.startedLocal).getTime() >= started) {
       if (j.lastResult.success) toast('Backup "' + name + '" finished.', 'ok');
+      else if (j.lastResult.skipped && /cancel/i.test(j.lastResult.error || '')) toast('Backup "' + name + '" cancelled.', '');
       else toast('Backup "' + name + '" failed: ' + (j.lastResult.error || 'unknown error'), 'err');
       load();
       return;
@@ -3002,7 +3105,7 @@ async function loadSettings() {
           return `<div class="card job-card ${cls}">
       <div class="job-tile">${j.jobType === 'disk' ? '💽' : '📁'}</div>
       <div class="job-main">
-        <div class="name">${esc(j.name)} ${sj ? fmtLast(sj) : ''}</div>
+        <div class="name">${esc(j.name)} ${sj ? fmtLast(sj) : ''} <span class="run-chip" data-run-chip="${esc(j.name)}" style="display:none" title="This backup is running now.">● Running</span></div>
         <div class="meta">🕐 ${esc(j.schedule)} · ${j.jobType === 'disk' ? 'whole-disk image' : esc(j.mode)}${j.backupPrivilege ? ' · backup-privilege' : ''}${j.vss ? ' · vss' : ''}</div>
         <div class="meta"><span title="${esc(j.source)}">📂 ${esc(folderName(j.source))}</span>${dest ? ' → ' + dest : ''}</div>
         <div class="job-health">${jobHealthLine(sj, state)}</div>
@@ -3012,7 +3115,7 @@ async function loadSettings() {
         </div>
       </div>
       <div class="job-actions">
-        <button onclick='runJobFromJobs(${JSON.stringify(j.name)})'${state !== 'Active' ? ' disabled title="This job is paused."' : ''}>Run now</button>
+        <button data-runbtn="${esc(j.name)}" onclick='runJobFromJobs(${JSON.stringify(j.name)})'${state !== 'Active' ? ' disabled title="This job is paused."' : ''}>Run now</button>
         ${jobStateButton(j, state)}
         <button class="icon-btn" title="Edit job" onclick='editJob(${JSON.stringify(j.name)})'>✎</button>
         <button class="icon-btn" title="Delete job" onclick='deleteJob(${JSON.stringify(j.name)})'>🗑</button>

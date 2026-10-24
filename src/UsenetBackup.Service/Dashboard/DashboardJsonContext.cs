@@ -21,7 +21,10 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(AcceptedDto))]
 [JsonSerializable(typeof(AcceptedReposDto))]
 [JsonSerializable(typeof(ActiveDto))]
-[JsonSerializable(typeof(ActiveProgressDto))]
+[JsonSerializable(typeof(RunProgressDto))]
+[JsonSerializable(typeof(UsenetBackup.Core.Service.RunProgressSnapshot))]
+[JsonSerializable(typeof(UsenetBackup.Core.Service.DestinationProgressSnapshot))]
+[JsonSerializable(typeof(List<UsenetBackup.Core.Service.DestinationProgressSnapshot>))]
 [JsonSerializable(typeof(YubiKeyStatusDto))]
 [JsonSerializable(typeof(YubiKeyUnlockDto))]
 [JsonSerializable(typeof(ExistsDto))]
@@ -71,7 +74,6 @@ namespace UsenetBackup.Service;
 [JsonSerializable(typeof(WinReBuildStatusDto))]
 [JsonSerializable(typeof(WinReBuildStepDto))]
 [JsonSerializable(typeof(List<WinReBuildStepDto>))]
-[JsonSerializable(typeof(UploadProgressSnapshot))]
 [JsonSerializable(typeof(JsonElement))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {

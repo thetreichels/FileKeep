@@ -53,9 +53,12 @@ public sealed record AcceptedReposDto(
 public sealed record ActiveDto(
     [property: JsonPropertyName("active")] bool Active);
 
-public sealed record ActiveProgressDto(
+/// <summary>The running backup's live progress (GET /api/run-progress):
+/// phase, counts, per-destination bars, and the worst-case total
+/// estimate that the job cards and the Overview card render.</summary>
+public sealed record RunProgressDto(
     [property: JsonPropertyName("active")] bool Active,
-    [property: JsonPropertyName("progress")] UsenetBackup.Core.Service.UploadProgressSnapshot? Progress);
+    [property: JsonPropertyName("progress")] UsenetBackup.Core.Service.RunProgressSnapshot? Progress);
 
 public sealed record YubiKeyStatusDto(
     [property: JsonPropertyName("detected")] bool Detected,

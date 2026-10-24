@@ -13,6 +13,8 @@ public sealed class UploadProgressTracker : IDisposable
     private readonly Timer _timer;
     private readonly DateTime _startTime;
     private readonly object _lock = new();
+    private readonly Action<UploadProgressSnapshot>? _onSnapshot;
+    private long _lastNotifyTicks;
 
     private int _uploaded;
     private int _skipped;
@@ -30,12 +32,14 @@ public sealed class UploadProgressTracker : IDisposable
         Action<string> log,
         string jobName,
         string host,
-        int totalChunks)
+        int totalChunks,
+        Action<UploadProgressSnapshot>? onSnapshot = null)
     {
         _log = log;
         _jobName = jobName;
         _host = host;
         _totalChunks = totalChunks;
+        _onSnapshot = onSnapshot;
         _startTime = DateTime.UtcNow;
         _timer = new Timer(LogProgress, null, LogInterval, LogInterval);
     }
@@ -49,6 +53,7 @@ public sealed class UploadProgressTracker : IDisposable
             _recent.Enqueue((DateTime.UtcNow, bytes));
             PruneOld();
         }
+        NotifySnapshot();
     }
 
     public void RecordSkipped(int chunks)
@@ -57,6 +62,7 @@ public sealed class UploadProgressTracker : IDisposable
         {
             _skipped += chunks;
         }
+        NotifySnapshot();
     }
 
     /// <summary>
@@ -69,6 +75,23 @@ public sealed class UploadProgressTracker : IDisposable
         {
             _phase = phase;
         }
+        NotifySnapshot();
+    }
+
+    // Run-progress mirroring: at most one snapshot per second reaches
+    // the subscriber (the per-chunk record calls would otherwise flood
+    // it — and GetSnapshot sums the rolling window each time).
+    private void NotifySnapshot()
+    {
+        if (_onSnapshot is null)
+            return;
+        long now = DateTime.UtcNow.Ticks;
+        long last = Interlocked.Read(ref _lastNotifyTicks);
+        if (now - last < TimeSpan.TicksPerSecond)
+            return;
+        if (Interlocked.CompareExchange(ref _lastNotifyTicks, now, last) != last)
+            return;
+        try { _onSnapshot(GetSnapshot()); } catch { /* a subscriber must never break an upload */ }
     }
 
     private void PruneOld()

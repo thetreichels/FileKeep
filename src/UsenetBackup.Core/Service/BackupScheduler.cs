@@ -383,6 +383,49 @@ public sealed class BackupScheduler
         private set => _activeUpload = value;
     }
 
+    // Live progress for the backup run in flight — the job cards'
+    // progress row reads it via GetRunProgress. Published by Execute
+    // for the run's whole duration; volatile for the same reason as
+    // _activeUpload (dashboard request threads read it while run
+    // threads publish/clear it). Runs are serialized by
+    // _operationLock, so a single tracker suffices.
+    private volatile RunProgressTracker? _activeRun;
+
+    /// <summary>Snapshot of the running backup's progress, or null
+    /// when no backup run is in flight.</summary>
+    public RunProgressSnapshot? GetRunProgress() => _activeRun?.Snapshot();
+
+    /// <summary>The tracker the in-flight run publishes into (null
+    /// outside a run). Run-path helpers update it null-conditionally.</summary>
+    private RunProgressTracker? RunProgress => _activeRun;
+
+    private int _userCancelRequested;
+
+    /// <summary>
+    /// Cancels the in-flight backup run for the named job (the job
+    /// card's Cancel button). Returns false when that job is not the
+    /// one running. The cancellation is marked user-requested so the
+    /// run's callers record a cancellation, not a failure; a service
+    /// stop goes through CancelActiveOperation directly and keeps
+    /// its existing behavior.
+    /// </summary>
+    public bool CancelRun(string jobName)
+    {
+        var active = _activeRun;
+        if (active is null ||
+            !active.JobName.Equals(jobName, StringComparison.OrdinalIgnoreCase))
+            return false;
+        Interlocked.Exchange(ref _userCancelRequested, 1);
+        CancelActiveOperation();
+        return true;
+    }
+
+    /// <summary>Consumes the user-cancel mark (true exactly once per
+    /// CancelRun). Run callers that caught a cancellation check it to
+    /// tell a user's Cancel apart from a service stop.</summary>
+    private bool ConsumeUserCancel()
+        => Interlocked.Exchange(ref _userCancelRequested, 0) == 1;
+
     public IReadOnlyList<JobState> Jobs
     {
         get
@@ -557,6 +600,9 @@ public sealed class BackupScheduler
     /// </summary>
     private CancellationToken BeginOperation()
     {
+        // A user-cancel mark belongs to the operation it was pressed
+        // during; never let one leak into the next operation.
+        Interlocked.Exchange(ref _userCancelRequested, 0);
         lock (_stateLock)
         {
             _activeOperationCts?.Dispose();
@@ -1167,6 +1213,17 @@ public sealed class BackupScheduler
         {
             CancellationToken token = BeginOperation();
             try { result = Execute(runnable ?? config, _clock.Now, token, skipped); }
+            catch (OperationCanceledException) when (ConsumeUserCancel())
+            {
+                result = new JobRunResult
+                {
+                    JobName = config.Name,
+                    StartedLocal = _clock.Now,
+                    Success = false,
+                    Skipped = true,
+                    Error = "Cancelled",
+                };
+            }
             finally { EndOperation(); }
         }
         Dictionary<string, PersistedJobRun>? runStateToWrite = null;
@@ -1176,7 +1233,9 @@ public sealed class BackupScheduler
             if (job is not null)
             {
                 job.LastResult = result;
-                job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
+                job.ConsecutiveFailures = result.Success
+                    ? 0
+                    : result.Skipped ? job.ConsecutiveFailures : job.ConsecutiveFailures + 1;
                 // Re-anchor the schedule so "run now" doesn't cause an immediate re-run.
                 job.NextRunLocal = job.Schedule.NextAfter(_clock.Now);
                 runStateToWrite = SnapshotRunState();
@@ -1196,6 +1255,17 @@ public sealed class BackupScheduler
         {
             CancellationToken token = BeginOperation();
             try { result = Execute(configOverride ?? job.Config, now, token, gateSkipped); }
+            catch (OperationCanceledException) when (ConsumeUserCancel())
+            {
+                result = new JobRunResult
+                {
+                    JobName = job.Config.Name,
+                    StartedLocal = now,
+                    Success = false,
+                    Skipped = true,
+                    Error = "Cancelled",
+                };
+            }
             finally { EndOperation(); }
         }
         Dictionary<string, PersistedJobRun>? runStateToWrite = null;
@@ -1206,7 +1276,9 @@ public sealed class BackupScheduler
             if (_jobs.Contains(job))
             {
                 job.LastResult = result;
-                job.ConsecutiveFailures = result.Success ? 0 : job.ConsecutiveFailures + 1;
+                job.ConsecutiveFailures = result.Success
+                    ? 0
+                    : result.Skipped ? job.ConsecutiveFailures : job.ConsecutiveFailures + 1;
                 // P2-D8: anchor from COMPLETION, not the due-scan
                 // instant — a run longer than its interval used to
                 // re-arm into the past and immediately run back-to-back.
@@ -1261,6 +1333,20 @@ public sealed class BackupScheduler
     }
 
     private JobRunResult Execute(BackupJobConfig job, DateTime now, CancellationToken token,
+        bool requireTargets, string opName,
+        IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
+    {
+        // Publish live progress for the whole run — the job cards'
+        // progress row reads it via GetRunProgress. Cleared in
+        // finally, so a finished, failed, or cancelled run's row
+        // collapses instead of going stale.
+        var tracker = new RunProgressTracker(job.Name);
+        _activeRun = tracker;
+        try { return ExecuteRun(job, now, token, requireTargets, opName, gateSkipped); }
+        finally { if (ReferenceEquals(_activeRun, tracker)) _activeRun = null; }
+    }
+
+    private JobRunResult ExecuteRun(BackupJobConfig job, DateTime now, CancellationToken token,
         bool requireTargets, string opName,
         IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
     {
@@ -1379,6 +1465,7 @@ public sealed class BackupScheduler
                     // VssSnapshot.Dispose aborts the writer session fail-safe.
                     throw;
                 }
+                RunProgress?.AddFilesScanned(manifest.Files.Count);
                 done.Add((manifest, batched, outcomes));
             }
             return FinishBackup(job, repo, done, passphrase, token, opName, now, gateSkipped);
@@ -1452,6 +1539,21 @@ public sealed class BackupScheduler
         string passphrase, CancellationToken token, string opName, DateTime now,
         IReadOnlyList<(string Name, string Reason)>? gateSkipped = null)
     {
+        // Run progress: destinations are known here even for the
+        // non-batched paths (batched runs registered theirs already —
+        // registration is idempotent). Non-batched runs still owe
+        // their uploads and possibly an auto-verify.
+        {
+            var rp = RunProgress;
+            if (rp is not null)
+            {
+                rp.SetPhase(RunPhases.Finishing);
+                foreach (var (tName, tType, _) in ResolveTargets(job))
+                    rp.RegisterDestination(tName, tType,
+                        tType == "nntp" ? "items" : tType == "smb" ? "files" : "chunks");
+                rp.SetExpectVerify(job.AutoVerify && done.Any(d => !d.Batched));
+            }
+        }
         bool autoUploadFailed = false;
         string? autoUploadError = null;
         bool verifyFailed = false;
@@ -1480,6 +1582,7 @@ public sealed class BackupScheduler
                 try {
                     var _m2 = repo.LoadManifest(manifest.BackupId);
                     if (_m2 is not null) { StampYubiKeyChallenge(_m2); repo.SaveManifest(_m2); }
+                    RunProgress?.SetPhase(RunPhases.Uploading);
                     UploadToTargets(job, manifest.BackupId, passphrase, token, uploadOutcomes);
                 }
                 catch (OperationCanceledException) { throw; }
@@ -1509,6 +1612,7 @@ public sealed class BackupScheduler
                 token.ThrowIfCancellationRequested();
                 try
                 {
+                    RunProgress?.SetPhase(RunPhases.Verifying);
                     Log($"job '{job.Name}': auto-verifying {manifest.BackupId}...");
                     // P2-D6: Verify RETURNS its findings (it does not throw
                     // for chunk/file failures) — discarding the list made
@@ -1539,6 +1643,7 @@ public sealed class BackupScheduler
                     OperationLog.Append(job.Repo, "auto-verify-failed",
                         $"job={job.Name} id={manifest.BackupId} error={ex.Message}");
                 }
+                RunProgress?.SetPhase(RunPhases.Finishing);
             }
         }
 
@@ -1779,11 +1884,13 @@ public sealed class BackupScheduler
                     throw new InvalidOperationException(
                         $"Unknown backup location '{targetName}'.");
                 outcomes?.Add((targetName, null));
+                RunProgress?.CompleteDestination(targetName);
             }
             catch (Exception ex)
             {
                 errors.Add($"{targetName}: {ex.Message}");
                 outcomes?.Add((targetName, ex.Message));
+                RunProgress?.FailDestination(targetName, ex.Message);
             }
         }
         if (errors.Count > 0)
@@ -1811,7 +1918,7 @@ public sealed class BackupScheduler
             PasswordProtected = loc.PasswordProtected,
         };
         AutoUploadToUsenetWithProviders(job, backupId, passphrase,
-            new List<NntpConfig> { provider }, token);
+            new List<NntpConfig> { provider }, token, loc.Name);
     }
 
     /// <summary>
@@ -1964,8 +2071,16 @@ public sealed class BackupScheduler
             {
                 failedTargets[name] = ex.Message;
                 Log($"job '{job.Name}': backup location '{name}' failed and is out of this run: {ex.Message}");
+                // The job card turns amber and the estimate rebuilds
+                // around the destinations that are left.
+                RunProgress?.FailDestination(name, ex.Message);
             }
         }
+
+        // Run progress: every destination counts chunks in batched
+        // mode (the batch is the unit of delivery for all of them).
+        foreach (var (tName, tType, _) in targets)
+            RunProgress?.RegisterDestination(tName, tType, "chunks");
 
         var uploaders = new List<(string Target, Nntp.NntpBatchUploader Uploader)>();
         var smbConns = new List<(string Name, SmbShare Share)>();
@@ -2116,9 +2231,12 @@ public sealed class BackupScheduler
             var tracker = new BatchTrackingBlobStore(localStore, IsDeliveredAtAllTargets);
             var batchedVolumes = new List<VolumeEntry>();
 
+            long flushedChunks = 0;
+
             bool OnFlushBatch(IReadOnlyList<string> chunkIds, int batchIndex)
             {
                 token.ThrowIfCancellationRequested();
+                RunProgress?.SetPhase(RunPhases.Uploading);
                 // 1. Verify staged chunks locally before upload (fail closed).
                 foreach (string id in chunkIds)
                     repo.VerifyChunk(id);
@@ -2140,6 +2258,7 @@ public sealed class BackupScheduler
                         entries.AddRange(up.UploadBatch(chunkIds, batchIndex, useVolumes));
                         deliveredTargets.Add(tName);
                         batchDelivered = true;
+                        RunProgress?.AddDestinationDone(tName, chunkIds.Count);
                     }
                     catch (Exception ex) { MarkFailed(tName, ex); }
                 }
@@ -2165,6 +2284,7 @@ public sealed class BackupScheduler
                         }
                         deliveredTargets.Add(activeUploaders[i].Target);
                         batchDelivered = true;
+                        RunProgress?.AddDestinationDone(activeUploaders[i].Target, chunkIds.Count);
                         // Deterministic: all providers produce identical entries.
                         if (entries.Count == 0 && uploaderEntries[i] is not null)
                             entries.AddRange(uploaderEntries[i]!);
@@ -2183,6 +2303,7 @@ public sealed class BackupScheduler
                         Log($"job '{job.Name}': batch {batchIndex}: {copied} chunks copied to SMB '{shareName}'.");
                         deliveredTargets.Add(shareName);
                         batchDelivered = true;
+                        RunProgress?.AddDestinationDone(shareName, chunkIds.Count);
                     }
                     catch (Exception ex) { MarkFailed(shareName, ex); }
                 }
@@ -2197,6 +2318,7 @@ public sealed class BackupScheduler
                         {
                             deliveredTargets.Add(usbLoc.Name);
                             batchDelivered = true;
+                            RunProgress?.AddDestinationDone(usbLoc.Name, chunkIds.Count);
                         }
                         else
                         {
@@ -2267,6 +2389,16 @@ public sealed class BackupScheduler
                     msg => Log($"job '{job.Name}': batch {batchIndex}: {msg}"));
                 Log($"job '{job.Name}': batch {batchIndex} complete — " +
                     $"{chunkIds.Count} chunks uploaded, pruned locally.");
+                // Totals are planned-so-far: flushed plus whatever
+                // the pipelined staging already holds for later
+                // batches. They settle to the final count as the walk
+                // completes, and a destination's bar never passes its
+                // own delivered count.
+                flushedChunks += chunkIds.Count;
+                foreach (var (tName, _, _) in targets)
+                    if (!failedTargets.ContainsKey(tName))
+                        RunProgress?.SetDestinationTotal(tName,
+                            flushedChunks + tracker.StagedIds.Count);
                 OperationLog.Append(job.Repo, "batch-flush",
                     $"job={job.Name} batch={batchIndex} chunks={chunkIds.Count}");
                 return true;
@@ -2675,7 +2807,13 @@ public sealed class BackupScheduler
         Log($"job '{job.Name}': syncing backup {backupId} to '{locName}' ({share})");
         using var smb = SmbShare.Connect(share, user, smbPassword);
         var sync = new SmbSync(Log);
-        var result = sync.Sync(job.Repo, smb, progress: null, cancellationToken: token);
+        var result = sync.Sync(job.Repo, smb, progress: (doneFiles, totalFiles) =>
+        {
+            var rp = RunProgress;
+            if (rp is null) return;
+            rp.SetDestinationTotal(locName, totalFiles);
+            rp.SetDestinationDone(locName, doneFiles);
+        }, cancellationToken: token);
         Log($"job '{job.Name}': SMB sync to '{locName}' complete — {result.ChunksCopied} chunks, " +
             $"{result.ManifestsCopied} manifests copied.");
     }
@@ -2712,7 +2850,13 @@ public sealed class BackupScheduler
                 StorageGuard.EnsureUsbDriveNotSource(targetDir, src, job.Name);
 
         Log($"job '{job.Name}': syncing backup {backupId} to USB '{locName}' ({targetDir})");
-        var result = SyncRepoToLocalFolder(job.Repo, targetDir, token);
+        var result = SyncRepoToLocalFolder(job.Repo, targetDir, token, (doneChunks, totalChunks) =>
+        {
+            var rp = RunProgress;
+            if (rp is null) return;
+            rp.SetDestinationTotal(locName, totalChunks);
+            rp.SetDestinationDone(locName, doneChunks);
+        });
         Log($"job '{job.Name}': USB sync to '{locName}' complete — {result.ChunksCopied} chunks, " +
             $"{result.ManifestsCopied} manifests copied.");
         OperationLog.Append(job.Repo, "usb-sync",
@@ -2725,7 +2869,8 @@ public sealed class BackupScheduler
     /// matching sizes are skipped. Returns counts.
     /// </summary>
     private (int ChunksCopied, int ManifestsCopied) SyncRepoToLocalFolder(
-        string repoRoot, string targetDir, CancellationToken token = default)
+        string repoRoot, string targetDir, CancellationToken token = default,
+        Action<int, int>? progress = null)
     {
         int chunksCopied = 0, manifestsCopied = 0;
         string chunksDir = Path.Combine(repoRoot, "chunks");
@@ -2738,13 +2883,20 @@ public sealed class BackupScheduler
 
         if (Directory.Exists(chunksDir))
         {
-            foreach (string src in Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories))
+            // Enumerate up front so progress has a real total; every
+            // file counts as delivered once processed (copied now or
+            // already present — both mean the destination has it).
+            var chunkFiles = Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories);
+            int processed = 0;
+            foreach (string src in chunkFiles)
             {
                 token.ThrowIfCancellationRequested();
                 string rel = Path.GetRelativePath(chunksDir, src);
                 string dst = Path.Combine(targetChunks, rel);
                 if (CopyIfDifferent(src, dst))
                     chunksCopied++;
+                processed++;
+                progress?.Invoke(processed, chunkFiles.Length);
             }
         }
         if (Directory.Exists(manifestsDir))
@@ -2785,7 +2937,8 @@ public sealed class BackupScheduler
 
     private void AutoUploadToUsenetWithProviders(
         BackupJobConfig job, string backupId, string passphrase,
-        IReadOnlyList<NntpConfig> providers, CancellationToken token = default)
+        IReadOnlyList<NntpConfig> providers, CancellationToken token = default,
+        string? progressDestination = null)
     {
         if (providers.Count == 0)
             throw new InvalidOperationException("Auto-upload enabled but no Usenet provider configured.");
@@ -2882,8 +3035,22 @@ public sealed class BackupScheduler
                 // it wasn't reserved, so progress could report done = total + 1
                 // — over 100%.
                 int totalUnits = dataUnits + parityUnits + 2 + (useVolumes ? 1 : 0);
+                // Mirror this provider's units into the run progress
+                // (job card + estimate). The destination is the
+                // location's name when the upload came from one;
+                // the legacy global-provider path names it by host.
+                string destName = progressDestination ?? nntp.Host;
+                RunProgress?.RegisterDestination(destName, "nntp", "items");
                 using var progress = new UploadProgressTracker(
-                    Log, job.Name, nntp.Host, totalUnits);
+                    Log, job.Name, nntp.Host, totalUnits,
+                    snap =>
+                    {
+                        var rp = RunProgress;
+                        if (rp is null) return;
+                        rp.SetDestinationTotal(destName, snap.TotalChunks);
+                        rp.SetDestinationDone(destName, snap.DoneChunks);
+                        rp.SetDestinationObservedRate(destName, snap.BytesPerSec);
+                    });
                 ActiveUpload = progress;
                 try
                 {
