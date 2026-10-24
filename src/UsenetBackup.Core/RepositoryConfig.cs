@@ -11,9 +11,6 @@ public sealed class RepositoryConfig
     [JsonPropertyName("created_utc")]
     public DateTime CreatedUtc { get; set; }
 
-    [JsonPropertyName("kdf")]
-    public string Kdf { get; set; } = "pbkdf2-hmac-sha512";
-
     [JsonPropertyName("kdf_iterations")]
     public int KdfIterations { get; set; }
 

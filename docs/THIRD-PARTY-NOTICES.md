@@ -17,6 +17,9 @@ its own terms, reproduced below. This file does not change those licenses.
 | ReedSolomonFast | 1.1.1 | Reed–Solomon erasure coding | MIT |
 | SQLitePCLRaw | 2.1.12 | Managed SQLite binding (bundles `e_sqlite3`) | Apache-2.0 |
 | SQLite | 3.53.3 (bundled via SQLitePCLRaw) | Embedded database engine | Public domain |
+| QRCoder | 1.4.3 | QR codes for authenticator setup | MIT |
+| Yubico.YubiKey | 1.18.0 | YubiKey challenge-response (HID) | Apache-2.0 |
+| Microsoft.Web.WebView2 | 1.0.2903.40 | Desktop app shell (WebView2 host) | Microsoft license |
 | MinGW-w64 runtime | — | C runtime statically linked into `FileKeepVss.exe` | BSD-style (see below) |
 | libgcc | — | Compiler runtime statically linked into `FileKeepVss.exe` | GPL with GCC Runtime Library Exception |
 
@@ -30,6 +33,8 @@ Notes:
 - **WiX v5** builds the installer but is build tooling only: a plain MSI
   built with `wix build` contains no WiX code, so its license does not attach
   to the product.
+- **Microsoft.Web.WebView2** is distributed under Microsoft's license
+  terms for WebView2 (https://developer.microsoft.com/microsoft-edge/webview2/).
 
 ---
 
@@ -44,6 +49,7 @@ The following packages are distributed under the MIT License:
 - System.Management — Copyright (c) .NET Foundation and Contributors —
   https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 - ReedSolomonFast — https://github.com/Dissimilis/ReedSolomonFast
+- QRCoder — https://github.com/codebude/QRCoder
 
 ```
 MIT License
@@ -74,7 +80,8 @@ SOFTWARE.
 ## Apache License 2.0
 
 Applies to **SQLitePCLRaw** (Copyright SourceGear, LLC —
-https://github.com/ericsink/SQLitePCL.raw).
+https://github.com/ericsink/SQLitePCL.raw) and **Yubico.YubiKey**
+(Copyright Yubico — https://github.com/Yubico/Yubico.NET).
 
 ```
                                  Apache License

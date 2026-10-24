@@ -46,15 +46,12 @@ public sealed class SmbTests : IDisposable
     }
 
     [Fact]
-    public void Load_LegacyShapedConfig_Loads_RetiredJobFieldsInert()
+    public void Load_LegacyShapedConfig_Throws()
     {
-        // Phase 6: pre-locations config shapes are no longer migrated.
-        // The file still loads (the retired job fields remain parse-only
-        // shims under the fail-closed loader), the top-level provider
-        // shape still parses (a kept surface), but the per-job
-        // connection fields are zeroed and read by no one, and bare
-        // "nntp"/"smb" targets resolve to no location — the job
-        // evaluates to NeedsLocation, exactly like a target-less job.
+        // No backwards compatibility: a pre-locations config file
+        // carrying the retired per-job fields (autoUpload, smbShare,
+        // smbUser, smbPasswordProtected) no longer loads — the
+        // fail-closed loader rejects the unrecognized members.
         Directory.CreateDirectory(_tmp);
         string repo = Path.Combine(_tmp, "repo");
         string src = Path.Combine(_tmp, "src");
@@ -74,31 +71,8 @@ public sealed class SmbTests : IDisposable
         """;
         File.WriteAllText(path, json);
 
-        var config = ServiceConfig.Load(path);
-
-        // Kept surface: the global provider shape parses unchanged, and
-        // no locations are derived from it (the migration is gone).
-        Assert.Equal("news.example.com", config.Nntp?.Host);
-        Assert.Empty(config.Locations);
-
-        var job = Assert.Single(config.Jobs);
-        // Retired per-job fields: zeroed on load, never read.
-        Assert.False(job.AutoUpload);
-        Assert.True(string.IsNullOrEmpty(job.SmbShare));
-        Assert.True(string.IsNullOrEmpty(job.SmbUser));
-        Assert.True(string.IsNullOrEmpty(job.SmbPasswordProtected));
-        // Bare tokens stay in the target list as inert names that
-        // resolve to nothing.
-        Assert.Equal(new[] { "nntp", "smb" }, job.EffectiveTargets);
-        Assert.Equal(JobRunState.NeedsLocation,
-            JobStateEvaluator.Evaluate(job, JobStateEvaluator.BuildLookup(config)));
-
-        // A save never writes the retired fields back out.
-        string outPath = Path.Combine(_tmp, "service2.json");
-        config.Save(outPath);
-        string saved = File.ReadAllText(outPath);
-        Assert.DoesNotContain("smbShare", saved);
-        Assert.DoesNotContain("autoUpload", saved);
+        var ex = Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(path));
+        Assert.Contains("Invalid service config", ex.Message);
     }
 
     [Fact]

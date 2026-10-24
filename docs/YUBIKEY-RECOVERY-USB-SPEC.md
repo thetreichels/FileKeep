@@ -1,7 +1,7 @@
 # YubiKey Recovery USB — Technical Specification
 
 **Date:** 2026-10-17
-**Status:** Spec — not implemented
+**Status:** Implemented — the recovery wizard unlocks by YubiKey touch (`YubiKeyRecovery.cs`, HID challenge-response); the manifest-stamped challenge travels with the backup
 **Depends on:** `7ba6abe` (YubiKey challenge in backup manifest)
 
 ## Problem

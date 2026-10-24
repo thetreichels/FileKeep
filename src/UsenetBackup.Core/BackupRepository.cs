@@ -110,21 +110,6 @@ public sealed class BackupRepository : IDisposable
     }
 
     /// <summary>
-    /// Opens a repo using a custom blob store (e.g., SmbBlobStore for remote chunks).
-    /// The repo directory must still exist locally for manifests and catalog.
-    /// </summary>
-    internal BackupRepository(string root, RepositoryConfig config, byte[] key, IBlobStore blobs)
-    {
-        _root = root;
-        _config = config;
-        _key = key;
-        IndexAuth = Nntp.IndexAuth.FromRepoKey(key);
-        _blobs = blobs;
-        _catalog = new Catalog(Path.Combine(root, "catalog.db"));
-        RebuildCatalogIfNeeded();
-    }
-
-    /// <summary>
     /// P2-D1: the catalog is a rebuildable index (its own contract), but
     /// nothing ever rebuilt it. Destination repos never receive
     /// catalog.db (SMB sync excludes it; USB copies carry manifests and
@@ -288,28 +273,6 @@ public sealed class BackupRepository : IDisposable
         byte[] key = KeyDerivation.DeriveKey(
             passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);
         return new BackupRepository(Path.GetFullPath(repoPath), config, key);
-    }
-
-    /// <summary>
-    /// Opens a repo using a custom blob store (e.g., SmbBlobStore for remote).
-    /// Manifests and catalog are still read from the local repo directory.
-    /// </summary>
-    public static BackupRepository OpenWithStore(string repoPath, string passphrase, IBlobStore blobs)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(passphrase);
-        ArgumentNullException.ThrowIfNull(blobs);
-        string configPath = Path.Combine(repoPath, "repo.json");
-        if (!File.Exists(configPath))
-            throw new InvalidOperationException($"No repository found at {repoPath} (missing repo.json).");
-
-        var config = JsonSerializer.Deserialize(File.ReadAllText(configPath), FileKeepJsonContext.Default.RepositoryConfig)
-            ?? throw new InvalidDataException("repo.json is corrupt.");
-        if (config.FormatVersion != FormatVersion)
-            throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
-
-        byte[] key = KeyDerivation.DeriveKey(
-            passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);
-        return new BackupRepository(Path.GetFullPath(repoPath), config, key, blobs);
     }
 
     // ---------- backup ----------
@@ -975,25 +938,6 @@ public sealed class BackupRepository : IDisposable
         }
     }
 
-    /// <summary>
-    /// Hashes, encrypts and stores one plaintext chunk, recording it on the
-    /// file entry. Shared by both chunking schemes: chunk IDs are SHA-256 of
-    /// plaintext either way, so deduplication is scheme-agnostic.
-    /// </summary>
-    private void StoreChunk(ReadOnlySpan<byte> chunkPlain, FileEntry entry, IncrementalHash fileHash,
-        byte[] blobBuf, IBlobStore blobs)
-    {
-        string chunkId = Hashing.Sha256Hex(chunkPlain);
-        if (!blobs.Exists(chunkId))
-        {
-            var blobSpan = blobBuf.AsSpan(0, chunkPlain.Length + ChunkCrypto.NonceSizeBytes + ChunkCrypto.TagSizeBytes);
-            ChunkCrypto.EncryptInto(chunkPlain, _key, Hashing.HexToBytes(chunkId), blobSpan);
-            blobs.Put(chunkId, blobSpan);
-        }
-        _catalog.RecordChunk(chunkId, chunkPlain.Length);
-        entry.Chunks.Add(chunkId);
-        fileHash.AppendData(chunkPlain);
-    }
 
     /// <summary>Fixed-size chunking path (v1 behavior).</summary>
     private long ChunkStreamFixed(Stream stream, FileEntry entry, IncrementalHash fileHash, byte[] buffer,

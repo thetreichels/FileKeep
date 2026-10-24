@@ -411,16 +411,6 @@ public sealed class Catalog : IDisposable
         }
     }
 
-    public long DownloadedCount()
-    {
-        lock (_lock)
-        {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM downloads";
-            return (long)cmd.ExecuteScalar()!;
-        }
-    }
-
     /// <summary>Number of backups the catalog knows about.</summary>
     public int CountBackups()
     {

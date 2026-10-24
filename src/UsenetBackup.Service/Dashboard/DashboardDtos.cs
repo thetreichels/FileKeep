@@ -88,9 +88,6 @@ public sealed record PassphraseStatusDto(
 public sealed record CancelledDto(
     [property: JsonPropertyName("cancelled")] bool Cancelled);
 
-public sealed record CountDto(
-    [property: JsonPropertyName("count")] int Count);
-
 public sealed record HasPasswordDto(
     [property: JsonPropertyName("hasPassword")] bool HasPassword);
 
@@ -120,19 +117,6 @@ public sealed record BrowseFoldersDto(
     [property: JsonPropertyName("home")] string Home,
     [property: JsonPropertyName("folders")] List<FolderDto> Folders,
     [property: JsonPropertyName("drives")] List<FolderDto> Drives);
-
-/// <summary>Snapshot of upload progress for /api/upload-progress.</summary>
-/// <summary>Single NNTP probe result for /api/config/nntp/probe.</summary>
-public sealed record NntpProbeResultDto(
-    [property: JsonPropertyName("port")] string Port,
-    [property: JsonPropertyName("result")] string Result);
-
-/// <summary>Response for /api/config/nntp/probe.</summary>
-public sealed record NntpProbeResponseDto(
-    [property: JsonPropertyName("host")] string Host,
-    [property: JsonPropertyName("probes")] List<NntpProbeResultDto> Probes,
-    [property: JsonPropertyName("fallback")] NntpProbeResultDto? Fallback,
-    [property: JsonPropertyName("diagnosis")] string Diagnosis);
 
 /// <summary>Job summary for /api/config response. Jobs carry no
 /// credentials or connection details (Phase 6): targets are location
@@ -256,15 +240,6 @@ public sealed record ActiveRestoreDto(
 public sealed record StatusDto(
     [property: JsonPropertyName("startedLocal")] DateTime? StartedLocal,
     [property: JsonPropertyName("jobs")] List<StatusJobDto> Jobs);
-
-/// <summary>Expiring backup entry for /api/expiration.</summary>
-public sealed record ExpiringBackupDto(
-    [property: JsonPropertyName("backupId")] string BackupId,
-    [property: JsonPropertyName("providerHost")] string ProviderHost,
-    [property: JsonPropertyName("uploadedUtc")] DateTime UploadedUtc,
-    [property: JsonPropertyName("expiresUtc")] DateTime ExpiresUtc,
-    [property: JsonPropertyName("daysLeft")] int DaysLeft,
-    [property: JsonPropertyName("retentionDays")] int RetentionDays);
 
 /// <summary>
 /// Backup entry for GET /api/backups. StoredBytes is the catalogued

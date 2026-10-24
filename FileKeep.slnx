@@ -9,4 +9,11 @@
   <Folder Name="/tests/">
     <Project Path="tests/UsenetBackup.Core.Tests/UsenetBackup.Core.Tests.csproj" />
   </Folder>
+  <!-- Native VSS helper: built by MinGW via build-vss-helper.ps1, not
+       MSBuild. Listed here for visibility only; it is not a buildable
+       project and must not be added to any build configuration. -->
+  <Folder Name="/src/UsenetBackup.VssHelper/">
+    <File Path="src/UsenetBackup.VssHelper/FileKeepVss.cpp" />
+    <File Path="src/UsenetBackup.VssHelper/build-vss-helper.ps1" />
+  </Folder>
 </Solution>

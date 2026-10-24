@@ -50,8 +50,8 @@ public class JsonContextRegistrationTests
         var options = ProductionJson.Options;
 
         var dashboardTypes = RegisteredTypes(typeof(DashboardJsonContext));
-        Assert.True(dashboardTypes.Count >= 62,
-            $"DashboardJsonContext registrations shrank to {dashboardTypes.Count} (expected at least 62): " +
+        Assert.True(dashboardTypes.Count >= 58,
+            $"DashboardJsonContext registrations shrank to {dashboardTypes.Count} (expected at least 58): " +
             "a deregistered response type 500s in the trimmed build.");
         var coreTypes = RegisteredTypes(typeof(FileKeepJsonContext));
         Assert.True(coreTypes.Count >= 16,

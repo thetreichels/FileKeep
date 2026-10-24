@@ -306,12 +306,6 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
-        app.MapGet("/api/backups/remote", (string repo) =>
-        {
-            var (status, payload) = DashboardApi.GetRemoteBackups(config, repo, restoreSession);
-            return Results.Json(payload, statusCode: status);
-        });
-
         app.MapPost("/api/backups/remote/import", async (string repo, HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -343,17 +337,6 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
-        app.MapPost("/api/operations/smb-sync", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            string share = GetBodyString(body, "share");
-            string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
-            var (status, payload) = DashboardApi.StartSmbSync(config, share, user, scheduler);
-            return Results.Json(payload, statusCode: status);
-        });
-
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -372,16 +355,6 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
             var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, dryRun);
-            return Results.Json(payload, statusCode: status);
-        });
-
-        app.MapPost("/api/operations/diagnose", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            string host = GetBodyString(body, "host");
-            var (status, payload) = DashboardApi.RunDiagnose(host);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -478,17 +451,6 @@ public static class Dashboard
             var (status, payload) = DashboardApi.CancelRestore(
                 string.IsNullOrWhiteSpace(destDir) ? null : destDir,
                 string.IsNullOrWhiteSpace(device) ? null : device);
-            return Results.Json(payload, statusCode: status);
-        });
-
-        app.MapPost("/api/operations/backup-now", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var body = await request.ReadFromJsonAsync<JsonElement>();
-            string repo = GetBodyString(body, "repo");
-            string sourceDir = GetBodyString(body, "sourceDir");
-            var (status, payload) = DashboardApi.StartAdhocBackup(config, repo, sourceDir, scheduler);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -613,41 +575,6 @@ public static class Dashboard
         {
             var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
             return Results.Json(payload, statusCode: status);
-        });
-
-        app.MapGet("/api/expiration", (string repo, int warnDays = 90) =>
-        {
-            try
-            {
-                // Build per-provider retention map from service config
-                var retentionByHost = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                if (config.Nntp is not null && !string.IsNullOrWhiteSpace(config.Nntp.Host))
-                    retentionByHost[config.Nntp.Host] = config.Nntp.RetentionDays;
-                foreach (var p in config.NntpProviders)
-                {
-                    if (!string.IsNullOrWhiteSpace(p.Host))
-                        retentionByHost[p.Host] = p.RetentionDays;
-                }
-                int GetRetention(string host) =>
-                    retentionByHost.TryGetValue(host, out int days) ? days : 1095;
-
-                var tracker = new UsenetUploadTracker(repo);
-                var expiring = tracker.GetExpiring(GetRetention, warnDays);
-                return Results.Json(expiring.Select(x => new ExpiringBackupDto(
-                    x.Record.BackupId,
-                    x.Record.ProviderHost,
-                    x.Record.UploadedUtc,
-                    x.ExpiresUtc,
-                    x.DaysLeft,
-                    GetRetention(x.Record.ProviderHost))).ToList());
-            }
-            catch (Exception ex)
-            {
-                // CX-4: this is a server-side failure (tracker read), not
-                // a client error — 500, not 400.
-                return Results.Json(new ErrorDto(ex.Message),
-                    statusCode: StatusCodes.Status500InternalServerError);
-            }
         });
 
         app.MapGet("/api/run-progress", () =>
@@ -794,19 +721,6 @@ public static class Dashboard
             if (nntp is null)
                 return Results.BadRequest(new ErrorDto("Empty NNTP config."));
             var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath, nntp, log);
-            return Results.Json(payload, statusCode: status);
-        });
-
-        app.MapPost("/api/config/nntp-providers", async (HttpRequest request) =>
-        {
-            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
-                return Results.StatusCode(StatusCodes.Status403Forbidden);
-            List<NntpConfig>? providers;
-            try { providers = await request.ReadFromJsonAsync<List<NntpConfig>>(); }
-            catch { return Results.BadRequest(new ErrorDto("Invalid providers JSON.")); }
-            if (providers is null)
-                return Results.BadRequest(new ErrorDto("Empty providers list."));
-            var (status, payload) = DashboardApi.UpdateNntpProviders(config, scheduler, configPath, providers, log);
             return Results.Json(payload, statusCode: status);
         });
 

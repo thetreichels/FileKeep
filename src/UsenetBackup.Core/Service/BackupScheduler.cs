@@ -344,7 +344,7 @@ public sealed class BackupScheduler
     private readonly Func<BackupLocation, bool> _networkReachable;
     /// <summary>
     /// Guards short-lived scheduler state: _jobs, _config, _nntpProviders,
-    /// _lastRetentionCheck, _activeOperationCts, ActiveUpload. Never held
+    /// _lastRetentionCheck, _activeOperationCts. Never held
     /// across a backup, upload, verify, or retention operation (D1).
     /// </summary>
     private readonly object _stateLock = new();
@@ -367,28 +367,11 @@ public sealed class BackupScheduler
     /// checks for the whole interval.</summary>
     private DateTime _nextRetentionRetry = DateTime.MinValue;
 
-    // P2-C18: volatile-backed — the dashboard reads this on request
-    // threads while upload threads publish/clear it; a plain
-    // auto-property gave no publication guarantee (a reader could
-    // observe a stale or torn reference indefinitely).
-    private volatile UploadProgressTracker? _activeUpload;
-
-    /// <summary>
-    /// Currently active upload progress tracker, or null if no upload in progress.
-    /// Used by the dashboard to show progress bar and current speed.
-    /// </summary>
-    public UploadProgressTracker? ActiveUpload
-    {
-        get => _activeUpload;
-        private set => _activeUpload = value;
-    }
-
     // Live progress for the backup run in flight — the job cards'
     // progress row reads it via GetRunProgress. Published by Execute
-    // for the run's whole duration; volatile for the same reason as
-    // _activeUpload (dashboard request threads read it while run
-    // threads publish/clear it). Runs are serialized by
-    // _operationLock, so a single tracker suffices.
+    // for the run's whole duration; volatile because dashboard request
+    // threads read it while run threads publish/clear it. Runs are
+    // serialized by _operationLock, so a single tracker suffices.
     private volatile RunProgressTracker? _activeRun;
 
     /// <summary>Snapshot of the running backup's progress, or null
@@ -3028,7 +3011,6 @@ public sealed class BackupScheduler
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
                 // real estimates that refine as more data arrives.
-                // Exposed via ActiveUpload for dashboard progress bar.
                 // Total covers data units (chunks or volumes) + parity + manifest
                 // + index so the bar doesn't hit 100% and vanish while work remains.
                 // CX-2: volume mode ALSO posts an NFO article (recorded below);
@@ -3051,8 +3033,8 @@ public sealed class BackupScheduler
                         rp.SetDestinationDone(destName, snap.DoneChunks);
                         rp.SetDestinationObservedRate(destName, snap.BytesPerSec);
                     });
-                ActiveUpload = progress;
-                try
+                // Scope block: formerly a try/finally whose finally only
+                // documented not clearing the removed ActiveUpload tracker.
                 {
                     // volId -> chunk group, filled by the data phase; feeds parity.
                     // (groupIndex, entry) pairs so the manifest keeps PlanVolumes
@@ -3241,22 +3223,11 @@ public sealed class BackupScheduler
                     Log($"job '{job.Name}': auto-upload to {nntp.Host} complete ({uploaded} posted, {skipped} already present)");
                     succeeded++;
                 }
-                finally
-                {
-                    // P2-C18: do NOT clear ActiveUpload here — between
-                    // providers the dashboard read "no upload active"
-                    // while the upload phase was still running. The
-                    // next provider's tracker replaces this one; the
-                    // single clear happens after the provider loop.
-                }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 // A stop is not a provider failure: propagate so the run
                 // ends as cancelled and its outcome is recorded (P2-C6).
-                // (Clear the progress tracker on this path too — it
-                // bypasses the after-loop clear below.)
-                ActiveUpload = null;
                 throw;
             }
             catch (Exception ex)
@@ -3265,7 +3236,6 @@ public sealed class BackupScheduler
                 Log($"job '{job.Name}': auto-upload to {nntp.Host} FAILED: {ex.Message}");
             }
         }
-        ActiveUpload = null;
         // SF-14: ANY failed provider must surface. The old rule threw
         // only when every configured entry (including blank hosts that
         // were never attempted) had an error, so a partial failure —

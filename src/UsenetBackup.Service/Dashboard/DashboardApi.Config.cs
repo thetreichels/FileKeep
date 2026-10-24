@@ -80,57 +80,6 @@ public static partial class DashboardApi
         }
     }
 
-    public static (int Status, object Payload) RunDiagnose(string host)
-    {
-        if (string.IsNullOrWhiteSpace(host))
-            return (400, new ErrorDto("host is required."));
-        var results = new List<NntpProbeResultDto>();
-        foreach (var (port, ssl, label) in new (int, bool, string)[]
-                 { (119, false, "119/plain"), (563, true, "563/TLS"), (443, false, "443/plain") })
-        {
-            results.Add(new NntpProbeResultDto(label, ProbeNntp(host, port, ssl)));
-        }
-        bool anyOk = results.Any(r => r.Result.StartsWith("OK", StringComparison.Ordinal));
-        NntpProbeResultDto? fallback = null;
-        string diagnosis;
-        if (anyOk)
-        {
-            diagnosis = $"{host} is reachable. Use port 563 (TLS) if your ISP interferes with plaintext NNTP.";
-        }
-        else
-        {
-            string fb = ProbeNntp("freenews.netfront.net", 119, false);
-            fallback = new NntpProbeResultDto("freenews.netfront.net:119", fb);
-            diagnosis = fb.StartsWith("OK", StringComparison.Ordinal)
-                ? $"Your network CAN reach NNTP (fallback answered), so the problem is specific to {host}."
-                : "No NNTP server is reachable. Your ISP or firewall is likely blocking NNTP.";
-        }
-        return (200, new NntpProbeResponseDto(host, results, fallback, diagnosis));
-    }
-
-    private static string ProbeNntp(string host, int port, bool ssl)
-    {
-        try
-        {
-            using var client = new UsenetBackup.Core.Nntp.NntpClient(host, port, ssl);
-            client.Connect();
-            string g = client.Greeting ?? "";
-            try { client.Quit(); } catch { }
-            return $"OK ({(g.Length <= 60 ? g : g[..60] + "…")})";
-        }
-        catch (Exception ex)
-        {
-            string msg = ex.Message ?? "";
-            if (ex is TimeoutException || msg.Contains("Timed out", StringComparison.OrdinalIgnoreCase))
-                return "BLOCKED/TIMEOUT (ISP or firewall may be filtering this port)";
-            if (msg.Contains("refused", StringComparison.OrdinalIgnoreCase))
-                return "CONNECTION REFUSED (port closed)";
-            if (msg.Contains("No such host", StringComparison.OrdinalIgnoreCase))
-                return "DNS FAILED";
-            return $"FAILED ({(msg.Length <= 80 ? msg : msg[..80] + "…")})";
-        }
-    }
-
     /// <summary>
     /// Lists USB-attached physical drives (Windows only).
     /// </summary>
@@ -336,9 +285,6 @@ public static partial class DashboardApi
                 j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
             // Jobs carry no credentials: jobs name locations in Targets,
             // and connection details + passwords live on the location.
-            // (The per-job SMB fields were retired in Phase 6; nothing
-            // reads them, so there is no blob to carry over here.)
-            job.SmbPasswordPlaintext = null;
             if (existing is null)
                 config.Jobs.Add(job);
             else
@@ -707,49 +653,4 @@ public static partial class DashboardApi
         }
     }
 
-    public static (int Status, object Payload) UpdateNntpProviders(ServiceConfig config,
-        BackupScheduler scheduler, string configPath, List<NntpConfig> providers,
-        Action<string>? log = null)
-    {
-        // Validate each provider
-        foreach (var p in providers)
-        {
-            if (string.IsNullOrWhiteSpace(p.Host))
-                return (400, new ErrorDto("Provider host is required."));
-            if (p.Port is < 1 or > 65535)
-                return (400, new ErrorDto($"Port {p.Port} is out of range." ));
-            if (p.Connections is < 1 or > 100)
-                return (400, new ErrorDto($"Connections must be 1-100 (got {p.Connections})." ));
-        }
-        // P2-C2: blob matching reads the live list and the wholesale
-        // replacement swaps it — both under the config lock.
-        lock (config.JobsLock)
-        {
-        // Encrypt supplied plaintext passwords via DPAPI; blank keeps the stored blob.
-        // Match against existing providers by host+port to preserve blobs.
-        foreach (var p in providers)
-        {
-            var existing = config.NntpProviders.FirstOrDefault(e =>
-                e.Host.Equals(p.Host, StringComparison.OrdinalIgnoreCase) && e.Port == p.Port);
-            string? blobToKeep = existing?.PasswordProtected;
-            if (!string.IsNullOrEmpty(p.PasswordPlaintext))
-                blobToKeep = Dpapi.Protect(p.PasswordPlaintext);
-            p.PasswordProtected = blobToKeep;
-            p.PasswordPlaintext = null;
-        }
-        config.NntpProviders = providers;
-        try
-        {
-            config.Validate();
-            config.Save(configPath);
-            scheduler.ReloadJobs(config);
-            log?.Invoke($"dashboard: {providers.Count} Usenet provider(s) saved");
-            return (200, new CountDto(providers.Count));
-        }
-        catch (Exception ex)
-        {
-            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
-        }
-        }
-    }
 }

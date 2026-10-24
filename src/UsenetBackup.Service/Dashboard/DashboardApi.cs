@@ -609,63 +609,6 @@ public static partial class DashboardApi
     }
 
     /// <summary>
-    /// Discovers backup manifests posted to Usenet (the encrypted manifest
-    /// index). Returns manifests not present locally — "all backups FileKeep
-    /// is aware of" beyond the local repo. Uses the first configured provider.
-    /// </summary>
-    public static (int Status, object Payload) GetRemoteBackups(ServiceConfig config, string repo, RestoreSession? session = null)
-    {
-        if (!IsKnownRepo(config, repo))
-            return (400, new ErrorDto("Unknown repo (not a configured job)."));
-        var provider = config.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
-        if (provider is null)
-            return (400, new ErrorDto("No Usenet provider configured."));
-        string? passphrase = GetRestorePassphrase(config, session);
-        if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
-                : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
-        try
-        {
-            string? nntpPassword = Environment.GetEnvironmentVariable(BackupScheduler.NntpPasswordEnvVar);
-            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
-                nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
-
-            using var client = new UsenetBackup.Core.Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
-            client.Connect();
-            if (!string.IsNullOrEmpty(provider.Username))
-                client.Authenticate(provider.Username, nntpPassword ?? "");
-
-            using var r = BackupRepository.Open(repo, passphrase);
-            string providerKey = UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(provider.Host, provider.Newsgroup);
-            using var store = new UsenetBackup.Core.Nntp.NntpBlobStore(
-                client, provider.Newsgroup, r.RepoId, r.CatalogPath,
-                messageIndex: r.MessageIndex, providerKey: providerKey,
-                indexAuth: r.IndexAuth);
-            var remote = r.DiscoverRemoteManifests(store);
-            var localIds = new HashSet<string>(r.ListBackups().Select(b => b.BackupId));
-            var fresh = remote
-                .Where(m => !localIds.Contains(m.Manifest.BackupId))
-                .Select(m => new
-                {
-                    backupId = m.Manifest.BackupId,
-                    createdUtc = m.Manifest.CreatedUtc,
-                    type = m.Manifest.Type,
-                    source = m.Manifest.Source,
-                    fileCount = m.Manifest.Files.Count,
-                    snapshot = m.Manifest.Snapshot,
-                })
-                .OrderByDescending(m => m.createdUtc)
-                .ToArray();
-            return (200, fresh);
-        }
-        catch (Exception ex)
-        {
-            return (500, new ErrorDto(ex.Message));
-        }
-    }
-
-    /// <summary>
     /// Imports remote-discovered manifests into the local repo so they can
     /// be downloaded/restored like local backups.
     /// </summary>
@@ -747,58 +690,6 @@ public static partial class DashboardApi
         });
         OperationLog.Append(repo, "manual-upload", $"backupId={backupId} started");
         return (202, new AcceptedDto(true));
-    }
-
-    /// <summary>
-    /// Starts a manual SMB sync in the background. The password comes from
-    /// the service config (the SMB location for the share, or the global
-    /// env var); the dashboard never handles it. Returns (202, accepted)
-    /// or (400, error).
-    /// </summary>
-    public static (int Status, object Payload) StartSmbSync(
-        ServiceConfig config, string share, string user,
-        BackupScheduler? scheduler = null)
-    {
-        if (string.IsNullOrWhiteSpace(share))
-            return (400, new ErrorDto("SMB share path is required."));
-        var repos = AllJobRepos(config);
-        if (repos.Count == 0)
-            return (400, new ErrorDto("No backup jobs configured."));
-        // Find SMB credentials: the location whose share matches the
-        // requested share is the credential home (the per-job smb*
-        // fields were retired in Phase 6); the env var overrides.
-        var loc = config.SnapshotLocations().FirstOrDefault(l =>
-            l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase) &&
-            l.Share.Equals(share, StringComparison.OrdinalIgnoreCase));
-        string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-        if (string.IsNullOrEmpty(password) && loc is not null && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
-            password = UsenetBackup.Core.Dpapi.Unprotect(loc.SmbPasswordProtected);
-        string effectiveUser = string.IsNullOrWhiteSpace(user) ? loc?.SmbUser ?? "" : user;
-        Task.Run(() =>
-        {
-            // P2-C3: serialize against scheduled runs and every other
-            // long operation through the scheduler's operation gate.
-            using var op = scheduler?.BeginDashboardOperation();
-            foreach (string repo in repos)
-            {
-                try
-                {
-                    using var smb = UsenetBackup.Core.SmbShare.Connect(share, effectiveUser, password);
-                    var sync = new UsenetBackup.Core.SmbSync(msg =>
-                        OperationLog.Append(repo, "smb-sync", msg));
-                    var result = sync.Sync(repo, smb);
-                    OperationLog.Append(repo, "smb-sync",
-                        $"to {share} complete: {result.ChunksCopied} chunks, {result.ManifestsCopied} manifests");
-                }
-                catch (Exception ex)
-                {
-                    OperationLog.Append(repo, "smb-sync", $"to {share} FAILED: {ex.Message}");
-                }
-            }
-        });
-        foreach (string repo in repos)
-            OperationLog.Append(repo, "smb-sync", $"to {share} started");
-        return (202, new AcceptedReposDto(true, repos.Count));
     }
 
     /// <summary>
@@ -1053,42 +944,6 @@ public static partial class DashboardApi
             }
         });
         OperationLog.Append(repo, "manual-restore", $"backupId={backupId} dest={destDir} started");
-        return (202, new AcceptedDto(true));
-    }
-
-    /// <summary>
-    /// Starts an ad-hoc backup of a source directory in the background.
-    /// </summary>
-    public static (int Status, object Payload) StartAdhocBackup(
-        ServiceConfig config, string repo, string sourceDir,
-        BackupScheduler? scheduler = null)
-    {
-        if (!IsKnownRepo(config, repo))
-            return (400, new ErrorDto("Unknown repo (not a configured job)."));
-        if (string.IsNullOrWhiteSpace(sourceDir) || !Directory.Exists(sourceDir))
-            return (400, new ErrorDto("sourceDir must be an existing directory."));
-        string? passphrase = BackupScheduler.GetPassphrase(config);
-        if (string.IsNullOrEmpty(passphrase))
-            return (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
-        Task.Run(() =>
-        {
-            // P2-C3: serialize against scheduled runs and every other
-            // long operation through the scheduler's operation gate.
-            using var op = scheduler?.BeginDashboardOperation();
-            try
-            {
-                using var r = BackupRepository.Open(repo, passphrase);
-                var manifest = r.BackupDirectory(sourceDir, snapshotProvider: null);
-                OperationLog.Append(repo, "manual-backup",
-                    $"id={manifest.BackupId} source={sourceDir} OK");
-            }
-            catch (Exception ex)
-            {
-                OperationLog.Append(repo, "manual-backup",
-                    $"source={sourceDir} FAILED: {ex.Message}");
-            }
-        });
-        OperationLog.Append(repo, "manual-backup", $"source={sourceDir} started");
         return (202, new AcceptedDto(true));
     }
 

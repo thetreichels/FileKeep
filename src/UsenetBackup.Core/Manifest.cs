@@ -137,9 +137,6 @@ public sealed class BackupManifest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Chunking { get; set; }
 
-    [JsonPropertyName("compression")]
-    public string Compression { get; set; } = "none";
-
     [JsonPropertyName("files")]
     public List<FileEntry> Files { get; set; } = new();
 

@@ -2,11 +2,11 @@
 
 ![FileKeep](assets/filekeep-splash.png)
 
-**Encrypted backups that live on Usenet.** FileKeep is an open-source Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
+**Encrypted backups that live on Usenet.** FileKeep is a Windows backup application that encrypts your files client-side and stores them as ordinary Usenet articles — no cloud subscription, no vendor lock-in, just your data, retrievable from any Usenet provider with enough retention.
 
 [![License: Proprietary](https://img.shields.io/badge/License-Proprietary-red.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D4.svg)]()
-[![Tests](https://img.shields.io/badge/tests-318-blue.svg)]()
+[![Tests](https://img.shields.io/badge/tests-passing-green.svg)]()
 
 ## What it does
 
@@ -22,11 +22,10 @@
 - **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
 - **Restore path hardening** — manifest paths are lexically anchored inside the destination (traversal, absolute, and UNC paths rejected) and pre-existing symlinks/junctions in the destination tree are never followed during restore
 - **Bootable WinRE recovery USB** (Windows 95 Setup-style wizard) for bare-metal restores — built ADK-free from the host's own WinRE image
-- **LAN mode** — serve a repository over HTTP so a recovery stick can pull from your NAS instead of re-downloading from Usenet
 
 ## Installation
 
-Download `filekeep-0.8.5.1.msi` and run it. Installs to `C:\Program Files\FileKeep\`:
+Download `FileKeep-Setup.exe` and run it. Installs to `C:\Program Files\FileKeep\`:
 
 | Path | Contents |
 |------|----------|
@@ -61,7 +60,7 @@ FileKeep.exe verify C:\backups\repo2 <backup-id>
 FileKeep.exe restore C:\backups\repo2 <backup-id> C:\restored
 ```
 
-More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues; `--probe-post-size auto` finds the provider's article-size ceiling before you upload), `retention-check` (article-age audit with `--dry-run`), `serve` (LAN repository server), `smb-sync`, `expiration-check`, `list`.
+More commands: `backup-disk` / `restore-disk` (whole-disk imaging), `nntp-check` (connection test; `--diagnose` probes 119/563/443 with classified failures and falls back to a free server to distinguish ISP blocking from provider issues; `--probe-post-size auto` finds the provider's article-size ceiling before you upload), `retention-check` (article-age audit with `--dry-run`), `smb-sync`, `expiration-check`, `list`.
 
 Backing up locked files (databases, Outlook PSTs, etc.):
 
@@ -126,7 +125,7 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 
 ```sh
 dotnet build FileKeep.slnx
-dotnet test FileKeep.slnx   # 318 tests; suite validated green on Windows
+dotnet test FileKeep.slnx   # suite validated green on Windows
 ```
 
 The core engine builds and tests cross-platform; Windows-only paths (backup privilege, VSS helper, service hosting, WiX installer) need a Windows 10/11 machine. The service also runs in `--console` mode on any OS for development.
@@ -141,7 +140,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.8.5.1). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
+FileKeep is in active development (v0.09.01). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 

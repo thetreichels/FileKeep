@@ -263,21 +263,6 @@ public sealed class BackupJobConfig
     public int VssTimeoutSecs { get; set; }
 
     /// <summary>
-    /// RETIRED (Phase 6, legacy config-shape drop): the pre-locations
-    /// "upload to Usenet after the backup" flag. Upload behaviour is now
-    /// expressed entirely by <see cref="Targets"/> (location names).
-    /// The property remains ONLY as a parse shim: the config loader is
-    /// fail-closed on unrecognized members, so removing it would turn
-    /// every pre-locations service.json into a startup error instead of
-    /// an inert load. Nothing reads it; <see cref="ServiceConfig.Load"/>
-    /// zeroes it, and it is never written back out (written only if a
-    /// caller sets it in memory, which no code path does).
-    /// </summary>
-    [JsonPropertyName("autoUpload")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool AutoUpload { get; set; }
-
-    /// <summary>
     /// User-controlled pause. A paused job never runs — scheduled or
     /// manual — until resumed. This is the only STORED pause: the other
     /// pauses (no backup location, USB drive away) are derived from the
@@ -300,36 +285,6 @@ public sealed class BackupJobConfig
     public List<string>? Targets { get; set; }
 
     /// <summary>
-    /// RETIRED (Phase 6, legacy config-shape drop): the per-job SMB share
-    /// path. Share and credentials live on the job's SMB
-    /// <see cref="BackupLocation"/> now. Parse shim only — see
-    /// <see cref="AutoUpload"/> for why the property remains: nothing
-    /// reads it, <see cref="ServiceConfig.Load"/> zeroes it, and it is
-    /// not written back out at its default.
-    /// </summary>
-    [JsonPropertyName("smbShare")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public string SmbShare { get; set; } = "";
-
-    /// <summary>RETIRED: per-job SMB username. Parse shim only; see <see cref="SmbShare"/>.</summary>
-    [JsonPropertyName("smbUser")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public string SmbUser { get; set; } = "";
-
-    /// <summary>RETIRED: per-job DPAPI-encrypted SMB password. Parse shim only; see <see cref="SmbShare"/>.</summary>
-    [JsonPropertyName("smbPasswordProtected")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public string SmbPasswordProtected { get; set; } = "";
-
-    /// <summary>
-    /// RETIRED: per-job plaintext SMB password input. Parse shim only;
-    /// see <see cref="SmbShare"/>. Not written when null.
-    /// </summary>
-    [JsonPropertyName("smbPassword")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? SmbPasswordPlaintext { get; set; }
-
-    /// <summary>
     /// A shallow copy of this job with a different target list. The
     /// scheduler runs a due job against a copy filtered to the targets
     /// available right now, leaving the stored job untouched.
@@ -344,8 +299,8 @@ public sealed class BackupJobConfig
     /// <summary>
     /// Effective upload targets: the explicit <see cref="Targets"/>,
     /// normalized (trimmed, non-empty, de-duplicated). There is no
-    /// fallback derivation (Phase 6 dropped the legacy
-    /// <see cref="AutoUpload"/> default): a job with no targets has no
+    /// fallback derivation (Phase 6 dropped the legacy auto-upload
+    /// default): a job with no targets has no
     /// destinations, and a target name that matches no location in
     /// <see cref="ServiceConfig.Locations"/> resolves to nothing — the
     /// job evaluates to the derived NeedsLocation state, exactly like a
@@ -680,25 +635,13 @@ public sealed class ServiceConfig
         catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
         if (config is null)
             throw new InvalidOperationException($"Invalid service config '{path}': empty document.");
-        // Phase 6: the pre-locations config shapes are no longer
-        // migrated (MigrateToLocations is gone). A legacy file still
-        // loads: the top-level provider shape parses as the global
-        // provider surface it now is, and the retired per-job
-        // connection fields parse into inert shim properties — zero
-        // them here so no stale value can ever be observed or written
-        // back out. The strings are nulled (not just emptied) so their
-        // WhenWritingDefault ignore condition drops them from any later
-        // save entirely. Bare "nntp"/"smb" target tokens are NOT
-        // rewritten: they name no location, resolve to nothing at run
-        // time, and the job lands in the derived NeedsLocation state.
-        foreach (var job in config.Jobs)
-        {
-            job.AutoUpload = false;
-            job.SmbShare = null!;
-            job.SmbUser = null!;
-            job.SmbPasswordProtected = null!;
-            job.SmbPasswordPlaintext = null;
-        }
+        // No backwards compatibility: the pre-locations config shapes
+        // are no longer migrated (MigrateToLocations is gone) and the
+        // retired per-job fields are gone too, so a legacy file fails
+        // to load under the fail-closed loader instead of loading
+        // inertly. Bare "nntp"/"smb" target tokens are NOT rewritten:
+        // they name no location, resolve to nothing at run time, and
+        // the job lands in the derived NeedsLocation state.
         config.Validate();
         return config;
     }

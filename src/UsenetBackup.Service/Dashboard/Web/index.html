@@ -70,7 +70,6 @@
     font-size: 20px;
   }
   .nav-brand .t1 { font-weight: 600; }
-  .nav-brand .t2 { font-size: 12px; color: var(--text-2); }
   .nav-item {
     display: block; padding: 9px 12px; margin: 2px 0; border-radius: 6px;
     color: var(--text); text-decoration: none; position: relative; cursor: pointer;
@@ -101,18 +100,6 @@
     border-radius: 8px; padding: 24px; width: 520px; max-width: 90vw;
     max-height: 85vh; overflow-y: auto;
   }
-  /* Status hero, Windows Update style. */
-  .hero { display: flex; align-items: center; gap: 20px; }
-  .hero-icon {
-    width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 28px; color: #fff; background: var(--ok);
-  }
-  .hero-icon.warn { background: #ca5010; }
-  .hero-icon.bad { background: var(--bad); }
-  .hero-title { font-size: 18px; font-weight: 600; }
-  .hero-sub { color: var(--text-2); margin-top: 4px; }
-  .hero button { margin-left: auto; flex-shrink: 0; }
   .row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
   .row:first-of-type { border-top: none; }
   .row .grow { flex: 1; }
@@ -286,40 +273,6 @@
   #sec-pp-checklist [data-rule].pass { color: var(--ok); }
   #sec-pp-checklist [data-rule].pass .rule-icon::before { content: "✓"; }
   #sec-pp-checklist [data-rule]:not(.pass) .rule-icon::before { content: "✗"; }
-  /* YubiKey slick UI: setup card, touch prompt, session badge. */
-  .yk-card {
-    border: 1px solid var(--border); border-radius: 8px; padding: 16px;
-    margin-top: 12px; background: var(--card);
-    display: flex; gap: 14px; align-items: flex-start;
-  }
-  .yk-icon {
-    width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent), #004578);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 22px; color: #fff;
-  }
-  .yk-card .yk-body { flex: 1; min-width: 0; }
-  .yk-card .yk-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
-  .yk-card .yk-desc { color: var(--text-2); font-size: 13px; margin-bottom: 10px; }
-  .yk-toggle-row { display: flex; align-items: center; gap: 10px; }
-  /* Pulsing touch indicator */
-  @keyframes yk-pulse {
-    0% { box-shadow: 0 0 0 0 rgba(0,103,192,0.4); }
-    70% { box-shadow: 0 0 0 12px rgba(0,103,192,0); }
-    100% { box-shadow: 0 0 0 0 rgba(0,103,192,0); }
-  }
-  .yk-touch {
-    display: none; margin-top: 12px; padding: 16px; border-radius: 8px;
-    border: 1px solid var(--accent); background: #eef5fc;
-    align-items: center; gap: 14px;
-  }
-  .yk-touch.show { display: flex; }
-  .yk-touch .yk-dot {
-    width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0;
-    background: var(--accent); animation: yk-pulse 1.5s ease-out infinite;
-  }
-  .yk-touch .yk-touch-text { font-size: 14px; }
-  .yk-touch .yk-touch-text strong { display: block; margin-bottom: 2px; }
   /* Session badge */
   .yk-badge {
     display: inline-flex; align-items: center; gap: 6px;
@@ -354,7 +307,6 @@
   }
   .view { display: none; }
   .view.active { display: block; }
-  .foot { color: var(--text-2); font-size: 12px; margin-top: 32px; }
   /* Settings form */
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
   .form-grid label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 13px; }
@@ -406,7 +358,6 @@
     & .toggle input:checked + .track { background: var(--accent); border-color: var(--accent); }
     & .toggle input:checked + .track::after { background: #ffffff; }
     & .infobar.warning { background: #2d2419; }
-    & .yk-touch { background: #1a2b3c; }
     & .yk-badge.unlocked { background: #1d3325; }
     & .yk-badge.locked { background: #2d2d2d; }
     & .infobar.error { background: #2d1f1e; }
@@ -427,7 +378,6 @@
     /* Multi-folder explanation bar on dark surfaces. */
     & .folder-list-msg { border-color:#3a4d7a; background:#1d2942; color:#c9d8f5; }
     & .folder-list-msg.err { border-color:#7a2e28; background:#3a1d1d; color:#f5c9c4; }
-    & .hero-icon.warn { background: #b34a0e; }
     & button.danger { background: #a4262c; border-color: #a4262c; }
     & button.danger:hover { background: #8f2026; border-color: #8f2026; }
   }
@@ -679,7 +629,7 @@
       </div>
           <div class="card" id="jobFormCard" style="display:none">
         <h2 style="margin-top:0" id="jobFormTitle">Add backup job</h2>
-        <div class="row" id="jf-type-row" style="margin-bottom:12px">
+        <div class="row" style="margin-bottom:12px">
           <label style="display:flex;align-items:center;gap:6px" title="Back up files and folders on a schedule."><input type="radio" name="jf-type" value="files" checked onchange="jobTypeChanged()"> Files &amp; folders</label>
           <label style="display:flex;align-items:center;gap:6px" title="Image an entire disk bit-for-bit on a schedule. Always a full capture."><input type="radio" name="jf-type" value="disk" onchange="jobTypeChanged()"> Whole disk image</label>
         </div>
@@ -729,7 +679,7 @@
         <div style="margin:12px 0">
           <button type="button" onclick="toggleAdvancedJob()" id="jf-advToggle" title="Show settings most people can leave alone: backup mode, privilege, and shadow copy options.">Show advanced settings ▸</button>
         </div>
-          <div id="jf-targets" style="margin:12px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
+          <div style="margin:12px 0" title="Scheduled backups must upload to Usenet or a network location. Local-only backups can only be run manually, one at a time.">
             <div class="meta" style="margin-bottom:4px">Upload to <b style="color:var(--bad)">*</b> <span style="color:var(--text-2)">(required — scheduled backups must leave this machine)</span></div>
             <div id="jf-location-list"><p style="color:var(--text-2)">Loading locations…</p></div>
           </div>
@@ -805,7 +755,7 @@
       </div>
     </div>
     <div class="view" id="view-security">
-      <div id="sec-wizard">
+      <div>
         <!-- Step 1: Build your protection -->
         <div class="sec-step" id="sec-step-1">
           <h1>Encryption / Decryption</h1>
@@ -1060,7 +1010,7 @@
         <!-- Step 4b: Phone setup -->
         <div class="sec-step" id="sec-step-4b" style="display:none">
           <h1>Set up your phone</h1>
-          <p style="color:var(--text-2);margin:-12px 0 20px" id="sec-phone-lede">Your phone's authenticator app shows a rotating 6-digit code that unlocks restores — scan the code below to add it.</p>
+          <p style="color:var(--text-2);margin:-12px 0 20px">Your phone's authenticator app shows a rotating 6-digit code that unlocks restores — scan the code below to add it.</p>
           <div class="card" style="text-align:center">
             <div id="sec-phone-qr" style="width:200px;height:200px;background:#fff;border-radius:8px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;color:var(--text-2)">Loading…</div>
             <div style="font-size:13px;color:var(--text-2);margin-bottom:16px">Scan the QR code with Google Authenticator, Authy, Microsoft Authenticator, or any authenticator app — it adds a "FileKeep" entry that shows a new code every 30 seconds.</div>
@@ -1102,17 +1052,17 @@
         <div class="name">Appearance</div>
         <div class="meta">Choose how FileKeep looks on this PC. System follows whatever this machine is using and switches automatically when the system setting changes.</div>
         <div style="display:flex;gap:12px;margin-top:12px">
-          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-light-card">
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center">
             <input type="radio" name="theme" value="light" onchange="setTheme('light')" style="margin-bottom:8px">
             <div style="font-weight:600">Light</div>
             <div class="meta" style="font-size:12px">Always use the light appearance.</div>
           </label>
-          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-dark-card">
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center">
             <input type="radio" name="theme" value="dark" onchange="setTheme('dark')" style="margin-bottom:8px">
             <div style="font-weight:600">Dark</div>
             <div class="meta" style="font-size:12px">Always use the dark appearance.</div>
           </label>
-          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center" id="theme-system-card">
+          <label class="card" style="flex:1;cursor:pointer;margin:0;padding:16px;text-align:center">
             <input type="radio" name="theme" value="system" checked onchange="setTheme('system')" style="margin-bottom:8px">
             <div style="font-weight:600">System</div>
             <div class="meta" style="font-size:12px">Follow whatever this machine is using — light or dark.</div>
@@ -1365,14 +1315,6 @@ function closeFolderPicker() {
   fpResolve = null;
   fpInput = null;
   if (res) res();
-}
-async function browseSaveFile(inputId, title, filter, defaultName) {
-  if (typeof window.fileKeepPickSaveFile === 'function') {
-    try {
-      const path = await window.fileKeepPickSaveFile(title || 'Save as', filter || '', defaultName || '');
-      if (path) document.getElementById(inputId).value = path;
-    } catch (e) { /* dialog unavailable; leave the typed value */ }
-  }
 }
 // ---- Multi-folder source picker ----
 // A folder already includes everything below it, so the list must not
@@ -2052,8 +1994,6 @@ async function loadRepo() {
   const vsEl = document.getElementById('vault-stored');
   if (vsEl) vsEl.textContent = storedText;
   } catch (e) { document.querySelector('#backups tbody').innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
-  const rbEl = document.getElementById('remoteBackups');
-  if (rbEl) rbEl.innerHTML = '';
 }
 async function uploadBackup(backupId) {
   const repo = currentRepo();
@@ -2620,17 +2560,6 @@ async function watchRestoreOutcome(repo, backupId) {
   }
   toast('Restore is taking a very long time — check the Operations log for its result.', '');
 }
-async function importRemote() {
-  const repo = currentRepo();
-  const ids = [...document.querySelectorAll('.remote-check:checked')].map(c => c.value);
-  if (!ids.length) { toast('Select at least one backup.', 'err'); return; }
-  try {
-    await api('/api/backups/remote/import?repo=' + encodeURIComponent(repo),
-      { method: 'POST', body: JSON.stringify({ backupIds: ids }) });
-  } catch (e) { toast(e.message, 'err'); return; }
-  toast('Imported ' + ids.length + ' backup' + (ids.length === 1 ? '' : 's') + '.', 'ok');
-  loadRepo();
-}
 // ---- Operations ----
 async function runRetentionCheck() {
   const dryRun = document.getElementById('op-dryrun').checked;
@@ -2780,13 +2709,6 @@ const opLabels = {
   'nzb-generate': 'NZB generated', 'download': 'Download from Usenet',
   'import-remote': 'Import from Usenet', 'init': 'Repository initialized'
 };
-function opFailed(op, kv, rest) {
-  if (op.endsWith('-failed')) return true;
-  if ((kv.ok || '').toLowerCase() === 'false') return true;
-  const em = rest.match(/errors=(\d+)/);
-  if (em && parseInt(em[1], 10) > 0) return true;
-  return /FAILED/.test(rest);
-}
 function toggleSidebarLog() {
   const content = document.getElementById('sidebar-log-content');
   const btn = document.getElementById('sidebar-log-toggle');
@@ -3129,30 +3051,6 @@ async function loadSettings() {
   loadLocationDisk();
   renderVaultLocations(cfg.locations || []);
   updateUsbScanButtonVisibility();
-}
-async function programSpareKey() {
-  if (!confirm('Insert the spare YubiKey and click OK. You will be prompted to touch it when it flashes.\n\nThis programs the spare with the same secret as your main key.')) return;
-  const csrf = document.querySelector('meta[name=csrf-token]').content;
-  toast('Waiting for YubiKey touch…', '');
-  try {
-    await api('/api/yubikey/program-spare', {
-      method: 'POST',
-      headers: { 'X-CSRF-Token': csrf },
-      body: JSON.stringify({ ...secProofFields(true) }),
-    });
-    toast('Spare key programmed successfully.', 'ok');
-  } catch (e) { toast(e.message, 'err'); }
-}
-
-async function clearPassphrase() {
-  if (!confirm('Clear the stored passphrase? Scheduled jobs will need USENETBACKUP_PASSPHRASE set.')) return;
-  try {
-    // Clearing the passphrase wipes the unlock configuration, so the
-    // server demands proof of the current passphrase (or recovery
-    // secret) in the same request — prompted here. Without it the
-    // server refuses and the error toast shows its message.
-    await api('/api/config/passphrase', { method: 'POST', body: JSON.stringify({ passphrase: '', ...secProofFields(true) }) });
-  } catch (e) { toast(e.message, 'err'); }
 }
 // ---- Vault storage locations (simplified list for Banked Vault tab) ----
 function renderVaultLocations(locations) {
