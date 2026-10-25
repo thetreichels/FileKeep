@@ -8,10 +8,21 @@ namespace FileKeep.Core;
 public sealed class LocalBlobStore : IBlobStore
 {
     private readonly string _rootDir;
+    private readonly Service.DisguisedLayout? _layout;
 
-    public LocalBlobStore(string repositoryRoot)
+    /// <summary>
+    /// Plain store: blobs at <c>rootDir/chunks/&lt;hh&gt;/&lt;rest&gt;</c>.
+    /// With a layout (slice 2, disguised USB destinations), blobs wear
+    /// derived names flat in <c>rootDir/&lt;cover&gt;</c> and are
+    /// header-wrapped on write / stripped on read — mirroring
+    /// <see cref="SmbBlobStore"/>. In the disguised case
+    /// <paramref name="repositoryRoot"/> is the location root (the
+    /// drive root for USB), NOT the cover folder itself.
+    /// </summary>
+    public LocalBlobStore(string repositoryRoot, Service.DisguisedLayout? layout = null)
     {
         _rootDir = Path.Combine(repositoryRoot, "chunks");
+        _layout = layout;
     }
 
     public string PathFor(string chunkIdHex)
@@ -21,6 +32,11 @@ public sealed class LocalBlobStore : IBlobStore
         // P2-D14: canonical lowercase (chunk IDs are SHA-256 hex; a
         // mixed-case foreign ID must address the same blob).
         chunkIdHex = chunkIdHex.ToLowerInvariant();
+        if (_layout is not null)
+            return Path.Combine(
+                Path.GetDirectoryName(_rootDir)!,
+                _layout.CoverName,
+                _layout.ChunkFileName(chunkIdHex));
         return Path.Combine(_rootDir, chunkIdHex[..2], chunkIdHex[2..]);
     }
 
@@ -44,6 +60,9 @@ public sealed class LocalBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         if (File.Exists(path))
             return;
+        // Disguised destinations store header-wrapped blobs; plain ones raw.
+        if (_layout is not null)
+            blob = Service.DisguisedLayout.WrapContent(blob, path);
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         // Write atomically so interrupted backups never leave half a blob,
@@ -85,6 +104,12 @@ public sealed class LocalBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         if (File.Exists(path))
             return;
+        // Wrapping a span needs a copy; chunks are bounded (CDC max 16 MiB).
+        byte[]? wrapped = _layout is not null
+            ? Service.DisguisedLayout.WrapContent(blob.ToArray(), path)
+            : null;
+        if (wrapped is not null)
+            blob = wrapped;
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
@@ -143,7 +168,11 @@ public sealed class LocalBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         try
         {
-            return File.ReadAllBytes(path);
+            byte[] stored = File.ReadAllBytes(path);
+            // Detect-and-strip: pre-header disguised blobs read back as-is.
+            return _layout is not null
+                ? Service.DisguisedLayout.UnwrapContent(stored, path)
+                : stored;
         }
         catch (IOException ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -155,9 +184,12 @@ public sealed class LocalBlobStore : IBlobStore
     {
         get
         {
-            if (!Directory.Exists(_rootDir))
+            string dir = _layout is not null
+                ? Path.Combine(Path.GetDirectoryName(_rootDir)!, _layout.CoverName)
+                : _rootDir;
+            if (!Directory.Exists(dir))
                 return 0;
-            return Directory.EnumerateFiles(_rootDir, "*", SearchOption.AllDirectories)
+            return Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
                 .LongCount(f => !f.Contains(".tmp-", StringComparison.Ordinal));
         }
     }

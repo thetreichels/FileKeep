@@ -404,6 +404,45 @@
     <a class="nav-item" data-view="security">Security</a>
     <a class="nav-item" data-view="tools">Tools & Settings</a>
     <a class="nav-item" data-view="about">About</a>
+    <!-- Offline Folders card (slice 1: locked card + encrypted catalog;
+         slice 2: file list + memory-served open over WebDAV).
+         Locked, it shows a lock and an Unlock button and NOTHING else:
+         no folder names, no counts, no hint whether anything is stored.
+         Unlocked, it lists the catalog entries; clicking one shows its
+         files, and double-clicking a file copies its share address for
+         File Explorer (the page itself cannot launch Explorer). -->
+    <div class="card" id="of-card" style="margin:12px 8px 0;padding:12px">
+      <div style="font-weight:600">🔒 Offline Folders</div>
+      <div id="of-locked">
+        <p style="color:var(--text-2);font-size:13px;margin:6px 0">Folder names stay hidden until you unlock.</p>
+        <div id="of-unlock-form" style="display:flex;flex-direction:column;gap:6px">
+          <input id="of-pass" type="password" placeholder="Passphrase" autocomplete="off">
+          <button onclick="ofUnlockPass()">Unlock</button>
+          <button onclick="ofUnlockTouch()">Unlock with YubiKey</button>
+        </div>
+      </div>
+      <div id="of-unlocked" style="display:none">
+        <div id="of-list" style="display:flex;flex-direction:column;gap:4px;margin:6px 0;max-height:30vh;overflow-y:auto"></div>
+        <div id="of-files" style="display:none;flex-direction:column;gap:4px;margin:6px 0;max-height:30vh;overflow-y:auto;border-top:1px solid var(--border);padding-top:6px"></div>
+        <div id="of-share" style="display:none;flex-direction:column;gap:6px;margin:6px 0">
+          <div style="font-size:12px;color:var(--text-2)">Open this folder in File Explorer — the share serves decrypted files from memory while unlocked:</div>
+          <div style="display:flex;gap:6px"><input id="of-share-url" readonly style="flex:1"><button onclick="ofCopyShare()">Copy</button></div>
+          <label style="font-size:13px">Add files <input id="of-file-input" type="file" multiple onchange="ofAddFiles()"></label>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button onclick="ofLock()">Lock</button>
+          <button onclick="ofShowAdd()">Add folder</button>
+        </div>
+        <div id="of-add-form" style="display:none;flex-direction:column;gap:6px;margin-top:8px">
+          <input id="of-name" type="text" placeholder="Folder name" maxlength="128" autocomplete="off">
+          <select id="of-location"></select>
+          <div style="display:flex;gap:6px">
+            <button onclick="ofAdd()">Add</button>
+            <button onclick="ofHideAdd()">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div id="sidebar-log" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);min-height:120px;max-height:40vh;overflow:hidden;display:flex;flex-direction:column">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:12px;font-weight:600;color:var(--text-2)">OPERATIONS LOG</span>
@@ -4849,8 +4888,188 @@ document.querySelector('[data-view="security"]').addEventListener('click', () =>
   secGoStep(1);
 });
 
+// Offline Folders card (slice 1: locked card + encrypted catalog;
+// slice 2: file list + memory-served open over the loopback WebDAV
+// share). Locked, the card reveals nothing — no names, no counts.
+// Unlocked, it lists catalog entries; clicking one shows its files.
+// Double-clicking a file copies its share address: the dashboard
+// page cannot launch File Explorer, so Explorer is the open path.
+let ofSelected = null;
+async function ofRefresh() {
+  try {
+    const st = await api('/api/offline-folders/status');
+    const locked = !!st.locked;
+    document.getElementById('of-locked').style.display = locked ? '' : 'none';
+    document.getElementById('of-unlocked').style.display = locked ? 'none' : '';
+    if (locked) { ofSelected = null; return; }
+    const folders = await api('/api/offline-folders');
+    const list = document.getElementById('of-list');
+    list.innerHTML = '';
+    if (!folders.length) {
+      list.innerHTML = '<p style="color:var(--text-2);font-size:13px">No offline folders yet.</p>';
+    }
+    folders.forEach(f => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.gap = '4px';
+      const b = document.createElement('button');
+      b.textContent = f.name;
+      b.title = f.locationId;
+      b.style.flex = '1';
+      b.style.textAlign = 'left';
+      b.onclick = () => {
+        ofSelected = f.name;
+        [...list.querySelectorAll('button.of-sel')].forEach(c => c.style.fontWeight = '');
+        b.style.fontWeight = '600';
+        ofShowFiles(f.name);
+      };
+      b.className = 'of-sel';
+      const x = document.createElement('button');
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.onclick = () => ofDelete(f.name);
+      row.appendChild(b);
+      row.appendChild(x);
+      list.appendChild(row);
+    });
+  } catch (e) { /* service-down banner covers this; card keeps its last state */ }
+}
+async function ofUnlockPass() {
+  const pass = document.getElementById('of-pass').value;
+  try {
+    await api('/api/offline-folders/unlock', { method: 'POST', body: JSON.stringify({ proofPassphrase: pass }) });
+    document.getElementById('of-pass').value = '';
+    await ofRefresh();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofUnlockTouch() {
+  try {
+    await api('/api/offline-folders/unlock', { method: 'POST', body: JSON.stringify({ proofYubiKey: true }) });
+    await ofRefresh();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofLock() {
+  try {
+    await api('/api/offline-folders/lock', { method: 'POST', body: '{}' });
+    ofSelected = null;
+    ofFilesFolder = null;
+    document.getElementById('of-files').style.display = 'none';
+    document.getElementById('of-share').style.display = 'none';
+    await ofRefresh();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofShowAdd() {
+  try {
+    const cfg = await api('/api/config');
+    const sel = document.getElementById('of-location');
+    sel.innerHTML = '';
+    (cfg.locations || []).forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.name;
+      o.textContent = l.name + ' (' + l.type + ')';
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) { toast('Add a backup location first.', 'bad'); return; }
+    document.getElementById('of-add-form').style.display = 'flex';
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function ofHideAdd() { document.getElementById('of-add-form').style.display = 'none'; }
+async function ofAdd() {
+  const name = document.getElementById('of-name').value;
+  const locationId = document.getElementById('of-location').value;
+  try {
+    await api('/api/offline-folders', { method: 'POST', body: JSON.stringify({ name, locationId }) });
+    document.getElementById('of-name').value = '';
+    ofHideAdd();
+    await ofRefresh();
+    toast('Offline folder added.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofDelete(name) {
+  try {
+    await api('/api/offline-folders/' + encodeURIComponent(name), { method: 'DELETE' });
+    document.getElementById('of-files').style.display = 'none';
+    document.getElementById('of-share').style.display = 'none';
+    await ofRefresh();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+// Slice 2 file list + memory-served open. The dashboard page cannot
+// launch File Explorer, so double-clicking a file copies its share
+// address: paste it into Explorer's address bar and the file opens
+// with decrypted bytes streamed from memory — never a temp file.
+let ofFilesFolder = null;
+async function ofShowFiles(folderName) {
+  ofFilesFolder = folderName;
+  const pane = document.getElementById('of-files');
+  const share = document.getElementById('of-share');
+  pane.style.display = 'flex';
+  share.style.display = 'flex';
+  document.getElementById('of-share-url').value = location.origin + '/dav/offline/' + encodeURIComponent(folderName) + '/';
+  try {
+    const files = await api('/api/offline-folders/' + encodeURIComponent(folderName) + '/files');
+    pane.innerHTML = '';
+    if (!files.length) {
+      pane.innerHTML = '<p style="color:var(--text-2);font-size:13px">No files yet.</p>';
+      return;
+    }
+    files.forEach(f => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.gap = '4px';
+      row.style.alignItems = 'center';
+      const b = document.createElement('button');
+      b.textContent = f.path + ' (' + f.size + ' bytes)';
+      b.title = 'Double-click to copy the share address for File Explorer';
+      b.style.flex = '1';
+      b.style.textAlign = 'left';
+      b.ondblclick = () => ofCopyFileUrl(f.path);
+      const x = document.createElement('button');
+      x.textContent = '×';
+      x.title = 'Remove file';
+      x.onclick = () => ofDeleteFile(folderName, f.path);
+      row.appendChild(b);
+      row.appendChild(x);
+      pane.appendChild(row);
+    });
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofCopyFileUrl(path) {
+  const url = location.origin + '/dav/offline/' + encodeURIComponent(ofFilesFolder) + '/' + path.split('/').map(encodeURIComponent).join('/');
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Share address copied — paste it into File Explorer to open the file.', 'ok');
+  } catch { toast(url, 'ok'); }
+}
+function ofCopyShare() {
+  const el = document.getElementById('of-share-url');
+  el.select();
+  try { document.execCommand('copy'); toast('Share address copied.', 'ok'); } catch { toast(el.value, 'ok'); }
+}
+async function ofAddFiles() {
+  const input = document.getElementById('of-file-input');
+  if (!ofFilesFolder || !input.files.length) return;
+  // Raw fetch, not api(): api() forces a JSON content type, which
+  // would break the multipart boundary the browser sets itself.
+  const fd = new FormData();
+  for (const file of input.files) fd.append('files', file, file.name);
+  try {
+    const r = await fetch('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
+    if (!r.ok) { const t = await r.text(); let m = t; try { m = JSON.parse(t).error || t; } catch {} throw new Error(m); }
+    input.value = '';
+    await ofShowFiles(ofFilesFolder);
+    toast('Files stored.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function ofDeleteFile(folderName, path) {
+  try {
+    await api('/api/offline-folders/' + encodeURIComponent(folderName) + '/files/' + path.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+    await ofShowFiles(folderName);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
 initTheme();
 load();
+ofRefresh();
 setInterval(load, 30000);
 </script>
 </body>

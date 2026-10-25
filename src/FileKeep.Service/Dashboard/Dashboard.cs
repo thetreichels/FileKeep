@@ -127,6 +127,14 @@ public static class Dashboard
         // the restore session holds the touch-unwrapped passphrase in memory.
         // FILEKEEP_YUBIKEY_SIMULATE=1 selects the software emulation (tests).
         var restoreSession = new RestoreSession();
+        // Offline Folders card session: separate from the restore
+        // session by design — unlocking one never unlocks the other.
+        var offlineFoldersSession = new OfflineFoldersSession();
+        string offlineFoldersPath = OfflineFoldersCatalog.CatalogPathFor(configPath);
+        // Slice 2 WebDAV share: loopback-only (it lives on this host),
+        // gated by the card session, serving decrypted bytes from
+        // memory. No endpoint here writes plaintext to disk.
+        var offlineDav = new OfflineFoldersDavHandler(config, offlineFoldersSession, offlineFoldersPath, log);
         IYubiKeyProvider? yubiKeyProvider =
             Environment.GetEnvironmentVariable("FILEKEEP_YUBIKEY_SIMULATE") == "1"
                 ? new SimulatedYubiKeyProvider()
@@ -912,6 +920,189 @@ public static class Dashboard
             var (status, payload) = DashboardApi.GetRestoreSessionStatus(config, restoreSession);
             return Results.Json(payload);
         });
+
+        // Offline Folders card (slice 1: locked card + encrypted
+        // catalog; slice 2: memory-served file use over WebDAV).
+        app.MapGet("/api/offline-folders/status", () =>
+        {
+            var (status, payload) = DashboardApi.GetOfflineFoldersStatus(offlineFoldersSession);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/unlock", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            // The card unlock takes passphrase/YubiKey proofs only;
+            // the TOTP element ca1ff44 added to the proof fields is
+            // discarded here — card unlock via TOTP is separate
+            // follow-up work, not part of this merge.
+            var (proofPassphrase, proofYubiKey, _) = await ReadProofFieldsAsync(request);
+            var (status, payload) = DashboardApi.UnlockOfflineFolders(config, offlineFoldersSession,
+                offlineFoldersPath, proofPassphrase, proofYubiKey, yubiKeyProvider, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/lock", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.LockOfflineFolders(offlineFoldersSession);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapGet("/api/offline-folders", () =>
+        {
+            var (status, payload) = DashboardApi.GetOfflineFolders(offlineFoldersSession);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? name = body.TryGetProperty("name", out var n) ? n.GetString() : null;
+            string? locationId = body.TryGetProperty("locationId", out var l) ? l.GetString() : null;
+            var (status, payload) = DashboardApi.AddOfflineFolder(config, offlineFoldersSession,
+                offlineFoldersPath, name, locationId, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapDelete("/api/offline-folders/{name}", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.DeleteOfflineFolder(offlineFoldersSession,
+                offlineFoldersPath, name, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        // Slice 2: file list / upload / delete within an offline folder.
+        app.MapGet("/api/offline-folders/{folder}/files", (string folder) =>
+        {
+            var (status, payload) = DashboardApi.GetOfflineFolderFiles(offlineFoldersSession, folder);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/{folder}/files", async (string folder, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            IFormCollection form;
+            try { form = await request.ReadFormAsync(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid upload.")); }
+            var stored = new List<OfflineFileDto>();
+            foreach (var file in form.Files)
+            {
+                // Browsers send basenames; the store path validates
+                // strictly, so a hostile name is a 400, not a traversal.
+                string fileName = Path.GetFileName(file.FileName);
+                await using var stream = file.OpenReadStream();
+                var (status, payload) = DashboardApi.StoreOfflineFile(config, offlineFoldersSession,
+                    offlineFoldersPath, folder, fileName, stream, DateTimeOffset.UtcNow, log);
+                if (status != 200)
+                    return Results.Json(payload, statusCode: status);
+                stored.Add((OfflineFileDto)payload);
+            }
+            return Results.Json(stored);
+        });
+
+        app.MapDelete("/api/offline-folders/{folder}/files/{*path}", (string folder, string path, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.DeleteOfflineFile(offlineFoldersSession,
+                offlineFoldersPath, folder, path, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        // Slice 2 WebDAV share (/dav/offline/**). Deliberately NOT
+        // CSRF-checked: Explorer cannot send the dashboard token, and
+        // browsers cannot issue these methods cross-origin without a
+        // CORS preflight this host never satisfies. The gate is the
+        // card session itself, plus loopback-only binding.
+        app.MapMethods("/dav/offline/{**rest}",
+            new[] { "OPTIONS", "PROPFIND", "GET", "PUT", "DELETE", "LOCK", "UNLOCK", "MKCOL" },
+            async (HttpContext ctx, string? rest) =>
+            {
+                var segments = new List<string>();
+                if (!string.IsNullOrEmpty(rest))
+                {
+                    foreach (string raw in rest.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        try { segments.Add(Uri.UnescapeDataString(raw)); }
+                        catch
+                        {
+                            ctx.Response.StatusCode = 400;
+                            await ctx.Response.WriteAsync("Invalid path.");
+                            return;
+                        }
+                    }
+                }
+                int depth = 1;
+                if (ctx.Request.Headers.TryGetValue("Depth", out var depthHeader))
+                {
+                    depth = depthHeader.ToString() switch
+                    {
+                        "0" => 0,
+                        "1" => 1,
+                        "infinity" => int.MaxValue,
+                        _ => 1,
+                    };
+                }
+                string? token = null;
+                if (ctx.Request.Headers.TryGetValue("Lock-Token", out var lockHeader))
+                    token = lockHeader.ToString().Trim('<', '>', ' ');
+                else if (ctx.Request.Headers.TryGetValue("If", out var ifHeader))
+                {
+                    string ifValue = ifHeader.ToString();
+                    int at = ifValue.IndexOf("opaquelocktoken:", StringComparison.Ordinal);
+                    if (at >= 0)
+                    {
+                        int end = ifValue.IndexOfAny(new[] { '>', ' ', ')' }, at);
+                        token = end < 0 ? ifValue[at..] : ifValue[at..end];
+                    }
+                }
+                var davRequest = new OfflineFoldersDavHandler.DavRequest
+                {
+                    Method = ctx.Request.Method,
+                    Segments = segments.ToArray(),
+                    Depth = depth,
+                    Body = ctx.Request.Method is "PUT" ? ctx.Request.Body : null,
+                    LockToken = token,
+                };
+                var result = offlineDav.Handle(davRequest);
+                foreach (var (name, value) in result.Headers)
+                    ctx.Response.Headers[name] = value;
+                if (result.ContentType is not null)
+                    ctx.Response.ContentType = result.ContentType;
+                if (result.ContentLength is not null)
+                    ctx.Response.ContentLength = result.ContentLength;
+                ctx.Response.StatusCode = result.Status;
+                try
+                {
+                    if (result.BodyBytes is not null)
+                        await ctx.Response.Body.WriteAsync(result.BodyBytes);
+                    else if (result.BodyWriter is not null)
+                        await result.BodyWriter(ctx.Response.Body);
+                }
+                catch (OfflineFoldersDavHandler.DavStreamException)
+                {
+                    // Headers already sent: the only safe failure is
+                    // aborting the connection, which the client reads
+                    // as a failed transfer, never as good bytes.
+                    ctx.Abort();
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    ctx.Abort();
+                    return;
+                }
+            });
 
         await app.RunAsync(ct);
     }

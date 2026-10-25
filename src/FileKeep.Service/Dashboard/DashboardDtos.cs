@@ -290,6 +290,26 @@ public sealed record LocationDiskDto(
     [property: JsonPropertyName("freeBytes")] long FreeBytes);
 
 /// <summary>Response for POST /api/protection/phone/setup: enrollment data.</summary>
+/// <summary>
+/// Offline Folders card status. Deliberately a single boolean: when
+/// locked, this is the ENTIRE response — no names, no counts, no hint
+/// whether a catalog file exists at all.
+/// </summary>
+public sealed record OfflineFoldersStatusDto(
+    [property: JsonPropertyName("locked")] bool Locked);
+
+/// <summary>One Offline Folders catalog entry, as served while unlocked.</summary>
+public sealed record OfflineFolderDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("locationId")] string LocationId,
+    [property: JsonPropertyName("addedUtc")] string AddedUtc);
+
+/// <summary>One file stored in an offline folder, as served while unlocked.</summary>
+public sealed record OfflineFileDto(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("size")] long Size,
+    [property: JsonPropertyName("modifiedUtc")] string ModifiedUtc);
+
 public sealed record PhoneSetupDto(
     [property: JsonPropertyName("otpauthUri")] string OtpauthUri,
     [property: JsonPropertyName("secret")] string Secret,
