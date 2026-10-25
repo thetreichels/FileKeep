@@ -4,16 +4,18 @@ using System.Text;
 namespace FileKeep.Service;
 
 /// <summary>
-/// Server-side restore session for YubiKey mode. After a successful
-/// <c>/api/restore/unlock</c> (physical YubiKey touch), the unwrapped
+/// Server-side restore session. After a successful unlock (YubiKey touch,
+/// typed passphrase or recovery secret, or phone authenticator code), the
 /// repository passphrase is held in memory here so restore endpoints can
-/// decrypt without another touch. The session expires after idle timeout
-/// and is wiped on lock.
+/// decrypt without another proof. One authorization covers every restore
+/// until the session ends: the session expires after idle timeout, is
+/// wiped on lock, and is locked when the GUI closes (a reopened GUI
+/// starts locked and never inherits authorization).
 /// </summary>
 /// <remarks>
-/// Only meaningful when <c>ServiceConfig.PassphraseYubiKey</c> is true.
-/// When YubiKey mode is off, restore endpoints use the environment/DPAPI
-/// passphrase directly and never consult this session.
+/// Meaningful whenever any unlock method is enabled: restore endpoints
+/// use the session passphrase then, and only fall back to the
+/// environment/DPAPI passphrase when no method is enabled at all.
 /// </remarks>
 public sealed class RestoreSession
 {

@@ -12,14 +12,18 @@ namespace FileKeep.Core.Tests;
 /// is enabled, the security-config operations must refuse to run
 /// without a fresh proof of an existing method carried by the request —
 /// the current passphrase, the typed recovery secret in
-/// generated-secret mode, or a YubiKey touch. A phone/TOTP code is
-/// never a proof, and an unlocked restore session is not one either.
+/// generated-secret mode, a YubiKey touch, or (since 2026-10-25) a
+/// TOTP code offered through the <c>proofTotp</c> field. A code offered
+/// through the passphrase field is still just a wrong passphrase, and
+/// an unlocked restore session is still not a proof either.
 /// With NO method enabled, first-time setup stays proof-free.
 ///
 /// Fixture note: test configs carry a fake DPAPI blob (unresolvable),
 /// so the "current passphrase" resolves through the
 /// FILEKEEP_PASSPHRASE env var, which BackupScheduler.GetPassphrase
 /// checks first — the same resolution the production link step uses.
+/// TOTP gate tests run through the guard's test hook (the sandbox has
+/// no DPAPI): the stored blob IS the base32 secret there.
 /// </summary>
 public sealed class SecurityProofTests : IDisposable
 {
@@ -34,11 +38,14 @@ public sealed class SecurityProofTests : IDisposable
         Directory.CreateDirectory(_workDir);
         _savedPassphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
+        TotpGuard.ResetForTests();
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, _savedPassphrase);
+        TotpGuard.ResetForTests();
+        TotpGuard.UnprotectForTests = null;
         try { Directory.Delete(_workDir, recursive: true); } catch { /* best effort */ }
     }
 
@@ -311,8 +318,9 @@ public sealed class SecurityProofTests : IDisposable
     [Fact]
     public void SetupPhoneTotp_CodeShapedProof_Refused403()
     {
-        // A 6-digit code offered as the proof field is just a wrong
-        // passphrase to the gate: TOTP is never consulted as proof.
+        // A 6-digit code offered through the PASSPHRASE field is just
+        // a wrong passphrase to the gate: the fields are distinct, and
+        // only proofTotp is ever checked as a TOTP code.
         var config = PassphraseConfig();
         config.PhoneAuthEnabled = true;
         var result = DashboardApi.SetupPhoneTotp(config, ConfigPath(),
@@ -514,5 +522,195 @@ public sealed class SecurityProofTests : IDisposable
         Assert.Equal(200, vs);
         Assert.True(Assert.IsType<OkDto>(okp).Ok);
         Assert.False(string.IsNullOrWhiteSpace(config.PhoneTotpSecretProtected));
+    }
+
+    // ---------- TOTP as a full proof (2026-10-25) ----------
+    // Full proof in the Windows app; still secondary-only as a
+    // configured method, because USB recovery needs Passphrase or
+    // YubiKey. Gate tests below use a no-op profile save (passphrase
+    // + phone, unchanged) as the vehicle: it succeeds exactly when
+    // the gate passes, so a 200 means "proof accepted" and a 403
+    // means "gate refused".
+
+    /// <summary>
+    /// A phone-only config whose live secret the guard can read in the
+    /// sandbox (no DPAPI here): the hook makes "unprotect" the
+    /// identity, so the stored blob IS the base32 secret.
+    /// </summary>
+    private static ServiceConfig PhoneConfig(string base32)
+    {
+        TotpGuard.UnprotectForTests = blob => blob;
+        return new ServiceConfig { PhoneAuthEnabled = true, PhoneTotpSecretProtected = base32 };
+    }
+
+    /// <summary>Passphrase + phone enabled: the gate-test vehicle config.</summary>
+    private ServiceConfig PassphraseAndPhoneConfig(string base32)
+    {
+        var config = PassphraseConfig();
+        TotpGuard.UnprotectForTests = blob => blob;
+        config.PhoneAuthEnabled = true;
+        config.PhoneTotpSecretProtected = base32;
+        return config;
+    }
+
+    /// <summary>A well-formed code guaranteed different from the valid one for this step.</summary>
+    private static string WrongCode(string valid) => valid == "123456" ? "654321" : "123456";
+
+    private const string TestSecret = "JBSWY3DPEHPK3PXP";
+
+    private (int Status, object Payload) SaveUnchangedProfile(ServiceConfig config, string? proofTotp) =>
+        DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
+        {
+            PassphraseEnabled = true, YubiKeyEnabled = false,
+            PhoneEnabled = true, LinkMode = "or", ProofTotp = proofTotp,
+        });
+
+    [Fact]
+    public void Gate_AcceptsValidTotpProof()
+    {
+        // A valid TOTP code proves a security change on its own, like
+        // any other proof: this no-op save succeeds exactly when the
+        // gate passes.
+        var config = PassphraseAndPhoneConfig(TestSecret);
+        var (status, _) = SaveUnchangedProfile(config, CurrentTotpCode(TestSecret));
+        Assert.Equal(200, status);
+    }
+
+    [Fact]
+    public void Gate_RejectsWrongTotpProof()
+    {
+        var config = PassphraseAndPhoneConfig(TestSecret);
+        var result = SaveUnchangedProfile(config, WrongCode(CurrentTotpCode(TestSecret)));
+        AssertProofRefused(result);
+    }
+
+    [Fact]
+    public void Gate_RejectsPendingSecretAsProof()
+    {
+        // Only the LIVE secret proves: a code from a staged
+        // re-enrollment secret must not authorize anything.
+        var config = PassphraseConfig();
+        TotpGuard.UnprotectForTests = blob => blob;
+        config.PhoneAuthEnabled = true;
+        config.PendingPhoneTotpSecretProtected = TestSecret;
+        var result = SaveUnchangedProfile(config, CurrentTotpCode(TestSecret));
+        AssertProofRefused(result);
+    }
+
+    [Fact]
+    public void Gate_RejectsReplayedTotpCode()
+    {
+        // One code authorizes one proof: the same code offered twice
+        // inside its window succeeds once, then refuses.
+        var config = PassphraseAndPhoneConfig(TestSecret);
+        string code = CurrentTotpCode(TestSecret);
+        Assert.Equal(200, SaveUnchangedProfile(config, code).Status);
+        AssertProofRefused(SaveUnchangedProfile(config, code));
+    }
+
+    [Fact]
+    public void TotpGuard_LocksOutAfterFiveFailures_ThenRecovers()
+    {
+        var config = PassphraseAndPhoneConfig(TestSecret);
+        string wrong = WrongCode(CurrentTotpCode(TestSecret));
+        for (int i = 0; i < TotpGuard.MaxConsecutiveFailures; i++)
+            AssertProofRefused(SaveUnchangedProfile(config, wrong));
+        Assert.True(TotpGuard.IsLockedOut);
+        // Even the correct code refuses while locked out.
+        AssertProofRefused(SaveUnchangedProfile(config, CurrentTotpCode(TestSecret)));
+        TotpGuard.ResetForTests();
+        Assert.False(TotpGuard.IsLockedOut);
+        Assert.Equal(200, SaveUnchangedProfile(config, CurrentTotpCode(TestSecret)).Status);
+    }
+
+    [Fact]
+    public void TotpGuard_SuccessResetsFailureCount()
+    {
+        var config = PassphraseAndPhoneConfig(TestSecret);
+        string wrong = WrongCode(CurrentTotpCode(TestSecret));
+        for (int i = 0; i < TotpGuard.MaxConsecutiveFailures - 1; i++)
+            AssertProofRefused(SaveUnchangedProfile(config, wrong));
+        Assert.Equal(200, SaveUnchangedProfile(config, CurrentTotpCode(TestSecret)).Status);
+        // Had the success not reset the counter, these 4 failures
+        // would stack onto the earlier 4 and trip the lockout.
+        for (int i = 0; i < TotpGuard.MaxConsecutiveFailures - 1; i++)
+            AssertProofRefused(SaveUnchangedProfile(config, wrong));
+        Assert.False(TotpGuard.IsLockedOut);
+    }
+
+    [Fact]
+    public void Profile_PhoneOnly_RefusedEvenWithValidTotpProof()
+    {
+        // Both halves of the corrected rule in one test: the gate
+        // ACCEPTS the valid TOTP proof (any gate refusal would be a
+        // 403), and then profile validation still refuses a phone-only
+        // profile, because USB recovery needs Passphrase or YubiKey.
+        var config = PhoneConfig(TestSecret);
+        var (status, payload) = DashboardApi.SetProtectionProfile(config, ConfigPath(),
+            new ProtectionProfileRequest
+            {
+                PassphraseEnabled = false, YubiKeyEnabled = false,
+                PhoneEnabled = true, LinkMode = "or",
+                ProofTotp = CurrentTotpCode(TestSecret),
+            });
+        Assert.Equal(400, status);
+        Assert.Contains("only enabled method", ErrorMessage((status, payload)));
+    }
+
+    [Fact]
+    public void Profile_AllMethodsOff_RefusedEvenWithValidTotpProof()
+    {
+        // At least one of Passphrase or YubiKey must stay enabled.
+        // (Phone-only fixture, so no passphrase-configured refusal
+        // fires first and masks the all-off check.)
+        var config = PhoneConfig(TestSecret);
+        var (status, payload) = DashboardApi.SetProtectionProfile(config, ConfigPath(),
+            new ProtectionProfileRequest
+            {
+                PassphraseEnabled = false, YubiKeyEnabled = false,
+                PhoneEnabled = false, LinkMode = "or",
+                ProofTotp = CurrentTotpCode(TestSecret),
+            });
+        Assert.Equal(400, status);
+        Assert.Contains("At least one of Passphrase or YubiKey", ErrorMessage((status, payload)));
+    }
+
+    [Fact]
+    public void ValidTotpCode_AsProofTotp_Succeeds_WindowsOnly()
+    {
+        if (!OperatingSystem.IsWindows())
+            throw Xunit.Sdk.SkipException.ForSkip(
+                "DPAPI credential storage requires Windows; a live TOTP secret is Windows-only here.");
+
+        // The real-DPAPI mirror of the hook tests above: enroll and
+        // enable a phone with passphrase proof, then change the
+        // profile again proven only by the phone's current code.
+        // (The guard reset below isolates this acceptance from the
+        // replay rule — the enrollment code's step was just consumed
+        // by verification, and replay is covered by its own test.)
+        var config = PassphraseConfig();
+        string path = ConfigPath();
+        var (ss, sp) = DashboardApi.SetupPhoneTotp(config, path, proofPassphrase: Pass);
+        Assert.Equal(200, ss);
+        string secret = Assert.IsType<PhoneSetupDto>(sp).Secret.Replace(" ", "");
+        var (vs, _) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret), path,
+            proofPassphrase: Pass);
+        Assert.Equal(200, vs);
+        var (ps, _) = DashboardApi.SetProtectionProfile(config, path, new ProtectionProfileRequest
+        {
+            PassphraseEnabled = true, YubiKeyEnabled = false,
+            PhoneEnabled = true, LinkMode = "or",
+            ProofPassphrase = Pass,
+        });
+        Assert.Equal(200, ps);
+        TotpGuard.ResetForTests();
+        var (ps2, _) = DashboardApi.SetProtectionProfile(config, path, new ProtectionProfileRequest
+        {
+            PassphraseEnabled = true, YubiKeyEnabled = false,
+            PhoneEnabled = false, LinkMode = "or",
+            ProofTotp = CurrentTotpCode(secret),
+        });
+        Assert.Equal(200, ps2);
+        Assert.False(config.PhoneAuthEnabled);
     }
 }

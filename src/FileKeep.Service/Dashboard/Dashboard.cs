@@ -36,40 +36,44 @@ public static class Dashboard
 
     /// <summary>
     /// Reads the optional security-proof fields (<c>proofPassphrase</c> /
-    /// <c>proofYubiKey</c>) from a JSON request body, for routes whose
-    /// normal shape carries no body or a body parsed elsewhere (phone
-    /// setup, program-spare). An absent or malformed body simply means
-    /// "no proof supplied" — the DashboardApi gate then decides whether
-    /// that is acceptable (first-time setup) or a refusal.
+    /// <c>proofYubiKey</c> / <c>proofTotp</c>) from a JSON request body,
+    /// for routes whose normal shape carries no body or a body parsed
+    /// elsewhere (phone setup, program-spare). An absent or malformed
+    /// body simply means "no proof supplied" — the DashboardApi gate
+    /// then decides whether that is acceptable (first-time setup) or
+    /// a refusal.
     /// </summary>
-    private static async Task<(string? ProofPassphrase, bool ProofYubiKey)>
+    private static async Task<(string? ProofPassphrase, bool ProofYubiKey, string? ProofTotp)>
         ReadProofFieldsAsync(HttpRequest request)
     {
         if (request.ContentLength is null or 0)
-            return (null, false);
+            return (null, false, null);
         try
         {
             string raw = await ReadBodyStringAsync(request);
             if (string.IsNullOrWhiteSpace(raw))
-                return (null, false);
+                return (null, false, null);
             using var doc = JsonDocument.Parse(raw);
             var root = doc.RootElement;
             string? pass = root.TryGetProperty("proofPassphrase", out var pp)
                 ? pp.GetString() : null;
             bool yubiKey = root.TryGetProperty("proofYubiKey", out var py) &&
                            py.ValueKind == JsonValueKind.True;
-            return (pass, yubiKey);
+            string? totp = root.TryGetProperty("proofTotp", out var pt)
+                ? pt.GetString() : null;
+            return (pass, yubiKey, totp);
         }
         catch
         {
-            return (null, false);
+            return (null, false, null);
         }
     }
 
     /// <summary>Extracts the security-proof fields from an already-parsed JSON body.</summary>
-    private static (string? ProofPassphrase, bool ProofYubiKey) ProofFieldsOf(JsonElement body) =>
+    private static (string? ProofPassphrase, bool ProofYubiKey, string? ProofTotp) ProofFieldsOf(JsonElement body) =>
         (body.TryGetProperty("proofPassphrase", out var pp) ? pp.GetString() : null,
-         body.TryGetProperty("proofYubiKey", out var py) && py.ValueKind == JsonValueKind.True);
+         body.TryGetProperty("proofYubiKey", out var py) && py.ValueKind == JsonValueKind.True,
+         body.TryGetProperty("proofTotp", out var pt) ? pt.GetString() : null);
 
     /// <summary>
     /// True only for loopback bind values: "localhost" (any case), any
@@ -707,8 +711,8 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
-            var (proofPassphrase, proofYubiKey) = ProofFieldsOf(body);
-            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log, proofPassphrase, proofYubiKey);
+            var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
+            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -754,7 +758,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             if (body is null)
                 return Results.BadRequest(new ErrorDto("Empty request."));
-            var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log, body.ProofPassphrase, body.ProofYubiKey, yubiKeyProvider);
+            var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log, body.ProofPassphrase, body.ProofYubiKey, yubiKeyProvider, body.ProofTotp);
             if (status != 200)
                 return Results.Json(payload, statusCode: status);
             return Results.Content(FileKeepJsonOptions.Serialize((AddYubiKeyResponse)payload,
@@ -768,8 +772,8 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             // The proof rides in an optional JSON body; first-time
             // setup sends none, exactly like the other gated routes.
-            var (proofPassphrase, proofYubiKey) = await ReadProofFieldsAsync(request);
-            var (status, payload) = DashboardApi.SetupPhoneTotp(config, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider);
+            var (proofPassphrase, proofYubiKey, proofTotp) = await ReadProofFieldsAsync(request);
+            var (status, payload) = DashboardApi.SetupPhoneTotp(config, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider, proofTotp);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -781,8 +785,8 @@ public static class Dashboard
             try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
-            var (proofPassphrase, proofYubiKey) = ProofFieldsOf(body);
-            var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider);
+            var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
+            var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider, proofTotp);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -790,8 +794,8 @@ public static class Dashboard
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            var (proofPassphrase, proofYubiKey) = await ReadProofFieldsAsync(request);
-            var (status, payload) = DashboardApi.ProgramSpareKey(config, configPath, yubiKeyProvider, log, proofPassphrase, proofYubiKey);
+            var (proofPassphrase, proofYubiKey, proofTotp) = await ReadProofFieldsAsync(request);
+            var (status, payload) = DashboardApi.ProgramSpareKey(config, configPath, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -808,7 +812,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             // The setup blocks until the user touches the key twice
             // (program + wrap, 60s timeout each).
-            var (status, payload) = DashboardApi.LinkYubiKey(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false);
+            var (status, payload) = DashboardApi.LinkYubiKey(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false, body?.ProofTotp);
             if (status != 200)
                 return Results.Json(payload, statusCode: status);
             return Results.Content(
@@ -830,7 +834,7 @@ public static class Dashboard
             // The setup blocks until the user touches the key twice
             // (program + wrap, 60s timeout each). The generated secret is
             // returned in this response only — never again.
-            var (status, payload) = DashboardApi.SetupGeneratedSecret(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false);
+            var (status, payload) = DashboardApi.SetupGeneratedSecret(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false, body?.ProofTotp);
             if (status != 200)
                 return Results.Json(payload, statusCode: status);
             return Results.Content(
@@ -872,6 +876,22 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
             var (status, payload) = DashboardApi.UnlockRestoreSessionWithPhone(config, restoreSession, code, log);
+            if (status != 200)
+                return Results.Json(payload, statusCode: status);
+            return Results.Content(
+                JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
+                "application/json");
+        });
+
+        app.MapPost("/api/restore/unlock-passphrase", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? passphrase = body.TryGetProperty("passphrase", out var p) ? p.GetString() : null;
+            var (status, payload) = DashboardApi.UnlockRestoreSessionWithPassphrase(config, restoreSession, passphrase, log);
             if (status != 200)
                 return Results.Json(payload, statusCode: status);
             return Results.Content(

@@ -21,11 +21,16 @@ public sealed class ProtectionProfileTests : IDisposable
         Directory.CreateDirectory(_workDir);
         _savedPassphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
+        // The TOTP guard's limiter is process-static: a lockout left by
+        // another class would change this class's verify outcomes, so
+        // every test starts (and ends) from a clean guard.
+        TotpGuard.ResetForTests();
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, _savedPassphrase);
+        TotpGuard.ResetForTests();
         try { Directory.Delete(_workDir, recursive: true); } catch { /* best effort */ }
     }
 
@@ -104,6 +109,12 @@ public sealed class ProtectionProfileTests : IDisposable
     [Fact]
     public void SetProtectionProfile_RejectsPhoneSole()
     {
+        // The phone authenticator can only ever be a secondary method:
+        // USB recovery cannot use TOTP, so a phone-only profile is
+        // refused even though a TOTP code stands alone as a proof in
+        // the Windows app. (Corrected 2026-10-25: an earlier edit of
+        // this test briefly accepted phone-sole by misreading the
+        // "same level" order as covering configuration too.)
         var config = new ServiceConfig();
         var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
         {
@@ -112,6 +123,20 @@ public sealed class ProtectionProfileTests : IDisposable
         });
         Assert.Equal(400, result.Status);
         Assert.Contains("only enabled method", ErrorMessage(result));
+    }
+
+    [Fact]
+    public void SetProtectionProfile_RejectsZeroMethods()
+    {
+        // At least one of Passphrase or YubiKey must stay enabled.
+        var config = new ServiceConfig();
+        var result = DashboardApi.SetProtectionProfile(config, ConfigPath(), new ProtectionProfileRequest
+        {
+            PassphraseEnabled = false, YubiKeyEnabled = false,
+            PhoneEnabled = false, LinkMode = "or",
+        });
+        Assert.Equal(400, result.Status);
+        Assert.Contains("At least one of Passphrase or YubiKey", ErrorMessage(result));
     }
 
     [Fact]

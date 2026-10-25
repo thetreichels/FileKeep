@@ -5,8 +5,11 @@ namespace FileKeep.Core.Service;
 /// <summary>
 /// Dashboard request body for <c>POST /api/protection/profile</c>: which
 /// unlock methods the protection wizard wants enabled, and how
-/// Passphrase+YubiKey are linked. The Phone method is always a standalone
-/// fallback — it can never be the sole method and is never linked.
+/// Passphrase+YubiKey are linked. The Phone method is a standalone
+/// fallback — it is never AND-linked, and it can only ever be a
+/// secondary method: at least one of Passphrase or YubiKey must stay
+/// configured, because USB recovery needs one of them. As a proof in
+/// the Windows app, a TOTP code stands alone like any other proof.
 /// </summary>
 public sealed class ProtectionProfileRequest
 {
@@ -45,11 +48,20 @@ public sealed class ProtectionProfileRequest
     /// <summary>
     /// When true, the caller asks to prove an existing method by a
     /// fresh YubiKey touch (the server touch-unwraps the stored blob)
-    /// instead of a typed proof. A phone/TOTP code is never accepted
-    /// as proof for changing security settings.
+    /// instead of a typed proof.
     /// </summary>
     [JsonPropertyName("proofYubiKey")]
     public bool ProofYubiKey { get; set; }
+
+    /// <summary>
+    /// A TOTP code from the phone authenticator, offered as proof of
+    /// an existing method (live secret only, rate-limited and
+    /// replay-protected server-side). Distinct from
+    /// <see cref="ProofPassphrase"/>: a code typed into the passphrase
+    /// field is still just a (wrong) passphrase, never a TOTP proof.
+    /// </summary>
+    [JsonPropertyName("proofTotp")]
+    public string? ProofTotp { get; set; }
 }
 
 /// <summary>
@@ -99,6 +111,10 @@ public sealed class AddYubiKeyRequest
     /// <summary>Prove by a fresh YubiKey touch instead of a typed proof.</summary>
     [JsonPropertyName("proofYubiKey")]
     public bool ProofYubiKey { get; set; }
+
+    /// <summary>Prove with a TOTP code (see <see cref="ProtectionProfileRequest.ProofTotp"/>).</summary>
+    [JsonPropertyName("proofTotp")]
+    public string? ProofTotp { get; set; }
 }
 
 /// <summary>
@@ -119,6 +135,10 @@ public sealed class YubiKeyLinkRequest
     /// <summary>Prove by a fresh YubiKey touch instead of a typed proof.</summary>
     [JsonPropertyName("proofYubiKey")]
     public bool ProofYubiKey { get; set; }
+
+    /// <summary>Prove with a TOTP code (see <see cref="ProtectionProfileRequest.ProofTotp"/>).</summary>
+    [JsonPropertyName("proofTotp")]
+    public string? ProofTotp { get; set; }
 }
 
 /// <summary>

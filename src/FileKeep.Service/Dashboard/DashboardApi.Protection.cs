@@ -9,9 +9,13 @@ namespace FileKeep.Service;
 /// <summary>
 /// DashboardApi — protection profile (Passphrase / YubiKey / Phone):
 /// reporting the current profile, saving it with the wizard's rules, and
-/// registering extra YubiKey labels. The Phone method is always a
-/// standalone fallback: it can never be the sole method, it is never
-/// linkable, and it is running-system-only (never used in USB recovery).
+/// registering extra YubiKey labels. The Phone method is a standalone
+/// fallback: it is never AND-linkable, it is running-system-only
+/// (never used in USB recovery), and it can only ever be a secondary
+/// method — at least one of Passphrase or YubiKey must stay configured,
+/// because USB recovery needs one of them. As a proof in the Windows
+/// app, though, a TOTP code stands alone like any other proof (see the
+/// security gate, 2026-10-25).
 /// </summary>
 public static partial class DashboardApi
 {
@@ -83,7 +87,7 @@ public static partial class DashboardApi
         // fresh proof of an existing method carried by this request.
         // Outside the config lock: a touch proof waits on hardware.
         var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
-            request.ProofPassphrase, request.ProofYubiKey, log);
+            request.ProofPassphrase, request.ProofYubiKey, log, request.ProofTotp);
         if (proofRefusal is not null)
             return proofRefusal.Value;
 
@@ -112,6 +116,12 @@ public static partial class DashboardApi
         }
         if (linkMode == "and" && (!request.PassphraseEnabled || !request.YubiKeyEnabled))
             return (400, new ErrorDto("\"and\" link mode requires both Passphrase and YubiKey to be enabled."));
+        // The phone authenticator can only ever be a SECONDARY method:
+        // USB recovery cannot use TOTP, so at least one of Passphrase
+        // or YubiKey must always stay configured, or recovery would be
+        // stranded with no usable method. This is a configuration rule
+        // only — as a proof in the Windows app, a TOTP code stands
+        // alone like any other proof (see the security gate).
         if (!request.PassphraseEnabled && !request.YubiKeyEnabled)
         {
             if (request.PhoneEnabled)
@@ -146,13 +156,13 @@ public static partial class DashboardApi
     public static (int Status, object Payload) AddYubiKeyName(ServiceConfig config,
         string configPath, string? name, Action<string>? log = null,
         string? proofPassphrase = null, bool proofYubiKey = false,
-        IYubiKeyProvider? yubiKeyProvider = null)
+        IYubiKeyProvider? yubiKeyProvider = null, string? proofTotp = null)
     {
         // Security fix (C-1 class): registering a key label changes the
         // unlock-method set, so it takes the same proof as any other
         // security-config change once a method is enabled.
         var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
-            proofPassphrase, proofYubiKey, log);
+            proofPassphrase, proofYubiKey, log, proofTotp);
         if (proofRefusal is not null)
             return proofRefusal.Value;
 
@@ -196,14 +206,14 @@ public static partial class DashboardApi
     public static (int Status, object Payload) SetupPhoneTotp(ServiceConfig config,
         string configPath, Action<string>? log = null,
         string? proofPassphrase = null, bool proofYubiKey = false,
-        IYubiKeyProvider? yubiKeyProvider = null)
+        IYubiKeyProvider? yubiKeyProvider = null, string? proofTotp = null)
     {
         // Security fix (C-3): starting a phone enrollment hands the
         // caller a fresh TOTP secret; once a method is enabled that is
         // only allowed with proof of an existing method, or anyone
         // could enroll their own phone and unlock with it.
         var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
-            proofPassphrase, proofYubiKey, log);
+            proofPassphrase, proofYubiKey, log, proofTotp);
         if (proofRefusal is not null)
             return proofRefusal.Value;
 
@@ -259,7 +269,7 @@ public static partial class DashboardApi
     public static (int Status, object Payload) VerifyPhoneTotp(ServiceConfig config, string? code,
         string? configPath = null, Action<string>? log = null,
         string? proofPassphrase = null, bool proofYubiKey = false,
-        IYubiKeyProvider? yubiKeyProvider = null)
+        IYubiKeyProvider? yubiKeyProvider = null, string? proofTotp = null)
     {
         // Security fix (C-3): a verified code PROMOTES the pending
         // secret to live — the step that completes a takeover — so it
@@ -268,7 +278,7 @@ public static partial class DashboardApi
         // code from the just-issued secret proves nothing about an
         // existing method.
         var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
-            proofPassphrase, proofYubiKey, log);
+            proofPassphrase, proofYubiKey, log, proofTotp);
         if (proofRefusal is not null)
             return proofRefusal.Value;
 
@@ -280,6 +290,16 @@ public static partial class DashboardApi
             return (400, new ErrorDto("No phone authenticator secret is enrolled. Start setup first."));
         if (string.IsNullOrWhiteSpace(code) || code.Trim().Length != TotpCrypto.CodeDigits)
             return (200, new OkDto(false));
+        // Every code check runs through the guard's limiter (see
+        // TotpGuard): enrollment verification is a code check too, and
+        // an attacker guessing enrollment codes must hit the same wall
+        // as one guessing proofs or unlocks. A lockout answers like any
+        // wrong code — plain false, no lockout state leaked to the page.
+        if (TotpGuard.IsLockedOut)
+        {
+            log?.Invoke("dashboard: phone code refused — TOTP checks are locked out after failed attempts");
+            return (200, new OkDto(false));
+        }
         try
         {
             string base32 = FileKeep.Core.Dpapi.Unprotect(target);
@@ -293,14 +313,28 @@ public static partial class DashboardApi
                 // Don't leave the base32 lying around longer than needed.
                 base32 = new string('\0', base32.Length);
             }
-            bool ok;
+            long? matchedStep;
             try
             {
-                ok = TotpCrypto.ValidateCode(secret, code, DateTimeOffset.UtcNow);
+                matchedStep = TotpCrypto.MatchStep(secret, code, DateTimeOffset.UtcNow);
             }
             finally
             {
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
+            }
+            bool ok = matchedStep is not null;
+            if (!ok)
+            {
+                TotpGuard.ReportFailure(log);
+                return (200, new OkDto(false));
+            }
+            if (!hasPending && !TotpGuard.AcceptStep(matchedStep.Value))
+            {
+                // Live-secret replay: a code already used for a proof
+                // or unlock cannot verify again inside its window.
+                TotpGuard.ReportFailure(log);
+                log?.Invoke("dashboard: phone code refused — that code was already used");
+                return (200, new OkDto(false));
             }
             if (ok && hasPending)
             {
@@ -335,7 +369,12 @@ public static partial class DashboardApi
                 }
                 log?.Invoke("dashboard: phone authenticator secret promoted after verified enrollment");
                 }
+                // Promotion succeeded: seed the replay record with the
+                // enrollment code's step, so that code cannot then be
+                // replayed as a proof or unlock inside its window.
+                TotpGuard.AcceptStep(matchedStep.Value);
             }
+            TotpGuard.ReportSuccess();
             return (200, new OkDto(ok));
         }
         catch (Exception ex)

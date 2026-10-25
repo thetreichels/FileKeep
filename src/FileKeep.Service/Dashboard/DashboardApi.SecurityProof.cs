@@ -3,6 +3,7 @@ using System.Text;
 using FileKeep.Core;
 using FileKeep.Core.Security;
 using FileKeep.Core.Service;
+using FileKeep.Service.Security;
 
 namespace FileKeep.Service;
 
@@ -24,13 +25,21 @@ namespace FileKeep.Service;
 ///   (a) the current passphrase, or
 ///   (b) the typed recovery secret in generated-secret (YubiKey-only)
 ///       mode, or
-///   (c) a fresh YubiKey touch that unwraps the stored blob.
-/// A phone/TOTP code is NEVER a proof (the phone holds no key material
-/// and must never authorize changing methods), and an already-unlocked
-/// restore session is NOT a proof either — the check below deliberately
-/// never consults session state, and performing it never touches one.
-/// When NO method is enabled yet (first-time setup) no proof is
-/// required, so the setup wizard's first calls keep working proof-free.
+///   (c) a fresh YubiKey touch that unwraps the stored blob, or
+///   (d) a valid TOTP code from the phone authenticator, checked
+///       against the LIVE secret only through <see cref="TotpGuard"/>
+///       (rate-limited, replay-protected).
+/// (d) is the 2026-10-25 reversal of the phase-1 rule, at Joel's order:
+/// TOTP now works as a proof like passphrase and YubiKey — a code
+/// alone proves, no second method needed at use time in the Windows
+/// app. What did NOT change: TOTP can still only ever be a SECONDARY
+/// configured method (the profile endpoint refuses a phone-only
+/// profile, because USB recovery needs Passphrase or YubiKey); an
+/// already-unlocked restore session is still NOT a proof — the check
+/// below deliberately never consults session state, and performing it
+/// never touches one — and USB recovery still never uses TOTP. When
+/// NO method is enabled yet (first-time setup) no proof is required,
+/// so the setup wizard's first calls keep working proof-free.
 /// </summary>
 public static partial class DashboardApi
 {
@@ -61,7 +70,8 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload)? CheckSecurityChangeProof(
         ServiceConfig config, IYubiKeyProvider? yubiKeyProvider,
-        string? proofPassphrase, bool proofYubiKey, Action<string>? log = null)
+        string? proofPassphrase, bool proofYubiKey, Action<string>? log = null,
+        string? proofTotp = null)
     {
         if (!HasEnabledUnlockMethod(config))
             return null;
@@ -94,6 +104,16 @@ public static partial class DashboardApi
                 // unwrap: not a proof. Fall through to the refusal.
             }
         }
+
+        // (d): possession proof — a valid TOTP code from the phone
+        // authenticator, live secret only, rate-limited and
+        // replay-protected by the guard. A code from a pending
+        // re-enrollment secret proves nothing and is never accepted
+        // here; neither is a code offered through the passphrase field
+        // (that field is still passphrase-only by design).
+        if (!string.IsNullOrEmpty(proofTotp) &&
+            TotpGuard.TryValidateLiveCode(config, proofTotp, log))
+            return null;
 
         log?.Invoke("dashboard: security settings change refused — " +
             "no valid proof of an existing unlock method was supplied");

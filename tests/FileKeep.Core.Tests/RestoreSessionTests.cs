@@ -8,8 +8,27 @@ namespace FileKeep.Core.Tests;
 /// <summary>
 /// RestoreSession behavior and the DashboardApi YubiKey session gate.
 /// </summary>
-public sealed class RestoreSessionTests
+public sealed class RestoreSessionTests : IDisposable
 {
+    private readonly string? _savedPassphrase;
+
+    public RestoreSessionTests()
+    {
+        // Same fixture hygiene as SecurityProofTests: the env-var
+        // passphrase and the TOTP guard are process-global, so each
+        // test starts from a clean slate and restores what it found.
+        _savedPassphrase = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
+        FileKeep.Service.Security.TotpGuard.ResetForTests();
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, _savedPassphrase);
+        FileKeep.Service.Security.TotpGuard.ResetForTests();
+        FileKeep.Service.Security.TotpGuard.UnprotectForTests = null;
+    }
+
     [Fact]
     public void Session_StartsLocked()
     {
@@ -272,5 +291,125 @@ public sealed class RestoreSessionTests
         string json = System.Text.Json.JsonSerializer.Serialize(payload);
         Assert.Contains("YubiKey detection failed", json);
         Assert.Contains("HID stack unavailable", json);
+    }
+
+    // ---------- Restore gating (2026-10-25): restores behind unlock ----------
+
+    [Fact]
+    public void RestoreGating_PassphraseMode_LockedSession_YieldsNothing_UnlockedYieldsSession()
+    {
+        // A passphrase profile gates restores: the env/DPAPI value alone
+        // no longer suffices — only the unlocked session passphrase does.
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-passphrase");
+        var config = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
+        var session = new RestoreSession();
+
+        Assert.Null(DashboardApi.GetRestorePassphrase(config, session));
+
+        var (_, statusPayload) = DashboardApi.GetRestoreSessionStatus(config, session);
+        var dto = Assert.IsType<YubiKeyUnlockDto>(statusPayload);
+        Assert.True(dto.RestoresGated);
+        Assert.True(dto.PassphraseEnabled);
+
+        session.Unlock("session-passphrase");
+        Assert.Equal("session-passphrase", DashboardApi.GetRestorePassphrase(config, session));
+    }
+
+    [Fact]
+    public void RestoreGating_YubiKeyMode_LockedSession_YieldsNothing()
+    {
+        // The pre-existing YubiKey rule, preserved under the new gate.
+        var config = new ServiceConfig { PassphraseYubiKey = true };
+        var session = new RestoreSession();
+        Assert.Null(DashboardApi.GetRestorePassphrase(config, session));
+        session.Unlock("unwrapped");
+        Assert.Equal("unwrapped", DashboardApi.GetRestorePassphrase(config, session));
+    }
+
+    [Fact]
+    public void RestoreGating_NoMethod_NoPassphrase_YieldsNothing()
+    {
+        // No method and no passphrase: the env/DPAPI fallback path is
+        // preserved and still yields nothing (restores 500 as before).
+        // Note this branch is near-vacuous in practice: any resolvable
+        // passphrase makes the profile passphrase-enabled, hence gated.
+        var config = new ServiceConfig();
+        var session = new RestoreSession();
+        Assert.Null(DashboardApi.GetRestorePassphrase(config, session));
+
+        var (_, statusPayload) = DashboardApi.GetRestoreSessionStatus(config, session);
+        Assert.False(Assert.IsType<YubiKeyUnlockDto>(statusPayload).RestoresGated);
+    }
+
+    [Fact]
+    public void RestoreSessionLockedMessage_ListsOnlyConfiguredMethods()
+    {
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-passphrase");
+        var passphraseOnly = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
+        string msg = DashboardApi.RestoreSessionLockedMessage(passphraseOnly);
+        Assert.Contains("passphrase", msg);
+        Assert.DoesNotContain("YubiKey", msg);
+
+        var yubiKey = new ServiceConfig { PassphraseYubiKey = true };
+        Assert.Contains("YubiKey", DashboardApi.RestoreSessionLockedMessage(yubiKey));
+    }
+
+    [Fact]
+    public void UnlockWithPassphrase_CorrectUnlocks_WrongRefused_WrongModeRefused()
+    {
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "typed-pass");
+        var config = new ServiceConfig { PassphraseProtected = "dpapi-blob" };
+        var session = new RestoreSession();
+
+        var (badStatus, _) = DashboardApi.UnlockRestoreSessionWithPassphrase(config, session, "not-it");
+        Assert.Equal(400, badStatus);
+        Assert.False(session.IsUnlocked);
+
+        var (goodStatus, _) = DashboardApi.UnlockRestoreSessionWithPassphrase(config, session, "typed-pass");
+        Assert.Equal(200, goodStatus);
+        Assert.True(session.IsUnlocked);
+        Assert.True(session.IsVerified);
+        Assert.Equal("typed-pass", session.GetPassphrase());
+
+        // YubiKey mode and generated mode both refuse typed-passphrase
+        // unlock — the touch path owns the former, the recovery-secret
+        // path owns the latter.
+        var yubiKeySession = new RestoreSession();
+        Assert.Equal(400, DashboardApi.UnlockRestoreSessionWithPassphrase(
+            new ServiceConfig { PassphraseYubiKey = true }, yubiKeySession, "typed-pass").Status);
+        Assert.False(yubiKeySession.IsUnlocked);
+        var generatedSession = new RestoreSession();
+        Assert.Equal(400, DashboardApi.UnlockRestoreSessionWithPassphrase(
+            new ServiceConfig { GeneratedSecretMode = true }, generatedSession, "typed-pass").Status);
+        Assert.False(generatedSession.IsUnlocked);
+    }
+
+    [Fact]
+    public void PhoneUnlock_WithoutYubiKey_ReleasesEnvPassphrase()
+    {
+        // Restores are gated in passphrase+phone mode too, so phone
+        // unlock must work there — not only under the YubiKey
+        // precondition it used to require.
+        const string base32 = "JBSWY3DPEHPK3PXP";
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-pass");
+        FileKeep.Service.Security.TotpGuard.UnprotectForTests = _ => base32;
+        var config = new ServiceConfig
+        {
+            PhoneAuthEnabled = true,
+            PhoneTotpSecretProtected = "test-sealed",
+        };
+        var session = new RestoreSession();
+
+        var (badStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(config, session, "000000");
+        Assert.Equal(400, badStatus);
+        Assert.False(session.IsUnlocked);
+
+        var (goodStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(
+            config, session, CurrentTotpCode(base32));
+        Assert.Equal(200, goodStatus);
+        Assert.True(session.IsUnlocked);
+        Assert.True(session.IsVerified);
+        Assert.Equal("env-pass", session.GetPassphrase());
+        Assert.Equal("env-pass", DashboardApi.GetRestorePassphrase(config, session));
     }
 }

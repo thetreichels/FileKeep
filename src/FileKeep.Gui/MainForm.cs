@@ -242,11 +242,44 @@ public class MainForm : Form
             // after its awaits and must not touch the WebView while
             // (or after) it is disposed here (P2-L13).
             _closing = true;
+            LockRestoreSessionOnClose();
             Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             try { _webView?.Dispose(); } catch { /* closing anyway */ }
         };
+    }
+
+    /// <summary>
+    /// Locks the restore session when the GUI closes (restore gating,
+    /// 2026-10-25): a closed GUI is the end of using FileKeep, and a
+    /// reopened GUI must start locked rather than inherit authorization.
+    /// Best-effort and never blocks closing: the lock endpoint needs the
+    /// page's CSRF token, so it is read back out of the served page
+    /// (the meta n-token DashboardHtml embeds) and posted with it. Any
+    /// failure — service down, token unreadable — is swallowed; the
+    /// 1-hour idle expiry is the backstop (a crash runs no close hook,
+    /// so it relies on that backstop too). Minimize-to-tray is not a
+    /// close and does not lock: the GUI is still running.
+    /// </summary>
+    private void LockRestoreSessionOnClose()
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            string html = http.GetStringAsync(DashboardUrl).GetAwaiter().GetResult();
+            const string marker = "<meta name=\"n-token\" content=\"";
+            int start = html.IndexOf(marker, StringComparison.Ordinal);
+            if (start < 0) return;
+            start += marker.Length;
+            int end = html.IndexOf('"', start);
+            if (end <= start) return;
+            string token = html.Substring(start, end - start);
+            using var req = new HttpRequestMessage(HttpMethod.Post, DashboardUrl + "api/restore/lock");
+            req.Headers.Add("X-CSRF-Token", token);
+            using var _ = http.SendAsync(req).GetAwaiter().GetResult();
+        }
+        catch { /* closing anyway — idle expiry is the backstop */ }
     }
 
     /// <summary>

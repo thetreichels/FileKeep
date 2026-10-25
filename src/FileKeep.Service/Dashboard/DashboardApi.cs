@@ -375,8 +375,8 @@ public static partial class DashboardApi
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)))
                 : (500, PassphraseUnavailableError(config, $"Service passphrase is not configured ({BackupScheduler.PassphraseEnvVar})."));
         try
         {
@@ -652,8 +652,8 @@ public static partial class DashboardApi
             return (400, new ErrorDto("backupId is required."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)))
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
@@ -817,8 +817,8 @@ public static partial class DashboardApi
             return (400, new ErrorDto("destDir is required."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)))
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         // SMB source and credentials: the job's SMB target location is
         // the credential home; see ResolveRestoreSmb.
@@ -1017,8 +1017,8 @@ public static partial class DashboardApi
             return (400, new ErrorDto("backupId is required."), "");
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."), "")
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)), "")
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."), "");
         try
         {
@@ -1062,8 +1062,8 @@ public static partial class DashboardApi
             return (400, new ErrorDto("No Usenet provider configured."));
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)))
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
@@ -1184,8 +1184,8 @@ public static partial class DashboardApi
         }
         string? passphrase = GetRestorePassphrase(config, session);
         if (string.IsNullOrEmpty(passphrase))
-            return config.PassphraseYubiKey
-                ? (401, new ErrorDto("Restore session is locked. Touch your YubiKey to unlock it."))
+            return HasEnabledUnlockMethod(config)
+                ? (401, new ErrorDto(RestoreSessionLockedMessage(config)))
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         // Chunk sources, resolved exactly as for a file restore: the
         // job's banked SMB location (the credential home; see

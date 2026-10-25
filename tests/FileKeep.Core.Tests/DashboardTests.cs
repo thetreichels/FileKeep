@@ -62,6 +62,19 @@ public sealed class DashboardTests : IDisposable
         },
     };
 
+    /// <summary>
+    /// A restore session unlocked with the test passphrase. Restore
+    /// endpoints are gated behind the session whenever a method is
+    /// enabled (2026-10-25); tests exercising post-gate behavior pass
+    /// this in, and tests exercising the gate itself pass none.
+    /// </summary>
+    private static RestoreSession UnlockedSession()
+    {
+        var s = new RestoreSession();
+        s.Unlock(Passphrase);
+        return s;
+    }
+
     // Serializes a dashboard payload exactly as the production service
     // does: Results.Json with the HttpJsonOptions resolver chain from
     // Dashboard.cs (DashboardJsonContext + FileKeepJsonContext — see
@@ -144,7 +157,7 @@ public sealed class DashboardTests : IDisposable
         var scheduler = new BackupScheduler(config);
         scheduler.RunJobNow("docs");
 
-        var (status, payload) = DashboardApi.GetBackups(config, _repoDir);
+        var (status, payload) = DashboardApi.GetBackups(config, _repoDir, UnlockedSession());
         Assert.Equal(200, status);
         using var doc = ToJson(payload);
         Assert.Equal(1, doc.RootElement.GetArrayLength());
@@ -163,7 +176,7 @@ public sealed class DashboardTests : IDisposable
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, null);
         try
         {
-            var (status, _) = DashboardApi.GetBackups(config, _repoDir);
+            var (status, _) = DashboardApi.GetBackups(config, _repoDir, UnlockedSession());
             Assert.Equal(500, status);
         }
         finally
@@ -775,7 +788,7 @@ public sealed class DashboardTests : IDisposable
         try
         {
             var (status, payload) = DashboardApi.StartDiskRestore(
-                config, _repoDir, backupId, target, confirmed: true);
+                config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
             Assert.Equal(409, status);
             Assert.Contains("already writing", ((ErrorDto)payload).Error);
             Assert.Equal(sentinel, File.ReadAllBytes(target));
@@ -787,7 +800,7 @@ public sealed class DashboardTests : IDisposable
 
         // Released: a fresh start is accepted and completes.
         var (okStatus, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
         Assert.Equal(202, okStatus);
         Assert.Equal("ok", WaitForDiskRestoreOutcome(_repoDir, backupId));
         Assert.Equal(imageBytes, File.ReadAllBytes(target));
@@ -808,7 +821,7 @@ public sealed class DashboardTests : IDisposable
         {
             var (status, payload) = DashboardApi.StartRestore(
                 config, _repoDir, "somebackup", dest,
-                FileKeep.Core.MergePolicy.Overwrite);
+                FileKeep.Core.MergePolicy.Overwrite, session: UnlockedSession());
             Assert.Equal(409, status);
             Assert.Contains("already writing", ((ErrorDto)payload).Error);
         }
@@ -905,7 +918,7 @@ public sealed class DashboardTests : IDisposable
         config.Jobs[0].Targets = new List<string>();
         config.Locations = new List<BackupLocation>();
         var (status, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
         Assert.Equal(202, status);
 
         string outcome = WaitForDiskRestoreOutcome(_repoDir, backupId);
@@ -939,7 +952,7 @@ public sealed class DashboardTests : IDisposable
 
         using var hold = scheduler.BeginDashboardOperation();
         var (status, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true, scheduler: scheduler);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession(), scheduler: scheduler);
         Assert.Equal(202, status);
 
         // While the gate is held: no outcome, target untouched.
@@ -968,7 +981,7 @@ public sealed class DashboardTests : IDisposable
         string target = MakeSentinelTarget(new byte[100_000]);
         var config = MakeConfig();
         var (status, payload) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
         Assert.Equal(400, status);
         Assert.Contains("no longer present", ((ErrorDto)payload).Error);
     }
@@ -999,7 +1012,7 @@ public sealed class DashboardTests : IDisposable
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         var (status, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true,
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession(),
             cancellationToken: cts.Token);
         Assert.Equal(202, status);
 
@@ -1032,7 +1045,7 @@ public sealed class DashboardTests : IDisposable
         string target = MakeSentinelTarget(imageBytes);
         var config = MakeDiskRestoreConfig(shareDir);
         var (status, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
         Assert.Equal(202, status);
 
         Assert.Equal("ok", WaitForDiskRestoreOutcome(_repoDir, backupId));
@@ -1084,7 +1097,7 @@ public sealed class DashboardTests : IDisposable
         byte[] before = File.ReadAllBytes(target);
         var config = MakeDiskRestoreConfig(shareDir);
         var (status, _) = DashboardApi.StartDiskRestore(
-            config, _repoDir, backupId, target, confirmed: true);
+            config, _repoDir, backupId, target, confirmed: true, session: UnlockedSession());
         Assert.Equal(202, status);
 
         Assert.Equal("failed", WaitForDiskRestoreOutcome(_repoDir, backupId));

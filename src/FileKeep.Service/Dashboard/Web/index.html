@@ -497,7 +497,7 @@
         </div>
         <div class="row" id="restore-session-row" style="display:none;margin-bottom:8px;align-items:center">
           <span id="restore-session-status" class="yk-badge locked">&#128273; Locked</span>
-          <span style="color:var(--text-2);font-size:13px">Touch your YubiKey to unlock restores</span>
+          <span style="color:var(--text-2);font-size:13px">Unlock restores to proceed — one unlock covers every restore until the hour expires or the app closes</span>
           <button id="restore-unlock-btn" class="accent" onclick="unlockRestoreSession()" title="Unlock restores with a YubiKey touch" style="margin-left:auto">Unlock with YubiKey</button>
           <button id="restore-lock-btn" onclick="lockRestoreSession()" title="Wipe the session passphrase from memory" style="margin-left:auto;display:none">Lock</button>
         </div>
@@ -510,6 +510,11 @@
           <span style="color:var(--text-2);font-size:13px">Or use your phone authenticator:</span>
           <input id="restore-phone-input" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="6-digit code" style="width:130px;font-family:monospace" onkeydown="if (event.key === 'Enter') unlockRestoreWithPhone()">
           <button class="accent" onclick="unlockRestoreWithPhone()">Unlock with phone</button>
+        </div>
+        <div class="row" id="restore-passphrase-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span style="color:var(--text-2);font-size:13px">Or enter your repository passphrase:</span>
+          <input id="restore-passphrase-input" type="password" autocomplete="current-password" spellcheck="false" placeholder="Passphrase" style="flex:1" onkeydown="if (event.key === 'Enter') unlockRestoreWithPassphrase()">
+          <button class="accent" onclick="unlockRestoreWithPassphrase()">Unlock with passphrase</button>
         </div>
         <div id="restore-secret-error" style="display:none;color:var(--bad);font-size:13px;margin-bottom:8px"></div>
         <table id="backups" style="display:none"><thead><tr><th>ID</th><th>Type</th><th>Created (UTC)</th><th>Actions</th></tr></thead><tbody></tbody></table>
@@ -2287,10 +2292,13 @@ async function refreshRestoreSession() {
   const st = document.getElementById('restore-session-status');
   const srow = document.getElementById('restore-secret-row');
   const prow = document.getElementById('restore-phone-row');
+  const pprow = document.getElementById('restore-passphrase-row');
   if (!row || !st) return;
   try {
     const s = await api('/api/restore/session');
-    if (!s.yubikey) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; return; }
+    // Restores are gated whenever ANY unlock method is enabled, not
+    // just in YubiKey mode — the session row renders on restoresGated.
+    if (!s.restoresGated) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; return; }
     row.style.display = '';
     st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
     // MU-15: a typed-secret unlock is not yet proven — the badge says
@@ -2307,7 +2315,9 @@ async function refreshRestoreSession() {
     // session is locked (WALK-2). Exactly one of Unlock/Lock shows.
     const unlockBtn = document.getElementById('restore-unlock-btn');
     const lockBtn = document.getElementById('restore-lock-btn');
-    if (unlockBtn) unlockBtn.style.display = s.unlocked ? 'none' : '';
+    // The YubiKey button renders only when a key is actually configured;
+    // a passphrase-only profile must never be offered a touch it can't do.
+    if (unlockBtn) unlockBtn.style.display = (!s.unlocked && s.yubikey) ? '' : 'none';
     if (lockBtn) lockBtn.style.display = s.unlocked ? '' : 'none';
     // Typed-secret unlock exists only in YubiKey-only (generated-secret)
     // mode, and only while the session is locked — in passphrase mode
@@ -2316,7 +2326,11 @@ async function refreshRestoreSession() {
     // Phone unlock (MU-15): shown whenever the phone method is enabled
     // and the session is locked.
     if (prow) prow.style.display = (s.phoneEnabled && !s.unlocked) ? '' : 'none';
-  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; }
+    // Typed-passphrase unlock: passphrase mode without YubiKey only
+    // (in YubiKey mode the touch path owns unlocks; in generated mode
+    // the recovery-secret row owns them).
+    if (pprow) pprow.style.display = (s.passphraseEnabled && !s.yubikey && !s.unlocked) ? '' : 'none';
+  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; }
 }
 async function unlockRestoreWithPhone() {
   const input = document.getElementById('restore-phone-input');
@@ -2359,21 +2373,43 @@ async function unlockRestoreWithSecret() {
   }
 }
 async function ensureRestoreSession() {
-  // Returns true when restores may proceed. In YubiKey mode this
-  // touches the key to unlock the session first.
+  // Returns true when restores may proceed. Restores are gated behind
+  // the session whenever any unlock method is enabled (2026-10-25):
+  // one authorization per GUI session — unlock once, restore freely
+  // until the hour expires or the GUI closes. When locked, the unlock
+  // happens on the session row above the backup list, which offers
+  // every method the profile has (touch, passphrase, recovery secret,
+  // or phone code) — never a prompt per restore, and never a
+  // touch-only funnel when the profile offers more.
   let s;
   try { s = await api('/api/restore/session'); }
   catch (e) { toast('Could not check restore session: ' + e.message, 'err'); return false; }
-  if (!s.yubikey || s.unlocked) return true;
-  if (!confirm(s.yubiKeyOnly
-    ? 'Restores are locked. Touch your YubiKey when it flashes to unlock — or Cancel and use "Unlock with recovery secret" above the backup list instead. Continue?'
-    : 'Restores require your YubiKey. Touch the key when it flashes. Continue?')) return false;
-  toast('Touch your YubiKey…');
+  if (!s.restoresGated || s.unlocked) return true;
+  toast('Restores are locked — unlock the restore session above the backup list first.', 'err');
+  await refreshRestoreSession();
+  const row = document.getElementById('restore-session-row');
+  if (row) row.scrollIntoView();
+  return false;
+}
+async function unlockRestoreWithPassphrase() {
+  const input = document.getElementById('restore-passphrase-input');
+  const errEl = document.getElementById('restore-secret-error');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = msg ? '' : 'none'; };
+  showErr('');
+  const passphrase = (input.value || '');
+  if (!passphrase) { showErr('Enter your repository passphrase.'); input.focus(); return; }
   try {
-    await api('/api/restore/unlock', { method: 'POST' });
+    await api('/api/restore/unlock-passphrase', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase })
+    });
+    input.value = '';
     toast('Restore session unlocked.', 'ok');
-    return true;
-  } catch (e) { toast('Unlock failed: ' + e.message, 'err'); return false; }
+    refreshRestoreSession();
+    loadRepo();
+  } catch (e) {
+    showErr(e.message);
+  }
 }
 async function openRestoreModal(backupId, type) {
   if (!await ensureRestoreSession()) return;
@@ -4096,13 +4132,15 @@ function secUpdateWizardNext() {
 // ---- Proof of an existing unlock method (server security gate) ----
 // Once any unlock method is enabled, the server refuses to change
 // security settings unless the request carries a fresh proof: the
-// current passphrase, or the recovery secret in YubiKey-only mode
-// (a phone code is never accepted). secServerHadMethod records
-// whether the SERVER had a method when the profile was loaded (the
-// wizard's local toggles are intent, not server state); credentials
-// collected during the run — the passphrase just saved, the secret
-// just generated — are reused as proof, so the user is prompted only
-// when nothing suitable is at hand. Held in memory only, never stored.
+// current passphrase, the recovery secret in YubiKey-only mode, or
+// a TOTP code from the phone authenticator (a full proof since
+// 2026-10-25, like passphrase and YubiKey). secServerHadMethod
+// records whether the SERVER had a method when the profile was loaded
+// (the wizard's local toggles are intent, not server state);
+// credentials collected during the run — the passphrase just saved,
+// the secret just generated — are reused as proof, so the user is
+// prompted only when nothing suitable is at hand. Held in memory
+// only, never stored.
 let secServerHadMethod = false;
 let secWizardPassphrase = '';
 let secProofHeld = '';
@@ -4118,9 +4156,17 @@ function secProofFields(required) {
   if (!required) return {};
   let proof = secHeldProof();
   if (!proof) {
-    proof = prompt('To change security settings, enter your current passphrase.\n' +
-      'In YubiKey-only mode, enter your recovery secret instead.') || '';
+    proof = prompt('To change security settings, enter your current passphrase,\n' +
+      'your recovery secret (YubiKey-only mode), or the 6-digit code from\n' +
+      'your authenticator app.') || '';
     if (proof) secProofHeld = proof;
+    // A 6-digit entry is ambiguous: it may be a short passphrase or
+    // an authenticator code. Send it as both — the server tries the
+    // passphrase first, then the code, so a correct value of either
+    // kind proves and a wrong one fails both. (A mistyped 6-digit
+    // passphrase counts as one failed TOTP attempt server-side, but
+    // the TOTP lockout never blocks passphrase proofs.)
+    if (/^\d{6}$/.test(proof)) return { proofPassphrase: proof, proofTotp: proof };
   }
   return proof ? { proofPassphrase: proof } : {};
 }

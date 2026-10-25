@@ -74,7 +74,14 @@ public sealed record YubiKeyUnlockDto(
     // MU-15: the phone is a real unlock path (it releases the
     // machine's DPAPI-held passphrase after a TOTP presence proof);
     // the restore view shows its unlock row only when enabled.
-    [property: JsonPropertyName("phoneEnabled")] bool PhoneEnabled);
+    [property: JsonPropertyName("phoneEnabled")] bool PhoneEnabled,
+    // Restore gating (2026-10-25): restores are gated behind the
+    // session whenever any unlock method is enabled, and the view
+    // renders the session row on this flag — not on YubiKey mode.
+    [property: JsonPropertyName("restoresGated")] bool RestoresGated,
+    // Typed-passphrase unlock exists only in passphrase mode without
+    // YubiKey; the view renders its row on this flag.
+    [property: JsonPropertyName("passphraseEnabled")] bool PassphraseEnabled);
 
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);

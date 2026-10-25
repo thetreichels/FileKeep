@@ -6,9 +6,13 @@ namespace FileKeep.Service.Security;
 /// <summary>
 /// RFC 6238 TOTP (time-based one-time passwords) for the phone
 /// authenticator method. HMAC-SHA1, 30-second time steps, 6-digit codes.
-/// The phone method is running-system-only and permanently OR-only — it
-/// never gates USB recovery and can never be the sole method (enforced in
-/// <c>DashboardApi.SetProtectionProfile</c>).
+/// The phone method is running-system-only and OR-only — it never gates
+/// USB recovery and is never AND-linked — and it can only ever be a
+/// secondary method: at least one of Passphrase or YubiKey must stay
+/// configured, because USB recovery needs one of them (enforced in
+/// <c>DashboardApi.SetProtectionProfile</c>). As a proof in the Windows
+/// app, though, a TOTP code stands alone like passphrase and YubiKey
+/// since 2026-10-25 (Joel's order).
 /// </summary>
 public static class TotpCrypto
 {
@@ -101,34 +105,36 @@ public static class TotpCrypto
     /// accepting ±<see cref="AllowedSkewSteps"/> time steps for clock skew.
     /// Comparison is constant-time; intermediate codes are wiped.
     /// </summary>
-    public static bool ValidateCode(byte[] secret, string code, DateTimeOffset now)
+    public static bool ValidateCode(byte[] secret, string code, DateTimeOffset now) =>
+        MatchStep(secret, code, now) is not null;
+
+    /// <summary>
+    /// Like <see cref="ValidateCode"/>, but returns the matched time step
+    /// instead of a boolean, so callers doing replay protection can tell
+    /// a fresh code from one already used (see <see cref="TotpGuard"/>).
+    /// Returns null when nothing matches. Scans from the earliest
+    /// accepted step upward, so a skewed (older-step) code reports its
+    /// own step, not the current one.
+    /// </summary>
+    public static long? MatchStep(byte[] secret, string code, DateTimeOffset now)
     {
         if (secret is null || secret.Length == 0 || string.IsNullOrWhiteSpace(code))
-            return false;
+            return null;
         string clean = code.Trim();
         if (clean.Length != CodeDigits || !clean.All(char.IsDigit))
-            return false;
+            return null;
 
         long step = now.ToUnixTimeSeconds() / TimeStepSeconds;
-        bool ok = false;
         for (long s = step - AllowedSkewSteps; s <= step + AllowedSkewSteps; s++)
         {
             string expected = ComputeCode(secret, s);
-            try
-            {
-                // Constant-time comparison on the ASCII bytes.
-                ok |= CryptographicOperations.FixedTimeEquals(
-                    Encoding.ASCII.GetBytes(expected),
-                    Encoding.ASCII.GetBytes(clean));
-            }
-            finally
-            {
-                // Wipe not needed for the managed string, but avoid
-                // leaving obvious copies: nothing retained beyond scope.
-            }
-            if (ok) break; // one match is enough; still constant-time per step
+            bool match = CryptographicOperations.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(expected),
+                Encoding.ASCII.GetBytes(clean));
+            if (match)
+                return s;
         }
-        return ok;
+        return null;
     }
 
     /// <summary>

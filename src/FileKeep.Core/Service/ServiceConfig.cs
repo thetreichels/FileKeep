@@ -550,8 +550,10 @@ public sealed class ServiceConfig
     /// <summary>
     /// Whether the phone authenticator is enabled as a fallback unlock
     /// method. It is always standalone: it can never be the sole method
-    /// (at least one of Passphrase/YubiKey must also be on), and it is
-    /// running-system-only — it is never used in USB recovery.
+    /// (at least one of Passphrase/YubiKey must also be on, because USB
+    /// recovery needs one of them), and it is running-system-only — it
+    /// is never used in USB recovery. As a proof in the Windows app, a
+    /// TOTP code stands alone like any other proof.
     /// </summary>
     [JsonPropertyName("phoneAuthEnabled")]
     public bool PhoneAuthEnabled { get; set; }
