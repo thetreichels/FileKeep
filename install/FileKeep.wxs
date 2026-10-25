@@ -17,6 +17,13 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of FileKeep is already installed." />
 
+    <!-- LocalAppData cleanup path: RemoveFolderEx needs a property that
+         resolves before CostInitialize, and directory ids cannot be used
+         there, so this is an environment-variable path that the
+         RemoveFolderEx action expands. It resolves to the installing
+         user's LocalAppData; another user's profile is out of reach. -->
+    <Property Id="FILEKEEP_LOCALAPPDATA" Value="%LOCALAPPDATA%\FileKeep" />
+
     <Media Id="1" Cabinet="product.cab" EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
@@ -84,6 +91,19 @@
       <Component Id="GuiExe" Guid="*">
         <File Id="GuiExeFile" Source="$(var.GuiBin)\FileKeepGui.exe" KeyPath="yes" />
         <RemoveFolder Id="RemoveGuiDir" Directory="GUIDIR" On="uninstall" />
+      </Component>
+      <Component Id="LocalAppDataCleanup" Guid="*">
+        <!-- Recursively delete the GUI's per-user data on a true uninstall
+             only (not on upgrade): gui-settings.json plus the whole WebView2
+             user-data tree (EBWebView, many nested folders). Plain
+             RemoveFile/RemoveFolder cannot recurse, so RemoveFolderEx is
+             required. Condition is the standard uninstall-only form.
+             Limits: only the installing user's profile is cleaned, and if
+             the GUI is still running at uninstall, locked WebView2 files
+             may survive — the self-test stops the GUI first, so it proves
+             the stopped case, not the GUI-open case. -->
+        <util:RemoveFolderEx Id="RemoveLocalAppData" Property="FILEKEEP_LOCALAPPDATA" On="uninstall" Condition="(REMOVE = &quot;ALL&quot;) AND NOT UPGRADINGPRODUCTCODE" />
+        <RegistryValue Root="HKCU" Key="Software\FileKeep" Name="LocalAppDataCleanup" Value="1" Type="integer" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

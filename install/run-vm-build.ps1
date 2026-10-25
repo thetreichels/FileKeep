@@ -274,6 +274,7 @@ if ($prods.Count -gt 0) {
     Start-Sleep 10
 }
 if (Test-Path "C:\Program Files\FileKeep") { throw "Uninstall left files behind" }
+if (Test-Path "$env:LOCALAPPDATA\FileKeep") { throw "Uninstall left LocalAppData files behind" }
 Write-Host "  Uninstall clean."
 
 Write-Host ""
