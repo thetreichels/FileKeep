@@ -39,6 +39,9 @@ public sealed class NeutralNamingTests
 
         Assert.Contains("From: poster-x <poster-x@invalid>\r\n", article);
         Assert.Contains("Subject: \"a1b2c3d4.rar\" [002/121] - yEnc\r\n", article);
+        Assert.Contains("X-Part: ", article);
+        Assert.Contains("X-Version: ", article);
+        Assert.DoesNotContain("X-UsenetBackup", article);
         Assert.DoesNotContain("usenet-backup] ", article);
         Assert.DoesNotContain("volume-", article);
         // yEnc filename is the RAR part name
@@ -51,10 +54,11 @@ public sealed class NeutralNamingTests
         string nfo = ArticleCodec.BuildNfoText(
             "9f2c41bd7e03a855c1d6942f6b0e3f1a", "2026-10-14", 120, "poster-x");
 
-        Assert.Contains("Backup ID : 9f2c41bd7e03a855c1d6942f6b0e3f1a", nfo);
-        Assert.Contains("These articles contain private archival data.", nfo);
+        Assert.Contains("Set ID : 9f2c41bd7e03a855c1d6942f6b0e3f1a", nfo);
+        Assert.Contains("These articles contain private data.", nfo);
         Assert.Contains("Their contents are encoded for", nfo);
-        Assert.Contains("authorized restoration only.", nfo);
+        Assert.Contains("authorized use only.", nfo);
+        Assert.DoesNotContain("backup", nfo, System.StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("FileKeep", nfo);
         Assert.DoesNotContain("filekeep", nfo);
         Assert.DoesNotContain("github", nfo, System.StringComparison.OrdinalIgnoreCase);

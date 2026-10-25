@@ -41,7 +41,7 @@ Use the wizard, or on the machine (or any Windows PC):
 
 `nntp-upload` also posts an AES-256-GCM encrypted copy of each backup's
 manifest to Usenet (message-ID
-`<manifest.<backup-id>.<repo-id>@usenet-backup>`). In the wizard, the
+`<set.<backup-id>.<repo-id>@invalid>`). In the wizard, the
 "Check for newer backups on Usenet…" button on the backup-selection step
 scans the newsgroup for these, decrypts any not on the stick with your
 passphrase, and lists them as "(from Usenet)". The CLI equivalent is
@@ -108,7 +108,7 @@ backup matters** — it is kilobytes; keep several copies.
 
 - The passphrase is never stored in the repo. Without it, chunks are
   AES-256-GCM ciphertext and unrecoverable — there is no back door.
-- Message-IDs are `<chunk-id>.<repo-id>@usenet-backup` where `repo-id =
+- Message-IDs are `<chunk-id>.<repo-id>@invalid>` where `repo-id =
   SHA-256(salt)[..16]`; a repo initialized with a *different* salt (or a
   different passphrase-derived key) cannot read articles posted by the
   original repo. Always restore the original `repo.json`.

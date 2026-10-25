@@ -52,18 +52,18 @@ payload:    concatenated encrypted chunk blobs
 ## Message IDs and articles
 
 - `ArticleCodec.MakeVolumeMessageId(volumeIdHex, repoId)` ->
-  `<volumeid.repoid@usenet-backup>` — deliberately the *same shape* as chunk
+  `<volumeid.repoid@invalid>` — deliberately the *same shape* as chunk
   message-IDs, so `NzbParser`'s strict parser, `ChunkMessageIndex`, and the
   catalog journal work unchanged.
-- Article headers: `Subject: [usenet-backup] volume <id>`,
-  `X-UsenetBackup-Volume: <id>`, `X-UsenetBackup-Format: v1`, then yEnc body.
+- Article headers: `Subject: "<set>.rar" [part/total] - yEnc`,
+  `X-Part: <id>`, `X-Version: v2`, then yEnc body.
 - `NntpBlobStore.PutVolume(id, bytes)` / `GetVolume(id)` mirror `Put`/`Get`
   (64-hex validation, journal fast path, STAT fallback, `WaitForArticle`).
 - Upload guard: posting refuses with a clear error when the article would
   exceed `MaxArticleBytes` ("lower volume_size_bytes"), instead of a bare
   server 441 mid-POST.
 - Retention refresh: `MakeRefreshVolumeMessageId` =
-  `<volid.repoid.refresh.<unixTime>.<nonce>@usenet-backup>`; republished
+  `<volid.repoid.re.<unixTime>.<nonce>@invalid>`; republished
   volumes record the new identity in the shared `ChunkMessageIndex`
   (its providerKey -> id -> messageId structure is ID-agnostic).
 
@@ -94,7 +94,7 @@ payload:    concatenated encrypted chunk blobs
 
 - `BackupRepository` dispatches on `nzb.IsVolumeNzb`: chunk NZB -> existing
   `DownloadChunks`; volume NZB -> new `DownloadVolumes`.
-- Per volume: fetch via `GetVolume` (validates the `X-UsenetBackup-Volume`
+- Per volume: fetch via `GetVolume` (validates the `X-Part`
   header matches), `VolumePacker.Unpack`, then the *existing*
   `VerifyDownloadedBlob` per chunk (size guard, AES-GCM decrypt, SHA-256
   == chunk ID, fail closed). Unpack-then-verify means the oversized-chunk
@@ -143,7 +143,7 @@ rows); volume rows follow the same convention.
 ## nntp-check
 
 New opt-in `--probe-post-size <MB>`: posts a single probe article of that
-size (random bytes, `[usenet-backup] probe` subject) to the newsgroup,
+size (random bytes, `<nonce>.bin` - yEnc subject) to the newsgroup,
 STAT-waits, and reports accept/reject with classification. Opt-in because
 the probe article permanently lands in the group.
 
@@ -151,11 +151,6 @@ the probe article permanently lands in the group.
 
 `UploadProgressTracker.totalUnits` counts volumes (+ parity volumes + 2)
 instead of chunks when packing is active; phase labels unchanged.
-
-## Docs
-
-`docs/FORMAT-v1.md` gains a "Volume packing" section: binary format,
-message IDs, NZB mapping, manifest fields.
 
 ## Tests
 

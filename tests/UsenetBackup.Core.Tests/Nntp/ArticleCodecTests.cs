@@ -26,7 +26,7 @@ public sealed class ArticleCodecTests
 
         string article = ArticleCodec.BuildArticle(chunkId, repoId, blob, "alt.binaries.test", "usenet-backup");
         Assert.Contains($"Message-ID: <{chunkId}.{repoId}@invalid>", article);
-        Assert.Contains($"X-UsenetBackup-Chunk: {chunkId}", article);
+        Assert.Contains($"X-Block: {chunkId}", article);
 
         var (id, back) = ArticleCodec.ParseArticle(article);
         Assert.Equal(chunkId, id);
@@ -64,8 +64,8 @@ public sealed class ArticleCodecTests
 
         string article = ArticleCodec.BuildVolumeArticle(volumeId, repoId, volumeBytes, "alt.binaries.test", "poster", "a1b2c3d4", 2, 4);
         Assert.Contains($"Message-ID: <{volumeId}.{repoId}@invalid>", article);
-        Assert.Contains($"X-UsenetBackup-Volume: {volumeId}", article);
-        Assert.DoesNotContain("X-UsenetBackup-Chunk", article);
+        Assert.Contains($"X-Part: {volumeId}", article);
+        Assert.DoesNotContain("X-Block", article);
 
         var (id, back) = ArticleCodec.ParseVolumeArticle(article);
         Assert.Equal(volumeId, id);
@@ -77,7 +77,7 @@ public sealed class ArticleCodecTests
     {
         string volumeId = new('c', 64);
         string msgId = ArticleCodec.MakeRefreshVolumeMessageId(volumeId, "0123456789abcdef");
-        Assert.StartsWith($"<{volumeId}.0123456789abcdef.refresh.", msgId, StringComparison.Ordinal);
+        Assert.StartsWith($"<{volumeId}.0123456789abcdef.re.", msgId, StringComparison.Ordinal);
         Assert.EndsWith("@invalid>", msgId, StringComparison.Ordinal);
     }
 
@@ -143,18 +143,18 @@ public sealed class ArticleCodecTests
         string backupId = Guid.NewGuid().ToString("N");
         // Current-domain ID parses.
         Assert.Equal(backupId,
-            ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@invalid>", repoId));
+            ArticleCodec.TryParseManifestMessageId($"<set.{backupId}.{repoId}@invalid>", repoId));
         // Legacy-domain ID (pre-release @usenet-backup) no longer
         // parses: legacy repo support was dropped before the first
         // release, so discovery must not see those articles at all.
         Assert.Null(
-            ArticleCodec.TryParseManifestMessageId($"<manifest.{backupId}.{repoId}@usenet-backup>", repoId));
+            ArticleCodec.TryParseManifestMessageId($"<set.{backupId}.{repoId}@usenet-backup>", repoId));
     }
 
     [Fact]
     public void TryParseManifestIndexMessageId_RejectsLegacyDomain()
     {
         Assert.Null(ArticleCodec.TryParseManifestIndexMessageId(
-            "<2026-10.abc123.index.3@usenet-backup>", "abc123"));
+            "<2026-10.abc123.cat.3@usenet-backup>", "abc123"));
     }
 }

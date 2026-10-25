@@ -25,8 +25,8 @@ internal sealed class FakeNntpServer : IDisposable
 
     /// <summary>
     /// When true, POST of message-index articles (Subject contains
-    /// "[usenet-backup] message-index") is rejected with 441, simulating
-    /// an index-publication failure. Chunk posts are unaffected.
+    /// (a message-identity or manifest index article) is rejected with 441,
+    /// simulating an index-publication failure. Chunk posts are unaffected.
     /// </summary>
     public bool FailIndexPosts { get; set; }
 
@@ -118,7 +118,7 @@ internal sealed class FakeNntpServer : IDisposable
                         string article = ReadArticle(reader);
                         string? msgId = ExtractMessageId(article);
                         if (msgId is null) { writer.WriteLine("441 missing Message-ID"); break; }
-                        if (FailIndexPosts && msgId.Contains("index.", StringComparison.Ordinal))
+                        if (FailIndexPosts && (msgId.StartsWith("<dir.", StringComparison.Ordinal) || msgId.Contains(".cat.", StringComparison.Ordinal)))
                         { writer.WriteLine("441 index posting rejected (injected failure)"); break; }
                         Articles[msgId] = article;
                         Interlocked.Increment(ref _postCount);

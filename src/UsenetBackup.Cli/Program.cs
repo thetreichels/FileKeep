@@ -47,28 +47,28 @@ static void PrintUsage()
 {
     // CX-1: usage is only printed on error paths (exit 2) — stderr.
     Console.Error.WriteLine("""
-        usenet-backup — local repository engine (milestones 1-2) + NNTP backend (milestone 3)
+        FileKeep — local repository engine + NNTP backend
 
         Usage:
-          usenet-backup init <repo> [--chunk-size BYTES] [--volume-size BYTES] [--chunking fixed|cdc]
-          usenet-backup backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
-          usenet-backup backup-disk <repo> <device> [--image-name NAME]
-          usenet-backup restore <repo> <backup-id> <dest-dir>
+          FileKeep init <repo> [--chunk-size BYTES] [--volume-size BYTES] [--chunking fixed|cdc]
+          FileKeep backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
+          FileKeep backup-disk <repo> <device> [--image-name NAME]
+          FileKeep restore <repo> <backup-id> <dest-dir>
               [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]
-          usenet-backup restore-disk <repo> <backup-id> <device> [--yes]
-          usenet-backup verify <repo> <backup-id>
-          usenet-backup list <repo>
-          usenet-backup nntp-check --host HOST [--port PORT] [--ssl] [--user USER] [--diagnose]
+          FileKeep restore-disk <repo> <backup-id> <device> [--yes]
+          FileKeep verify <repo> <backup-id>
+          FileKeep list <repo>
+          FileKeep nntp-check --host HOST [--port PORT] [--ssl] [--user USER] [--diagnose]
               [--probe-post-size MB]
-          usenet-backup nntp-upload <repo> <backup-id> --host HOST [--port PORT]
+          FileKeep nntp-upload <repo> <backup-id> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP] [--no-volumes]
               [--poster POSTER]
-          usenet-backup nzb-generate <repo> <backup-id> <output.nzb>
+          FileKeep nzb-generate <repo> <backup-id> <output.nzb>
               [--newsgroup GROUP] [--poster POSTER]
-          usenet-backup download <repo> <nzb-file> --host HOST [--port PORT]
+          FileKeep download <repo> <nzb-file> --host HOST [--port PORT]
               [--ssl] [--user USER] [--newsgroup GROUP]
-          usenet-backup smb-sync <repo> --share \\server\share\path [--user USER]
-          usenet-backup expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
+          FileKeep smb-sync <repo> --share \\server\share\path [--user USER]
+          FileKeep expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
           (--user also accepts --username as an alias)
 
         --parent turns the backup into an incremental against that parent
@@ -991,7 +991,7 @@ static int NzbGenerate(string[] args)
     string? providerHost = GetOption(args, "--provider-host");
     string? providerKey = providerHost is null ? null :
         UsenetBackup.Core.Nntp.ChunkMessageIndex.MakeProviderKey(providerHost, newsgroup);
-    string poster = GetOption(args, "--poster") ?? "usenet-backup";
+    string poster = GetOption(args, "--poster") ?? "poster";
 
     using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
     var manifest = repo.LoadManifest(pos[1]);

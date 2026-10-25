@@ -248,7 +248,7 @@ public sealed class RetentionManagerTests : IDisposable
         Assert.True(fx.MessageIndex.HasNewIdentity(providerKey, lostChunk));
         string newId = fx.MessageIndex.GetMessageId(providerKey, lostChunk, RepoId);
         Assert.NotEqual(oldMessageId, newId);
-        Assert.Contains(".refresh.", newId);
+        Assert.Contains(".re.", newId);
 
         // New article is actually on the server
         Assert.True(fx.Store.ExistsOnServer(lostChunk));
@@ -681,7 +681,7 @@ public sealed class RetentionManagerTests : IDisposable
         string id2 = ArticleCodec.MakeRefreshMessageId(chunkId, RepoId);
         Assert.NotEqual(id1, id2);
         Assert.Contains(chunkId, id1);
-        Assert.Contains(".refresh.", id1);
+        Assert.Contains(".re.", id1);
     }
 
     [Fact]

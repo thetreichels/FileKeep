@@ -3,9 +3,9 @@ using System.Text;
 namespace UsenetBackup.Core.Nntp;
 
 /// <summary>
-/// Usenet article format for backup chunks (documented in FORMAT-v1.md,
-/// v2 neutralizes the viewable naming: subjects, From, and attachment
-/// names no longer advertise the software).
+/// Usenet article format for backup chunks (v2 anonymous naming:
+/// subjects, From, and attachment names no longer advertise the
+/// software or purpose).
 /// One chunk per article. The message-ID is deterministic —
 /// &lt;chunkid.repoid@invalid&gt; — so uploads are idempotent,
 /// existence checks need no index, and downloads need only the chunk ID.
@@ -89,23 +89,23 @@ public static class ArticleCodec
     /// Servers reject duplicate message IDs, so refreshing retention requires
     /// a NEW identity. The timestamp + random suffix guarantees uniqueness
     /// while keeping the chunk ID recoverable from the ID itself.
-    /// Format: &lt;chunkId.repoId.refresh.&lt;unixTime&gt;.&lt;nonce&gt;@invalid&gt;.
+    /// Format: &lt;chunkId.repoId.re.&lt;unixTime&gt;.&lt;nonce&gt;@invalid&gt;.
     /// </summary>
     public static string MakeRefreshMessageId(string chunkIdHex, string repoId)
     {
         long unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         string nonce = Guid.NewGuid().ToString("N")[..8];
-        return $"<{chunkIdHex}.{repoId}.refresh.{unixTime}.{nonce}@{MessageIdDomain}>";
+        return $"<{chunkIdHex}.{repoId}.re.{unixTime}.{nonce}@{MessageIdDomain}>";
     }
 
     /// <summary>
     /// Message-ID for an encrypted manifest article:
-    /// &lt;manifest.&lt;backup-id&gt;.&lt;repo-id&gt;@invalid&gt;.
+    /// &lt;set.&lt;backup-id&gt;.&lt;repo-id&gt;@invalid&gt;.
     /// Backup IDs are 32-char GUIDs ("N" format). Lets the recovery wizard
     /// discover backups newer than the USB stick.
     /// </summary>
     public static string MakeManifestMessageId(string backupId, string repoId) =>
-        $"<manifest.{backupId}.{repoId}@{MessageIdDomain}>";
+        $"<set.{backupId}.{repoId}@{MessageIdDomain}>";
 
     /// <summary>
     /// If <paramref name="messageId"/> is a manifest article for this repo,
@@ -113,7 +113,7 @@ public static class ArticleCodec
     /// </summary>
     public static string? TryParseManifestMessageId(string messageId, string repoId)
     {
-        string prefix = $"<manifest.";
+        string prefix = $"<set.";
         string suffix = $".{repoId}@{MessageIdDomain}>";
         if (!messageId.StartsWith(prefix, StringComparison.Ordinal) ||
             !messageId.EndsWith(suffix, StringComparison.Ordinal))
@@ -124,22 +124,22 @@ public static class ArticleCodec
 
     /// <summary>
     /// Message-ID for a versioned monthly manifest index:
-    /// &lt;YYYY-MM.&lt;repo-id&gt;.index.&lt;version&gt;@invalid&gt;.
+    /// &lt;YYYY-MM.&lt;repo-id&gt;.cat.&lt;version&gt;@invalid&gt;.
     /// Each index version supersedes the previous; the wizard STATs
     /// version 1, 2, 3... until 430 to find the latest. Articles are
     /// immutable on Usenet, so updates require new versions.
     /// </summary>
     public static string MakeManifestIndexMessageId(string repoId, string yearMonth, int version) =>
-        $"<{yearMonth}.{repoId}.index.{version}@{MessageIdDomain}>";
+        $"<{yearMonth}.{repoId}.cat.{version}@{MessageIdDomain}>";
 
     /// <summary>
     /// Message-ID for a versioned chunk-message-identity index. Each
     /// retention refresh (or upload) that changes message identities posts
     /// a new version; recovery probes versions to find the latest.
-    /// Format: &lt;msgindex.&lt;repoId&gt;.&lt;version&gt;@invalid&gt;.
+    /// Format: &lt;dir.&lt;repoId&gt;.&lt;version&gt;@invalid&gt;.
     /// </summary>
     public static string MakeMessageIndexMessageId(string repoId, int version) =>
-        $"<msgindex.{repoId}.{version}@{MessageIdDomain}>";
+        $"<dir.{repoId}.{version}@{MessageIdDomain}>";
 
     /// <summary>
     /// Parses a manifest index message-ID, returning (yearMonth, version)
@@ -147,12 +147,12 @@ public static class ArticleCodec
     /// </summary>
     public static (string YearMonth, int Version)? TryParseManifestIndexMessageId(string messageId, string repoId)
     {
-        // Format: <YYYY-MM.<repoid>.index.<version>@invalid>
+        // Format: <YYYY-MM.<repoid>.cat.<version>@invalid>
         if (!messageId.StartsWith("<", StringComparison.Ordinal))
             return null;
         if (!messageId.EndsWith($"@{MessageIdDomain}>", StringComparison.Ordinal))
             return null;
-        string suffix = $".{repoId}.index.";
+        string suffix = $".{repoId}.cat.";
         string inner = messageId[1..^(MessageIdDomain.Length + 2)]; // strip < and @domain>
         int idx = inner.IndexOf(suffix, StringComparison.Ordinal);
         if (idx < 0)
@@ -221,8 +221,8 @@ public static class ArticleCodec
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: ").Append(SingleSubject($"{chunkIdHex[..16].ToLowerInvariant()}.bin")).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
-        sb.Append("X-UsenetBackup-Chunk: ").Append(chunkIdHex).Append("\r\n");
-        sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
+        sb.Append("X-Block: ").Append(chunkIdHex).Append("\r\n");
+        sb.Append("X-Version: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");
         sb.Append(YEnc.Encode(blob, $"{chunkIdHex[..16].ToLowerInvariant()}.bin"));
         return sb.ToString();
@@ -242,8 +242,8 @@ public static class ArticleCodec
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: ").Append(SingleSubject(fileName)).Append("\r\n");
         sb.Append("Message-ID: ").Append(MakeManifestMessageId(backupId, repoId)).Append("\r\n");
-        sb.Append("X-UsenetBackup-Manifest: ").Append(backupId).Append("\r\n");
-        sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
+        sb.Append("X-Set: ").Append(backupId).Append("\r\n");
+        sb.Append("X-Version: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");
         sb.Append(YEnc.Encode(encryptedBlob, fileName));
         return sb.ToString();
@@ -264,9 +264,9 @@ public static class ArticleCodec
         }
 
         var headers = ParseHeaders(articleText[..split]);
-        if (!headers.TryGetValue("X-UsenetBackup-Manifest", out string? backupId) ||
+        if (!headers.TryGetValue("X-Set", out string? backupId) ||
             string.IsNullOrEmpty(backupId))
-            throw new InvalidDataException("Article is not a usenet-backup manifest.");
+            throw new InvalidDataException("Article is not a set record.");
         string body = articleText[(split + (articleText[split..].StartsWith("\r\n\r\n") ? 4 : 2))..];
         byte[] blob = YEnc.Decode(body);
         return (backupId, blob);
@@ -284,13 +284,13 @@ public static class ArticleCodec
     /// Message-ID for a retention-refresh republication of a volume.
     /// Servers reject duplicate message IDs, so refreshing retention requires
     /// a NEW identity.
-    /// Format: &lt;volumeId.repoId.refresh.&lt;unixTime&gt;.&lt;nonce&gt;@invalid&gt;.
+    /// Format: &lt;volumeId.repoId.re.&lt;unixTime&gt;.&lt;nonce&gt;@invalid&gt;.
     /// </summary>
     public static string MakeRefreshVolumeMessageId(string volumeIdHex, string repoId)
     {
         long unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         string nonce = Guid.NewGuid().ToString("N")[..8];
-        return $"<{volumeIdHex}.{repoId}.refresh.{unixTime}.{nonce}@{MessageIdDomain}>";
+        return $"<{volumeIdHex}.{repoId}.re.{unixTime}.{nonce}@{MessageIdDomain}>";
     }
 
     public static string BuildVolumeArticle(
@@ -336,8 +336,8 @@ public static class ArticleCodec
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: ").Append(subject).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
-        sb.Append("X-UsenetBackup-Volume: ").Append(volumeIdHex).Append("\r\n");
-        sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
+        sb.Append("X-Part: ").Append(volumeIdHex).Append("\r\n");
+        sb.Append("X-Version: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");
         sb.Append(YEnc.Encode(volumeBytes, fileName));
         return sb.ToString();
@@ -359,9 +359,9 @@ public static class ArticleCodec
         }
 
         var headers = ParseHeaders(articleText[..split]);
-        if (!headers.TryGetValue("X-UsenetBackup-Volume", out string? volumeId) ||
+        if (!headers.TryGetValue("X-Part", out string? volumeId) ||
             volumeId.Length != 64 || !volumeId.All(Uri.IsHexDigit))
-            throw new InvalidDataException("Article is missing a valid X-UsenetBackup-Volume header.");
+            throw new InvalidDataException("Article is missing a valid X-Part header.");
 
         string body = articleText[(split + (articleText[split..].StartsWith("\r\n\r\n") ? 4 : 2))..];
         byte[] blob = YEnc.Decode(body);
@@ -379,9 +379,9 @@ public static class ArticleCodec
         }
 
         var headers = ParseHeaders(articleText[..split]);
-        if (!headers.TryGetValue("X-UsenetBackup-Chunk", out string? chunkId) ||
+        if (!headers.TryGetValue("X-Block", out string? chunkId) ||
             chunkId.Length != 64 || !chunkId.All(Uri.IsHexDigit))
-            throw new InvalidDataException("Article is missing a valid X-UsenetBackup-Chunk header.");
+            throw new InvalidDataException("Article is missing a valid X-Block header.");
 
         string body = articleText[(split + (articleText[split..].StartsWith("\r\n\r\n") ? 4 : 2))..];
         byte[] blob = YEnc.Decode(body);
@@ -404,14 +404,14 @@ public static class ArticleCodec
         var sb = new StringBuilder();
         sb.AppendLine("============================================================");
         sb.AppendLine();
-        sb.Append("  Backup ID : ").AppendLine(backupId.ToLowerInvariant());
+        sb.Append("  Set ID : ").AppendLine(backupId.ToLowerInvariant());
         sb.Append("  Date      : ").AppendLine(dateIso);
         sb.Append("  Volumes   : ").AppendLine(volumeCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
         sb.Append("  Poster    : ").AppendLine(poster);
         sb.AppendLine();
         sb.AppendLine("------------------------------------------------------------");
-        sb.AppendLine("These articles contain private archival data.");
-        sb.AppendLine("Their contents are encoded for authorized restoration only.");
+        sb.AppendLine("These articles contain private data.");
+        sb.AppendLine("Their contents are encoded for authorized use only.");
         sb.Append("============================================================");
         return sb.ToString();
     }
@@ -479,7 +479,7 @@ public static class ArticleCodec
         sb.Append("Newsgroups: ").Append(newsgroup).Append("\r\n");
         sb.Append("Subject: ").Append(PartSubject(fileName, 1, totalParts)).Append("\r\n");
         sb.Append("Message-ID: ").Append(MakeNfoMessageId(backupId, batchIndex, repoId)).Append("\r\n");
-        sb.Append("X-UsenetBackup-Format: ").Append(FormatVersion).Append("\r\n");
+        sb.Append("X-Version: ").Append(FormatVersion).Append("\r\n");
         sb.Append("\r\n");
         sb.Append(YEnc.Encode(Encoding.UTF8.GetBytes(nfoText), fileName));
         return sb.ToString();

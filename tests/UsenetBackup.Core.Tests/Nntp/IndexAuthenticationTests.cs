@@ -97,7 +97,7 @@ public sealed class ChunkIndexAuthenticationTests : IDisposable
     {
         // Same attack, one level up: fetch the authentic envelope,
         // flip one mapping inside it, and repost as the next version
-        // with the ORIGINAL index_hmac — now stale for the payload.
+        // with the ORIGINAL sig — now stale for the payload.
         using var victim = CreateStore(IndexAuth.FromRepoKey(KeyA));
         victim.PostMessageIndex("""{"h/g":{"aaa":"<aaa@invalid>"}}""");
 
@@ -106,8 +106,8 @@ public sealed class ChunkIndexAuthenticationTests : IDisposable
         string article = raw.GetArticle(msgId)!;
         string body = article[(article.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4)..];
         var envelope = System.Text.Json.Nodes.JsonNode.Parse(body.Trim())!.AsObject();
-        Assert.NotNull(envelope["index_hmac"]);
-        envelope["index"]!["h/g"]!["aaa"] = "<evil@invalid>";
+        Assert.NotNull(envelope["sig"]);
+        envelope["data"]!["h/g"]!["aaa"] = "<evil@invalid>";
         string tampered = envelope.ToJsonString();
 
         using var attacker = CreateStore(null, "attacker.db");

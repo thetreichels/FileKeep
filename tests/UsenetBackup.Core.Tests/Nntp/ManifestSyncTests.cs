@@ -58,7 +58,7 @@ public sealed class ManifestSyncTests : IDisposable
         string backupId = Guid.NewGuid().ToString("N");
         string repoId = "0123456789abcdef";
         string msgId = ArticleCodec.MakeManifestMessageId(backupId, repoId);
-        Assert.StartsWith("<manifest.", msgId);
+        Assert.StartsWith("<set.", msgId);
         Assert.Equal(backupId, ArticleCodec.TryParseManifestMessageId(msgId, repoId));
         // Wrong repo: not ours.
         Assert.Null(ArticleCodec.TryParseManifestMessageId(msgId, "ffffffffffffffff"));

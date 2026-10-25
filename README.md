@@ -114,7 +114,7 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 
 ## Backup format
 
-`BACKUP FORMAT v1` is frozen and documented in [`docs/FORMAT-v1.md`](docs/FORMAT-v1.md). Future versions add `v2`, `v3` readers — they never silently change `v1`. Additional docs:
+Posted articles use the v2 anonymous format: hex filenames with `- yEnc` subjects, `X-Set` / `X-Part` / `X-Block` / `X-Version` headers, and `@invalid` message-IDs (see `ArticleCodec`). Additional docs:
 
 - [`docs/RECOVERY.md`](docs/RECOVERY.md) — bare-metal recovery runbook
 - [`docs/VSS-DESIGN.md`](docs/VSS-DESIGN.md) — VSS snapshot lifecycle design

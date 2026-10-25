@@ -328,7 +328,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
 
     /// <summary>
     /// Fetches a volume article, resolving refreshed identities through the
-    /// message index. Validates the X-UsenetBackup-Volume header matches.
+    /// message index. Validates the X-Part header matches.
     /// Unpacking and per-chunk verification are the caller's job.
     /// </summary>
     public byte[] GetVolume(string volumeIdHex)
@@ -570,7 +570,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     }
 
     /// <summary>Trailer line prefix authenticating a manifest-index body.</summary>
-    private const string IndexHmacLinePrefix = "index-hmac:";
+    private const string IndexHmacLinePrefix = "sig:";
 
     /// <summary>
     /// Posts a versioned chunk-message-identity index. Each version
@@ -589,7 +589,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         if (_indexAuth is not null)
         {
             // Authenticate the index (B-H1): the posted body is an envelope
-            // {"index": <map>, "index_hmac": "<hex>"} whose HMAC covers the
+            // {"data": <map>, "sig": "<hex>"} whose HMAC covers the
             // canonical index JSON (the field-blanking mirror of the
             // manifest root_hmac pattern — the canonical form is the index
             // content with the HMAC field absent). Canonicalizing here
@@ -605,7 +605,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
                 if (existing is not null && existing == canonical)
                     return latestVersion;
             }
-            postedBody = "{\"index\":" + canonical + ",\"index_hmac\":\"" +
+            postedBody = "{\"data\":" + canonical + ",\"sig\":\"" +
                 _indexAuth.ComputeChunkIndexHmac(canonical) + "\"}";
         }
         else if (latestVersion > 0)
@@ -620,7 +620,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         sb.Append("From: ").Append(ArticleCodec.FormatFrom(_from)).Append("\r\n");
         sb.Append("Date: ").Append(ArticleCodec.Rfc2822DateNow()).Append("\r\n");
         sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
-        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.idx")).Append("\r\n");
+        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.bin")).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("Content-Type: application/json; charset=utf-8\r\n");
         sb.Append("\r\n");
@@ -734,7 +734,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
 
     /// <summary>
     /// Extracts the payload of a chunk-index envelope
-    /// ({"index": {...}, "index_hmac": "..."}): returns the canonical
+    /// ({"data": {...}, "sig": "..."}): returns the canonical
     /// inner index JSON and the presented HMAC, or null when the body
     /// is not a well-formed envelope.
     /// </summary>
@@ -747,10 +747,10 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
             JsonElement root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return null;
-            if (!root.TryGetProperty("index", out var indexEl) ||
+            if (!root.TryGetProperty("data", out var indexEl) ||
                 indexEl.ValueKind != JsonValueKind.Object)
                 return null;
-            if (root.TryGetProperty("index_hmac", out var hmacEl) &&
+            if (root.TryGetProperty("sig", out var hmacEl) &&
                 hmacEl.ValueKind == JsonValueKind.String)
                 hmacHex = hmacEl.GetString();
             return CanonicalizeChunkIndexJson(indexEl.GetRawText());
@@ -865,7 +865,7 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
         sb.Append("From: ").Append(ArticleCodec.FormatFrom(_from)).Append("\r\n");
         sb.Append("Date: ").Append(ArticleCodec.Rfc2822DateNow()).Append("\r\n");
         sb.Append("Newsgroups: ").Append(_newsgroup).Append("\r\n");
-        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.mft")).Append("\r\n");
+        sb.Append("Subject: ").Append(ArticleCodec.SingleSubject($"{_repoId[..8]}.bin")).Append("\r\n");
         sb.Append("Message-ID: ").Append(messageId).Append("\r\n");
         sb.Append("Content-Type: text/plain; charset=utf-8\r\n");
         sb.Append("\r\n");
