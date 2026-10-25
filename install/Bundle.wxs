@@ -2,8 +2,9 @@
 <!-- WiX Burn bundle for FileKeep: stock WixStandardBootstrapperApplication
      (hyperlinkLicense theme) with FileKeep branding. No custom theme — the
      generic installer the user asked for. Shows the FileKeep logo, product
-     name and version, a progress bar, and a "Launch FileKeep" button
-     on the Success page. Wraps the MSI built from FileKeep.wxs.
+     name and version, and a progress bar. No Launch button on the Success
+     page (removed 2026-10-25: the app opens from its shortcut instead).
+     Wraps the MSI built from FileKeep.wxs.
 
      Build on Windows after the MSI:
        wix build -arch x64 -ext <Bal wixext dll> -d SrcRoot=C:\fk -d ProductVersion=<from repo-root VERSION> -d MsiPath=C:\ub\filekeep-<version>.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs
@@ -29,15 +30,13 @@
          "logo.png" UX payload (via the WixStdbaLogo binder variable); no
          explicit Payload element is needed or allowed (it would duplicate).
          LicenseUrl is empty, so no license link is shown.
-         The MSI's own exit-dialog checkbox never shows inside a bundle, so
-         launch-on-finish lives here via LaunchTarget: the Success page shows
-         a "Launch FileKeep" button when it is set. -->
+         The MSI's own exit-dialog checkbox never shows inside a bundle, and
+         no LaunchTarget is set, so the Success page shows only Close. -->
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
         Theme="hyperlinkLicense"
         LicenseUrl=""
         LogoFile="$(var.SrcRoot)/assets/filekeep-logo.png"
-        LaunchTarget="[ProgramFiles6432Folder]FileKeep\gui\FileKeepGui.exe"
         SuppressOptionsUI="yes"
         ShowVersion="yes" />
     </BootstrapperApplication>
