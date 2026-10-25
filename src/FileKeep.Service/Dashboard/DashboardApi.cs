@@ -722,21 +722,29 @@ public static partial class DashboardApi
     /// no restore could pull from an auth-required share; those fields
     /// were retired in Phase 6 and the location is now the only source.)
     /// </summary>
-    public static (string? Share, string? User, string? Password) ResolveRestoreSmb(
-        ServiceConfig config, string repo, string? smbShare, string? smbUser)
+    /// <summary>
+    /// The job's first SMB target location, if any — the location object
+    /// behind a restore's SMB chunk source (its disguise layout, when
+    /// disguised, decides how the share's chunks are named).
+    /// </summary>
+    public static BackupLocation? TryGetRestoreSmbLocation(ServiceConfig config, string repo)
     {
         var job = config.SnapshotJobs().FirstOrDefault(j =>
             j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
-        BackupLocation? smbLoc = null;
-        if (job is not null)
-        {
-            var locByName = config.SnapshotLocations().ToDictionary(
-                l => l.Name, StringComparer.OrdinalIgnoreCase);
-            smbLoc = job.EffectiveTargets
-                .Select(t => locByName.TryGetValue(t, out var l) ? l : null)
-                .FirstOrDefault(l => l is not null &&
-                    l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase));
-        }
+        if (job is null)
+            return null;
+        var locByName = config.SnapshotLocations().ToDictionary(
+            l => l.Name, StringComparer.OrdinalIgnoreCase);
+        return job.EffectiveTargets
+            .Select(t => locByName.TryGetValue(t, out var l) ? l : null)
+            .FirstOrDefault(l => l is not null &&
+                l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static (string? Share, string? User, string? Password) ResolveRestoreSmb(
+        ServiceConfig config, string repo, string? smbShare, string? smbUser)
+    {
+        BackupLocation? smbLoc = TryGetRestoreSmbLocation(config, repo);
         if (string.IsNullOrWhiteSpace(smbShare) && smbLoc is not null)
             smbShare = smbLoc.Share;
         string? smbPassword = null;
@@ -760,12 +768,21 @@ public static partial class DashboardApi
     /// SMB — so a USB-backed restore failed on every chunk once local
     /// staging was pruned, even with the drive plugged in.)
     /// </summary>
-    public static string? ResolveRestoreUsb(ServiceConfig config, string repo)
+    public static string? ResolveRestoreUsb(ServiceConfig config, string repo) =>
+        ResolveRestoreUsbWithLocation(config, repo).Path;
+
+    /// <summary>
+    /// Like <see cref="ResolveRestoreUsb"/>, but also returns the location
+    /// the path came from, so callers can apply its disguise layout.
+    /// The resolved folder is the cover name for disguised locations.
+    /// </summary>
+    public static (string? Path, BackupLocation? Location) ResolveRestoreUsbWithLocation(
+        ServiceConfig config, string repo)
     {
         var job = config.SnapshotJobs().FirstOrDefault(j =>
             j.Repo.Equals(repo, StringComparison.OrdinalIgnoreCase));
         if (job is null)
-            return null;
+            return (null, null);
         var locByName = config.SnapshotLocations().ToDictionary(
             l => l.Name, StringComparer.OrdinalIgnoreCase);
         foreach (string target in job.EffectiveTargets)
@@ -774,12 +791,12 @@ public static partial class DashboardApi
                 loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
             {
                 string? path = UsbDriveResolver.ResolveBackupPath(
-                    loc.VolumeSerial ?? "", loc.UsbFolder ?? "FileKeep");
+                    loc.VolumeSerial ?? "", FileKeep.Core.Service.DisguisedLayout.UsbFolderFor(loc));
                 if (path is not null)
-                    return path;
+                    return (path, loc);
             }
         }
-        return null;
+        return (null, null);
     }
 
     /// <summary>
@@ -811,7 +828,18 @@ public static partial class DashboardApi
         smbUser = resolvedUser;
         // USB source: the job's USB target location, if its drive is
         // plugged in now; see ResolveRestoreUsb.
-        string? usbFolder = ResolveRestoreUsb(config, repo);
+        var (usbFolder, restoreUsbLoc) = ResolveRestoreUsbWithLocation(config, repo);
+        // Disguise layouts for the chunk pulls below. The SMB layout
+        // applies only when the resolved share IS the location's share —
+        // an explicitly supplied share is treated as a plain root. The
+        // USB folder always comes from location resolution, so its
+        // layout always applies.
+        var restoreSmbLoc = TryGetRestoreSmbLocation(config, repo);
+        FileKeep.Core.Service.DisguisedLayout? restoreSmbLayout =
+            restoreSmbLoc is not null &&
+            string.Equals(smbShare, restoreSmbLoc.Share, StringComparison.OrdinalIgnoreCase)
+                ? restoreSmbLoc.Disguise : null;
+        FileKeep.Core.Service.DisguisedLayout? restoreUsbLayout = restoreUsbLoc?.Disguise;
         string targetKey = FileRestoreTargetKey(destDir);
         var claim = new RestoreClaim
         {
@@ -855,9 +883,9 @@ public static partial class DashboardApi
                         SmbPassword = smbPassword ?? "",
                     };
                     if (!string.IsNullOrWhiteSpace(smbShare))
-                        ws.EnsureSmbChunks(null, effectiveToken);
+                        ws.EnsureSmbChunks(null, effectiveToken, restoreSmbLayout);
                     if (usbFolder is not null)
-                        ws.EnsureLocalChunks(usbFolder, null, effectiveToken);
+                        ws.EnsureLocalChunks(usbFolder, null, effectiveToken, restoreUsbLayout);
                 }
                 using var r = BackupRepository.Open(repo, passphrase);
                 var restoreOptions = new FileKeep.Core.RestoreOptions { MergePolicy = mergePolicy };
@@ -1165,7 +1193,13 @@ public static partial class DashboardApi
         // plugged in now (see ResolveRestoreUsb).
         var (resolvedShare, resolvedUser, smbPassword) =
             ResolveRestoreSmb(config, repo, null, null);
-        string? usbFolder = ResolveRestoreUsb(config, repo);
+        var (usbFolder, diskUsbLoc) = ResolveRestoreUsbWithLocation(config, repo);
+        var diskSmbLoc = TryGetRestoreSmbLocation(config, repo);
+        FileKeep.Core.Service.DisguisedLayout? diskSmbLayout =
+            diskSmbLoc is not null &&
+            string.Equals(resolvedShare, diskSmbLoc.Share, StringComparison.OrdinalIgnoreCase)
+                ? diskSmbLoc.Disguise : null;
+        FileKeep.Core.Service.DisguisedLayout? diskUsbLayout = diskUsbLoc?.Disguise;
         string targetKey = DiskRestoreTargetKey(device);
         var claim = new RestoreClaim
         {
@@ -1198,7 +1232,7 @@ public static partial class DashboardApi
                 // chunk — with the target already partly overwritten.
                 EnsureDiskImageChunksStaged(repo, backupId, passphrase,
                     resolvedShare, resolvedUser, smbPassword, usbFolder,
-                    effectiveToken);
+                    effectiveToken, diskSmbLayout, diskUsbLayout);
                 using var r = BackupRepository.Open(repo, passphrase);
                 r.RestoreDiskImage(backupId, device, effectiveToken);
                 // MU-15: deferred proof for a typed-secret unlock.
@@ -1249,7 +1283,9 @@ public static partial class DashboardApi
     private static void EnsureDiskImageChunksStaged(
         string repo, string backupId, string passphrase,
         string? smbShare, string? smbUser, string? smbPassword, string? usbFolder,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        FileKeep.Core.Service.DisguisedLayout? smbLayout = null,
+        FileKeep.Core.Service.DisguisedLayout? usbLayout = null)
     {
         // The chunk set the manifest declares — volumes or per-file chunk
         // lists, the same enumeration the chunk pull uses.
@@ -1287,9 +1323,9 @@ public static partial class DashboardApi
                 SmbPassword = smbPassword ?? "",
             };
             if (!string.IsNullOrWhiteSpace(smbShare))
-                ws.EnsureSmbChunks(null, cancellationToken);
+                ws.EnsureSmbChunks(null, cancellationToken, smbLayout);
             if (usbFolder is not null)
-                ws.EnsureLocalChunks(usbFolder, null, cancellationToken);
+                ws.EnsureLocalChunks(usbFolder, null, cancellationToken, usbLayout);
         }
         cancellationToken.ThrowIfCancellationRequested();
 

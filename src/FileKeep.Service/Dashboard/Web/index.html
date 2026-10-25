@@ -12,6 +12,7 @@
     --accent: #0067c0;
     --accent-hover: #1972c2;
     --bg: #f3f3f3;
+    --bg-2: #f3f3f3;
     --card: #ffffff;
     --border: #e6e6e6;
     --text: #1b1b1b;
@@ -335,6 +336,7 @@
   :root[data-theme="dark"] {
     color-scheme: dark;
     --bg: #202020;
+    --bg-2: #202020;
     --card: #2b2b2b;
     --border: #353535;
     --text: #f3f3f3;
@@ -613,6 +615,11 @@
           <input id="lf-usbserial" type="hidden">
           <input id="lf-usblabel" type="hidden">
         </div>
+        <div class="form-grid" id="lf-disguise-fields" style="display:none">
+          <label class="check" title="Store this destination's files under disguised names in an innocuous folder, instead of the usual chunks/manifests layout. Cannot be changed after the location is created."><input id="lf-disguise" type="checkbox"> Disguise this destination</label>
+          <label title="Innocuous folder name on the destination, e.g. 'Photos'. Used as the destination's root folder when disguised.">Cover folder name<input id="lf-covername" type="text" placeholder="e.g. Photos"></label>
+          <label class="check" title="Also write decoy media files alongside the real files, so the folder reads as an ordinary media collection."><input id="lf-decoys" type="checkbox"> Add decoy files</label>
+        </div>
         <div id="lf-error" style="color:var(--bad);margin:8px 0;display:none"></div>
         <div id="lf-test-result" style="margin:8px 0;display:none"></div>
         <div style="margin-top:12px;display:flex;gap:8px">
@@ -855,9 +862,6 @@
                 </span>
                 <span id="sec-pp-match-msg" class="meta"></span>
               </label>
-            </div>
-            <div style="margin-top:12px">
-              <button type="button" onclick="secFillSamplePassphrase()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:0">Fill with a sample passphrase (demo)</button>
             </div>
           </div>
         </div>
@@ -3067,7 +3071,7 @@ function renderVaultLocations(locations) {
     const detail = l.type === 'nntp'
       ? 'Volumes posted and confirmed'
       : l.type === 'usb'
-        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.usbFolder || 'FileKeep')}`
+        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.disguiseEnabled ? (l.coverName || 'FileKeep') : (l.usbFolder || 'FileKeep'))}`
         : esc(l.share || '');
     return `<div class="row" style="padding:8px 0">
       <div style="font-size:20px">${icon}</div>
@@ -3203,7 +3207,7 @@ function renderLocations(locations) {
     const detail = l.type === 'nntp'
       ? `${esc(l.host)}:${l.port}${l.ssl ? ' · SSL' : ''}`
       : l.type === 'usb'
-        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.usbFolder || 'FileKeep')}`
+        ? `USB${l.volumeLabel ? ` (${esc(l.volumeLabel)})` : ''} · ${esc(l.disguiseEnabled ? (l.coverName || 'FileKeep') : (l.usbFolder || 'FileKeep'))}`
         : esc(l.share);
     const usedBy = l.usedBy && l.usedBy.length
       ? `Used by ${l.usedBy.length} job${l.usedBy.length > 1 ? 's' : ''}`
@@ -3292,6 +3296,13 @@ function showLocationForm(type, loc) {
   document.getElementById('lf-nntp-fields').style.display = type === 'nntp' ? '' : 'none';
   document.getElementById('lf-smb-fields').style.display = type === 'smb' ? '' : 'none';
   document.getElementById('lf-usb-fields').style.display = type === 'usb' ? '' : 'none';
+  document.getElementById('lf-disguise-fields').style.display = (type === 'smb' || type === 'usb') ? '' : 'none';
+  document.getElementById('lf-disguise').checked = loc ? !!loc.disguiseEnabled : false;
+  document.getElementById('lf-covername').value = loc ? (loc.coverName || '') : '';
+  document.getElementById('lf-decoys').checked = loc ? !!loc.disguiseDecoys : false;
+  document.getElementById('lf-disguise').disabled = !!loc;
+  document.getElementById('lf-covername').disabled = !!loc;
+  document.getElementById('lf-decoys').disabled = !!loc;
   if (type === 'usb') {
     loadUsbDrivesForLocationForm(loc);
     document.getElementById('lf-usbfolder').value = loc ? (loc.usbFolder || 'FileKeep') : 'FileKeep';
@@ -3406,6 +3417,18 @@ async function saveLocation() {
     if (!loc.volumeSerial) {
       markInvalid('lf-usbdrive');
       errMsg = 'Select a USB drive from the list.';
+    }
+  }
+  if (type === 'smb' || type === 'usb') {
+    loc.disguiseEnabled = document.getElementById('lf-disguise').checked;
+    loc.coverName = document.getElementById('lf-covername').value.trim();
+    loc.disguiseDecoys = document.getElementById('lf-decoys').checked;
+    if (loc.disguiseEnabled && !loc.coverName) {
+      markInvalid('lf-covername');
+      errMsg = 'Enter a cover folder name for a disguised destination.';
+    } else if (loc.disguiseEnabled && /[/\\:*?"<>|]/.test(loc.coverName)) {
+      markInvalid('lf-covername');
+      errMsg = 'Cover folder name must not contain path separators or special characters.';
     }
   }
   if (!valid) {
@@ -3854,13 +3877,6 @@ function secValidatePassphraseBlur() {
   } else {
     errEl.style.display = 'none';
   }
-}
-
-function secFillSamplePassphrase() {
-  const s = 'Correct-Horse-Battery-42!';
-  document.getElementById('sec-pp-pass').value = s;
-  document.getElementById('sec-pp-confirm').value = s;
-  secCheckPassphrase();
 }
 
 async function secSavePassphrase() {

@@ -2063,7 +2063,7 @@ public sealed class BackupScheduler
             RunProgress?.RegisterDestination(tName, tType, "chunks");
 
         var uploaders = new List<(string Target, Nntp.NntpBatchUploader Uploader)>();
-        var smbConns = new List<(string Name, SmbShare Share)>();
+        var smbConns = new List<(string Name, SmbShare Share, BackupLocation Loc)>();
         try
         {
             // NNTP uploaders (one per NNTP location — ResolveTargets
@@ -2116,7 +2116,7 @@ public sealed class BackupScheduler
                     smbPassword = Dpapi.Unprotect(passwordProtected);
                 try
                 {
-                    smbConns.Add((loc.Name, SmbShare.Connect(share, user, smbPassword)));
+                    smbConns.Add((loc.Name, SmbShare.Connect(share, user, smbPassword), loc));
                 }
                 catch (Exception ex)
                 {
@@ -2190,9 +2190,11 @@ public sealed class BackupScheduler
                                 Nntp.ChunkMessageIndex.MakeProviderKey(loc.Host, loc.Newsgroup)),
                         // File destinations: the blob must VERIFY at the
                         // destination (decrypt + hash) — presence or size
-                        // alone is not evidence (DL-4).
-                        "smb" => loc is not null && repo.VerifyChunkBlobAt(Path.Combine(
-                            loc.Share, "chunks", chunkId[..2], chunkId[2..]), chunkId),
+                        // alone is not evidence (DL-4). Disguised targets
+                        // resolve through the cover folder + derived name
+                        // and verify header-stripped; plain targets use
+                        // the classic sharded path.
+                        "smb" => loc is not null && SmbChunkVerified(loc, chunkId),
                         "usb" => loc is not null && UsbChunkVerified(loc, chunkId),
                         _ => false,
                     };
@@ -2201,10 +2203,31 @@ public sealed class BackupScheduler
                 }
                 return true;
             }
+            bool SmbChunkVerified(BackupLocation loc, string chunkId)
+            {
+                // The disguise slice's batched delivery check used the
+                // classic path unconditionally, so it never found a
+                // disguised blob and re-uploaded every run; with headers
+                // it would additionally have failed verification. Both
+                // are fixed here: disguised targets resolve + verify
+                // through the layout, plain targets are untouched.
+                if (loc.Disguise is { } smbLayout)
+                    return repo.VerifyDisguisedChunkBlobAt(Path.Combine(
+                        loc.Share, smbLayout.CoverName, smbLayout.ChunkFileName(chunkId)), chunkId);
+                return repo.VerifyChunkBlobAt(Path.Combine(
+                    loc.Share, "chunks", chunkId[..2], chunkId[2..]), chunkId);
+            }
+
             bool UsbChunkVerified(BackupLocation loc, string chunkId)
             {
-                string? root = UsbDriveResolver.ResolveBackupPath(loc.VolumeSerial, loc.UsbFolder);
-                return root is not null && repo.VerifyChunkBlobAt(Path.Combine(
+                string? root = UsbDriveResolver.ResolveBackupPath(
+                    loc.VolumeSerial, DisguisedLayout.UsbFolderFor(loc));
+                if (root is null)
+                    return false;
+                if (loc.Disguise is { } usbLayout)
+                    return repo.VerifyDisguisedChunkBlobAt(Path.Combine(
+                        root, usbLayout.ChunkFileName(chunkId)), chunkId);
+                return repo.VerifyChunkBlobAt(Path.Combine(
                     root, "chunks", chunkId[..2], chunkId[2..]), chunkId);
             }
 
@@ -2273,13 +2296,15 @@ public sealed class BackupScheduler
                 // (Volume entries are recorded after ALL delivery legs —
                 // see the MU-18 note before the prune step.)
                 // 3. SMB: copy the batch's chunks.
-                foreach (var (shareName, share) in smbConns)
+                foreach (var (shareName, share, smbLoc) in smbConns)
                 {
                     if (failedTargets.ContainsKey(shareName))
                         continue;
                     try
                     {
-                        int copied = smbSync.CopyChunks(chunkIds, job.Repo, share);
+                        var batchLayout = smbLoc.Disguise;
+                        int copied = smbSync.CopyChunks(chunkIds, job.Repo, share,
+                            batchLayout?.CoverName, batchLayout);
                         Log($"job '{job.Name}': batch {batchIndex}: {copied} chunks copied to SMB '{shareName}'.");
                         deliveredTargets.Add(shareName);
                         batchDelivered = true;
@@ -2464,13 +2489,14 @@ public sealed class BackupScheduler
             }
 
             // SMB: final metadata sync (chunks were copied per batch).
-            foreach (var (shareName, share) in smbConns)
+            foreach (var (shareName, share, smbLoc) in smbConns)
             {
                 if (failedTargets.ContainsKey(shareName))
                     continue;
                 try
                 {
-                    var result = smbSync.Sync(job.Repo, share);
+                    var finalLayout = smbLoc.Disguise;
+                    var result = smbSync.Sync(job.Repo, share, finalLayout?.CoverName, finalLayout);
                     Log($"job '{job.Name}': SMB metadata sync to '{shareName}' complete.");
                     deliveredTargets.Add(shareName);
                 }
@@ -2504,7 +2530,7 @@ public sealed class BackupScheduler
         {
             foreach (var (_, uploader) in uploaders)
                 uploader.Dispose();
-            foreach (var (_, share) in smbConns)
+            foreach (var (_, share, _) in smbConns)
                 share.Dispose();
         }
     }
@@ -2526,12 +2552,13 @@ public sealed class BackupScheduler
     /// </summary>
     private bool CopyBatchChunksToUsb(BackupLocation usbLoc, IReadOnlyList<string> chunkIds, BackupJobConfig job)
     {
-        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
+        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, DisguisedLayout.UsbFolderFor(usbLoc));
         if (targetDir is null)
         {
             Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping batch USB copy.");
             return false;
         }
+        var layout = usbLoc.Disguise;
         int copied = 0;
         string chunksDir = Path.Combine(job.Repo, "chunks");
         string targetChunks = Path.Combine(targetDir, "chunks");
@@ -2542,13 +2569,18 @@ public sealed class BackupScheduler
                 throw new FileNotFoundException(
                     $"Chunk {id} is missing from the local staging repo; " +
                     "it cannot be confirmed at the USB destination.", src);
-            string dst = Path.Combine(targetChunks, id[..2], id[2..]);
-            if (CopyFileIfDifferent(src, dst))
+            string dst = layout is not null
+                ? Path.Combine(targetDir, layout.ChunkFileName(id))
+                : Path.Combine(targetChunks, id[..2], id[2..]);
+            if (CopyFileWrappedOrPlain(src, dst, layout))
             {
                 copied++;
                 // Confirm the copy that just landed: a destination can
                 // accept a write and still store different bytes.
-                if (!FilesHaveSameContent(src, dst))
+                bool verified = layout is not null
+                    ? DisguisedLayout.WrappedMatches(src, dst)
+                    : FilesHaveSameContent(src, dst);
+                if (!verified)
                     throw new IOException(
                         $"Chunk {id} did not verify at the USB destination after copying.");
             }
@@ -2566,19 +2598,24 @@ public sealed class BackupScheduler
     /// </summary>
     private bool CopyMetadataToUsb(BackupLocation usbLoc, BackupJobConfig job)
     {
-        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, usbLoc.UsbFolder);
+        string? targetDir = UsbDriveResolver.ResolveBackupPath(usbLoc.VolumeSerial, DisguisedLayout.UsbFolderFor(usbLoc));
         if (targetDir is null)
         {
             Log($"job '{job.Name}': USB drive for '{usbLoc.Name}' not present — skipping metadata copy.");
             return false;
         }
+        var layout = usbLoc.Disguise;
         string manifestsDir = Path.Combine(job.Repo, "manifests");
         if (Directory.Exists(manifestsDir))
             foreach (string src in Directory.GetFiles(manifestsDir, "*.json"))
-                CopyFileIfDifferent(src, Path.Combine(targetDir, "manifests", Path.GetFileName(src)));
+                CopyFileWrappedOrPlain(src, layout is not null
+                    ? Path.Combine(targetDir, layout.ManifestFileName(Path.GetFileName(src)))
+                    : Path.Combine(targetDir, "manifests", Path.GetFileName(src)), layout);
         string repoJson = Path.Combine(job.Repo, "repo.json");
         if (File.Exists(repoJson))
-            CopyFileIfDifferent(repoJson, Path.Combine(targetDir, "repo.json"));
+            CopyFileWrappedOrPlain(repoJson, layout is not null
+                ? Path.Combine(targetDir, layout.RepoFileName())
+                : Path.Combine(targetDir, "repo.json"), layout);
         Log($"job '{job.Name}': metadata copied to USB '{usbLoc.Name}'.");
         return true;
     }
@@ -2632,7 +2669,8 @@ public sealed class BackupScheduler
         Log($"job '{job.Name}': streaming disk image to SMB share '{share}' " +
             $"(sparse={job.Sparse})...");
         using var smb = SmbShare.Connect(share, user, smbPassword);
-        var store = new SmbBlobStore(smb);
+        var streamLayout = smbLoc.Disguise;
+        var store = new SmbBlobStore(smb, streamLayout?.CoverName, streamLayout);
         var manifest = repo.BackupDiskImageStreaming(
             job.FirstSource, store, imageName, sparse: job.Sparse, volumeLetter: volumeLetter,
             cancellationToken: token);
@@ -2787,7 +2825,8 @@ public sealed class BackupScheduler
         Log($"job '{job.Name}': syncing backup {backupId} to '{locName}' ({share})");
         using var smb = SmbShare.Connect(share, user, smbPassword);
         var sync = new SmbSync(Log);
-        var result = sync.Sync(job.Repo, smb, progress: (doneFiles, totalFiles) =>
+        var smbLayout = loc.Disguise;
+        var result = sync.Sync(job.Repo, smb, smbLayout?.CoverName, smbLayout, progress: (doneFiles, totalFiles) =>
         {
             var rp = RunProgress;
             if (rp is null) return;
@@ -2809,7 +2848,7 @@ public sealed class BackupScheduler
     {
         string locName = loc?.Name ?? "usb";
         string serial = loc?.VolumeSerial ?? "";
-        string folder = loc?.UsbFolder ?? "FileKeep";
+        string folder = loc is not null ? DisguisedLayout.UsbFolderFor(loc) : "FileKeep";
         if (string.IsNullOrWhiteSpace(serial))
             throw new InvalidOperationException(
                 $"Job '{job.Name}' targets USB location '{locName}' but no volume serial is configured.");
@@ -2830,7 +2869,7 @@ public sealed class BackupScheduler
                 StorageGuard.EnsureUsbDriveNotSource(targetDir, src, job.Name);
 
         Log($"job '{job.Name}': syncing backup {backupId} to USB '{locName}' ({targetDir})");
-        var result = SyncRepoToLocalFolder(job.Repo, targetDir, token, (doneChunks, totalChunks) =>
+        var result = SyncRepoToLocalFolder(job.Repo, targetDir, token, loc?.Disguise, (doneChunks, totalChunks) =>
         {
             var rp = RunProgress;
             if (rp is null) return;
@@ -2847,9 +2886,15 @@ public sealed class BackupScheduler
     /// Copies chunks, manifests, parity and repo.json from a local repo to a
     /// local folder (e.g. on a USB drive). Idempotent: existing files with
     /// matching sizes are skipped. Returns counts.
+    /// With a layout, the destination wears the disguised layout instead:
+    /// all files sit flat in <paramref name="targetDir"/> under derived
+    /// names, plus decoys when enabled (see <see cref="DisguisedLayout"/>).
     /// </summary>
-    private (int ChunksCopied, int ManifestsCopied) SyncRepoToLocalFolder(
+    // Internal (not private) so tests can drive the USB folder sync
+    // directly — same test-seam pattern as the connection-pool seam.
+    internal (int ChunksCopied, int ManifestsCopied) SyncRepoToLocalFolder(
         string repoRoot, string targetDir, CancellationToken token = default,
+        DisguisedLayout? layout = null,
         Action<int, int>? progress = null)
     {
         int chunksCopied = 0, manifestsCopied = 0;
@@ -2858,22 +2903,33 @@ public sealed class BackupScheduler
 
         string targetChunks = Path.Combine(targetDir, "chunks");
         string targetManifests = Path.Combine(targetDir, "manifests");
-        Directory.CreateDirectory(targetChunks);
-        Directory.CreateDirectory(targetManifests);
+        if (layout is not null)
+            Directory.CreateDirectory(targetDir);
+        else
+        {
+            Directory.CreateDirectory(targetChunks);
+            Directory.CreateDirectory(targetManifests);
+        }
 
+        int chunkFileCount = 0;
         if (Directory.Exists(chunksDir))
         {
             // Enumerate up front so progress has a real total; every
             // file counts as delivered once processed (copied now or
             // already present — both mean the destination has it).
             var chunkFiles = Directory.GetFiles(chunksDir, "*", SearchOption.AllDirectories);
+            chunkFileCount = chunkFiles.Length;
             int processed = 0;
             foreach (string src in chunkFiles)
             {
                 token.ThrowIfCancellationRequested();
                 string rel = Path.GetRelativePath(chunksDir, src);
-                string dst = Path.Combine(targetChunks, rel);
-                if (CopyIfDifferent(src, dst))
+                string dst = layout is not null
+                    ? Path.Combine(targetDir, layout.ChunkFileName(
+                        rel.Replace(Path.DirectorySeparatorChar.ToString(), "")
+                           .Replace(Path.AltDirectorySeparatorChar.ToString(), "")))
+                    : Path.Combine(targetChunks, rel);
+                if (CopyWrappedOrPlain(src, dst, layout))
                     chunksCopied++;
                 processed++;
                 progress?.Invoke(processed, chunkFiles.Length);
@@ -2884,17 +2940,47 @@ public sealed class BackupScheduler
             foreach (string src in Directory.GetFiles(manifestsDir, "*", SearchOption.AllDirectories))
             {
                 string rel = Path.GetRelativePath(manifestsDir, src);
-                string dst = Path.Combine(targetManifests, rel);
-                if (CopyIfDifferent(src, dst))
+                string dst = layout is not null
+                    ? Path.Combine(targetDir, layout.ManifestFileName(Path.GetFileName(src)))
+                    : Path.Combine(targetManifests, rel);
+                if (CopyWrappedOrPlain(src, dst, layout))
                     manifestsCopied++;
             }
         }
         // Copy repo.json so the USB drive is a self-contained recoverable repo.
         string repoJson = Path.Combine(repoRoot, "repo.json");
         if (File.Exists(repoJson))
-            CopyIfDifferent(repoJson, Path.Combine(targetDir, "repo.json"));
+            CopyWrappedOrPlain(repoJson, layout is not null
+                ? Path.Combine(targetDir, layout.RepoFileName())
+                : Path.Combine(targetDir, "repo.json"), layout);
+        if (layout is not null && layout.DecoysEnabled)
+            layout.WriteDecoys(targetDir, chunkFileCount);
 
         return (chunksCopied, manifestsCopied);
+    }
+
+    /// <summary>
+    /// Disguised destinations copy header-wrapped (and compare wrapped);
+    /// plain destinations copy raw. Single branch point for the USB
+    /// folder-sync paths, mirroring SmbSync's.
+    /// </summary>
+    private static bool CopyWrappedOrPlain(string src, string dst, DisguisedLayout? layout)
+    {
+        if (layout is not null)
+            return DisguisedLayout.CopyWrappedIfNeeded(src, dst, out _);
+        return CopyIfDifferent(src, dst);
+    }
+
+    /// <summary>
+    /// Disguised destinations copy header-wrapped (and compare wrapped,
+    /// including content hash); plain destinations copy raw with the
+    /// hash-compare path. Single branch point for the batched USB paths.
+    /// </summary>
+    private static bool CopyFileWrappedOrPlain(string src, string dst, DisguisedLayout? layout)
+    {
+        if (layout is not null)
+            return DisguisedLayout.CopyWrappedIfNeeded(src, dst, out _);
+        return CopyFileIfDifferent(src, dst);
     }
 
     /// <summary>Copies src to dst if dst is missing or differs in size. Returns true if copied.</summary>

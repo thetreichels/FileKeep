@@ -148,6 +148,29 @@ public sealed class BackupLocation
     [JsonPropertyName("usbFolder")]
     public string UsbFolder { get; set; } = "FileKeep";
 
+    // ---- Disguise fields (usb/smb only; see DisguisedLayout) ----
+
+    /// <summary>
+    /// When true, this destination wears a disguised layout: files live
+    /// flat in <see cref="CoverName"/> under derived media-style names
+    /// instead of chunks/manifests/repo.json. Default false; existing
+    /// configs load unchanged.
+    /// </summary>
+    [JsonPropertyName("disguiseEnabled")]
+    public bool DisguiseEnabled { get; set; } = false;
+
+    /// <summary>Innocuous on-destination folder name for disguised locations, e.g. "Photos".</summary>
+    [JsonPropertyName("coverName")]
+    public string CoverName { get; set; } = "";
+
+    /// <summary>When true (and disguised), decoy media files are written alongside real files.</summary>
+    [JsonPropertyName("disguiseDecoys")]
+    public bool DisguiseDecoys { get; set; } = false;
+
+    /// <summary>The disguise layout for this location, or null when plain. See <see cref="DisguisedLayout"/>.</summary>
+    [JsonIgnore]
+    public DisguisedLayout? Disguise => DisguisedLayout.ForLocation(this);
+
     /// <summary>
     /// Parity/redundancy mode for this location ("none", "xor", "par2").
     /// If empty, falls back to the job's RedundancyMode.

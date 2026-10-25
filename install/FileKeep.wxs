@@ -7,7 +7,7 @@
      IMPORTANT: re-publish with the current csproj (single-file) before building;
      the MSI installs only the files listed below.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="FileKeep"
            Version="$(var.ProductVersion)"
            Manufacturer="J. Treichel"
@@ -42,8 +42,7 @@
           <Shortcut Id="DashboardShortcut"
                     Name="FileKeep"
                     Description="Open FileKeep"
-                    Target="[#GuiExeFile]"
-                    WorkingDirectory="GUIDIR" />
+                    Target="[#GuiExeFile]" />
           <RemoveFolder Id="RemoveAppStartMenu" Directory="AppStartMenu" On="uninstall" />
           <RegistryValue Root="HKCU"
                          Key="Software\FileKeep"
@@ -61,8 +60,7 @@
         <Shortcut Id="DesktopShortcut"
                   Name="FileKeep"
                   Description="Open FileKeep"
-                  Target="[#GuiExeFile]"
-                  WorkingDirectory="GUIDIR" />
+                  Target="[#GuiExeFile]" />
         <RegistryValue Root="HKLM"
                        Key="Software\FileKeep"
                        Name="DesktopShortcut"
@@ -85,10 +83,7 @@
     <ComponentGroup Id="GuiFiles" Directory="GUIDIR">
       <Component Id="GuiExe" Guid="*">
         <File Id="GuiExeFile" Source="$(var.GuiBin)\FileKeepGui.exe" KeyPath="yes" />
-      </Component>
-      <Component Id="GuiDirCleanup" Guid="*">
         <RemoveFolder Id="RemoveGuiDir" Directory="GUIDIR" On="uninstall" />
-        <RegistryValue Root="HKCU" Key="Software\FileKeep" Name="GuiDirCleanup" Value="1" Type="integer" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
@@ -122,8 +117,7 @@
              exit code (WindowsServiceHost); these actions make Windows
              restart the service on the first two failures instead of
              leaving backups silently stopped until someone notices. -->
-        <ServiceConfig Id="BackupServiceRecovery"
-                       ServiceName="FileKeep"
+        <util:ServiceConfig ServiceName="FileKeep"
                        FirstFailureActionType="restart"
                        SecondFailureActionType="restart"
                        ThirdFailureActionType="none"
@@ -187,9 +181,11 @@
          extension's ui:WixUI element; the old v3 <UIRef> no longer resolves. -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
-    <!-- Launch FileKeep when the installer finishes (checkbox on the exit dialog)
-         TEMPORARILY DISABLED: WixCA binary not resolving in this build env.
-         The bundle provides launch via its Success page button. -->
+    <!-- Launch-on-Finish is intentionally not wired: inside the bundle the MSI
+         UI is suppressed, so this dialog never shows for Setup.exe runs, and
+         stock WixStdBA cannot attach a launch to its Success-page Close/Finish
+         button. Launch-on-Finish for the bundle needs a custom BA (parked).
+         Kept here for reference. -->
     <!--
     <Property Id="WixShellExecTarget" Value="[#GuiExeFile]" />
     <CustomAction Id="LaunchFileKeep" BinaryRef="WixCA" DllEntry="WixShellExec"

@@ -38,7 +38,6 @@
         LicenseUrl=""
         LogoFile="$(var.SrcRoot)/assets/filekeep-logo.png"
         LaunchTarget="[ProgramFiles6432Folder]FileKeep\gui\FileKeepGui.exe"
-        LaunchWorkingFolder="[ProgramFiles6432Folder]FileKeep\gui"
         SuppressOptionsUI="yes"
         ShowVersion="yes" />
     </BootstrapperApplication>

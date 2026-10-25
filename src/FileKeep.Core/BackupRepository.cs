@@ -1709,16 +1709,40 @@ public sealed class BackupRepository : IDisposable
     {
         try
         {
-            byte[] blob = File.ReadAllBytes(blobPath);
-            byte[] chunkId = Hashing.HexToBytes(chunkIdHex);
-            byte[] plaintext = ChunkCrypto.Decrypt(blob, _key, chunkId); // AES-GCM authenticates
-            byte[] actual = Hashing.Sha256Bytes(plaintext);
-            return CryptographicOperations.FixedTimeEquals(actual, chunkId);
+            return VerifyBlobBytes(File.ReadAllBytes(blobPath), chunkIdHex);
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Same check as <see cref="VerifyChunkBlobAt"/>, but for a blob on a
+    /// disguised destination: the fake header (when present) is stripped
+    /// first, so headered and pre-header blobs both verify. Used by the
+    /// batched-run delivery confirmation for disguised SMB/USB targets.
+    /// </summary>
+    internal bool VerifyDisguisedChunkBlobAt(string blobPath, string chunkIdHex)
+    {
+        try
+        {
+            byte[] stored = File.ReadAllBytes(blobPath);
+            return VerifyBlobBytes(
+                Service.DisguisedLayout.UnwrapContent(stored, blobPath), chunkIdHex);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool VerifyBlobBytes(byte[] blob, string chunkIdHex)
+    {
+        byte[] chunkId = Hashing.HexToBytes(chunkIdHex);
+        byte[] plaintext = ChunkCrypto.Decrypt(blob, _key, chunkId); // AES-GCM authenticates
+        byte[] actual = Hashing.Sha256Bytes(plaintext);
+        return CryptographicOperations.FixedTimeEquals(actual, chunkId);
     }
 
     private ChunkMessageIndex? _messageIndex;

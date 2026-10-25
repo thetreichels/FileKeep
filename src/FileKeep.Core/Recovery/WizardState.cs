@@ -404,7 +404,8 @@ public sealed class WizardState : IDisposable
     /// idempotent and resumable. Verifies the manifest exists on the share.
     /// </summary>
     public void EnsureSmbChunks(Action<int, int>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Service.DisguisedLayout? layout = null)
     {
         if (string.IsNullOrWhiteSpace(SmbShare) || SelectedBackupId is null)
             return;
@@ -413,9 +414,14 @@ public sealed class WizardState : IDisposable
             string.IsNullOrEmpty(SmbUser) ? null : SmbUser,
             string.IsNullOrEmpty(SmbPassword) ? null : SmbPassword,
             createIfMissing: false);
-        EnsureChunksFrom(smb.Combine("chunks"),
+        // Disguised shares hold chunks flat in the cover folder; plain
+        // shares hold them sharded under chunks/.
+        string remoteRoot = layout is not null
+            ? smb.Combine(layout.CoverName)
+            : smb.Combine("chunks");
+        EnsureChunksFrom(remoteRoot,
             id => $"Chunk {id} not found on SMB share {SmbShare}.", progress,
-            cancellationToken);
+            cancellationToken, layout);
     }
 
     /// <summary>
@@ -430,22 +436,31 @@ public sealed class WizardState : IDisposable
     /// once local staging was pruned.)
     /// </summary>
     public void EnsureLocalChunks(string folderRoot, Action<int, int>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Service.DisguisedLayout? layout = null)
     {
         if (string.IsNullOrWhiteSpace(folderRoot) || SelectedBackupId is null)
             return;
-        EnsureChunksFrom(Path.Combine(folderRoot, "chunks"),
+        // Disguised folders hold chunks flat in the folder root itself;
+        // plain folders hold them sharded under chunks/.
+        string remoteRoot = layout is not null
+            ? folderRoot
+            : Path.Combine(folderRoot, "chunks");
+        EnsureChunksFrom(remoteRoot,
             id => $"Chunk {id} not found in folder {folderRoot}.", progress,
-            cancellationToken);
+            cancellationToken, layout);
     }
 
     /// <summary>
-    /// Copies the selected backup's chunks from a chunks root — an SMB
-    /// share or a plain folder, same sharded layout — into the local
-    /// repo, skipping chunks already present.
+    /// Copies the selected backup's chunks from a remote root — an SMB
+    /// share or a plain folder — into the local repo, skipping chunks
+    /// already present. With a layout, the root is the disguised cover
+    /// folder and chunks wear derived names; without one, the root is
+    /// the classic sharded chunks/ directory.
     /// </summary>
     private void EnsureChunksFrom(string remoteChunks, Func<string, string> notFoundMessage,
-        Action<int, int>? progress, CancellationToken cancellationToken = default)
+        Action<int, int>? progress, CancellationToken cancellationToken = default,
+        Service.DisguisedLayout? layout = null)
     {
         var repo = OpenRepo();
         var manifest = repo.LoadManifest(SelectedBackupId!);
@@ -478,7 +493,8 @@ public sealed class WizardState : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             // Chunk files are sharded: chunks/ab/cdef... (first 2 hex chars
             // as the directory, remaining 62 as the file name) — same layout
-            // as LocalBlobStore.
+            // as LocalBlobStore. Disguised sources instead hold each chunk
+            // flat under its derived name.
             string shard = id.Length >= 2 ? id[..2] : id;
             string fileName = id.Length >= 2 ? id[2..] : id;
             string localPath = Path.Combine(localChunks, shard, fileName);
@@ -490,14 +506,22 @@ public sealed class WizardState : IDisposable
             bool haveGoodLocal = File.Exists(localPath) && repo.VerifyChunkBlobAt(localPath, id);
             if (!haveGoodLocal)
             {
-                string remotePath = Path.Combine(remoteChunks, shard, fileName);
+                string remotePath = layout is not null
+                    ? Path.Combine(remoteChunks, layout.ChunkFileName(id))
+                    : Path.Combine(remoteChunks, shard, fileName);
                 if (!File.Exists(remotePath))
                     throw new FileNotFoundException(notFoundMessage(id));
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                 string tmpPath = localPath + ".tmp-" + Guid.NewGuid().ToString("N");
                 try
                 {
-                    File.Copy(remotePath, tmpPath);
+                    // Disguised sources store header-wrapped blobs;
+                    // strip on the way in so verification sees clean
+                    // ciphertext (pre-header files copy through unchanged).
+                    if (layout is not null)
+                        Service.DisguisedLayout.CopyUnwrapped(remotePath, tmpPath);
+                    else
+                        File.Copy(remotePath, tmpPath);
                     if (!repo.VerifyChunkBlobAt(tmpPath, id))
                         throw new InvalidDataException(
                             $"Chunk {id} pulled from {remoteChunks} failed verification; it was not stored.");

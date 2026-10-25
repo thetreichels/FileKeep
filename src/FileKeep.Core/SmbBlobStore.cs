@@ -12,21 +12,35 @@ public sealed class SmbBlobStore : IBlobStore
 {
     private readonly string _chunksDir;
     private readonly SmbShare _share;
+    private readonly string? _disguiseSubfolder;
+    private readonly Service.DisguisedLayout? _layout;
 
     /// <summary>The share path (UNC or local) this store writes to.</summary>
     public string SharePath => _share.UncPath;
 
-    public SmbBlobStore(SmbShare share)
+    /// <summary>
+    /// Plain store: chunks under <c>share\chunks\</c>. With a layout, chunks
+    /// wear disguised names flat in <c>share\subfolder</c> (defaulting to
+    /// the layout's cover name) — see <see cref="Service.DisguisedLayout"/>.
+    /// </summary>
+    public SmbBlobStore(SmbShare share, string? disguiseSubfolder = null,
+        Service.DisguisedLayout? layout = null)
     {
         ArgumentNullException.ThrowIfNull(share);
         _chunksDir = share.Combine("chunks");
         _share = share;
+        _disguiseSubfolder = disguiseSubfolder;
+        _layout = layout;
     }
 
     public string PathFor(string chunkIdHex)
     {
         if (chunkIdHex.Length != 64 || !chunkIdHex.All(Uri.IsHexDigit))
             throw new ArgumentException("Chunk ID must be 64 hex chars.", nameof(chunkIdHex));
+        if (_layout is not null)
+            return Path.Combine(
+                _share.Combine(_disguiseSubfolder ?? _layout.CoverName),
+                _layout.ChunkFileName(chunkIdHex));
         return Path.Combine(_chunksDir, chunkIdHex[..2], chunkIdHex[2..]);
     }
 
@@ -45,6 +59,9 @@ public sealed class SmbBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         if (File.Exists(path))
             return;
+        // Disguised destinations store header-wrapped blobs; plain ones raw.
+        if (_layout is not null)
+            blob = Service.DisguisedLayout.WrapContent(blob, path);
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         // Write atomically so interrupted backups never leave half a blob,
@@ -83,6 +100,13 @@ public sealed class SmbBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         if (File.Exists(path))
             return;
+        // Wrapping a span needs a copy; streaming callers hand us the
+        // blob anyway, and chunks are bounded (CDC max 16 MiB).
+        byte[]? wrapped = _layout is not null
+            ? Service.DisguisedLayout.WrapContent(blob.ToArray(), path)
+            : null;
+        if (wrapped is not null)
+            blob = wrapped;
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
@@ -141,7 +165,11 @@ public sealed class SmbBlobStore : IBlobStore
         string path = PathFor(chunkIdHex);
         if (!File.Exists(path))
             throw new InvalidDataException($"Chunk not found on SMB share: {chunkIdHex}.");
-        return File.ReadAllBytes(path);
+        byte[] stored = File.ReadAllBytes(path);
+        // Detect-and-strip: pre-header disguised blobs read back as-is.
+        return _layout is not null
+            ? Service.DisguisedLayout.UnwrapContent(stored, path)
+            : stored;
     }
 
     public long StoredCount

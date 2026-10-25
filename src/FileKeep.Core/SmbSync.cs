@@ -36,10 +36,18 @@ public sealed class SmbSync
     /// <summary>
     /// Syncs the repo at <paramref name="repoRoot"/> to the connected share.
     /// <paramref name="progress"/> receives (filesDone, filesTotal) periodically.
+    /// When <paramref name="layout"/> is given, the destination wears the
+    /// disguised layout instead of the classic one: all files sit flat in
+    /// <c>share\<paramref name="destSubfolder"/> (defaulting to the
+    /// layout's cover name) under derived names (see
+    /// <see cref="Service.DisguisedLayout"/>), plus decoys when enabled.
+    /// With no layout, behavior is exactly the classic layout.
     /// </summary>
     public SyncResult Sync(
         string repoRoot,
         SmbShare share,
+        string? destSubfolder = null,
+        Service.DisguisedLayout? layout = null,
         Action<int, int>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -83,20 +91,35 @@ public sealed class SmbSync
             progress?.Invoke(done, total);
         }
 
+        // Disguised destinations collapse the whole repo into one flat
+        // cover folder; plain destinations keep the classic subdirs.
+        string cover = layout is not null ? (destSubfolder ?? layout.CoverName) : "";
+        string destRoot = layout is not null ? share.Combine(cover) : share.UncPath;
         string destChunks = share.Combine("chunks");
         string destManifests = share.Combine("manifests");
         string destParity = share.Combine("parity");
-        Directory.CreateDirectory(destChunks);
-        Directory.CreateDirectory(destManifests);
-        if (parityFiles.Length > 0)
-            Directory.CreateDirectory(destParity);
+        if (layout is not null)
+        {
+            Directory.CreateDirectory(destRoot);
+        }
+        else
+        {
+            Directory.CreateDirectory(destChunks);
+            Directory.CreateDirectory(destManifests);
+            if (parityFiles.Length > 0)
+                Directory.CreateDirectory(destParity);
+        }
 
         foreach (string src in chunkFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string relative = Path.GetRelativePath(chunksDir, src);
-            string dest = Path.Combine(destChunks, relative);
-            if (CopyIfNeeded(src, dest, out long bytes))
+            string dest = layout is not null
+                ? Path.Combine(destRoot, layout.ChunkFileName(
+                    relative.Replace(Path.DirectorySeparatorChar.ToString(), "")
+                            .Replace(Path.AltDirectorySeparatorChar.ToString(), "")))
+                : Path.Combine(destChunks, relative);
+            if (CopyWrappedOrPlain(src, dest, layout, out long bytes))
             {
                 result.ChunksCopied++;
                 result.BytesCopied += bytes;
@@ -112,8 +135,10 @@ public sealed class SmbSync
         foreach (string src in manifestFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string dest = Path.Combine(destManifests, Path.GetFileName(src));
-            if (CopyIfNeeded(src, dest, out long bytes))
+            string dest = layout is not null
+                ? Path.Combine(destRoot, layout.ManifestFileName(Path.GetFileName(src)))
+                : Path.Combine(destManifests, Path.GetFileName(src));
+            if (CopyWrappedOrPlain(src, dest, layout, out long bytes))
             {
                 result.ManifestsCopied++;
                 result.BytesCopied += bytes;
@@ -130,8 +155,10 @@ public sealed class SmbSync
         {
             cancellationToken.ThrowIfCancellationRequested();
             string relative = Path.GetRelativePath(parityDir, src);
-            string dest = Path.Combine(destParity, relative);
-            if (CopyIfNeeded(src, dest, out long bytes))
+            string dest = layout is not null
+                ? Path.Combine(destRoot, layout.ParityFileName(relative))
+                : Path.Combine(destParity, relative);
+            if (CopyWrappedOrPlain(src, dest, layout, out long bytes))
             {
                 result.ParityCopied++;
                 result.BytesCopied += bytes;
@@ -143,11 +170,15 @@ public sealed class SmbSync
         if (hasRepoJson)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string dest = share.Combine("repo.json");
-            CopyIfNeeded(repoJson, dest, out long bytes);
+            string dest = layout is not null
+                ? Path.Combine(destRoot, layout.RepoFileName())
+                : share.Combine("repo.json");
+            CopyWrappedOrPlain(repoJson, dest, layout, out long bytes);
             result.BytesCopied += bytes;
             done++;
         }
+        if (layout is not null && layout.DecoysEnabled)
+            layout.WriteDecoys(destRoot, chunkFiles.Length);
         Report();
 
         _log?.Invoke($"SMB sync to {share.UncPath}: {result.ChunksCopied} chunks copied " +
@@ -168,7 +199,8 @@ public sealed class SmbSync
     /// rather than passing as delivered (DL-4). Returns the number
     /// copied (chunks already present and content-verified not counted).
     /// </summary>
-    public int CopyChunks(IEnumerable<string> chunkIds, string repoRoot, SmbShare share)
+    public int CopyChunks(IEnumerable<string> chunkIds, string repoRoot, SmbShare share,
+        string? destSubfolder = null, Service.DisguisedLayout? layout = null)
     {
         ArgumentNullException.ThrowIfNull(chunkIds);
         ArgumentException.ThrowIfNullOrWhiteSpace(repoRoot);
@@ -182,13 +214,18 @@ public sealed class SmbSync
                 throw new FileNotFoundException(
                     $"Chunk {id} is missing from the local staging repo; " +
                     "it cannot be confirmed at the destination.", src);
-            string dest = share.Combine("chunks", id[..2], id[2..]);
-            if (CopyIfNeeded(src, dest, out _))
+            string dest = layout is not null
+                ? share.Combine(destSubfolder ?? layout.CoverName, layout.ChunkFileName(id))
+                : share.Combine("chunks", id[..2], id[2..]);
+            if (CopyWrappedOrPlain(src, dest, layout, out _))
             {
                 copied++;
                 // Confirm the copy that just landed: a destination can
                 // accept a write and still store different bytes.
-                if (!FilesHaveSameContent(src, dest))
+                bool verified = layout is not null
+                    ? Service.DisguisedLayout.WrappedMatches(src, dest)
+                    : FilesHaveSameContent(src, dest);
+                if (!verified)
                     throw new IOException(
                         $"Chunk {id} did not verify at the destination after copying.");
             }
@@ -196,6 +233,21 @@ public sealed class SmbSync
             // (CopyIfNeeded compared content) — confirmed.
         }
         return copied;
+    }
+
+    /// <summary>
+    /// Disguised destinations copy header-wrapped; plain destinations
+    /// copy raw. Single branch point so no copy site can forget the
+    /// header (a forgotten wrap would write a headerless file that a
+    /// later sync recopies forever, and a forgotten strip would fail
+    /// verification downstream).
+    /// </summary>
+    private static bool CopyWrappedOrPlain(string src, string dest,
+        Service.DisguisedLayout? layout, out long bytesCopied)
+    {
+        if (layout is not null)
+            return Service.DisguisedLayout.CopyWrappedIfNeeded(src, dest, out bytesCopied);
+        return CopyIfNeeded(src, dest, out bytesCopied);
     }
 
     /// <summary>True when both files hold identical bytes (SHA-256).</summary>

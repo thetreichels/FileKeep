@@ -217,7 +217,8 @@ public static partial class DashboardApi
             .Where(j => j.EffectiveTargets.Any(t =>
                 t.Equals(l.Name, StringComparison.OrdinalIgnoreCase)))
             .Select(j => j.Name).ToList(),
-        l.VolumeLabel, l.UsbFolder);
+        l.VolumeLabel, l.UsbFolder,
+        l.DisguiseEnabled, l.CoverName, l.DisguiseDecoys);
 
     /// <summary>
     /// Adds a new job or updates an existing one (matched by name, case-insensitive).
@@ -365,6 +366,13 @@ public static partial class DashboardApi
             return (400, new ErrorDto("Share path is required for SMB locations."));
         if (loc.Type == "usb" && string.IsNullOrWhiteSpace(loc.VolumeSerial))
             return (400, new ErrorDto("Volume serial is required for USB locations."));
+        // Disguise is a USB/SMB-only destination property, and its cover
+        // name must be a safe single folder name.
+        if (loc.DisguiseEnabled && loc.Type != "smb" && loc.Type != "usb")
+            return (400, new ErrorDto("Disguised layout is only available for USB and network-share locations."));
+        if (loc.DisguiseEnabled &&
+            !FileKeep.Core.Service.DisguisedLayout.IsValidCoverName(loc.CoverName, out string? coverError))
+            return (400, new ErrorDto(coverError!));
 
         // P2-C1: lookup + field-by-field mutation under the config
         // lock — unlocked, a concurrent save/scan or a running job
@@ -390,6 +398,16 @@ public static partial class DashboardApi
                 config.Locations.Add(loc);
             else
             {
+                // Disguise settings are immutable after creation: a
+                // location's on-destination layout is derived from them,
+                // so changing them would orphan every chunk already
+                // written there. Delete and recreate to re-clothe.
+                if (existing.DisguiseEnabled != loc.DisguiseEnabled ||
+                    !string.Equals(existing.CoverName, loc.CoverName, StringComparison.Ordinal) ||
+                    existing.DisguiseDecoys != loc.DisguiseDecoys)
+                    return (400, new ErrorDto(
+                        "Disguise settings cannot be changed on an existing location. " +
+                        "Delete it and create a new disguised location instead."));
                 existing.Type = loc.Type;
                 existing.Host = loc.Host; existing.Port = loc.Port;
                 existing.Ssl = loc.Ssl; existing.Username = loc.Username;
@@ -402,6 +420,9 @@ public static partial class DashboardApi
                 existing.VolumeSerial = loc.VolumeSerial;
                 existing.VolumeLabel = loc.VolumeLabel;
                 existing.UsbFolder = loc.UsbFolder;
+                existing.DisguiseEnabled = loc.DisguiseEnabled;
+                existing.CoverName = loc.CoverName;
+                existing.DisguiseDecoys = loc.DisguiseDecoys;
             }
         }
         try
@@ -566,7 +587,7 @@ public static partial class DashboardApi
             else if (loc.Type == "usb")
             {
                 string? path = FileKeep.Core.UsbDriveResolver.ResolveBackupPath(
-                    loc.VolumeSerial, loc.UsbFolder);
+                    loc.VolumeSerial, FileKeep.Core.Service.DisguisedLayout.UsbFolderFor(loc));
                 if (path is not null)
                     return (200, new OkMessageDto(true, $"USB drive found at {path}." ));
                 else

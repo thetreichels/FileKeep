@@ -182,7 +182,9 @@ Write-Host "Building VSS helper..."
 & "$srcRoot\src\FileKeep.VssHelper\build-vss-helper.ps1"
 if ($LASTEXITCODE -ne 0) { throw "VSS helper build failed" }
 
-wix build -arch x64 -ext WixToolset.UI.wixext -d SrcRoot=$srcRoot -d ProductVersion=$productVersion -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d GuiBin=C:\ub\publish\gui -d VssBin=$srcRoot\src\FileKeep.VssHelper -o $msiPath install/FileKeep.wxs
+wix extension add WixToolset.Util.wixext/6.0.1
+if ($LASTEXITCODE -ne 0) { throw "wix Util extension add failed" }
+wix build -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -d SrcRoot=$srcRoot -d ProductVersion=$productVersion -d CliBin=C:\ub\publish\cli -d ServiceBin=C:\ub\publish\service -d RecoveryBin=C:\ub\publish\recovery -d GuiBin=C:\ub\publish\gui -d VssBin=$srcRoot\src\FileKeep.VssHelper -o $msiPath install/FileKeep.wxs
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $msi = Get-Item $msiPath
 Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
@@ -233,7 +235,12 @@ Move-Item -Force $reattached C:\ub\FileKeep-Setup.exe
 Write-Host "  Bundle signed via detach/sign/reattach/sign."
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
-Start-Process msiexec -ArgumentList "/i", $msiPath, "/qn" -Wait
+# A running GUI blocks file replacement on install (in-use exe) and directory
+# removal on uninstall (gui/ as its working directory) — stop it first so the
+# self-test tests the new build instead of the leftovers of the old one.
+Get-Process FileKeepGui -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep 2
+Start-Process msiexec -ArgumentList "/i", $msiPath, "/qn", "/l*v", "C:\ub\selftest-install.log" -Wait
 Start-Sleep 15
 foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
                  "C:\Program Files\FileKeep\service\FileKeepService.exe",
@@ -244,22 +251,26 @@ foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
 $svc = sc.exe query FileKeep
 Write-Host "  Service state:"
 Write-Host $svc
-if ($svc -notmatch "RUNNING") { Write-Host "  NOTE: service not running after install (expected: registered auto-start, starts on first boot / service start)" }
+# -notmatch on an array returns the non-matching lines (always truthy) — join first.
+if (($svc -join "`n") -notmatch "RUNNING") { Write-Host "  NOTE: service not running after install (expected: registered auto-start, starts on first boot / service start)" }
 
 Write-Host "  Uninstalling..."
+# Same reason as before install: a running GUI blocks directory removal.
+Get-Process FileKeepGui -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep 2
 # Uninstall by ProductCode from the registered product (not by MSI path),
 # because each build generates a new ProductCode.
 $prods = @(Get-WmiObject Win32_Product | Where-Object { $_.Name -eq "FileKeep" })
 if ($prods.Count -gt 0) {
     foreach ($prod in $prods) {
         Write-Host ("  Uninstalling product: {0}" -f $prod.IdentifyingNumber)
-        Start-Process msiexec -ArgumentList "/x", $prod.IdentifyingNumber, "/qn" -Wait
+        Start-Process msiexec -ArgumentList "/x", $prod.IdentifyingNumber, "/qn", "/l*v", "C:\ub\selftest-uninstall.log" -Wait
         Start-Sleep 5
     }
     Start-Sleep 5
 } else {
     Write-Host "  WARNING: FileKeep not found in Win32_Product, trying MSI path..."
-    Start-Process msiexec -ArgumentList "/x", $msiPath, "/qn" -Wait
+    Start-Process msiexec -ArgumentList "/x", $msiPath, "/qn", "/l*v", "C:\ub\selftest-uninstall.log" -Wait
     Start-Sleep 10
 }
 if (Test-Path "C:\Program Files\FileKeep") { throw "Uninstall left files behind" }

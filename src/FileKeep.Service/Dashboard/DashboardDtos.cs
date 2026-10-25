@@ -168,7 +168,10 @@ public sealed record ConfigLocationDto(
     [property: JsonPropertyName("hasPassword")] bool HasPassword,
     [property: JsonPropertyName("usedBy")] List<string> UsedBy,
     [property: JsonPropertyName("volumeLabel")] string? VolumeLabel,
-    [property: JsonPropertyName("usbFolder")] string? UsbFolder);
+    [property: JsonPropertyName("usbFolder")] string? UsbFolder,
+    [property: JsonPropertyName("disguiseEnabled")] bool DisguiseEnabled = false,
+    [property: JsonPropertyName("coverName")] string? CoverName = null,
+    [property: JsonPropertyName("disguiseDecoys")] bool DisguiseDecoys = false);
 
 /// <summary>Full response for GET /api/config.</summary>
 public sealed record ConfigSnapshotDto(
