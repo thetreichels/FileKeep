@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>FileKeep.Core</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Exposed for unit tests of internal helpers (e.g. VSS path mapping). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="FileKeep.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Security: override transitive SQLitePCLRaw 2.1.11 (CVE-2025-6965,
+         GHSA-2m69-gcr7-jv3q, SQLite < 3.50.2 memory corruption) with 2.1.12
+         which bundles patched SQLite 3.53.3. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <!-- Reed-Solomon erasure coding: proven library replaces handmade
+         implementation (which had a singular-matrix bug for certain
+         erasure patterns). MIT licensed, pure managed C#. -->
+    <PackageReference Include="ReedSolomonFast" Version="1.1.1" />
+  </ItemGroup>
+
+</Project>

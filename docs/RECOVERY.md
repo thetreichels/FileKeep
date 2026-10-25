@@ -27,7 +27,7 @@ keep a copy on USB and/or in a password manager:
 Publish the wizard for USB/WinRE use with:
 
 ```powershell
-dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj `
+dotnet publish src/FileKeep.Recovery/FileKeep.Recovery.csproj `
     -c Release -r win-x64 --self-contained
 ```
 
@@ -54,7 +54,7 @@ mkdir C:\RestoreRepo
 #    copy repo.json, manifests\, catalog.db into C:\RestoreRepo
 
 # 2. Download the chunks from Usenet (needs provider credentials):
-$env:USENETBACKUP_PASSPHRASE = "<passphrase>"
+$env:FILEKEEP_PASSPHRASE = "<passphrase>"
 FileKeep download C:\RestoreRepo backup.nzb --host <provider> --user <user>
 #    (you will be prompted for the NNTP password, or pass --password)
 

@@ -1,19 +1,19 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/UsenetBackup.Cli/UsenetBackup.Cli.csproj" />
-    <Project Path="src/UsenetBackup.Core/UsenetBackup.Core.csproj" />
-    <Project Path="src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj" />
-    <Project Path="src/UsenetBackup.Service/UsenetBackup.Service.csproj" />
-    <Project Path="src/UsenetBackup.Gui/UsenetBackup.Gui.csproj" />
+    <Project Path="src/FileKeep.Cli/FileKeep.Cli.csproj" />
+    <Project Path="src/FileKeep.Core/FileKeep.Core.csproj" />
+    <Project Path="src/FileKeep.Recovery/FileKeep.Recovery.csproj" />
+    <Project Path="src/FileKeep.Service/FileKeep.Service.csproj" />
+    <Project Path="src/FileKeep.Gui/FileKeep.Gui.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/UsenetBackup.Core.Tests/UsenetBackup.Core.Tests.csproj" />
+    <Project Path="tests/FileKeep.Core.Tests/FileKeep.Core.Tests.csproj" />
   </Folder>
   <!-- Native VSS helper: built by MinGW via build-vss-helper.ps1, not
        MSBuild. Listed here for visibility only; it is not a buildable
        project and must not be added to any build configuration. -->
-  <Folder Name="/src/UsenetBackup.VssHelper/">
-    <File Path="src/UsenetBackup.VssHelper/FileKeepVss.cpp" />
-    <File Path="src/UsenetBackup.VssHelper/build-vss-helper.ps1" />
+  <Folder Name="/src/FileKeep.VssHelper/">
+    <File Path="src/FileKeep.VssHelper/FileKeepVss.cpp" />
+    <File Path="src/FileKeep.VssHelper/build-vss-helper.ps1" />
   </Folder>
 </Solution>

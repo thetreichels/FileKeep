@@ -3,7 +3,7 @@
      (hyperlinkLicense theme) with FileKeep branding. No custom theme — the
      generic installer the user asked for. Shows the FileKeep logo, product
      name and version, a progress bar, and a "Launch FileKeep" button
-     on the Success page. Wraps the MSI built from UsenetBackup.wxs.
+     on the Success page. Wraps the MSI built from FileKeep.wxs.
 
      Build on Windows after the MSI:
        wix build -arch x64 -ext <Bal wixext dll> -d SrcRoot=C:\fk -d ProductVersion=<from repo-root VERSION> -d MsiPath=C:\ub\filekeep-<version>.msi -o C:\ub\FileKeep-Setup.exe install/Bundle.wxs

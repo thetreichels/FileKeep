@@ -6,7 +6,7 @@
 
 ## Problem
 
-The recovery USB (`src/UsenetBackup.Recovery/`) currently only accepts a typed
+The recovery USB (`src/FileKeep.Recovery/`) currently only accepts a typed
 passphrase. Backups protected with YubiKey-only mode (no passphrase) cannot be
 recovered from bare metal because:
 
@@ -39,7 +39,7 @@ is used silently. If "YubiKey only" mode, the derived key decrypts directly.
 
 ### Code changes
 
-**`src/UsenetBackup.Recovery/`:**
+**`src/FileKeep.Recovery/`:**
 
 1. Add `YubiKeyRecovery.cs`:
    - `DetectKeys()`: enumerate HID YubiKeys via P/Invoke `SetupDi*` (no SDK

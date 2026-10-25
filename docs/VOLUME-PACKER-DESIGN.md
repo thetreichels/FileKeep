@@ -83,9 +83,9 @@ payload:    concatenated encrypted chunk blobs
   message-ID, `bytes` = article size, `date` = volume upload time
   (`Catalog.GetUploadTimeUtc(volumeId)` — the uploads table already keys by
   content ID; PAR2 parity rows do the same today).
-- Head meta keeps all existing fields and adds `x-usenetbackup-volume-count`.
+- Head meta keeps all existing fields and adds `x-filekeep-volume-count`.
 - `NzbParser` reads head meta into `NzbDocument.Meta`; `IsVolumeNzb` is true
-  when `x-usenetbackup-volume-count` is present and > 0. Old NZBs lack it ->
+  when `x-filekeep-volume-count` is present and > 0. Old NZBs lack it ->
   chunk path, unchanged.
 - `NzbFile.VolumeId` recovered from the first segment via the existing
   strict message-ID parse.

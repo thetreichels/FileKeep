@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>FileKeep.Cli</RootNamespace>
+    <AssemblyName>FileKeep</AssemblyName>
+    <ApplicationIcon>../../assets/filekeep.ico</ApplicationIcon>
+      <!-- Single-file self-contained publish: the MSI installs the exe + native deps explicitly. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- Bundle SQLitePCLRaw native library (e_sqlite3.dll) into the single file. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Installer size: trim unused framework code (partial = only trimmable
+         assemblies) and drop ICU globalization data (app is English-only). -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+</PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FileKeep.Core\FileKeep.Core.csproj" />
+  </ItemGroup>
+
+</Project>

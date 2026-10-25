@@ -241,7 +241,7 @@ and what guarantees it provides.
 
 ### Phase B: Engine integration
 
-- [ ] `VssSnapshot` class in `UsenetBackup.Core` that spawns the helper,
+- [ ] `VssSnapshot` class in `FileKeep.Core` that spawns the helper,
       parses the snapshot path, and implements `IDisposable` for cleanup
 - [ ] Backup job option: `consistencyLevel` = `file` | `crash-consistent`
       | `application-consistent`

@@ -1,0 +1,1289 @@
+using System.Text;
+using FileKeep.Core;
+using FileKeep.Core.Nntp;
+
+/// Free no-signup NNTP server used ONLY as a differential-diagnosis
+/// fallback: if the user's provider is unreachable on every port but this
+/// server answers, the problem is provider/account-specific; if neither
+/// answers, the local network or ISP is likely blocking NNTP.
+/// The probe is connect + greeting only — never authenticates, never posts.
+const string DiagnoseFallbackHost = "freenews.netfront.net";
+
+if (args.Length == 0)
+{
+    PrintUsage();
+    return 2;
+}
+
+try
+{
+    return args[0].ToLowerInvariant() switch
+    {
+        "init" => Init(args[1..]),
+        "backup" => Backup(args[1..]),
+        "backup-disk" => BackupDisk(args[1..]),
+        "restore" => Restore(args[1..]),
+        "restore-disk" => RestoreDisk(args[1..]),
+        "verify" => Verify(args[1..]),
+        "list" => List(args[1..]),
+        "nntp-check" => NntpCheck(args[1..]),
+        "nntp-upload" => NntpUpload(args[1..]),
+        "manifest-discover" => ManifestDiscover(args[1..]),
+        "nzb-generate" => NzbGenerate(args[1..]),
+        "download" => Download(args[1..]),
+        "expiration-check" => ExpirationCheck(args[1..]),
+        "retention-check" => RetentionCheck(args[1..]),
+        "smb-sync" => SmbSyncCommand(args[1..]),
+        _ => Unknown(args[0]),
+    };
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"error: {ex.Message}");
+    return 1;
+}
+
+static void PrintUsage()
+{
+    // CX-1: usage is only printed on error paths (exit 2) — stderr.
+    Console.Error.WriteLine("""
+        FileKeep — local repository engine + NNTP backend
+
+        Usage:
+          FileKeep init <repo> [--chunk-size BYTES] [--volume-size BYTES] [--chunking fixed|cdc]
+          FileKeep backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss]
+          FileKeep backup-disk <repo> <device> [--image-name NAME]
+          FileKeep restore <repo> <backup-id> <dest-dir>
+              [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]
+          FileKeep restore-disk <repo> <backup-id> <device> [--yes]
+          FileKeep verify <repo> <backup-id>
+          FileKeep list <repo>
+          FileKeep nntp-check --host HOST [--port PORT] [--ssl] [--user USER] [--diagnose]
+              [--probe-post-size MB]
+          FileKeep nntp-upload <repo> <backup-id> --host HOST [--port PORT]
+              [--ssl] [--user USER] [--newsgroup GROUP] [--no-volumes]
+              [--poster POSTER]
+          FileKeep nzb-generate <repo> <backup-id> <output.nzb>
+              [--newsgroup GROUP] [--poster POSTER]
+          FileKeep download <repo> <nzb-file> --host HOST [--port PORT]
+              [--ssl] [--user USER] [--newsgroup GROUP]
+          FileKeep smb-sync <repo> --share \\server\share\path [--user USER]
+          FileKeep expiration-check <repo> [--warn-days DAYS] [--retention-days DAYS] [--config PATH]
+          (--user also accepts --username as an alias)
+
+        --parent turns the backup into an incremental against that parent
+        manifest. Unchanged files (same size + mtime) reuse the parent's
+        chunks without re-reading.
+
+        nntp-upload posts every unique chunk of a backup as one yEnc article
+        each. It is resumable: already-posted articles are skipped via the
+        local upload journal plus a server STAT check.
+
+        By default nntp-upload packs chunks into volumes (see --volume-size,
+        default 32 MiB): one article per volume instead of one per chunk.
+        --no-volumes forces the original one-article-per-chunk behavior.
+
+        nntp-check --probe-post-size MB posts a single probe article of that
+        size to discover the provider's article-size ceiling (the upper
+        bound for --volume-size). Use --probe-post-size auto to binary-search
+        the ceiling automatically. Probe articles permanently land in
+        the newsgroup.
+
+        nzb-generate writes an NZB 1.1 index of the backup's articles —
+        one file per chunk, or one file per packed volume when the backup
+        was uploaded with volume packing (deterministic message-IDs either
+        way). Articles with no upload journal record are flagged — run
+        nntp-upload first.
+
+        download fetches every article referenced by an NZB index into the
+        repo's local chunk store. It is resumable: chunks already present
+        are skipped. Each fetched chunk is authenticated and hash-verified
+        before being stored. Run verify/restore afterwards as usual.
+
+        --backup-privilege enables the Windows SeBackupPrivilege and reads
+        files with backup semantics (Windows only, requires administrator
+        rights), so files locked by other processes can be read. This reads
+        the live files, not a point-in-time copy.
+
+        --vss takes a Volume Shadow Copy snapshot of the source volume and
+        backs up from the shadow copy (Windows only, requires administrator
+        rights). This gives a point-in-time frozen view, so open files back
+        up consistently. Mutually exclusive with --backup-privilege.
+
+        smb-sync copies a repo's chunks, manifests, and config to an SMB
+        network share (e.g. a NAS). Idempotent and resumable — files already
+        on the share are skipped. The share can be opened directly for
+        restores (WinRE wizard or the Windows recovery page), no Usenet
+        needed. Password via --password, FILEKEEP_SMB_PASSWORD, or a
+        prompt; omit --user for shares the current user can already reach.
+
+        backup-disk images a raw block device (e.g. \\.\C: on Windows,
+        /dev/sda on Linux) through the normal chunk/encrypt pipeline as a
+        single image entry; restore-disk writes it back. The image is of the
+        live volume, not a point-in-time copy.
+
+        The passphrase is read from --passphrase, the FILEKEEP_PASSPHRASE
+        environment variable, or an interactive prompt (in that order).
+        The NNTP password comes from --password, FILEKEEP_NNTP_PASSWORD,
+        or an interactive prompt (only when --user is given).
+        """);
+}
+
+static int Unknown(string cmd)
+{
+    Console.Error.WriteLine($"error: unknown command '{cmd}'");
+    PrintUsage();
+    return 2;
+}
+
+static string GetPassphrase(string[] args)
+{
+    string? fromArg = GetOption(args, "--passphrase");
+    if (!string.IsNullOrEmpty(fromArg))
+    {
+        WarnSecretOnCommandLine("--passphrase", "FILEKEEP_PASSPHRASE");
+        return fromArg;
+    }
+    string? fromEnv = Environment.GetEnvironmentVariable("FILEKEEP_PASSPHRASE");
+    if (!string.IsNullOrEmpty(fromEnv))
+        return fromEnv;
+    string typed = PromptInteractive("Passphrase: ", "--passphrase", "FILEKEEP_PASSPHRASE");
+    if (string.IsNullOrEmpty(typed))
+        throw new InvalidOperationException("A passphrase is required.");
+    return typed;
+}
+
+/// <summary>
+/// A secret passed as a command-line flag is visible to other users on the
+/// machine via the process list. Warn once per invocation.
+/// </summary>
+static void WarnSecretOnCommandLine(string flag, string envVar)
+{
+    Console.Error.WriteLine(
+        $"warning: {flag} exposes the secret in the process list; " +
+        $"prefer the {envVar} environment variable or the interactive prompt.");
+}
+
+/// <summary>
+/// Prompts on stdin for a secret, but fails fast instead of hanging when stdin
+/// is not interactive (piped / redirected), e.g. in scripts.
+/// </summary>
+static string PromptInteractive(string prompt, string flagName, string envName)
+{
+    if (Console.IsInputRedirected)
+        throw new InvalidOperationException(
+            $"A secret is required but stdin is not interactive. Pass {flagName} or set {envName}.");
+    Console.Write(prompt);
+    return ReadSecretMasked();
+}
+
+/// <summary>
+/// Reads a secret from the console WITHOUT echoing it (MU-8): the
+/// prompts used Console.ReadLine, so passphrases and passwords
+/// appeared on screen and in terminal scrollback despite looking
+/// like password prompts. Backspace edits; Enter ends input.
+/// </summary>
+static string ReadSecretMasked()
+{
+    var secret = new System.Text.StringBuilder();
+    try
+    {
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                return secret.ToString();
+            }
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (secret.Length > 0)
+                    secret.Length--;
+                continue;
+            }
+            if (key.KeyChar == '\0' || char.IsControl(key.KeyChar))
+                continue; // arrows, function keys, escape, etc.
+            secret.Append(key.KeyChar);
+        }
+    }
+    catch (InvalidOperationException)
+    {
+        // No real console handle (rare hosting): fall back to a line.
+        return Console.ReadLine() ?? "";
+    }
+}
+
+/// <summary>
+/// Parses an integer option (MU-9): a value that was SUPPLIED but
+/// doesn't parse used to be silently replaced with the default — a
+/// typo at `init` created a repository with default chunk/volume
+/// parameters (permanent repo properties) with no warning anywhere.
+/// An absent option still gets the default; a garbage one is an error.
+/// </summary>
+static int ParseIntOption(string[] args, string name, int defaultValue)
+{
+    string? raw = GetOption(args, name);
+    if (raw is null)
+        return defaultValue;
+    if (!int.TryParse(raw, out int value))
+        throw new InvalidOperationException($"Invalid value for {name}: '{raw}' is not a number.");
+    return value;
+}
+
+/// <summary>Long-valued counterpart of <see cref="ParseIntOption"/> (MU-9).</summary>
+static long ParseLongOption(string[] args, string name, long defaultValue)
+{
+    string? raw = GetOption(args, name);
+    if (raw is null)
+        return defaultValue;
+    if (!long.TryParse(raw, out long value))
+        throw new InvalidOperationException($"Invalid value for {name}: '{raw}' is not a number.");
+    return value;
+}
+
+static string? GetOption(string[] args, string name)
+{
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == name && i + 1 < args.Length)
+            return args[i + 1];
+        if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+            return args[i][(name.Length + 1)..];
+    }
+    return null;
+}
+
+static string[] GetOptions(string[] args, string name)
+{
+    var values = new List<string>();
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == name && i + 1 < args.Length)
+            values.Add(args[i + 1]);
+        else if (args[i].StartsWith(name + "=", StringComparison.Ordinal))
+            values.Add(args[i][(name.Length + 1)..]);
+    }
+    return values.ToArray();
+}
+
+static string[] Positionals(string[] args) =>
+    args.Where((a, i) => !(a.StartsWith("--") || (i > 0 && args[i - 1].StartsWith("--")))).ToArray();
+
+static bool HasFlag(string[] args, string name) =>
+    args.Any(a => a == name);
+
+static int Init(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: init <repo>"); return 2; }
+    int chunkSize = ParseIntOption(args, "--chunk-size", BackupRepository.DefaultChunkSize);
+    long volumeSize = ParseLongOption(args, "--volume-size", BackupRepository.DefaultVolumeSizeBytes);
+    string chunking = GetOption(args, "--chunking") ?? BackupRepository.ChunkingSchemeCdc;
+    using var repo = BackupRepository.Init(pos[0], GetPassphrase(args), chunkSize, volumeSizeBytes: volumeSize, chunkingScheme: chunking);
+    Console.WriteLine($"Initialized repository at {Path.GetFullPath(pos[0])} (chunk size {chunkSize}, chunking {chunking}, volume size {volumeSize}).");
+    return 0;
+}
+
+static int Backup(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup <repo> <source-dir> [--parent <backup-id>] [--backup-privilege] [--vss] [--verify <fast|verify|paranoid>]"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    string? parent = GetOption(args, "--parent");
+    var verifyMode = VerificationModeParser.Parse(GetOption(args, "--verify"));
+    using ISnapshotProvider? snap = CreateSnapshotProvider(args, pos[1]);
+    BackupManifest manifest;
+    try
+    {
+        manifest = parent is null
+            ? repo.BackupDirectory(pos[1], snap)
+            : repo.BackupIncremental(pos[1], parent, snap, verifyMode);
+        // VSS: writer session finalized only after data is safely stored.
+        if (snap is FileKeep.Core.Recovery.VssSnapshot vss)
+            vss.Complete();
+    }
+    catch
+    {
+        // VssSnapshot.Dispose aborts the writer session fail-safe;
+        // explicit abort here is unnecessary.
+        throw;
+    }
+    Console.WriteLine($"{manifest.Type} backup {manifest.BackupId}" +
+        (manifest.ParentId is null ? "" : $" (parent {manifest.ParentId})") +
+        (manifest.Snapshot is null ? "" : $" [snapshot: {manifest.Snapshot}]") +
+        $": {manifest.Files.Count} files, {manifest.Files.Sum(f => f.Chunks.Count)} chunk refs, {repo.StoredChunkCount()} unique chunks stored.");
+    return 0;
+}
+
+/// <summary>
+/// Creates the snapshot provider requested by CLI flags, or null for a
+/// live read. --vss and --backup-privilege are mutually exclusive.
+/// </summary>
+static ISnapshotProvider? CreateSnapshotProvider(string[] args, string sourceDir)
+{
+    bool wantVss = HasFlag(args, "--vss");
+    bool wantPriv = HasFlag(args, "--backup-privilege");
+    if (wantVss && wantPriv)
+        throw new InvalidOperationException("--vss and --backup-privilege are mutually exclusive.");
+    if (wantPriv)
+        return new BackupPrivilegeSnapshotProvider(sourceDir);
+    if (wantVss)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("VSS snapshots require Windows.");
+        string helper = Path.Combine(AppContext.BaseDirectory, "FileKeepVss.exe");
+        string volume = Path.GetPathRoot(Path.GetFullPath(sourceDir))
+            ?? throw new InvalidOperationException($"Cannot determine volume for '{sourceDir}'.");
+        var vss = new FileKeep.Core.Recovery.VssSnapshot(helper);
+        vss.Create(volume, sourceDir);
+        Console.WriteLine($"VSS snapshot created for {volume} (reading via shadow copy).");
+        return vss;
+    }
+    return null;
+}
+
+static int BackupDisk(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: backup-disk <repo> <device> [--image-name NAME]"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    string imageName = GetOption(args, "--image-name") ?? "disk.img";
+    var manifest = repo.BackupDiskImage(pos[1], imageName);
+    Console.WriteLine($"disk-image backup {manifest.BackupId}: {manifest.Files[0].Size} bytes as '{imageName}', " +
+        $"{manifest.Files[0].Chunks.Count} chunks, {repo.StoredChunkCount()} unique chunks stored.");
+    return 0;
+}
+
+static int RestoreDisk(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore-disk <repo> <backup-id> <device> [--yes]"); return 2; }
+    string device = pos[2];
+    if (!HasFlag(args, "--yes"))
+    {
+        // Destructive by design: make the operator prove they mean THIS device.
+        if (Console.IsInputRedirected)
+            throw new InvalidOperationException(
+                "Refusing to overwrite a block device without confirmation: stdin is not " +
+                "interactive. Re-run with --yes to confirm non-interactively.");
+        Console.Error.WriteLine($"WARNING: this will OVERWRITE {device} with the contents of backup {pos[1]}.");
+        Console.Error.WriteLine("All existing data on that device will be destroyed.");
+        Console.Write($"Type the device path exactly to confirm: ");
+        string? typed = Console.ReadLine();
+        if (!string.Equals(typed?.Trim(), device, StringComparison.Ordinal))
+            throw new InvalidOperationException("Confirmation did not match; restore aborted.");
+    }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    repo.RestoreDiskImage(pos[1], device);
+    Console.WriteLine($"Restored disk image {pos[1]} to {device}.");
+    return 0;
+}
+
+static int Restore(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 3) { Console.Error.WriteLine("error: restore <repo> <backup-id> <dest-dir> [--include <glob>]... [--exclude <glob>]... [--merge-policy <skip|overwrite|newer>] [--merge]"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    var options = new FileKeep.Core.RestoreOptions();
+    options.Include.AddRange(GetOptions(args, "--include"));
+    options.Exclude.AddRange(GetOptions(args, "--exclude"));
+    // What to do when a file already exists in the destination. --merge is
+    // shorthand for --merge-policy skip.
+    string? policyArg = GetOption(args, "--merge-policy");
+    if (policyArg is not null)
+    {
+        if (!FileKeep.Core.MergePolicyInfo.TryParse(policyArg, out var policy))
+        {
+            Console.Error.WriteLine("error: --merge-policy must be one of: skip, overwrite, newer");
+            Console.Error.WriteLine("  skip      - " + FileKeep.Core.MergePolicyInfo.Description(FileKeep.Core.MergePolicy.SkipDiffering));
+            Console.Error.WriteLine("  overwrite - " + FileKeep.Core.MergePolicyInfo.Description(FileKeep.Core.MergePolicy.Overwrite));
+            Console.Error.WriteLine("  newer     - " + FileKeep.Core.MergePolicyInfo.Description(FileKeep.Core.MergePolicy.KeepNewer));
+            return 2;
+        }
+        options.MergePolicy = policy;
+    }
+    else if (HasFlag(args, "--merge"))
+    {
+        options.MergePolicy = FileKeep.Core.MergePolicy.SkipDiffering;
+    }
+    var result = repo.Restore(pos[1], pos[2], options);
+    Console.WriteLine($"Restored backup {pos[1]} to {Path.GetFullPath(pos[2])}.");
+    if (options.MergePolicy != FileKeep.Core.MergePolicy.Overwrite ||
+        options.Include.Count > 0 || options.Exclude.Count > 0)
+    {
+        Console.WriteLine($"  files restored: {result.RestoredFiles}, " +
+            $"skipped identical: {result.SkippedIdentical}, " +
+            $"skipped differing: {result.SkippedDiffering.Count}");
+        foreach (string skipped in result.SkippedDiffering)
+            Console.WriteLine($"  skipped (differs): {skipped}");
+    }
+    return 0;
+}
+
+static int Verify(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: verify <repo> <backup-id>"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    var errors = repo.Verify(pos[1]);
+    if (errors.Count == 0)
+    {
+        Console.WriteLine($"Backup {pos[1]} verified OK.");
+        return 0;
+    }
+    foreach (var e in errors)
+        Console.Error.WriteLine($"verify failed: {e}");
+    return 1;
+}
+
+static int List(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: list <repo>"); return 2; }
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    foreach (var b in repo.ListBackups())
+        Console.WriteLine($"{b.BackupId}  {b.Type,-4}  {b.CreatedUtc:O}  {b.Source}");
+    return 0;
+}
+
+static string GetNntpPassword(string[] args)
+{
+    string? fromArg = GetOption(args, "--password");
+    if (!string.IsNullOrEmpty(fromArg))
+    {
+        WarnSecretOnCommandLine("--password", "FILEKEEP_NNTP_PASSWORD");
+        return fromArg;
+    }
+    string? fromEnv = Environment.GetEnvironmentVariable("FILEKEEP_NNTP_PASSWORD");
+    if (!string.IsNullOrEmpty(fromEnv))
+        return fromEnv;
+    return PromptInteractive("NNTP password: ", "--password", "FILEKEEP_NNTP_PASSWORD");
+}
+
+static NntpClient ConnectNntp(string[] args)
+{
+    string? host = GetOption(args, "--host");
+    if (string.IsNullOrEmpty(host))
+        throw new InvalidOperationException("--host is required.");
+    bool ssl = args.Contains("--ssl");
+    int port = ParseIntOption(args, "--port", ssl ? 563 : 119);
+
+    var client = new NntpClient(host, port, ssl);
+    try
+    {
+        client.Connect();
+        string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
+        if (!string.IsNullOrEmpty(user))
+            client.Authenticate(user, GetNntpPassword(args));
+        return client;
+    }
+    catch
+    {
+        client.Dispose();
+        throw;
+    }
+}
+
+static int NntpCheck(string[] args)
+{
+    if (HasFlag(args, "--diagnose"))
+        return NntpDiagnose(args);
+    string? probeSize = GetOption(args, "--probe-post-size");
+    if (probeSize is not null)
+        return NntpProbePostSize(args, probeSize);
+
+    using var client = ConnectNntp(args);
+    Console.WriteLine($"Connected: {client.Greeting}");
+    client.Quit();
+    Console.WriteLine("NNTP check OK.");
+    return 0;
+}
+
+/// <summary>
+/// Posts a single probe article of the given size (in MB) to find the
+/// provider's maximum accepted article size — the upper bound for
+/// volume_size_bytes. Opt-in: the probe article permanently lands in the
+/// newsgroup.
+/// Use "auto" to binary-search the ceiling automatically (1 MB .. 256 MB).
+/// </summary>
+static int NntpProbePostSize(string[] args, string sizeArg)
+{
+    if (sizeArg.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        return NntpProbePostSizeAuto(args);
+    if (!double.TryParse(sizeArg, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double mb) ||
+        mb <= 0 || mb > 1024)
+    {
+        Console.Error.WriteLine("error: --probe-post-size needs a size in MB (0 < MB <= 1024) or 'auto'");
+        return 2;
+    }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    long bytes = (long)(mb * 1024 * 1024);
+    Console.WriteLine($"Posting a {mb} MB probe article to {newsgroup} " +
+        "(it will permanently land in the group)...");
+
+    byte[] payload = new byte[bytes];
+    Random.Shared.NextBytes(payload);
+    string probeArticle = FileKeep.Core.Nntp.ArticleCodec.BuildProbeArticle(
+        payload, newsgroup, "poster", out string probeMessageId);
+
+    using var client = ConnectNntp(args);
+    try
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        client.Post(probeArticle);
+        sw.Stop();
+        bool retrievable = client.Stat(probeMessageId);
+        client.Quit();
+        Console.WriteLine($"POST accepted in {sw.Elapsed.TotalSeconds:F1}s; " +
+            $"article {(retrievable ? "is retrievable" : "not yet visible via STAT")}.");
+        Console.WriteLine($"The provider accepts articles of at least {mb} MB.");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"POST failed: {ex.Message}");
+        Console.Error.WriteLine($"The provider does NOT accept {mb} MB articles — " +
+            "use a smaller volume_size_bytes in repo.json.");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Binary-searches the provider's maximum accepted article size: probes
+/// 1 MB .. 256 MB, keeping the largest accepted size. Each probe posts a
+/// real article (they permanently land in the newsgroup), so this sends
+/// ~8 probe articles total. Prints the ceiling and a suggested
+/// volume_size_bytes (ceiling with a 10% safety margin).
+/// </summary>
+static int NntpProbePostSizeAuto(string[] args)
+{
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    Console.WriteLine($"Binary-searching max article size on {newsgroup} " +
+        "(~8 probe articles will permanently land in the group)...");
+
+    long loBytes = 1L * 1024 * 1024;      // known good floor
+    long hiBytes = 256L * 1024 * 1024;    // search ceiling
+
+    // First verify the floor is accepted at all.
+    if (!TryPostProbe(args, newsgroup, loBytes, quiet: true))
+    {
+        Console.Error.WriteLine("Even 1 MB probes are rejected — the provider or " +
+            "credentials may be wrong. Fix connectivity first (nntp-check --diagnose).");
+        return 1;
+    }
+
+    // If the ceiling itself is accepted, that IS the answer (or higher).
+    if (TryPostProbe(args, newsgroup, hiBytes, quiet: true))
+    {
+        Console.WriteLine($"Provider accepts at least {hiBytes / (1024 * 1024)} MB articles.");
+        Console.WriteLine("Suggested volume_size_bytes: 268435456 (256 MiB).");
+        return 0;
+    }
+
+    // Binary search: lo accepted, hi rejected.
+    while (hiBytes - loBytes > 1L * 1024 * 1024)
+    {
+        long mid = (loBytes + hiBytes) / 2;
+        // Round to whole MB for clean reporting.
+        mid = (mid / (1024 * 1024)) * (1024 * 1024);
+        if (mid <= loBytes) break;
+        Console.WriteLine($"  trying {mid / (1024 * 1024)} MB...");
+        if (TryPostProbe(args, newsgroup, mid, quiet: true))
+            loBytes = mid;
+        else
+            hiBytes = mid;
+    }
+
+    long maxMb = loBytes / (1024 * 1024);
+    long suggested = (long)(loBytes * 0.9); // 10% safety margin
+    Console.WriteLine($"\nProvider max article size: ~{maxMb} MB.");
+    Console.WriteLine($"Suggested volume_size_bytes: {suggested} " +
+        $"({suggested / (1024.0 * 1024):F1} MiB, 10% safety margin).");
+    return 0;
+}
+
+/// <summary>
+/// Posts one probe article of exactly <paramref name="bytes"/> and returns
+/// true if the server accepted it. Quiet mode suppresses per-probe output.
+/// </summary>
+static bool TryPostProbe(string[] args, string newsgroup, long bytes, bool quiet, string from = "poster")
+{
+    byte[] payload = new byte[bytes];
+    Random.Shared.NextBytes(payload);
+    string article = FileKeep.Core.Nntp.ArticleCodec.BuildProbeArticle(
+        payload, newsgroup, from, out _);
+
+    try
+    {
+        using var client = ConnectNntp(args);
+        client.Post(article);
+        client.Quit();
+        return true;
+    }
+    catch (Exception ex)
+    {
+        if (!quiet)
+            Console.WriteLine($"Probe of {bytes} bytes failed: {ex.Message}");
+        return false;
+    }
+}
+
+/// <summary>
+/// Upload preflight: builds the largest planned volume, measures the exact
+/// posted article size, and proves the provider accepts it before any real
+/// data is posted. Uses the cached per-provider limit when known; otherwise
+/// posts a single probe article at the planned size. Throws (aborting the
+/// upload) with a clear message if the provider rejects the size.
+/// </summary>
+static void PreflightVolumeSize(
+    FileKeep.Core.BackupRepository repo,
+    System.Collections.Generic.IReadOnlyList<System.Collections.Generic.IReadOnlyList<string>> groups,
+    string[] args,
+    string newsgroup)
+{
+    if (groups.Count == 0)
+        return;
+    string? host = GetOption(args, "--host");
+    if (string.IsNullOrEmpty(host))
+        return; // --host is validated later by ConnectNntp
+    bool ssl = args.Contains("--ssl");
+    int port = ParseIntOption(args, "--port", ssl ? 563 : 119);
+
+    // Find the largest group by total blob bytes, then build exactly that
+    // volume and measure the real posted article size (yEnc + headers).
+    long maxBlobBytes = 0;
+    System.Collections.Generic.IReadOnlyList<string>? largest = null;
+    foreach (var group in groups)
+    {
+        long total = 0;
+        foreach (string id in group)
+            total += repo.GetChunkBlobSize(id);
+        if (total > maxBlobBytes)
+        {
+            maxBlobBytes = total;
+            largest = group;
+        }
+    }
+    if (largest is null)
+        return;
+    var volume = FileKeep.Core.Nntp.VolumePacker.BuildVolume(largest, repo.GetChunkBlob);
+    // Measure with the real v2 framing (dummy set name keeps the size exact).
+    string poster = GetOption(args, "--poster") ?? repo.GetOrCreatePoster();
+    string article = FileKeep.Core.Nntp.ArticleCodec.BuildVolumeArticle(
+        volume.Id, repo.RepoId, volume.Bytes, newsgroup, poster, "00000000", 2, 2);
+    long articleBytes = article.Length; // yEnc body is ASCII: chars == bytes
+
+    var limits = new FileKeep.Core.Nntp.ProviderLimits(repo.RepoRoot);
+    long? cached = limits.GetMaxArticleBytes(host, port);
+    if (cached.HasValue && cached.Value >= articleBytes)
+    {
+        Console.WriteLine($"Preflight: largest article {articleBytes} bytes within " +
+            $"known {host}:{port} limit ({cached.Value} bytes).");
+        return;
+    }
+    Console.WriteLine($"Preflight: probing {host}:{port} with a {articleBytes}-byte " +
+        "article to verify the upload will succeed...");
+    limits.EnsureCapacity(host, port, articleBytes,
+        size => TryPostProbe(args, newsgroup, size, quiet: false, from: poster));
+    Console.WriteLine("Preflight OK — provider accepts the volume size.");
+}
+
+/// <summary>
+/// Multi-port connectivity diagnostic. Probes the configured provider on
+/// 119 (plain), 563 (TLS) and 443 (plain, HTTPS-camouflage), classifies
+/// each failure (timeout/blocked vs auth vs TLS), and falls back to a
+/// free no-signup server to distinguish ISP-level blocking from a
+/// provider/account problem.
+/// </summary>
+static int NntpDiagnose(string[] args)
+{
+    string? host = GetOption(args, "--host");
+    if (string.IsNullOrEmpty(host))
+    {
+        Console.Error.WriteLine("error: nntp-check --diagnose requires --host HOST");
+        return 2;
+    }
+    string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
+    string? password = string.IsNullOrEmpty(user) ? null : GetNntpPassword(args);
+
+    var probes = new (int Port, bool Ssl, string Label)[]
+    {
+        (119, false, "119/plain"),
+        (563, true, "563/TLS"),
+        (443, false, "443/plain"),
+    };
+
+    Console.WriteLine($"Diagnosing NNTP connectivity to {host}...");
+    int okCount = 0;
+    foreach (var (port, ssl, label) in probes)
+    {
+        string result = ProbeNntp(host, port, ssl, user, password);
+        Console.WriteLine($"  port {label}: {result}");
+        if (result.StartsWith("OK", StringComparison.Ordinal))
+            okCount++;
+    }
+
+    if (okCount > 0)
+    {
+        Console.WriteLine($"\n{host} is reachable ({okCount}/3 ports). Use --ssl (port 563) " +
+            "if your ISP interferes with plaintext NNTP on 119.");
+        return 0;
+    }
+
+    // All provider ports failed — differential diagnosis via free server.
+    Console.WriteLine($"\nAll ports failed for {host}. Probing free no-signup server " +
+        $"{DiagnoseFallbackHost}:119 to check whether NNTP is blocked entirely...");
+    string fallback = ProbeNntp(DiagnoseFallbackHost, 119, ssl: false, user: null, password: null);
+    Console.WriteLine($"  fallback {DiagnoseFallbackHost}:119: {fallback}");
+
+    if (fallback.StartsWith("OK", StringComparison.Ordinal))
+    {
+        Console.WriteLine("\nDiagnosis: your network CAN reach NNTP (fallback server answered), " +
+            $"so the problem is specific to {host}: wrong hostname, account issue, " +
+            "or the provider blocking your IP. Check credentials and try their " +
+            "alternate ports/hostnames.");
+    }
+    else
+    {
+        Console.WriteLine("\nDiagnosis: no NNTP server is reachable, including the free fallback. " +
+            "Your ISP or firewall is likely blocking NNTP traffic. Mitigations: " +
+            "use NNTPS on port 563 (encrypted, harder to filter), try port 443, " +
+            "or route NNTP through a VPN.");
+    }
+    return 1;
+}
+
+/// <summary>
+/// Single NNTP probe: connect, read greeting, optionally authenticate.
+/// Returns a short classified result string starting with "OK" on success.
+/// Never throws.
+/// </summary>
+static string ProbeNntp(string host, int port, bool ssl, string? user, string? password)
+{
+    try
+    {
+        using var client = new NntpClient(host, port, ssl);
+        client.Connect();
+        string greeting = client.Greeting ?? "";
+        if (!string.IsNullOrEmpty(user))
+        {
+            try
+            {
+                client.Authenticate(user, password ?? "");
+            }
+            catch (Exception ex)
+            {
+                return $"AUTH FAILED ({ClassifyAuthError(ex)})";
+            }
+        }
+        try { client.Quit(); } catch { /* best effort */ }
+        return $"OK ({Truncate(greeting, 60)})";
+    }
+    catch (Exception ex)
+    {
+        return ClassifyConnectError(ex);
+    }
+}
+
+static string ClassifyConnectError(Exception ex)
+{
+    string msg = ex.Message ?? "";
+    // Timeout or refused = nothing listening / packets dropped (ISP block, firewall, wrong host)
+    if (ex is TimeoutException || msg.Contains("Timed out", StringComparison.OrdinalIgnoreCase))
+        return "BLOCKED/TIMEOUT (no response — ISP or firewall may be filtering this port)";
+    if (msg.Contains("refused", StringComparison.OrdinalIgnoreCase))
+        return "CONNECTION REFUSED (host reachable, port closed)";
+    if (ex is System.Security.Authentication.AuthenticationException || msg.Contains("TLS", StringComparison.OrdinalIgnoreCase) || msg.Contains("SSL", StringComparison.OrdinalIgnoreCase))
+        return $"TLS FAILED ({Truncate(msg, 80)})";
+    if (msg.Contains("No such host", StringComparison.OrdinalIgnoreCase) || msg.Contains("nodename nor servname", StringComparison.OrdinalIgnoreCase))
+        return "DNS FAILED (hostname does not resolve)";
+    return $"FAILED ({Truncate(msg, 80)})";
+}
+
+static string ClassifyAuthError(Exception ex)
+{
+    string msg = ex.Message ?? "";
+    if (msg.Contains("502", StringComparison.Ordinal))
+        return "server rejected credentials (502 — wrong username/password or IP-blocked account)";
+    return Truncate(msg, 80);
+}
+
+static string Truncate(string s, int max) =>
+    s.Length <= max ? s : s[..max] + "…";
+
+static int NntpUpload(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: nntp-upload <repo> <backup-id> --host HOST [...]"); return 2; }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    bool noVolumes = HasFlag(args, "--no-volumes");
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    var manifest = repo.LoadManifest(pos[1]);
+    // Poster identity: explicit --poster wins for the run; otherwise the
+    // repo's stable pseudonym (generated once, never advertises the software).
+    string poster = GetOption(args, "--poster") ?? repo.GetOrCreatePoster();
+    // Chunk order MUST use ChunkOrdering for parity group alignment (see b1921c8)
+    string[] chunkIds = FileKeep.Core.ChunkOrdering.GetOrderedChunkIds(manifest);
+
+    // Packing mode and volume size are sticky per backup (see
+    // BackupRepository.ResolveVolumeMode): flips are refused loudly rather
+    // than silently breaking the upload/download contract.
+    bool useVolumes = repo.ResolveVolumeMode(manifest, chunkIds, forceChunkMode: noVolumes, out string? refusal);
+    if (refusal is not null)
+    {
+        Console.Error.WriteLine($"error: {refusal}");
+        return 2;
+    }
+    if (manifest.Volumes is { Count: > 0 } && (noVolumes || !repo.UseVolumes))
+        Console.WriteLine("note: backup was uploaded with volume packing; volume mode forced " +
+            "(--no-volumes / use_volumes=false ignored for this backup).");
+
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: FileKeep.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            from: poster, indexAuth: repo.IndexAuth);
+        store.MaxArticleBytes = repo.MaxDownloadBytes;
+        int uploaded = 0, skipped = 0;
+        if (useVolumes)
+        {
+            // Pack chunks into volumes (one Usenet article each), streaming
+            // one volume at a time so memory stays flat for large backups.
+            var groups = repo.PlanVolumes(manifest);
+            // Preflight: prove the provider accepts our largest article
+            // BEFORE posting anything. Uses the cached per-provider limit
+            // when known; otherwise posts one probe article at the planned
+            // size. Aborts the upload if the probe is rejected.
+            PreflightVolumeSize(repo, groups, args, newsgroup);
+            // The post set reads as an ordinary multi-part binary post:
+            // part 1 is the NFO, parts 2..n+1 are the RAR-named volumes.
+            string setName = FileKeep.Core.Nntp.ArticleCodec.SetName(manifest.BackupId);
+            int totalParts = groups.Count + 1;
+            string nfoText = FileKeep.Core.Nntp.ArticleCodec.BuildNfoText(
+                manifest.BackupId,
+                manifest.CreatedUtc.ToString("yyyy-MM-dd"),
+                groups.Count,
+                poster);
+            store.PostNfo(manifest.BackupId, nfoText, setName, totalParts);
+            Console.WriteLine("  NFO posted (part 1 of " + totalParts + ").");
+            var volumeEntries = new List<VolumeEntry>(groups.Count);
+            for (int i = 0; i < groups.Count; i++)
+            {
+                var volume = VolumePacker.BuildVolume(groups[i], repo.GetChunkBlob);
+                if (store.Exists(volume.Id))
+                {
+                    skipped++;
+                }
+                else
+                {
+                    store.PutVolume(volume.Id, volume.Bytes, setName, i + 2, totalParts);
+                    uploaded++;
+                }
+                volumeEntries.Add(new VolumeEntry
+                {
+                    Id = volume.Id,
+                    ChunkIds = volume.ChunkIds.ToList(),
+                    SizeBytes = volume.Bytes.Length,
+                });
+                if ((i + 1) % 10 == 0 || i + 1 == groups.Count)
+                    Console.WriteLine($"  {i + 1}/{groups.Count} volumes processed ({uploaded} uploaded, {skipped} already present)");
+            }
+            // Record the packing in the manifest BEFORE the manifest itself is
+            // uploaded — the NZB and download paths both read it from there.
+            // (Mode is sticky per backup, so this only ever writes once.)
+            if (manifest.Volumes is null)
+            {
+                manifest.Volumes = volumeEntries;
+                manifest.VolumeSize = repo.VolumeSizeBytes;
+                repo.SaveManifest(manifest);
+            }
+            OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
+                $"id={manifest.BackupId} chunks={chunkIds.Length} volumes={groups.Count} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+            Console.WriteLine($"Upload complete: {uploaded} volumes posted, {skipped} already present.");
+        }
+        else
+        {
+            for (int i = 0; i < chunkIds.Length; i++)
+            {
+                if (store.Exists(chunkIds[i]))
+                {
+                    skipped++;
+                }
+                else
+                {
+                    store.Put(chunkIds[i], repo.GetChunkBlob(chunkIds[i]));
+                    uploaded++;
+                }
+                if ((i + 1) % 25 == 0 || i + 1 == chunkIds.Length)
+                    Console.WriteLine($"  {i + 1}/{chunkIds.Length} chunks processed ({uploaded} uploaded, {skipped} already present)");
+            }
+            OperationLog.Append(Path.GetFullPath(pos[0]), "nntp-upload",
+                $"id={manifest.BackupId} chunks={chunkIds.Length} uploaded={uploaded} skipped={skipped} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+            Console.WriteLine($"Upload complete: {uploaded} posted, {skipped} already present.");
+        }
+        // Upload the encrypted manifest so the USB recovery wizard can
+        // discover backups newer than the stick.
+        repo.UploadManifest(manifest.BackupId, store);
+        Console.WriteLine("Manifest uploaded (encrypted).");
+        return 0;
+    }
+    finally
+    {
+        client.Quit();
+    }
+}
+
+/// <summary>
+/// Lists backups whose encrypted manifests exist on Usenet but not locally.
+/// Used by the USB recovery wizard to find backups newer than the stick.
+/// </summary>
+static int ManifestDiscover(string[] args)
+{
+    var pos = args.Where(a => !a.StartsWith('-')).ToArray();
+    if (pos.Length < 1) { Console.Error.WriteLine("error: manifest-discover <repo> --host HOST [...]"); return 2; }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var store = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: FileKeep.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            indexAuth: repo.IndexAuth);
+        store.MaxArticleBytes = repo.MaxDownloadBytes;
+        // Use the monthly index (STAT probes) instead of LISTGROUP, which is
+        // infeasible on large groups (e.g., alt.binaries.test has billions).
+        var found = repo.DiscoverRemoteManifestsViaIndex(store);
+        if (found.Count == 0)
+        {
+            Console.WriteLine("No remote manifests newer than local.");
+        }
+        else
+        {
+            foreach (var m in found)
+                Console.WriteLine($"{m.BackupId}  type={m.Manifest.Type}  created={m.Manifest.CreatedUtc:u}  files={m.Manifest.Files.Count}");
+        }
+        return 0;
+    }
+    finally
+    {
+        client.Quit();
+    }
+}
+
+static int NzbGenerate(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 3)
+    {
+        Console.Error.WriteLine("error: nzb-generate <repo> <backup-id> <output.nzb> [--newsgroup GROUP] [--poster POSTER] [--provider-host HOST]");
+        return 2;
+    }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+    // P2-D16: with a provider host, NZB dates come from THAT provider's
+    // journal only (another provider's rows say nothing about the
+    // articles this NZB describes). Without one, dates fall back to
+    // any-provider (informational only).
+    string? providerHost = GetOption(args, "--provider-host");
+    string? providerKey = providerHost is null ? null :
+        FileKeep.Core.Nntp.ChunkMessageIndex.MakeProviderKey(providerHost, newsgroup);
+    string poster = GetOption(args, "--poster") ?? "poster";
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    var manifest = repo.LoadManifest(pos[1]);
+    using var catalog = new Catalog(repo.CatalogPath);
+
+    // Volume mode: rebuild packed volume bytes deterministically from local
+    // chunk blobs (same packing => same bytes => same volume IDs).
+    Dictionary<string, IReadOnlyList<string>>? volumeGroups = null;
+    if (manifest.Volumes is { Count: > 0 })
+        volumeGroups = manifest.Volumes.ToDictionary(
+            v => v.Id, v => (IReadOnlyList<string>)v.ChunkIds);
+
+    int notUploaded = 0;
+    string xml = NzbGenerator.Generate(
+        manifest,
+        chunkId => repo.GetChunkBlob(chunkId),
+        id =>
+        {
+            var t = catalog.GetUploadTimeUtc(id, providerKey);
+            if (t is null)
+                notUploaded++;
+            return t;
+        },
+        new NzbGenerator.Options(newsgroup, poster, repo.RepoId),
+        getVolumeBlob: volumeGroups is null
+            ? null
+            : volId => VolumePacker.BuildVolume(volumeGroups[volId], repo.GetChunkBlob).Bytes);
+
+    File.WriteAllText(pos[2], xml, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+    int chunkCount = manifest.Files.SelectMany(f => f.Chunks).Distinct().Count();
+    int volumeCount = manifest.Volumes?.Count ?? 0;
+    OperationLog.Append(Path.GetFullPath(pos[0]), "nzb-generate",
+        $"id={manifest.BackupId} chunks={chunkCount} volumes={volumeCount} output={pos[2]} newsgroup={newsgroup}");
+    string unit = volumeCount > 0 ? "volumes" : "chunks";
+    int unitCount = volumeCount > 0 ? volumeCount : chunkCount;
+    if (notUploaded > 0)
+        Console.WriteLine($"warning: {notUploaded}/{unitCount} {unit} have no upload journal record — run nntp-upload first.");
+    Console.WriteLine($"NZB written to {pos[2]} ({unitCount} {unit}).");
+    return 0;
+}
+
+static int Download(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 2) { Console.Error.WriteLine("error: download <repo> <nzb-file> --host HOST [...]"); return 2; }
+    string newsgroup = GetOption(args, "--newsgroup") ?? "alt.binaries.test";
+
+    NzbDocument nzb;
+    try
+    {
+        nzb = NzbParser.ParseFile(pos[1]);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: cannot parse NZB '{pos[1]}': {ex.Message}");
+        return 2;
+    }
+    if (nzb.Files.Count == 0)
+    {
+        Console.Error.WriteLine($"error: NZB '{pos[1]}' contains no files.");
+        return 2;
+    }
+    Console.WriteLine($"NZB references {nzb.Files.Count} {(nzb.IsVolumeNzb ? "volume(s)" : "chunk(s)")}" +
+        (nzb.BackupId is null ? "" : $" (backup {nzb.BackupId})") + ".");
+
+    using var repo = BackupRepository.Open(pos[0], GetPassphrase(args));
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var remote = new NntpBlobStore(client, newsgroup, repo.RepoId, repo.CatalogPath, messageIndex: repo.MessageIndex,
+            providerKey: FileKeep.Core.Nntp.ChunkMessageIndex.MakeProviderKey(GetOption(args, "--host")!, newsgroup),
+            indexAuth: repo.IndexAuth);
+        // Volume articles are volume-sized, not chunk-sized.
+        remote.MaxArticleBytes = Math.Max(repo.MaxDownloadBytes, repo.VolumeSizeBytes * 2);
+        // Fetch the latest published message-identity index before
+        // downloading. A retention refresh may have republished articles
+        // under new IDs; without this, stale IDs would be requested.
+        // Throws an explicit recovery error if an index was published but
+        // cannot be retrieved or parsed — never silently falls back.
+        remote.SyncMessageIndex(repo.MessageIndex);
+        string unit = nzb.IsVolumeNzb ? "volume" : "chunk";
+        DownloadResult result = repo.DownloadNzb(nzb, remote, (done, total) =>
+        {
+            if (done % 25 == 0 || done == total)
+                Console.WriteLine($"  {done}/{total} {unit}s processed");
+        });
+        OperationLog.Append(Path.GetFullPath(pos[0]), "download",
+            $"nzb={pos[1]} chunks={result.Total} downloaded={result.Downloaded} already_present={result.AlreadyPresent} host={GetOption(args, "--host")} newsgroup={newsgroup}");
+        Console.WriteLine($"Download complete: {result.Downloaded} fetched, {result.AlreadyPresent} already present.");
+        return 0;
+    }
+    finally
+    {
+        client.Quit();
+    }
+}
+
+/// <summary>
+/// Serves a repo's chunks over HTTP for LAN restores.
+/// Usage: FileKeep serve &lt;repo&gt; [--port PORT] [--bind ADDR]
+/// Endpoints: GET/HEAD /chunks/{id}, POST /chunks/{id}, GET /count
+/// </summary>
+/// <summary>
+/// Checks Usenet upload expiration status.
+/// Usage: FileKeep expiration-check &lt;repo&gt; [--warn-days DAYS] [--retention-days DAYS]
+/// Lists backups whose Usenet copies are expired or expiring soon.
+/// </summary>
+static int ExpirationCheck(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: expiration-check <repo> [--warn-days DAYS]"); return 2; }
+    string repoPath = Path.GetFullPath(pos[0]);
+    int warnDays = ParseIntOption(args, "--warn-days", 90);
+    int defaultRetention = ParseIntOption(args, "--retention-days", 1095);
+
+    // Build per-provider retention map from service config if provided.
+    // Otherwise fall back to the default for all hosts.
+    var retentionByHost = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    string? configPath = GetOption(args, "--config");
+    if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
+    {
+        try
+        {
+            var svcConfig = FileKeep.Core.Service.ServiceConfig.Load(configPath);
+            if (svcConfig.Nntp is not null && !string.IsNullOrWhiteSpace(svcConfig.Nntp.Host))
+                retentionByHost[svcConfig.Nntp.Host] = svcConfig.Nntp.RetentionDays;
+            foreach (var p in svcConfig.NntpProviders)
+            {
+                if (!string.IsNullOrWhiteSpace(p.Host))
+                    retentionByHost[p.Host] = p.RetentionDays;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"warning: could not load service config '{configPath}': {ex.Message}");
+        }
+    }
+
+    int GetRetention(string host) =>
+        retentionByHost.TryGetValue(host, out int days) ? days : defaultRetention;
+
+    var tracker = new FileKeep.Core.Nntp.UsenetUploadTracker(repoPath);
+    var expiring = tracker.GetExpiring(GetRetention, warnDays);
+
+    if (expiring.Count == 0)
+    {
+        Console.WriteLine($"No Usenet uploads expiring within {warnDays} days.");
+        return 0;
+    }
+
+    Console.WriteLine($"Usenet uploads expiring within {warnDays} days:");
+    foreach (var (record, expires, daysLeft) in expiring)
+    {
+        int retention = GetRetention(record.ProviderHost);
+        string status = daysLeft < 0 ? "EXPIRED" : $"{daysLeft}d left";
+        Console.WriteLine($"  {record.BackupId[..8]}…  {record.ProviderHost}  uploaded {record.UploadedUtc:u}  expires {expires:u}  (retention {retention}d)  [{status}]");
+    }
+    return expiring.Any(x => x.DaysLeft < 0) ? 1 : 0;
+}
+
+static int RetentionCheck(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: retention-check <repo> [--warn-days DAYS] [--repost-threshold DAYS] [--dry-run]"); return 2; }
+    string repoPath = Path.GetFullPath(pos[0]);
+    int warnDays = ParseIntOption(args, "--warn-days", 90);
+    int repostThreshold = ParseIntOption(args, "--repost-threshold", 30);
+    bool dryRun = HasFlag(args, "--dry-run");
+
+    using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
+
+    // Build NNTP config from service config or args
+    string? configPath = GetOption(args, "--config");
+    FileKeep.Core.Service.NntpConfig? nntp = null;
+    if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
+    {
+        var svcConfig = FileKeep.Core.Service.ServiceConfig.Load(configPath);
+        nntp = svcConfig.Nntp;
+    }
+    if (nntp is null)
+    {
+        Console.Error.WriteLine("error: --config with NNTP settings is required");
+        return 2;
+    }
+
+    int GetRetention(string host) =>
+        string.Equals(host, nntp.Host, StringComparison.OrdinalIgnoreCase)
+            ? nntp.RetentionDays : 1095;
+
+    var manager = new FileKeep.Core.Nntp.RetentionManager(
+        msg => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}"),
+        GetRetention);
+
+    using var client = ConnectNntp(args);
+    try
+    {
+        using var remote = new FileKeep.Core.Nntp.NntpBlobStore(
+            client, nntp.Newsgroup, repo.RepoId, repo.CatalogPath,
+            messageIndex: repo.MessageIndex,
+            providerKey: FileKeep.Core.Nntp.ChunkMessageIndex.MakeProviderKey(nntp.Host, nntp.Newsgroup),
+            indexAuth: repo.IndexAuth);
+
+        if (dryRun)
+        {
+            Console.WriteLine("DRY RUN — no articles will be reposted, no indexes updated, no timestamps advanced");
+        }
+
+        // Single-provider command: only records for the configured host are
+        // processed through this connection. Records from other providers
+        // fail visibly instead of being checked through the wrong server.
+        var report = manager.CheckAndRepost(repo,
+            record => string.Equals(record.ProviderHost, nntp.Host, StringComparison.OrdinalIgnoreCase)
+                ? remote
+                : throw new InvalidOperationException(
+                    $"Backup {record.BackupId} was uploaded via '{record.ProviderHost}', " +
+                    $"but this retention-check targets '{nntp.Host}'. Run retention-check " +
+                    "against the original provider, or use the service scheduler which " +
+                    "checks each provider through its own connection."),
+            warnDays, repostThreshold, dryRun: dryRun);
+
+        Console.WriteLine($"\nRetention check complete:");
+        Console.WriteLine($"  Backups checked: {report.BackupsChecked}");
+        Console.WriteLine($"  Healthy: {report.BackupsHealthy}");
+        Console.WriteLine($"  Refreshed: {report.BackupsRefreshed}");
+        Console.WriteLine($"  Articles checked: {report.ArticlesChecked}");
+        Console.WriteLine($"  Articles missing: {report.ArticlesMissing}");
+        Console.WriteLine($"  Articles republished: {report.ArticlesRepublished}");
+        if (report.Errors.Count > 0)
+        {
+            Console.WriteLine($"  Errors: {report.Errors.Count}");
+            foreach (var err in report.Errors)
+                Console.WriteLine($"    - {err}");
+        }
+
+        return report.Errors.Count > 0 ? 1 : 0;
+    }
+    finally
+    {
+        client.Dispose();
+    }
+}
+
+
+/// <summary>
+/// Syncs a local repository to an SMB network share:
+/// FileKeep smb-sync &lt;repo&gt; --share \\server\share\path [--user USER]
+/// Copies chunks (content-addressed, skipped if present), manifests, and
+/// repo.json. Idempotent and resumable. The password comes from --password,
+/// FILEKEEP_SMB_PASSWORD, or an interactive prompt (never stored).
+/// </summary>
+static int SmbSyncCommand(string[] args)
+{
+    var pos = Positionals(args);
+    if (pos.Length < 1) { Console.Error.WriteLine("error: smb-sync <repo> --share \\\\server\\share [--user USER]"); return 2; }
+    string? share = GetOption(args, "--share");
+    if (string.IsNullOrWhiteSpace(share)) { Console.Error.WriteLine("error: --share \\\\server\\share\\path is required."); return 2; }
+    string? user = GetOption(args, "--user") ?? GetOption(args, "--username");
+    string? password = null;
+    if (!string.IsNullOrEmpty(user))
+    {
+        string? fromArg = GetOption(args, "--password");
+        if (!string.IsNullOrEmpty(fromArg))
+        {
+            WarnSecretOnCommandLine("--password", "FILEKEEP_SMB_PASSWORD");
+            password = fromArg;
+        }
+        else
+        {
+            password = Environment.GetEnvironmentVariable("FILEKEEP_SMB_PASSWORD");
+            if (string.IsNullOrEmpty(password))
+                password = PromptInteractive("SMB password: ", "--password", "FILEKEEP_SMB_PASSWORD");
+        }
+    }
+
+    string repoRoot = Path.GetFullPath(pos[0]);
+    Console.WriteLine($"Connecting to {share}...");
+    using var smb = FileKeep.Core.SmbShare.Connect(share, user, password);
+    Console.WriteLine($"Connected. Syncing {repoRoot}...");
+    var sync = new FileKeep.Core.SmbSync(msg => Console.WriteLine(msg));
+    int lastPct = -1;
+    var result = sync.Sync(repoRoot, smb, (done, total) =>
+    {
+        if (total == 0) return;
+        int pct = done * 100 / total;
+        if (pct != lastPct)
+        {
+            lastPct = pct;
+            Console.Write($"\r  {pct}% ({done}/{total} files)");
+        }
+    });
+    Console.WriteLine($"\nDone: {result.ChunksCopied} chunks + {result.ManifestsCopied} manifests copied " +
+        $"({result.ChunksSkipped + result.ManifestsSkipped} already present).");
+    return 0;
+}

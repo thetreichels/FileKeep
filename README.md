@@ -41,14 +41,14 @@ The installer registers the `FileKeep` service (starts on first boot) and otherw
 
 ```powershell
 # 1. Create a repository (passphrase via env var — never on the command line)
-$env:USENETBACKUP_PASSPHRASE = "your-passphrase"
+$env:FILEKEEP_PASSPHRASE = "your-passphrase"
 FileKeep.exe init C:\backups\repo
 
 # 2. Back up a directory (incremental against the previous backup)
 FileKeep.exe backup C:\backups\repo C:\Users\you\Documents --parent <previous-backup-id>
 
 # 3. Upload to Usenet
-$env:USENETBACKUP_NNTP_PASSWORD = "your-nntp-password"
+$env:FILEKEEP_NNTP_PASSWORD = "your-nntp-password"
 FileKeep.exe nntp-upload C:\backups\repo <backup-id> --host news.example.com --user youruser
 
 # 4. Generate an NZB index for the backup
@@ -106,7 +106,7 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 
 ## Security model
 
-- **Passphrase handling.** The key is derived at runtime and zeroed on dispose; it is never written to the repository. Prefer the `USENETBACKUP_PASSPHRASE` environment variable or the interactive prompt — `--passphrase` on the command line is visible in the process list (the CLI warns about this).
+- **Passphrase handling.** The key is derived at runtime and zeroed on dispose; it is never written to the repository. Prefer the `FILEKEEP_PASSPHRASE` environment variable or the interactive prompt — `--passphrase` on the command line is visible in the process list (the CLI warns about this).
 - **What's public.** Chunk message-IDs embed the SHA-256 of the plaintext chunk (required for content addressing and dedup). Volume articles embed the SHA-256 of the packed volume bytes instead — still deterministic, so the guess-confirmation caveat applies to volume-packed uploads too. Ciphertext is safe, but anyone with an NZB can confirm guesses about plaintext. Filenames are plaintext in manifests (a v1 tradeoff for independent verifiability). There is no forward secrecy: a compromised passphrase decrypts all past Usenet posts.
 - **Dashboard.** Binds to loopback only. NNTP passwords are stored via Windows DPAPI and never exposed to the UI.
 - **Destructive commands.** `restore-disk` overwrites a block device; it requires typing the device path to confirm (or `--yes` for scripts).

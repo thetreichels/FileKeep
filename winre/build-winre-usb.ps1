@@ -286,9 +286,9 @@ if ($BinaryDir -ne "") {
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { Fail "dotnet SDK not found (source mode requires it)." }
     Push-Location $SourceDir
     try {
-        dotnet publish src/UsenetBackup.Cli/UsenetBackup.Cli.csproj -c Release -r win-x64 --self-contained -o $cliOut
+        dotnet publish src/FileKeep.Cli/FileKeep.Cli.csproj -c Release -r win-x64 --self-contained -o $cliOut
         if ($LASTEXITCODE -ne 0) { Fail "dotnet publish (CLI) failed." }
-        dotnet publish src/UsenetBackup.Recovery/UsenetBackup.Recovery.csproj -c Release -r win-x64 --self-contained -o $wizOut
+        dotnet publish src/FileKeep.Recovery/FileKeep.Recovery.csproj -c Release -r win-x64 --self-contained -o $wizOut
         if ($LASTEXITCODE -ne 0) { Fail "dotnet publish (Recovery) failed." }
     } finally { Pop-Location }
     $srcDocs = Join-Path $SourceDir "docs\RECOVERY.md"
