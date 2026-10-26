@@ -44,7 +44,8 @@ public static partial class DashboardApi
     public static ProtectionProfileResponse GetProtectionProfile(ServiceConfig config) =>
         new()
         {
-            PassphraseEnabled = !config.GeneratedSecretMode && HasConfiguredPassphrase(config),
+            PassphraseEnabled = (!config.GeneratedSecretMode && HasConfiguredPassphrase(config)) ||
+                                HasPassphraseWrap(config),
             YubiKeyEnabled = config.GeneratedSecretMode || config.PassphraseYubiKey,
             PhoneEnabled = config.PhoneAuthEnabled,
             YubiKeyOnly = config.GeneratedSecretMode,
@@ -103,6 +104,19 @@ public static partial class DashboardApi
                                 !string.IsNullOrEmpty(config.PassphraseYubiKeyWrapped);
             if (request.YubiKeyEnabled && !setupPresent)
                 return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
+            // In YubiKey-only mode the passphrase toggle maps to the
+            // added-passphrase wrap, not to a configured passphrase:
+            // on requires a wrap to exist (added via the add endpoint),
+            // off clears it. The YubiKey and the recovery-sheet secret
+            // keep working either way; only this method goes.
+            if (request.PassphraseEnabled && !HasPassphraseWrap(config))
+                return (400, new ErrorDto("No passphrase is added. Add a passphrase first — it wraps the generated secret."));
+            if (!request.PassphraseEnabled && HasPassphraseWrap(config))
+            {
+                config.PassphraseWrapProtected = null;
+                config.PassphraseWrapSaltB64 = null;
+                config.PassphraseWrapIterations = 0;
+            }
         }
         else
         {

@@ -82,6 +82,15 @@ public static partial class DashboardApi
             VerifyCurrentSecretProof(config, proofPassphrase))
             return null;
 
+        // (e): knowledge proof — the added passphrase in YubiKey-only
+        // mode. Unwrapping the passphrase wrap proves the method,
+        // even though the wrapping passphrase is not the root secret
+        // itself. (The typed recovery secret already proves via (a);
+        // this branch covers only the added passphrase.)
+        if (!string.IsNullOrEmpty(proofPassphrase) &&
+            TryUnwrapPassphraseWrap(config, proofPassphrase, out _))
+            return null;
+
         // (c): possession proof — a fresh touch unwraps the stored
         // blob, exactly the mechanism UnlockRestoreSession uses. The
         // unwrapped value is discarded here: this is a proof check,

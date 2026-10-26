@@ -724,6 +724,19 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapPost("/api/security/passphrase-wrap", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
+            var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
+            var (status, payload) = DashboardApi.AddPassphraseWrap(config, configPath, passphrase, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapGet("/api/protection/profile", () =>
         {
             var profile = DashboardApi.GetProtectionProfile(config);

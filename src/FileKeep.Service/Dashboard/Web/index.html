@@ -2365,10 +2365,11 @@ async function refreshRestoreSession() {
     // Phone unlock (MU-15): shown whenever the phone method is enabled
     // and the session is locked.
     if (prow) prow.style.display = (s.phoneEnabled && !s.unlocked) ? '' : 'none';
-    // Typed-passphrase unlock: passphrase mode without YubiKey only
-    // (in YubiKey mode the touch path owns unlocks; in generated mode
-    // the recovery-secret row owns them).
-    if (pprow) pprow.style.display = (s.passphraseEnabled && !s.yubikey && !s.unlocked) ? '' : 'none';
+    // Typed-passphrase unlock: passphrase mode without YubiKey, and
+    // YubiKey-only mode with an added passphrase (the wrap). In
+    // passphrase+YubiKey mode the endpoint refuses, so the row stays
+    // hidden there even though passphraseEnabled is true.
+    if (pprow) pprow.style.display = (s.passphraseEnabled && !s.unlocked && (!s.yubikey || s.passphraseWrap)) ? '' : 'none';
   } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; }
 }
 async function unlockRestoreWithPhone() {
@@ -3957,8 +3958,14 @@ function secValidatePassphraseBlur() {
 async function secSavePassphrase() {
   const p1 = document.getElementById('sec-pp-pass').value;
   if (!secCheckPassphrase()) return false;
+  // YubiKey-only mode: a typed passphrase cannot REPLACE the
+  // generated secret (the server refuses) — it is ADDED as a wrap
+  // around it. The same step, the same proof prompt; only the
+  // endpoint differs, and the added passphrase becomes the proof
+  // later wizard steps send back (the server's gate accepts it).
+  const wrapMode = !!secProfile.yubiKeyOnly;
   try {
-    await api('/api/config/passphrase', {
+    await api(wrapMode ? '/api/security/passphrase-wrap' : '/api/config/passphrase', {
       method: 'POST',
       // When a method already exists this is a CHANGE, so the request
       // carries proof of the current one (prompted if not held); on
@@ -3970,7 +3977,7 @@ async function secSavePassphrase() {
     // the proof later wizard steps (link, profile save) send back.
     secWizardPassphrase = p1;
     secServerHadMethod = true;
-    toast('Passphrase saved.', 'ok');
+    toast(wrapMode ? 'Passphrase added — it unlocks restores alongside your YubiKey.' : 'Passphrase saved.', 'ok');
     document.getElementById('sec-pp-pass').value = '';
     document.getElementById('sec-pp-confirm').value = '';
     // Do NOT secLoadProfile() here: it refetches the server profile, where

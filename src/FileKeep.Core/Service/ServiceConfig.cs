@@ -539,6 +539,36 @@ public sealed class ServiceConfig
     public string? PassphraseYubiKeyWrapped { get; set; }
 
     /// <summary>
+    /// In YubiKey-only (generated-secret) mode, a user-added passphrase
+    /// wraps the generated secret (AES-256-GCM, the same blob format as
+    /// <see cref="PassphraseYubiKeyWrapped"/>) under a PBKDF2-HMAC-SHA512
+    /// KEK derived from the added passphrase — see
+    /// DashboardApi.AddPassphraseWrap. The added passphrase unlocks
+    /// restores and proves security-config changes; it never replaces
+    /// the root secret, so the YubiKey touch and the recovery-sheet
+    /// secret keep working. Null when no passphrase has been added.
+    /// The salt lives in <see cref="PassphraseWrapSaltB64"/>; the
+    /// iteration count in <see cref="PassphraseWrapIterations"/>.
+    /// </summary>
+    [JsonPropertyName("passphraseWrapProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PassphraseWrapProtected { get; set; }
+
+    /// <summary>
+    /// The 32-byte salt (base64) for the added-passphrase KEK.
+    /// </summary>
+    [JsonPropertyName("passphraseWrapSaltB64")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? PassphraseWrapSaltB64 { get; set; }
+
+    /// <summary>
+    /// PBKDF2 iteration count for the added-passphrase KEK. 0 means
+    /// unset; readers fall back to the repository default.
+    /// </summary>
+    [JsonPropertyName("passphraseWrapIterations")]
+    public int PassphraseWrapIterations { get; set; }
+
+    /// <summary>
     /// The YubiKey HMAC-SHA1 slot secret, DPAPI-encrypted. Stored so spare
     /// keys can be programmed later with the same secret. Without this,
     /// a lost key means re-running setup (which invalidates old keys).

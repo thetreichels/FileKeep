@@ -79,9 +79,18 @@ public sealed record YubiKeyUnlockDto(
     // session whenever any unlock method is enabled, and the view
     // renders the session row on this flag — not on YubiKey mode.
     [property: JsonPropertyName("restoresGated")] bool RestoresGated,
-    // Typed-passphrase unlock exists only in passphrase mode without
-    // YubiKey; the view renders its row on this flag.
-    [property: JsonPropertyName("passphraseEnabled")] bool PassphraseEnabled);
+    // Typed-passphrase unlock exists in passphrase mode without
+    // YubiKey, and in YubiKey-only mode with an added passphrase
+    // (the wrap); the view renders its row on this flag combined
+    // with PassphraseWrap below. In passphrase+YubiKey mode the
+    // endpoint refuses, so the row stays hidden there.
+    [property: JsonPropertyName("passphraseEnabled")] bool PassphraseEnabled,
+    // True when a passphrase has been added to a YubiKey-only
+    // profile (it wraps the generated secret). The restore view
+    // needs this separately from PassphraseEnabled: in
+    // passphrase+YubiKey mode PassphraseEnabled is true but the
+    // typed-passphrase row must NOT render.
+    [property: JsonPropertyName("passphraseWrap")] bool PassphraseWrap);
 
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);

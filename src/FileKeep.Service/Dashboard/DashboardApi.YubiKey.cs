@@ -341,11 +341,139 @@ public static partial class DashboardApi
     /// exists there is nothing to check against and the unlock refuses,
     /// exactly like restores themselves in that state.
     /// </summary>
+    /// <summary>
+    /// Whether a passphrase has been added to a YubiKey-only profile
+    /// (see <see cref="AddPassphraseWrap"/>). The wrap alone is the
+    /// marker: a salt without a blob, or a blob without a salt, is
+    /// not a usable added passphrase.
+    /// </summary>
+    private static bool HasPassphraseWrap(ServiceConfig config) =>
+        !string.IsNullOrEmpty(config.PassphraseWrapProtected) &&
+        !string.IsNullOrEmpty(config.PassphraseWrapSaltB64);
+
+    /// <summary>
+    /// Tries to unwrap the added-passphrase wrap with a typed
+    /// candidate. Returns false (without distinguishing why) when
+    /// there is no wrap, the candidate is empty, the salt is
+    /// malformed, or the GCM tag does not verify — a wrong added
+    /// passphrase and a missing wrap are the same answer to a caller.
+    /// The derived KEK is zeroed before returning.
+    /// </summary>
+    private static bool TryUnwrapPassphraseWrap(ServiceConfig config, string? candidate, out string? secret)
+    {
+        secret = null;
+        if (string.IsNullOrEmpty(candidate) || !HasPassphraseWrap(config))
+            return false;
+        int iterations = config.PassphraseWrapIterations > 0
+            ? config.PassphraseWrapIterations
+            : BackupRepository.DefaultKdfIterations;
+        byte[] kek;
+        try
+        {
+            kek = KeyDerivation.DeriveKey(candidate,
+                Convert.FromBase64String(config.PassphraseWrapSaltB64!),
+                iterations);
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException or ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+        try
+        {
+            secret = YubiKeyCrypto.Unwrap(config.PassphraseWrapProtected!, kek);
+            return true;
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException)
+        {
+            return false;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+        }
+    }
+
+    /// <summary>
+    /// Adds a passphrase to a YubiKey-only (generated-secret) profile.
+    /// The passphrase does NOT replace the root secret: it wraps it —
+    /// a PBKDF2-HMAC-SHA512 KEK (fresh 32-byte salt, the repository
+    /// default iteration count) encrypts the generated secret with
+    /// AES-256-GCM, reusing YubiKeyCrypto's wrap format. The added
+    /// passphrase then unlocks restores and proves security-config
+    /// changes, exactly like any other method, while the YubiKey touch
+    /// and the recovery-sheet secret keep working unchanged. Adding
+    /// requires fresh proof of an existing method (the shared gate).
+    /// Removing the added passphrase is the profile toggle off, which
+    /// clears the wrap. In passphrase mode this endpoint refuses —
+    /// the passphrase there already is the repository secret, so it
+    /// is changed from the passphrase settings, not added.
+    /// </summary>
+    public static (int Status, object Payload) AddPassphraseWrap(
+        ServiceConfig config, string configPath, string? passphrase,
+        IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null,
+        string? proofPassphrase = null, bool proofYubiKey = false, string? proofTotp = null)
+    {
+        var proof = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log, proofTotp);
+        if (proof is not null)
+            return proof.Value;
+        if (!config.GeneratedSecretMode)
+            return (400, new ErrorDto(
+                "Adding a passphrase is only available in YubiKey-only mode. " +
+                "In passphrase mode the passphrase already is the repository secret — " +
+                "change it from the passphrase settings."));
+        if (HasPassphraseWrap(config))
+            return (400, new ErrorDto(
+                "A passphrase is already added. Turn Passphrase off in the profile " +
+                "to remove it before adding a different one."));
+        if (string.IsNullOrEmpty(passphrase))
+            return (400, new ErrorDto("A passphrase is required."));
+        if (!BackupScheduler.TryGetPassphrase(config, out string? root, out string? problem) ||
+            string.IsNullOrEmpty(root))
+            return (400, new ErrorDto(problem ??
+                "Adding a passphrase needs the repository secret on this PC (stored copy " +
+                "or environment) — unlock with your YubiKey or recovery secret instead."));
+        byte[] salt = KeyDerivation.NewSalt();
+        int iterations = BackupRepository.DefaultKdfIterations;
+        byte[] kek = KeyDerivation.DeriveKey(passphrase, salt, iterations);
+        string blob;
+        try { blob = YubiKeyCrypto.Wrap(root, kek); }
+        finally { CryptographicOperations.ZeroMemory(kek); }
+        lock (config.JobsLock)
+        {
+            config.PassphraseWrapProtected = blob;
+            config.PassphraseWrapSaltB64 = Convert.ToBase64String(salt);
+            config.PassphraseWrapIterations = iterations;
+        }
+        try { config.Save(configPath); }
+        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        log?.Invoke("dashboard: passphrase added to YubiKey-only profile (wraps generated secret)");
+        return (200, new OkDto(true));
+    }
+
     public static (int Status, object Payload) UnlockRestoreSessionWithPassphrase(
         ServiceConfig config, RestoreSession session, string? passphrase,
         Action<string>? log = null)
     {
-        if (config.GeneratedSecretMode || config.PassphraseYubiKey)
+        if (config.GeneratedSecretMode)
+        {
+            // YubiKey-only mode with an added passphrase: the typed
+            // passphrase unwraps the generated secret into the session.
+            // Without a wrap there is no passphrase to type — the sheet
+            // secret and the touch are the unlocks there.
+            if (!HasPassphraseWrap(config))
+                return (400, new ErrorDto(
+                    "Typed-passphrase unlock is only available in passphrase mode without YubiKey, " +
+                    "or in YubiKey-only mode with an added passphrase."));
+            if (string.IsNullOrEmpty(passphrase) ||
+                !TryUnwrapPassphraseWrap(config, passphrase, out string? root) ||
+                string.IsNullOrEmpty(root))
+                return (400, new ErrorDto("That passphrase doesn't match the added passphrase."));
+            session.Unlock(root);
+            log?.Invoke("dashboard: restore session unlocked via added passphrase");
+            return (200, new OkDto(true));
+        }
+        if (config.PassphraseYubiKey)
             return (400, new ErrorDto(
                 "Typed-passphrase unlock is only available in passphrase mode without YubiKey."));
         if (string.IsNullOrEmpty(passphrase) || !VerifyCurrentSecretProof(config, passphrase))
@@ -511,7 +639,8 @@ public static partial class DashboardApi
         (200, new YubiKeyUnlockDto(config.PassphraseYubiKey, session.IsUnlocked,
             config.GeneratedSecretMode, session.IsVerified, config.PhoneAuthEnabled,
             HasEnabledUnlockMethod(config),
-            GetProtectionProfile(config).PassphraseEnabled));
+            GetProtectionProfile(config).PassphraseEnabled,
+            HasPassphraseWrap(config)));
 
     /// <summary>
     /// Resolves the passphrase for restore-side operations. When any
