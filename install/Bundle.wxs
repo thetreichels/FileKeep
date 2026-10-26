@@ -23,8 +23,8 @@
          rejects the child). Theme="hyperlinkLicense" is the stock payload
          group; LogoFile brands its Install page with the FileKeep logo.
          The stock theme's logo slot is a 64x64 ImageControl, so LogoFile
-         must be a square image — assets/filekeep-logo.png (64x64, from the
-         vault-door icon). The wide filekeep-banner.bmp is for the MSI's
+         must be a square image — assets/filekeep-logo.png (64x64, the
+         current app icon, downscaled from the 1024 master). The wide filekeep-banner.bmp is for the MSI's
          WixUI dialogs only (493x58 banner slot) and renders broken here.
          LogoFile is embedded automatically by the Bal extension as the
          "logo.png" UX payload (via the WixStdbaLogo binder variable); no
