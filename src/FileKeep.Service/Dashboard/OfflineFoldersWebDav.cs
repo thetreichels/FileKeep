@@ -42,6 +42,13 @@ public sealed class OfflineFoldersDavHandler
         public Stream? Body { get; init; }
         /// <summary>Lock token from Lock-Token or If headers, if any.</summary>
         public string? LockToken { get; init; }
+        /// <summary>
+        /// Open token from the <c>?open=</c> query (slice 3, part 1:
+        /// the Use dialog mints one per open). A presented token
+        /// must be valid and must cover the requested file; a
+        /// read-only token permits GET only.
+        /// </summary>
+        public string? OpenToken { get; init; }
     }
 
     public sealed class DavResult
@@ -61,7 +68,10 @@ public sealed class OfflineFoldersDavHandler
         public int Status { get; } = status;
     }
 
-    private sealed record DavNode(string Href, string DisplayName, bool IsCollection, long? Size, DateTimeOffset? ModifiedUtc);
+    private sealed record DavNode(string Href, string DisplayName, bool IsCollection, long? Size, DateTimeOffset? ModifiedUtc, bool ReadOnly = false);
+
+    /// <summary>One Use-dialog open: the file, and whether it may write.</summary>
+    private sealed record OpenEntry(string Folder, string Path, bool ReadOnly);
 
     private readonly ServiceConfig _config;
     private readonly OfflineFoldersSession _session;
@@ -69,6 +79,7 @@ public sealed class OfflineFoldersDavHandler
     private readonly Action<string>? _log;
     private readonly object _locksGuard = new();
     private readonly Dictionary<string, string> _locks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, OpenEntry> _opens = new(StringComparer.Ordinal);
 
     public OfflineFoldersDavHandler(
         ServiceConfig config, OfflineFoldersSession session, string catalogPath,
@@ -80,14 +91,84 @@ public sealed class OfflineFoldersDavHandler
         _log = log;
     }
 
+    /// <summary>
+    /// Mints an open token for one file (slice 3, part 1: the Use
+    /// dialog calls this, then hands the URL to the desktop host,
+    /// which ShellExecutes it). Returns the token and the DAV URL
+    /// carrying it, or null when locked or the file does not exist.
+    /// A read-only token permits GET only (enforced in
+    /// <see cref="Handle"/>); an edit token marks the open for the
+    /// open-file count but writes go through the normal LOCK-gated
+    /// PUT path. Tokens are dropped on card lock, like locks.
+    /// </summary>
+    public (string Token, string Url)? IssueOpenToken(string folder, string path, bool readOnly)
+    {
+        var entries = Entries();
+        if (entries is null) return null;
+        var folderEntry = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, folder, StringComparison.OrdinalIgnoreCase));
+        if (folderEntry is null) return null;
+        var file = folderEntry.Files.FirstOrDefault(f =>
+            string.Equals(f.Path, path, StringComparison.OrdinalIgnoreCase));
+        if (file is null) return null;
+        string token = "open-" + Guid.NewGuid().ToString("N");
+        lock (_locksGuard) { _opens[token] = new OpenEntry(folderEntry.Name, file.Path, readOnly); }
+        string url = "/dav/offline/" + Uri.EscapeDataString(folderEntry.Name) + "/" +
+            string.Join("/", file.Path.Split('/').Select(Uri.EscapeDataString)) +
+            "?open=" + Uri.EscapeDataString(token);
+        return (token, url);
+    }
+
+    /// <summary>Releases an open token (the file is no longer open). False when unknown.</summary>
+    public bool ReleaseOpenToken(string token)
+    {
+        lock (_locksGuard) { return _opens.Remove(token); }
+    }
+
+    /// <summary>Currently open files (locks are not opens — see the card lock flow for those).</summary>
+    public IReadOnlyList<OfflineOpenFileDto> ListOpens()
+    {
+        lock (_locksGuard)
+        {
+            return _opens.Values
+                .Select(o => new OfflineOpenFileDto(o.Folder, o.Path, o.ReadOnly))
+                .ToList();
+        }
+    }
+
     public DavResult Handle(DavRequest request)
     {
         // The share exists only while the card is unlocked. Locking
-        // drops every lock token with it.
+        // drops every lock token and open token with it.
         if (!_session.IsUnlocked)
         {
-            lock (_locksGuard) { _locks.Clear(); }
+            lock (_locksGuard) { _locks.Clear(); _opens.Clear(); }
             return Error(403, "Offline Folders is locked.");
+        }
+
+        // A presented open token must be valid and must cover the
+        // requested file. No token is the legacy share path (the
+        // unlocked card suffices); a token, once presented, is
+        // checked strictly. Collection requests do not carry file
+        // tokens, so the path check applies to file operations only.
+        if (request.OpenToken is not null)
+        {
+            OpenEntry? open;
+            lock (_locksGuard) { _opens.TryGetValue(request.OpenToken, out open); }
+            if (open is null)
+                return Error(403, "Unknown open token.");
+            string method = request.Method.ToUpperInvariant();
+            if (method is "GET" or "PUT" or "DELETE" or "LOCK" && request.Segments.Length >= 2)
+            {
+                string targetPath = string.Join("/", request.Segments[1..]);
+                if (!string.Equals(open.Folder, request.Segments[0], StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(open.Path, targetPath, StringComparison.OrdinalIgnoreCase))
+                    return Error(403, "This open token does not cover the requested file.");
+                if (open.ReadOnly && method is "PUT" or "DELETE")
+                    return Error(403, "This open is read-only.");
+                if (open.ReadOnly && method is "LOCK")
+                    return Error(405, "This open is read-only.");
+            }
         }
 
         return request.Method.ToUpperInvariant() switch
@@ -238,12 +319,24 @@ public sealed class OfflineFoldersDavHandler
         string href = "/dav/offline/" + Uri.EscapeDataString(folder.Name) + "/" +
             string.Join("/", file.Path.Split('/').Select(Uri.EscapeDataString));
         string display = file.Path.Split('/')[^1];
-        return new DavNode(href, display, false, file.Size, file.ModifiedUtc);
+        return new DavNode(href, display, false, file.Size, file.ModifiedUtc,
+            ReadOnly: HasReadOnlyOpen(folder.Name, file.Path));
+    }
+
+    private bool HasReadOnlyOpen(string folder, string path)
+    {
+        lock (_locksGuard)
+        {
+            return _opens.Values.Any(o => o.ReadOnly &&
+                string.Equals(o.Folder, folder, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(o.Path, path, StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     private static DavResult Multistatus(List<DavNode> nodes)
     {
         XNamespace d = "DAV:";
+        XNamespace fk = "urn:filekeep";
         var root = new XElement(d + "multistatus");
         foreach (var node in nodes)
         {
@@ -261,6 +354,9 @@ public sealed class OfflineFoldersDavHandler
                         node.ModifiedUtc is not null
                             ? new XElement(d + "getlastmodified",
                                 node.ModifiedUtc.Value.UtcDateTime.ToString("R"))
+                            : null,
+                        node.ReadOnly
+                            ? new XElement(fk + "readonly", "true")
                             : null),
                     new XElement(d + "status", "HTTP/1.1 200 OK")));
             root.Add(response);

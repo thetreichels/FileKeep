@@ -23,14 +23,16 @@ namespace FileKeep.Service;
 ///     ciphertext only (see <see cref="OfflineFoldersCatalog"/>).
 ///
 /// Unlock proofs mirror the security-config gate exactly: the current
-/// passphrase, the typed recovery secret in generated-secret mode, or
-/// a YubiKey touch. A TOTP/phone code is NEVER a proof here — the
-/// gate has no phone path at all — and an unlocked restore session is
-/// NOT a proof either: this session is separate, and unlocking one
-/// never unlocks the other. Adding/removing entries requires the
-/// unlocked card session, not a fresh proof per call: the session
-/// itself IS the fresh proof, bounded by the 1-hour idle expiry, the
-/// same way the restore session gates restore endpoints.
+/// passphrase, the typed recovery secret in generated-secret mode,
+/// the added passphrase in generated mode (unwrapped to the root
+/// secret), or a YubiKey touch. A TOTP/phone code is NEVER a proof
+/// here — the gate has no phone path at all — and an unlocked
+/// restore session is NOT a proof either: this session is separate,
+/// and unlocking one never unlocks the other. Adding/removing
+/// entries requires the unlocked card session, not a fresh proof per
+/// call: the session itself IS the fresh proof, bounded by the
+/// 1-hour idle expiry, the same way the restore session gates
+/// restore endpoints.
 /// </summary>
 public static partial class DashboardApi
 {
@@ -91,6 +93,200 @@ public static partial class DashboardApi
             CryptographicOperations.ZeroMemory(key);
             CryptographicOperations.ZeroMemory(contentKey);
         }
+    }
+
+    /// <summary>
+    /// Rekeys the Offline Folders catalog and its chunks from the
+    /// current secret to <paramref name="newSecret"/> (the rewrite
+    /// half of rekey — see <see cref="OfflineRekey"/>). Runs BEFORE
+    /// the passphrase change it prepares for: the old secret is the
+    /// currently configured one (resolved on this PC, or typed as
+    /// <paramref name="oldSecret"/> when it cannot be resolved), and
+    /// the new secret is typed here. Requires fresh proof of an
+    /// existing method (the shared gate), refuses in YubiKey-only
+    /// mode (the root secret never changes there), and refuses while
+    /// the card is unlocked — rekey replaces the keys the open
+    /// session holds, so the user locks, rekeys, changes the
+    /// passphrase, and re-unlocks under the new secret. A partial
+    /// run still returns 200 with its failures listed and the
+    /// catalog unsaved; the user fixes the failures and re-runs
+    /// with the same secrets.
+    /// </summary>
+    public static (int Status, object Payload) RekeyOfflineFolders(
+        ServiceConfig config, string configPath, OfflineFoldersSession session,
+        string? oldSecret, string? newSecret, IYubiKeyProvider? yubiKeyProvider,
+        Action<string>? log = null, string? proofPassphrase = null,
+        bool proofYubiKey = false, string? proofTotp = null)
+    {
+        var proof = CheckSecurityChangeProof(config, yubiKeyProvider,
+            proofPassphrase, proofYubiKey, log, proofTotp);
+        if (proof is not null)
+            return proof.Value;
+        if (config.GeneratedSecretMode)
+            return (400, new ErrorDto(
+                "Offline rekey is a passphrase-mode operation: in YubiKey-only mode the root secret " +
+                "never changes, so the catalog never needs rekeying."));
+        if (session.IsUnlocked)
+            return (400, new ErrorDto(
+                "Lock Offline Folders first — rekey replaces the keys the open session holds, " +
+                "so it runs only while the card is locked."));
+        if (string.IsNullOrEmpty(newSecret))
+            return (400, new ErrorDto("A new secret is required."));
+        string? old = oldSecret;
+        if (string.IsNullOrEmpty(old))
+        {
+            if (!BackupScheduler.TryGetPassphrase(config, out string? current, out _) ||
+                string.IsNullOrEmpty(current))
+                return (400, new ErrorDto(
+                    "The current secret could not be resolved on this PC — type it as oldSecret."));
+            old = current;
+        }
+        string catalogPath = OfflineFoldersCatalog.CatalogPathFor(configPath);
+        if (!File.Exists(catalogPath))
+            return (400, new ErrorDto("No offline folders catalog exists — nothing to rekey."));
+        OfflineRekeySummaryDto summary;
+        try
+        {
+            summary = OfflineRekey.Rewrite(catalogPath, old, newSecret, locationId =>
+            {
+                var location = config.SnapshotLocations().FirstOrDefault(l =>
+                    string.Equals(l.Name, locationId, StringComparison.OrdinalIgnoreCase));
+                if (location is null)
+                    throw new InvalidOperationException($"Location '{locationId}' no longer exists.");
+                return OfflineFileStore.ResolveStore(location);
+            }, log);
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
+        {
+            return (400, new ErrorDto(
+                "The catalog could not be decrypted with the current secret — it may already be under " +
+                "a different secret, or the file is damaged."));
+        }
+        if (summary.Failures.Count > 0)
+            log?.Invoke("dashboard: offline folders rekey incomplete — catalog left under the old secret; fix the failures and re-run.");
+        return (200, summary);
+    }
+
+    /// <summary>
+    /// Exports one folder as an encrypted package (slice 3, part 2):
+    /// the folder's manifest plus a location pointer, under a fresh
+    /// export passphrase. Requires the unlocked card (the entries
+    /// live only in the session). No credentials and no plaintext
+    /// filenames leave in the package; the passphrase is never
+    /// logged.
+    /// </summary>
+    public static (int Status, object Payload) ExportOfflineFolder(
+        ServiceConfig config, OfflineFoldersSession session, string folderName,
+        string? exportPassphrase, Action<string>? log = null)
+    {
+        var entries = session.GetEntries();
+        if (entries is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        var folder = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+        if (folder is null)
+            return (404, new ErrorDto("No such offline folder."));
+        if (string.IsNullOrEmpty(exportPassphrase))
+            return (400, new ErrorDto("An export passphrase is required."));
+        var location = config.SnapshotLocations().FirstOrDefault(l =>
+            string.Equals(l.Name, folder.LocationId, StringComparison.OrdinalIgnoreCase));
+        if (location is null)
+            return (400, new ErrorDto(
+                $"The folder's location '{folder.LocationId}' no longer exists — nothing to point the export at."));
+        OfflineExportPackageDto package;
+        try { package = OfflineExport.CreatePackage(folder, location, exportPassphrase); }
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        log?.Invoke($"dashboard: offline folder '{folder.Name}' exported ({folder.Files.Count} files).");
+        return (200, new OfflineExportResultDto($"{folder.Name}.filekeep-export.json", package));
+    }
+
+    /// <summary>
+    /// Imports an export package into this machine's catalog,
+    /// re-encrypting it under the card secret. Requires the unlocked
+    /// card. No data moves — chunks already sit on the destination,
+    /// content-addressed; only the knowledge of what they add up to
+    /// travels. Refuses a duplicate folder name; warns when no local
+    /// location matches the pointer (the folder will not resolve
+    /// until one is added) or when a same-named local location is
+    /// a different type.
+    /// </summary>
+    public static (int Status, object Payload) ImportOfflineFolder(
+        ServiceConfig config, OfflineFoldersSession session, string catalogPath,
+        OfflineExportPackageDto package, string? exportPassphrase,
+        Action<string>? log = null)
+    {
+        var entries = session.GetEntries();
+        if (entries is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        if (string.IsNullOrEmpty(exportPassphrase))
+            return (400, new ErrorDto("The export passphrase is required."));
+        OfflineExport.Payload payload;
+        try { payload = OfflineExport.DecryptPackage(package, exportPassphrase); }
+        catch (Exception ex) when (ex is CryptographicException or InvalidDataException)
+        {
+            return (400, new ErrorDto(
+                "The package could not be decrypted — wrong export passphrase, or the file is damaged or not an export."));
+        }
+        if (entries.Any(e => string.Equals(e.Name, payload.Folder, StringComparison.OrdinalIgnoreCase)))
+            return (400, new ErrorDto($"A folder named '{payload.Folder}' already exists — forget or rename it first."));
+        var entry = new OfflineFolderEntry(payload.Folder, payload.Location.Name, DateTimeOffset.UtcNow)
+        {
+            Files = payload.Files.Select(f => new OfflineFileEntry(
+                f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList())).ToList(),
+        };
+        entries.Add(entry);
+        var save = PersistOfflineFolders(session, catalogPath, entries);
+        if (save is not null)
+            return save.Value;
+        session.SetEntries(entries);
+        var warnings = new List<string>();
+        var local = config.SnapshotLocations().FirstOrDefault(l =>
+            string.Equals(l.Name, payload.Location.Name, StringComparison.OrdinalIgnoreCase));
+        if (local is null)
+            warnings.Add($"No local location named '{payload.Location.Name}' — the folder will not resolve until one is added.");
+        else if (!string.Equals(local.Type, payload.Location.Type, StringComparison.OrdinalIgnoreCase))
+            warnings.Add($"Local location '{payload.Location.Name}' is '{local.Type}' but the package says '{payload.Location.Type}'.");
+        log?.Invoke($"dashboard: offline folder '{payload.Folder}' imported ({payload.Files.Count} files).");
+        return (200, new OfflineImportSummaryDto(payload.Folder, payload.Files.Count,
+            payload.Files.Sum(f => f.ChunkIds.Count), warnings));
+    }
+
+    /// <summary>
+    /// Forgets a folder: removes its entry from the local catalog
+    /// only. Destination chunks are untouched and orphaned (opaque
+    /// without the manifest). Requires the unlocked card and an
+    /// explicit confirmation — without an export, the folder is
+    /// unrecoverable from this machine. Jobs are never touched: they
+    /// reference locations, not folder entries, so nothing dangles;
+    /// the summary names the live jobs still using the location so
+    /// the user knows the location (and its chunks) stay.
+    /// </summary>
+    public static (int Status, object Payload) ForgetOfflineFolder(
+        ServiceConfig config, OfflineFoldersSession session, string catalogPath,
+        string folderName, bool confirm, Action<string>? log = null)
+    {
+        var entries = session.GetEntries();
+        if (entries is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        var folder = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+        if (folder is null)
+            return (404, new ErrorDto("No such offline folder."));
+        if (!confirm)
+            return (400, new ErrorDto(
+                "Confirmation required: without an export, forgetting is unrecoverable from this machine."));
+        int files = folder.Files.Count;
+        int chunks = folder.Files.Sum(f => f.ChunkIds.Count);
+        var jobsUsingLocation = config.Jobs
+            .Where(j => j.EffectiveTargets.Contains(folder.LocationId, StringComparer.OrdinalIgnoreCase))
+            .Select(j => j.Name).ToList();
+        entries.Remove(folder);
+        var save = PersistOfflineFolders(session, catalogPath, entries);
+        if (save is not null)
+            return save.Value;
+        session.SetEntries(entries);
+        log?.Invoke($"dashboard: offline folder '{folder.Name}' forgotten ({files} files; destination chunks orphaned).");
+        return (200, new OfflineForgetSummaryDto(folder.Name, files, chunks, jobsUsingLocation));
     }
 
     /// <summary>
@@ -385,6 +581,16 @@ public static partial class DashboardApi
             return config.GeneratedSecretMode
                 ? GeneratedSecret.Normalize(proofPassphrase)
                 : proofPassphrase;
+
+        // Added passphrase (generated mode): the typed candidate
+        // wraps the root secret rather than being it, so unwrap it
+        // (the restore unlock already accepts the wrap; the card
+        // unlock was the missing twin). A wrong added passphrase
+        // and a missing wrap are the same answer here: keep trying.
+        if (!string.IsNullOrEmpty(proofPassphrase) &&
+            TryUnwrapPassphraseWrap(config, proofPassphrase, out string? unwrapped) &&
+            !string.IsNullOrEmpty(unwrapped))
+            return unwrapped;
 
         if (proofYubiKey && yubiKeyProvider is not null &&
             (config.PassphraseYubiKey || config.GeneratedSecretMode) &&

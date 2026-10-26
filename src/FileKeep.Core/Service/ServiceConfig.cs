@@ -187,6 +187,44 @@ public sealed class BackupLocation
                 ? !string.IsNullOrEmpty(SmbPasswordProtected) ||
                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_SMB_PASSWORD"))
                 : true; // usb: no password needed
+
+    /// <summary>
+    /// Shallow copy. Safe: every member is a string, number, or bool
+    /// (the rest are computed). Vault migration clones a location and
+    /// then changes only the pool-identifying fields.
+    /// </summary>
+    public BackupLocation Clone() => (BackupLocation)MemberwiseClone();
+}
+
+/// <summary>
+/// One previous vault, recorded when vault migration re-points jobs
+/// at fresh repos. The old repo path and old targets are kept so the
+/// previous vault stays findable: its local dir is untouched, and
+/// its destination pools are untouched (fresh pools were created
+/// for the new vaults), so it remains restorable with the old
+/// secret through a future repo-picker — it is never silently lost.
+/// </summary>
+public sealed class MigratedVaultRecord
+{
+    /// <summary>Jobs that were re-pointed away from <see cref="OldRepo"/>.</summary>
+    [JsonPropertyName("jobs")]
+    public List<string> Jobs { get; set; } = new();
+
+    /// <summary>Local repo path the jobs used before migration.</summary>
+    [JsonPropertyName("oldRepo")]
+    public string OldRepo { get; set; } = "";
+
+    /// <summary>Local repo path the jobs use after migration.</summary>
+    [JsonPropertyName("newRepo")]
+    public string NewRepo { get; set; } = "";
+
+    /// <summary>When the migration ran (UTC, round-trip format).</summary>
+    [JsonPropertyName("migratedUtc")]
+    public string MigratedUtc { get; set; } = "";
+
+    /// <summary>Target names the jobs used before migration.</summary>
+    [JsonPropertyName("oldTargets")]
+    public List<string> OldTargets { get; set; } = new();
 }
 
 /// <summary>
@@ -447,6 +485,15 @@ public sealed class ServiceConfig
     /// </summary>
     [JsonPropertyName("locations")]
     public List<BackupLocation> Locations { get; set; } = new();
+
+    /// <summary>
+    /// Previous vaults recorded by vault migration (see
+    /// <see cref="MigratedVaultRecord"/>). Appended to, never pruned
+    /// by migration itself — the user deletes the record when the
+    /// old vault is gone.
+    /// </summary>
+    [JsonPropertyName("previousVaults")]
+    public List<MigratedVaultRecord> PreviousVaults { get; set; } = new();
 
     /// <summary>
     /// Global Usenet provider surface for the repo-scoped operations that

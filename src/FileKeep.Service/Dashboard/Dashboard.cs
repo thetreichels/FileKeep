@@ -956,6 +956,130 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapPost("/api/vaults/migrate", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? newSecret = body.TryGetProperty("newSecret", out var nEl) ? nEl.GetString() : null;
+            var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
+            var (status, payload) = DashboardApi.MigrateVaults(config, configPath, newSecret,
+                yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/export", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            string? exportPassphrase = body.TryGetProperty("exportPassphrase", out var pEl) ? pEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(folder))
+                return Results.BadRequest(new ErrorDto("A folder is required."));
+            var (status, payload) = DashboardApi.ExportOfflineFolder(config, offlineFoldersSession,
+                folder, exportPassphrase, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/import", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? exportPassphrase = body.TryGetProperty("exportPassphrase", out var pEl) ? pEl.GetString() : null;
+            OfflineExportPackageDto? package = null;
+            if (body.TryGetProperty("package", out var pkgEl))
+            {
+                try { package = System.Text.Json.JsonSerializer.Deserialize<OfflineExportPackageDto>(pkgEl.GetRawText()); }
+                catch { /* falls through to the null check */ }
+            }
+            if (package is null)
+                return Results.BadRequest(new ErrorDto("An export package is required."));
+            var (status, payload) = DashboardApi.ImportOfflineFolder(config, offlineFoldersSession,
+                offlineFoldersPath, package, exportPassphrase, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/forget", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            bool confirm = body.TryGetProperty("confirm", out var cEl) && cEl.GetBoolean();
+            if (string.IsNullOrWhiteSpace(folder))
+                return Results.BadRequest(new ErrorDto("A folder is required."));
+            var (status, payload) = DashboardApi.ForgetOfflineFolder(config, offlineFoldersSession,
+                offlineFoldersPath, folder, confirm, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/open-token", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            string? file = body.TryGetProperty("file", out var fiEl) ? fiEl.GetString() : null;
+            bool readOnly = body.TryGetProperty("readOnly", out var rEl) && rEl.GetBoolean();
+            if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(file))
+                return Results.BadRequest(new ErrorDto("A folder and a file are required."));
+            if (!offlineFoldersSession.IsUnlocked)
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var issued = offlineDav.IssueOpenToken(folder, file, readOnly);
+            if (issued is null)
+                return Results.NotFound(new ErrorDto("No such offline file."));
+            return Results.Json(new OfflineOpenTokenDto(issued.Value.Token, issued.Value.Url, readOnly));
+        });
+
+        app.MapPost("/api/offline-folders/release-open", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? token = body.TryGetProperty("token", out var tEl) ? tEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(token))
+                return Results.BadRequest(new ErrorDto("A token is required."));
+            if (!offlineDav.ReleaseOpenToken(token))
+                return Results.NotFound(new ErrorDto("No such open."));
+            return Results.Json(new OkDto(true));
+        });
+
+        app.MapGet("/api/offline-folders/opens", () =>
+        {
+            if (!offlineFoldersSession.IsUnlocked)
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Results.Json(offlineDav.ListOpens());
+        });
+
+        app.MapPost("/api/offline-folders/rekey", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? oldSecret = body.TryGetProperty("oldSecret", out var oEl) ? oEl.GetString() : null;
+            string? newSecret = body.TryGetProperty("newSecret", out var nEl) ? nEl.GetString() : null;
+            var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
+            var (status, payload) = DashboardApi.RekeyOfflineFolders(config, configPath, offlineFoldersSession,
+                oldSecret, newSecret, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/offline-folders/lock", (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -1079,6 +1203,9 @@ public static class Dashboard
                         token = end < 0 ? ifValue[at..] : ifValue[at..end];
                     }
                 }
+                string? openToken = ctx.Request.Query.TryGetValue("open", out var openValues)
+                    ? openValues.ToString()
+                    : null;
                 var davRequest = new OfflineFoldersDavHandler.DavRequest
                 {
                     Method = ctx.Request.Method,
@@ -1086,6 +1213,7 @@ public static class Dashboard
                     Depth = depth,
                     Body = ctx.Request.Method is "PUT" ? ctx.Request.Body : null,
                     LockToken = token,
+                    OpenToken = string.IsNullOrEmpty(openToken) ? null : openToken,
                 };
                 var result = offlineDav.Handle(davRequest);
                 foreach (var (name, value) in result.Headers)

@@ -92,6 +92,87 @@ public sealed record YubiKeyUnlockDto(
     // typed-passphrase row must NOT render.
     [property: JsonPropertyName("passphraseWrap")] bool PassphraseWrap);
 
+/// <summary>Result of POST /api/offline-folders/rekey: totals for the
+/// catalog, how many chunks were rewritten vs already new-key, and
+/// the failures. The catalog is saved under the new key ONLY when
+/// <see cref="Failures"/> is empty (<see cref="CatalogSaved"/>); a
+/// partial run leaves the old-key catalog in place, so the user
+/// fixes the failures and re-runs with the same secrets.</summary>
+public sealed record OfflineRekeySummaryDto(
+    [property: JsonPropertyName("folders")] int Folders,
+    [property: JsonPropertyName("files")] int Files,
+    [property: JsonPropertyName("chunks")] int Chunks,
+    [property: JsonPropertyName("rewritten")] int Rewritten,
+    [property: JsonPropertyName("skipped")] int Skipped,
+    [property: JsonPropertyName("failures")] IReadOnlyList<string> Failures,
+    [property: JsonPropertyName("catalogSaved")] bool CatalogSaved);
+
+/// <summary>One repo re-pointed by vault migration.</summary>
+public sealed record VaultRepoMappingDto(
+    [property: JsonPropertyName("oldRepo")] string OldRepo,
+    [property: JsonPropertyName("newRepo")] string NewRepo,
+    [property: JsonPropertyName("jobs")] IReadOnlyList<string> Jobs);
+
+/// <summary>Result of POST /api/vaults/migrate: how many jobs moved,
+/// which repos were created, which fresh locations were added, and
+/// the warnings (typed-secret mismatch).</summary>
+public sealed record VaultMigrationSummaryDto(
+    [property: JsonPropertyName("jobsMigrated")] int JobsMigrated,
+    [property: JsonPropertyName("repos")] IReadOnlyList<VaultRepoMappingDto> Repos,
+    [property: JsonPropertyName("locationsCreated")] IReadOnlyList<string> LocationsCreated,
+    [property: JsonPropertyName("warnings")] IReadOnlyList<string> Warnings);
+
+/// <summary>Encrypted offline export envelope (file format,
+/// snake_case like repo.json). Returned inside
+/// <see cref="OfflineExportResultDto"/>; the same shape is the
+/// import input. No filenames or credentials appear outside the
+/// encrypted <c>data</c> blob.</summary>
+public sealed record OfflineExportPackageDto(
+    [property: JsonPropertyName("format")] string Format,
+    [property: JsonPropertyName("kdf_salt_b64")] string KdfSaltB64,
+    [property: JsonPropertyName("kdf_iterations")] int KdfIterations,
+    [property: JsonPropertyName("nonce_b64")] string NonceB64,
+    [property: JsonPropertyName("data_b64")] string DataB64);
+
+/// <summary>Result of POST /api/offline-folders/export: the download
+/// filename and the envelope (the page stringifies it to a file).</summary>
+public sealed record OfflineExportResultDto(
+    [property: JsonPropertyName("fileName")] string FileName,
+    [property: JsonPropertyName("package")] OfflineExportPackageDto Package);
+
+/// <summary>Result of POST /api/offline-folders/import.</summary>
+public sealed record OfflineImportSummaryDto(
+    [property: JsonPropertyName("folder")] string Folder,
+    [property: JsonPropertyName("files")] int Files,
+    [property: JsonPropertyName("chunks")] int Chunks,
+    [property: JsonPropertyName("warnings")] IReadOnlyList<string> Warnings);
+
+/// <summary>Result of POST /api/offline-folders/forget: the entry is
+/// gone, the destination chunks are untouched and orphaned, and
+/// <see cref="JobsUsingLocation"/> names the live jobs that still
+/// target the folder's location (the location itself is never
+/// touched by a forget).</summary>
+public sealed record OfflineForgetSummaryDto(
+    [property: JsonPropertyName("folder")] string Folder,
+    [property: JsonPropertyName("files")] int Files,
+    [property: JsonPropertyName("chunks")] int Chunks,
+    [property: JsonPropertyName("jobsUsingLocation")] IReadOnlyList<string> JobsUsingLocation);
+
+/// <summary>Result of POST /api/offline-folders/open-token: the
+/// token and the DAV URL carrying it (the page hands the URL to
+/// the desktop host, which ShellExecutes it).</summary>
+public sealed record OfflineOpenTokenDto(
+    [property: JsonPropertyName("token")] string Token,
+    [property: JsonPropertyName("url")] string Url,
+    [property: JsonPropertyName("readOnly")] bool ReadOnly);
+
+/// <summary>One currently open file, for the lock-while-open
+/// warning (GET /api/offline-folders/opens).</summary>
+public sealed record OfflineOpenFileDto(
+    [property: JsonPropertyName("folder")] string Folder,
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("readOnly")] bool ReadOnly);
+
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);
 

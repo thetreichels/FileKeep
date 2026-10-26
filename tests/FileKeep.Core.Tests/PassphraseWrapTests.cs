@@ -240,6 +240,44 @@ public sealed class PassphraseWrapTests : IDisposable
     }
 
     [Fact]
+    public void CardUnlock_AcceptsAddedPassphrase()
+    {
+        string secret = GeneratedSecret.Generate();
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, secret);
+        var config = GeneratedConfig();
+        var (added, _) = DashboardApi.AddPassphraseWrap(config, ConfigPath(), AddedPass,
+            yubiKeyProvider: null, proofPassphrase: secret);
+        Assert.Equal(200, added);
+
+        // A catalog created under the root secret.
+        string catalog = Path.Combine(_workDir, "offline-" + Guid.NewGuid().ToString("N") + ".json");
+        OfflineFoldersCatalog.Save(catalog, OfflineFoldersCatalog.DeriveKey(secret),
+            new List<OfflineFolderEntry> { new("Vault", "nas", DateTimeOffset.UtcNow) });
+
+        // The added passphrase unlocks the card: it unwraps to the root.
+        var cardSession = new OfflineFoldersSession();
+        var (status, _) = DashboardApi.UnlockOfflineFolders(config, cardSession, catalog,
+            proofPassphrase: AddedPass, proofYubiKey: false, yubiKeyProvider: null);
+        Assert.Equal(200, status);
+        Assert.True(cardSession.IsUnlocked);
+        Assert.Single(cardSession.GetEntries()!);
+
+        // A wrong added passphrase proves nothing.
+        var wrongSession = new OfflineFoldersSession();
+        var (wrongStatus, _) = DashboardApi.UnlockOfflineFolders(config, wrongSession, catalog,
+            proofPassphrase: "not-the-added-passphrase", proofYubiKey: false, yubiKeyProvider: null);
+        Assert.Equal(403, wrongStatus);
+        Assert.False(wrongSession.IsUnlocked);
+
+        // The sheet secret still unlocks (the wrap changed nothing else).
+        var sheetSession = new OfflineFoldersSession();
+        var (sheetStatus, _) = DashboardApi.UnlockOfflineFolders(config, sheetSession, catalog,
+            proofPassphrase: secret, proofYubiKey: false, yubiKeyProvider: null);
+        Assert.Equal(200, sheetStatus);
+        Assert.True(sheetSession.IsUnlocked);
+    }
+
+    [Fact]
     public void TypedPassphraseUnlock_RefusesWithoutWrap()
     {
         string secret = GeneratedSecret.Generate();
