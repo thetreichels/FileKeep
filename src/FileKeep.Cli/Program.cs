@@ -1273,7 +1273,7 @@ static int SmbSyncCommand(string[] args)
     Console.WriteLine($"Connected. Syncing {repoRoot}...");
     var sync = new FileKeep.Core.SmbSync(msg => Console.WriteLine(msg));
     int lastPct = -1;
-    var result = sync.Sync(repoRoot, smb, (done, total) =>
+    var result = sync.Sync(repoRoot, smb, progress: (done, total) =>
     {
         if (total == 0) return;
         int pct = done * 100 / total;
