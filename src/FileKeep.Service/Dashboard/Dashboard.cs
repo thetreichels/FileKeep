@@ -1065,6 +1065,30 @@ public static class Dashboard
             return Results.Json(offlineDav.ListOpens());
         });
 
+        app.MapPost("/api/offline-folders/save-as", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            string? file = body.TryGetProperty("file", out var fiEl) ? fiEl.GetString() : null;
+            string? destination = body.TryGetProperty("destination", out var dEl) ? dEl.GetString() : null;
+            string? locationName = body.TryGetProperty("locationName", out var lEl) ? lEl.GetString() : null;
+            string? path = body.TryGetProperty("path", out var pEl) ? pEl.GetString() : null;
+            string? fileName = body.TryGetProperty("fileName", out var nEl) ? nEl.GetString() : null;
+            bool overwrite = body.TryGetProperty("overwrite", out var oEl) && oEl.GetBoolean();
+            if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(file) ||
+                string.IsNullOrWhiteSpace(destination))
+                return Results.BadRequest(new ErrorDto("A folder, a file, and a destination are required."));
+            if (!offlineFoldersSession.IsUnlocked)
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.SaveOfflineFileAs(config, offlineFoldersSession,
+                folder, file, destination, locationName, path, fileName, overwrite);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/offline-folders/rekey", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

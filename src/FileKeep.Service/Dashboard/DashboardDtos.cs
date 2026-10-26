@@ -173,6 +173,14 @@ public sealed record OfflineOpenFileDto(
     [property: JsonPropertyName("path")] string Path,
     [property: JsonPropertyName("readOnly")] bool ReadOnly);
 
+/// <summary>Result of POST /api/offline-folders/save-as: the written
+/// file's name, the destination kind ("local", "usb", or "smb"),
+/// and the bytes written.</summary>
+public sealed record OfflineSaveAsDto(
+    [property: JsonPropertyName("fileName")] string FileName,
+    [property: JsonPropertyName("destination")] string Destination,
+    [property: JsonPropertyName("bytes")] long Bytes);
+
 public sealed record ExistsDto(
     [property: JsonPropertyName("exists")] bool Exists);
 

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -96,6 +97,36 @@ public class NativeBridge
                 _owner.Invoke(() => mainForm.SetTrayEnabled(enabled));
             else
                 mainForm.SetTrayEnabled(enabled);
+        }
+    }
+
+    /// <summary>
+    /// Opens a Stealth Folders DAV URL in the shell (the Use dialog's Open
+    /// path). Narrow by design: only absolute http URLs on a loopback host
+    /// under /dav/offline/ are accepted, so a page can never talk the host
+    /// into opening an arbitrary file, LAN address, or remote URL. Anything
+    /// else returns false and the page falls back to copying the address.
+    /// </summary>
+    public bool OpenDavUrl(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)) return false;
+        string host = uri.Host;
+        if (host != "127.0.0.1" && host != "localhost" && host != "::1") return false;
+        if (!uri.AbsolutePath.StartsWith("/dav/offline/", StringComparison.Ordinal)) return false;
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo
+            {
+                FileName = uri.AbsoluteUri,
+                UseShellExecute = true,
+            });
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }
@@ -460,6 +491,12 @@ public class MainForm : Form
                         const path = await bridge.PickSaveFile(title || 'Save as', filter || '', defaultName || '');
                         return path || '';
                     } catch (e) { return ''; }
+                };
+                window.fileKeepOpenDav = async function(url) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        return await bridge.OpenDavUrl(url || '');
+                    } catch (e) { return false; }
                 };
                 // Signal to the dashboard that native dialogs are available
                 window.fileKeepNative = true;

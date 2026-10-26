@@ -401,48 +401,10 @@
     <a class="nav-item active" data-view="overview">Overview</a>
     <a class="nav-item" data-view="jobs">Backup jobs</a>
     <a class="nav-item" data-view="vault">Banked Vault</a>
+    <a class="nav-item" data-view="stealth">Stealth Folders</a>
     <a class="nav-item" data-view="security">Security</a>
     <a class="nav-item" data-view="tools">Tools & Settings</a>
     <a class="nav-item" data-view="about">About</a>
-    <!-- Offline Folders card (slice 1: locked card + encrypted catalog;
-         slice 2: file list + memory-served open over WebDAV).
-         Locked, it shows a lock and an Unlock button and NOTHING else:
-         no folder names, no counts, no hint whether anything is stored.
-         Unlocked, it lists the catalog entries; clicking one shows its
-         files, and double-clicking a file copies its share address for
-         File Explorer (the page itself cannot launch Explorer). -->
-    <div class="card" id="of-card" style="margin:12px 8px 0;padding:12px">
-      <div style="font-weight:600">🔒 Offline Folders</div>
-      <div id="of-locked">
-        <p style="color:var(--text-2);font-size:13px;margin:6px 0">Folder names stay hidden until you unlock.</p>
-        <div id="of-unlock-form" style="display:flex;flex-direction:column;gap:6px">
-          <input id="of-pass" type="password" placeholder="Passphrase" autocomplete="off">
-          <button onclick="ofUnlockPass()">Unlock</button>
-          <button onclick="ofUnlockTouch()">Unlock with YubiKey</button>
-        </div>
-      </div>
-      <div id="of-unlocked" style="display:none">
-        <div id="of-list" style="display:flex;flex-direction:column;gap:4px;margin:6px 0;max-height:30vh;overflow-y:auto"></div>
-        <div id="of-files" style="display:none;flex-direction:column;gap:4px;margin:6px 0;max-height:30vh;overflow-y:auto;border-top:1px solid var(--border);padding-top:6px"></div>
-        <div id="of-share" style="display:none;flex-direction:column;gap:6px;margin:6px 0">
-          <div style="font-size:12px;color:var(--text-2)">Open this folder in File Explorer — the share serves decrypted files from memory while unlocked:</div>
-          <div style="display:flex;gap:6px"><input id="of-share-url" readonly style="flex:1"><button onclick="ofCopyShare()">Copy</button></div>
-          <label style="font-size:13px">Add files <input id="of-file-input" type="file" multiple onchange="ofAddFiles()"></label>
-        </div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button onclick="ofLock()">Lock</button>
-          <button onclick="ofShowAdd()">Add folder</button>
-        </div>
-        <div id="of-add-form" style="display:none;flex-direction:column;gap:6px;margin-top:8px">
-          <input id="of-name" type="text" placeholder="Folder name" maxlength="128" autocomplete="off">
-          <select id="of-location"></select>
-          <div style="display:flex;gap:6px">
-            <button onclick="ofAdd()">Add</button>
-            <button onclick="ofHideAdd()">Cancel</button>
-          </div>
-        </div>
-      </div>
-    </div>
     <div id="sidebar-log" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);min-height:120px;max-height:40vh;overflow:hidden;display:flex;flex-direction:column">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <span style="font-size:12px;font-weight:600;color:var(--text-2)">OPERATIONS LOG</span>
@@ -608,6 +570,122 @@
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeScanResultsModal()">Close</button>
           </div>
+        </div>
+      </div>
+    </div>
+    <div class="view" id="view-stealth">
+      <h1>Stealth Folders</h1>
+      <p style="color:var(--text-2);margin:-12px 0 20px">Files that live encrypted across your destinations and open from memory — nothing readable on disk until you unlock.</p>
+      <!-- Locked state: a lock and an Unlock button and NOTHING else —
+           no folder names, no counts, no hint whether anything is stored.
+           To make a folder, unlock first — creating lives in the unlocked view. -->
+      <div id="of-locked">
+        <div class="card">
+          <div style="font-weight:600">🔒 Locked</div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Folder names stay hidden until you unlock. To make a folder, unlock first — creating lives in the unlocked view, so nothing about your folders leaks while locked.</p>
+          <div style="display:flex;flex-direction:column;gap:6px;max-width:320px">
+            <input id="of-pass" type="password" placeholder="Passphrase" autocomplete="off">
+            <button onclick="ofUnlockPass()">Unlock</button>
+            <button onclick="ofUnlockTouch()">Unlock with YubiKey</button>
+          </div>
+        </div>
+      </div>
+      <div id="of-unlocked" style="display:none">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+          <button onclick="ofLock()">Lock</button>
+          <button onclick="document.getElementById('st-import').style.display = document.getElementById('st-import').style.display === 'none' ? '' : 'none'">Import package…</button>
+        </div>
+        <div class="card" id="st-import" style="display:none">
+          <div class="name" style="font-size:16px;font-weight:600">Import a Stealth Folder</div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Import re-encrypts the package into this machine's catalog under its own secret. No data moves — only knowledge does.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <input id="st-import-file" type="file" accept=".json,application/json">
+            <input id="st-import-pass" type="password" placeholder="Export passphrase" autocomplete="off">
+            <button onclick="stImport()">Import</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="name" style="font-size:16px;font-weight:600">Make a new Stealth Folder</div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Name it, pick a USB or SMB location, create it. The entry goes into the encrypted catalog the moment you create it.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <input id="of-name" type="text" placeholder="Folder name" maxlength="128" autocomplete="off">
+            <select id="of-location"></select>
+            <button onclick="ofAdd()">Create folder</button>
+          </div>
+          <p id="st-loc-hint" style="color:var(--text-2);font-size:13px;margin:6px 0 0;display:none">No USB or SMB backup location yet — add one first (Backup jobs tab).</p>
+        </div>
+        <div class="card">
+          <div class="name" style="font-size:16px;font-weight:600">Folders</div>
+          <div id="of-list" style="display:flex;flex-direction:column;gap:4px;margin:6px 0"></div>
+        </div>
+        <div class="card" id="st-files-card" style="display:none">
+          <div class="name" style="font-size:16px;font-weight:600" id="st-files-title">Files</div>
+          <div id="of-files" style="display:flex;flex-direction:column;gap:4px;margin:6px 0"></div>
+          <div id="of-share" style="display:flex;flex-direction:column;gap:6px;margin:6px 0">
+            <div style="font-size:12px;color:var(--text-2)">Open this folder in File Explorer — the share serves decrypted files from memory while unlocked:</div>
+            <div style="display:flex;gap:6px"><input id="of-share-url" readonly style="flex:1"><button onclick="ofCopyShare()">Copy</button></div>
+            <label style="font-size:13px">Add files <input id="of-file-input" type="file" multiple onchange="ofAddFiles()"></label>
+          </div>
+        </div>
+        <div class="card" id="st-use" style="display:none">
+          <div class="name" style="font-size:16px;font-weight:600" id="st-use-name">Use file</div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Open is memory-only via the share — nothing is written to disk. Save As is a one-way decrypted export; FileKeep does not track, reload, or clean it after.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button onclick="stOpen(true)">Open read-only</button>
+            <button onclick="stOpen(false)">Open to edit</button>
+            <button onclick="stCopyUseUrl()">Copy address</button>
+            <button onclick="stHideUse()">Cancel</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+            <div style="font-weight:600;font-size:13px">Save As — one-way decrypted export</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <select id="st-save-dest" onchange="stUpdateSaveLabel()">
+                <option value="local">Local file</option>
+                <option value="usb">USB stick</option>
+                <option value="smb">SMB share</option>
+              </select>
+              <input id="st-save-name" type="text" placeholder="File name" autocomplete="off">
+              <select id="st-save-loc" style="display:none"></select>
+              <button onclick="stSaveAsDest()">Save</button>
+            </div>
+            <p id="st-save-label" style="color:var(--text-2);font-size:13px;margin:0"></p>
+          </div>
+        </div>
+        <div class="card" id="st-actions" style="display:none">
+          <div class="name" style="font-size:16px;font-weight:600" id="st-actions-name">Folder actions</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">
+            <input id="st-export-pass" type="password" placeholder="Export passphrase" autocomplete="off">
+            <button onclick="stExport()">Export encrypted package…</button>
+            <button onclick="stForget()">Forget…</button>
+          </div>
+          <p style="color:#c00;font-size:13px;margin:6px 0">Forget removes this folder from this machine's catalog only (destination chunks stay, orphaned and opaque). Without an export first, the folder is unrecoverable from this machine.</p>
+          <p id="st-forget-note" style="font-size:13px;margin:6px 0;display:none"></p>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Export writes one encrypted package — location pointer + manifest, no credentials, no plaintext filenames.</p>
+        </div>
+        <div class="card">
+          <div class="name" style="font-size:16px;font-weight:600">Currently open</div>
+          <div id="st-opens" style="display:flex;flex-direction:column;gap:4px;margin:6px 0"></div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0 0">Open tokens are cleared on lock, along with the share and the keys.</p>
+        </div>
+      </div>
+      <!-- Rekey is a locked-only operation (it replaces the keys the open
+           session holds), so this card shows its form while locked and a
+           Lock button while unlocked. -->
+      <div class="card" id="st-rekey">
+        <div class="name" style="font-size:16px;font-weight:600">Rekey</div>
+        <div id="st-rekey-form" style="display:none;flex-direction:column;gap:6px;margin-top:8px;max-width:420px">
+          <p style="color:var(--text-2);font-size:13px;margin:0">Rekey replaces the keys the open session holds — lock Stealth Folders first, then rekey. (Passphrase-mode operation; in YubiKey-only mode the root secret never changes, so no rekey is needed.)</p>
+          <input id="st-old-secret" type="password" placeholder="Old secret (only if it cannot be resolved on this PC)" autocomplete="off">
+          <input id="st-new-secret" type="password" placeholder="New secret" autocomplete="off">
+          <input id="st-rekey-pass" type="password" placeholder="Passphrase proof" autocomplete="off">
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button onclick="stRekey(false)">Rekey</button>
+            <button onclick="stRekey(true)">Rekey with YubiKey</button>
+          </div>
+        </div>
+        <div id="st-rekey-unlocked" style="display:none;margin-top:8px">
+          <p style="color:var(--text-2);font-size:13px;margin:0 0 8px">Rekey needs Stealth Folders locked first.</p>
+          <button onclick="ofLock()">Lock, then rekey…</button>
         </div>
       </div>
     </div>
@@ -1637,6 +1715,7 @@ document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', 
   document.getElementById('view-' + a.dataset.view).classList.add('active');
   document.querySelector('main').scrollTop = 0;
   if (a.dataset.view === 'about') loadAboutVersion();
+  if (a.dataset.view === 'stealth') ofRefresh();
 }));
 function fmtLast(j) {
   if (!j.lastResult) return '<span class="pill idle">never run</span>';
@@ -4908,21 +4987,19 @@ async function ofRefresh() {
     const locked = !!st.locked;
     document.getElementById('of-locked').style.display = locked ? '' : 'none';
     document.getElementById('of-unlocked').style.display = locked ? 'none' : '';
-    if (locked) { ofSelected = null; return; }
+    document.getElementById('st-rekey-form').style.display = locked ? 'flex' : 'none';
+    document.getElementById('st-rekey-unlocked').style.display = locked ? 'none' : '';
+    if (locked) { ofSelected = null; ofFilesFolder = null; stHideUse(); stForgetArmed = false; document.getElementById('st-files-card').style.display = 'none'; document.getElementById('st-actions').style.display = 'none'; return; }
     const folders = await api('/api/offline-folders');
     const list = document.getElementById('of-list');
     list.innerHTML = '';
     if (!folders.length) {
-      list.innerHTML = '<p style="color:var(--text-2);font-size:13px">No offline folders yet.</p>';
+      list.innerHTML = '<p style="color:var(--text-2);font-size:13px">No stealth folders yet.</p>';
     }
     folders.forEach(f => {
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.gap = '4px';
       const b = document.createElement('button');
       b.textContent = f.name;
       b.title = f.locationId;
-      b.style.flex = '1';
       b.style.textAlign = 'left';
       b.onclick = () => {
         ofSelected = f.name;
@@ -4931,15 +5008,13 @@ async function ofRefresh() {
         ofShowFiles(f.name);
       };
       b.className = 'of-sel';
-      const x = document.createElement('button');
-      x.textContent = '×';
-      x.title = 'Remove';
-      x.onclick = () => ofDelete(f.name);
-      row.appendChild(b);
-      row.appendChild(x);
-      list.appendChild(row);
+      list.appendChild(b);
     });
-  } catch (e) { /* service-down banner covers this; card keeps its last state */ }
+    if (!ofSelected) document.getElementById('st-files-card').style.display = 'none';
+    await stPopulateLocations();
+    stUpdateActions();
+    await stRefreshOpens();
+  } catch (e) { /* service-down banner covers this; tab keeps its last state */ }
 }
 async function ofUnlockPass() {
   const pass = document.getElementById('of-pass').value;
@@ -4957,47 +5032,51 @@ async function ofUnlockTouch() {
 }
 async function ofLock() {
   try {
+    // Lock-while-open warns + confirms (decided: warn, never block).
+    // The opens list is advisory: if it cannot be read, locking anyway
+    // is the safe default — lock is the secure action.
+    let opens = [];
+    try { opens = await api('/api/offline-folders/opens'); } catch { opens = []; }
+    if (opens.length) {
+      const list = opens.slice(0, 10).map(o => '- ' + o.folder + ' / ' + o.path + (o.readOnly ? ' (read-only)' : ' (editable)')).join('\n');
+      const more = opens.length > 10 ? '\nand ' + (opens.length - 10) + ' more.' : '';
+      if (!confirm(opens.length + ' file(s) still open:\n' + list + more + '\nLock anyway? Open apps will lose the share.')) return;
+    }
     await api('/api/offline-folders/lock', { method: 'POST', body: '{}' });
     ofSelected = null;
     ofFilesFolder = null;
     document.getElementById('of-files').style.display = 'none';
     document.getElementById('of-share').style.display = 'none';
+    stHideUse();
+    stForgetArmed = false;
     await ofRefresh();
   } catch (e) { toast(e.message, 'bad'); }
 }
-async function ofShowAdd() {
+// The create card lists USB/SMB locations only: the file store refuses
+// anything else ("Offline files are stored on USB/SMB locations only"),
+// so offering a Usenet location here would only fail at first file add.
+async function stPopulateLocations() {
   try {
     const cfg = await api('/api/config');
     const sel = document.getElementById('of-location');
     sel.innerHTML = '';
-    (cfg.locations || []).forEach(l => {
+    (cfg.locations || []).filter(l => l.type === 'usb' || l.type === 'smb').forEach(l => {
       const o = document.createElement('option');
       o.value = l.name;
       o.textContent = l.name + ' (' + l.type + ')';
       sel.appendChild(o);
     });
-    if (!sel.options.length) { toast('Add a backup location first.', 'bad'); return; }
-    document.getElementById('of-add-form').style.display = 'flex';
-  } catch (e) { toast(e.message, 'bad'); }
+    document.getElementById('st-loc-hint').style.display = sel.options.length ? 'none' : '';
+  } catch (e) { /* service-down banner covers this */ }
 }
-function ofHideAdd() { document.getElementById('of-add-form').style.display = 'none'; }
 async function ofAdd() {
   const name = document.getElementById('of-name').value;
   const locationId = document.getElementById('of-location').value;
   try {
     await api('/api/offline-folders', { method: 'POST', body: JSON.stringify({ name, locationId }) });
     document.getElementById('of-name').value = '';
-    ofHideAdd();
     await ofRefresh();
-    toast('Offline folder added.', 'ok');
-  } catch (e) { toast(e.message, 'bad'); }
-}
-async function ofDelete(name) {
-  try {
-    await api('/api/offline-folders/' + encodeURIComponent(name), { method: 'DELETE' });
-    document.getElementById('of-files').style.display = 'none';
-    document.getElementById('of-share').style.display = 'none';
-    await ofRefresh();
+    toast('Stealth folder added.', 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
 // Slice 2 file list + memory-served open. The dashboard page cannot
@@ -5009,6 +5088,8 @@ async function ofShowFiles(folderName) {
   ofFilesFolder = folderName;
   const pane = document.getElementById('of-files');
   const share = document.getElementById('of-share');
+  document.getElementById('st-files-card').style.display = '';
+  document.getElementById('st-files-title').textContent = 'Files — ' + folderName;
   pane.style.display = 'flex';
   share.style.display = 'flex';
   document.getElementById('of-share-url').value = location.origin + '/dav/offline/' + encodeURIComponent(folderName) + '/';
@@ -5017,28 +5098,30 @@ async function ofShowFiles(folderName) {
     pane.innerHTML = '';
     if (!files.length) {
       pane.innerHTML = '<p style="color:var(--text-2);font-size:13px">No files yet.</p>';
-      return;
+    } else {
+      files.forEach(f => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '4px';
+        row.style.alignItems = 'center';
+        const b = document.createElement('button');
+        b.textContent = f.path + ' (' + f.size + ' bytes)';
+        b.title = 'Click for Open / Save As; double-click to copy the share address for File Explorer';
+        b.style.flex = '1';
+        b.style.textAlign = 'left';
+        b.onclick = () => stShowUse(folderName, f.path);
+        b.ondblclick = () => ofCopyFileUrl(f.path);
+        const x = document.createElement('button');
+        x.textContent = '×';
+        x.title = 'Remove file';
+        x.onclick = () => ofDeleteFile(folderName, f.path);
+        row.appendChild(b);
+        row.appendChild(x);
+        pane.appendChild(row);
+      });
     }
-    files.forEach(f => {
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.gap = '4px';
-      row.style.alignItems = 'center';
-      const b = document.createElement('button');
-      b.textContent = f.path + ' (' + f.size + ' bytes)';
-      b.title = 'Double-click to copy the share address for File Explorer';
-      b.style.flex = '1';
-      b.style.textAlign = 'left';
-      b.ondblclick = () => ofCopyFileUrl(f.path);
-      const x = document.createElement('button');
-      x.textContent = '×';
-      x.title = 'Remove file';
-      x.onclick = () => ofDeleteFile(folderName, f.path);
-      row.appendChild(b);
-      row.appendChild(x);
-      pane.appendChild(row);
-    });
   } catch (e) { toast(e.message, 'bad'); }
+  stUpdateActions();
 }
 async function ofCopyFileUrl(path) {
   const url = location.origin + '/dav/offline/' + encodeURIComponent(ofFilesFolder) + '/' + path.split('/').map(encodeURIComponent).join('/');
@@ -5071,6 +5154,264 @@ async function ofDeleteFile(folderName, path) {
   try {
     await api('/api/offline-folders/' + encodeURIComponent(folderName) + '/files/' + path.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
     await ofShowFiles(folderName);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+// ---- Stealth Folders tab: Use dialog, export/import/forget, opens, rekey ----
+// Open tokens minted by this page, keyed by folder + path: the opens list
+// carries no token (OfflineOpenFileDto has none), so Release is only
+// offered for opens this page minted. Anything else releases on lock.
+let stUseFolder = null;
+let stUseFile = null;
+let stTokens = {};
+let stForgetArmed = false;
+
+function stUpdateActions() {
+  const box = document.getElementById('st-actions');
+  if (!ofSelected) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  document.getElementById('st-actions-name').textContent = 'Folder actions — ' + ofSelected;
+}
+
+function stShowUse(folderName, path) {
+  stUseFolder = folderName;
+  stUseFile = path;
+  document.getElementById('st-use-name').textContent = 'Use file — ' + path;
+  document.getElementById('st-use').style.display = '';
+  document.getElementById('st-save-name').value = path.split('/').pop();
+  stUpdateSaveLabel();
+  document.getElementById('st-use').scrollIntoView({ block: 'nearest' });
+}
+function stHideUse() {
+  stUseFolder = null;
+  stUseFile = null;
+  document.getElementById('st-use').style.display = 'none';
+}
+function stUseDavUrl() {
+  return location.origin + '/dav/offline/' + encodeURIComponent(stUseFolder) + '/' + stUseFile.split('/').map(encodeURIComponent).join('/');
+}
+async function stOpen(readOnly) {
+  if (!stUseFolder || !stUseFile) return;
+  try {
+    const issued = await api('/api/offline-folders/open-token', { method: 'POST', body: JSON.stringify({ folder: stUseFolder, file: stUseFile, readOnly }) });
+    const key = stUseFolder + '\n' + stUseFile;
+    stTokens[key] = issued.token;
+    const absolute = location.origin + issued.url;
+    // In the desktop app the host bridge ShellExecutes the loopback DAV
+    // URL (narrow validation lives on the native side). Anywhere else,
+    // fall back to the old behavior: copy the address for Explorer.
+    if (typeof window.fileKeepOpenDav === 'function') {
+      let opened = false;
+      try { opened = await window.fileKeepOpenDav(absolute); } catch {}
+      if (opened) {
+        toast(readOnly ? 'Opened read-only.' : 'Opened to edit.', 'ok');
+        await stRefreshOpens();
+        return;
+      }
+    }
+    await navigator.clipboard.writeText(absolute);
+    toast('Share address copied — paste it into File Explorer to open the file.', 'ok');
+    await stRefreshOpens();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stCopyUseUrl() {
+  try {
+    await navigator.clipboard.writeText(stUseDavUrl());
+    toast('Share address copied — paste it into File Explorer to open the file.', 'ok');
+  } catch { toast(stUseDavUrl(), 'ok'); }
+}
+// Forensic labels for the Save As destinations, plainly worded: the
+// dialog must say what each destination leaves behind, because Save As
+// is the one path where plaintext deliberately leaves memory.
+const stSaveLabels = {
+  local: 'Local: plaintext on your disk. Deletion on SSDs cannot be promised (wear leveling).',
+  usb: 'USB: plaintext lives on the stick until the stick is removed or destroyed.',
+  smb: "SMB: plaintext on someone else's disk and across the network (SMB encryption only if the server supports it).",
+};
+function stUpdateSaveLabel() {
+  const dest = document.getElementById('st-save-dest').value;
+  document.getElementById('st-save-label').textContent = stSaveLabels[dest] || '';
+  const locSel = document.getElementById('st-save-loc');
+  locSel.style.display = dest === 'local' ? 'none' : '';
+  if (dest !== 'local') stPopulateSaveLocations(dest);
+}
+async function stPopulateSaveLocations(type) {
+  try {
+    const cfg = await api('/api/config');
+    const sel = document.getElementById('st-save-loc');
+    sel.innerHTML = '';
+    (cfg.locations || []).filter(l => l.type === type).forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.name;
+      o.textContent = l.name;
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = 'No ' + type.toUpperCase() + ' location yet';
+      sel.appendChild(o);
+    }
+  } catch (e) { /* service-down banner covers this */ }
+}
+async function stSaveAsDest() {
+  if (!stUseFolder || !stUseFile) return;
+  const dest = document.getElementById('st-save-dest').value;
+  const name = document.getElementById('st-save-name').value.trim();
+  if (!name) { toast('Enter a file name.', 'bad'); return; }
+  try {
+    if (dest === 'local') {
+      // Desktop app: the host save picker chooses the path (and warns
+      // on overwrite), then the service writes the decrypted bytes
+      // there. Plain browser: fall back to the download.
+      if (typeof window.fileKeepPickSaveFile === 'function') {
+        const path = await window.fileKeepPickSaveFile('Save as', '', name);
+        if (!path) return; // picker cancelled
+        const res = await api('/api/offline-folders/save-as', { method: 'POST', body: JSON.stringify({ folder: stUseFolder, file: stUseFile, destination: 'local', path, overwrite: true }) });
+        toast('Saved ' + res.fileName + ' (' + res.bytes + ' bytes).', 'ok');
+        return;
+      }
+      await stSaveAsDownload();
+      return;
+    }
+    const loc = document.getElementById('st-save-loc').value;
+    if (!loc) { toast('Add a ' + dest.toUpperCase() + ' backup location first.', 'bad'); return; }
+    const res = await api('/api/offline-folders/save-as', { method: 'POST', body: JSON.stringify({ folder: stUseFolder, file: stUseFile, destination: dest, locationName: loc, fileName: name }) });
+    toast('Saved ' + res.fileName + ' to ' + dest.toUpperCase() + ' (' + res.bytes + ' bytes).', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stSaveAsDownload() {
+  if (!stUseFolder || !stUseFile) return;
+  try {
+    // No token is the legacy share path: while unlocked, a plain GET
+    // serves decrypted bytes from memory. If that ever refuses, mint a
+    // read-only token and retry with it.
+    let r = await fetch(stUseDavUrl());
+    if (!r.ok) {
+      const issued = await api('/api/offline-folders/open-token', { method: 'POST', body: JSON.stringify({ folder: stUseFolder, file: stUseFile, readOnly: true }) });
+      stTokens[stUseFolder + '\n' + stUseFile] = issued.token;
+      r = await fetch(location.origin + issued.url);
+    }
+    if (!r.ok) throw new Error('Could not read the file from the share.');
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = stUseFile.split('/').pop();
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    toast('Saved.', 'ok');
+    await stRefreshOpens();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stRefreshOpens() {
+  const box = document.getElementById('st-opens');
+  try {
+    const opens = await api('/api/offline-folders/opens');
+    box.innerHTML = '';
+    if (!opens.length) {
+      box.innerHTML = '<p style="color:var(--text-2);font-size:13px">Nothing open.</p>';
+      return;
+    }
+    opens.forEach(o => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.gap = '4px';
+      row.style.alignItems = 'center';
+      const t = document.createElement('span');
+      t.style.flex = '1';
+      t.textContent = o.folder + ' / ' + o.path + (o.readOnly ? ' · read-only' : ' · editable');
+      row.appendChild(t);
+      const key = o.folder + '\n' + o.path;
+      if (stTokens[key]) {
+        const rel = document.createElement('button');
+        rel.textContent = 'Release';
+        rel.onclick = () => stReleaseOpen(stTokens[key]);
+        row.appendChild(rel);
+      } else {
+        const n = document.createElement('span');
+        n.style.color = 'var(--text-2)';
+        n.style.fontSize = '13px';
+        n.textContent = 'releases on lock';
+        row.appendChild(n);
+      }
+      box.appendChild(row);
+    });
+  } catch (e) { /* locked or down; opens stay as they were */ }
+}
+async function stReleaseOpen(token) {
+  try {
+    await api('/api/offline-folders/release-open', { method: 'POST', body: JSON.stringify({ token }) });
+    for (const k of Object.keys(stTokens)) if (stTokens[k] === token) delete stTokens[k];
+    await stRefreshOpens();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stExport() {
+  if (!ofSelected) return;
+  const pass = document.getElementById('st-export-pass').value;
+  try {
+    const res = await api('/api/offline-folders/export', { method: 'POST', body: JSON.stringify({ folder: ofSelected, exportPassphrase: pass }) });
+    const blob = new Blob([JSON.stringify(res.package, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = res.fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    document.getElementById('st-export-pass').value = '';
+    toast('Exported ' + ofSelected + '.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stImport() {
+  const input = document.getElementById('st-import-file');
+  const pass = document.getElementById('st-import-pass').value;
+  if (!input.files.length) { toast('Choose an export package file first.', 'bad'); return; }
+  try {
+    const pkg = JSON.parse(await input.files[0].text());
+    const res = await api('/api/offline-folders/import', { method: 'POST', body: JSON.stringify({ package: pkg, exportPassphrase: pass }) });
+    let msg = 'Imported ' + res.folder + ' (' + res.files + ' files).';
+    if (res.warnings && res.warnings.length) msg += ' Warnings: ' + res.warnings.join(' ');
+    input.value = '';
+    document.getElementById('st-import-pass').value = '';
+    await ofRefresh();
+    toast(msg, 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stForget() {
+  if (!ofSelected) return;
+  const note = document.getElementById('st-forget-note');
+  if (!stForgetArmed) {
+    stForgetArmed = true;
+    note.style.display = '';
+    note.textContent = 'Click Forget again to confirm — without an export, this folder is unrecoverable from this machine.';
+    setTimeout(() => { stForgetArmed = false; note.style.display = 'none'; }, 10000);
+    return;
+  }
+  stForgetArmed = false;
+  note.style.display = 'none';
+  try {
+    const res = await api('/api/offline-folders/forget', { method: 'POST', body: JSON.stringify({ folder: ofSelected, confirm: true }) });
+    let msg = 'Forgot ' + res.folder + ' (' + res.files + ' files, ' + res.chunks + ' chunks).';
+    if (res.jobsUsingLocation && res.jobsUsingLocation.length) msg += ' Location still used by: ' + res.jobsUsingLocation.join(', ') + '.';
+    ofSelected = null;
+    ofFilesFolder = null;
+    stHideUse();
+    await ofRefresh();
+    toast(msg, 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stRekey(withTouch) {
+  const oldSecret = document.getElementById('st-old-secret').value || null;
+  const newSecret = document.getElementById('st-new-secret').value;
+  if (!newSecret) { toast('A new secret is required.', 'bad'); return; }
+  const body = { oldSecret, newSecret };
+  if (withTouch) body.proofYubiKey = true;
+  else body.proofPassphrase = document.getElementById('st-rekey-pass').value;
+  try {
+    await api('/api/offline-folders/rekey', { method: 'POST', body: JSON.stringify(body) });
+    document.getElementById('st-old-secret').value = '';
+    document.getElementById('st-new-secret').value = '';
+    document.getElementById('st-rekey-pass').value = '';
+    await ofRefresh();
+    toast('Stealth Folders rekeyed.', 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
 
