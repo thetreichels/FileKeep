@@ -114,7 +114,11 @@ public sealed class RestoreSessionTests : IDisposable
                 proofPassphrase: "the-real-passphrase");
             Assert.Equal(200, ss);
             string secret = Assert.IsType<PhoneSetupDto>(sp).Secret.Replace(" ", "");
-            var (vs, okp) = DashboardApi.VerifyPhoneTotp(config, CurrentTotpCode(secret), path,
+            // Capture the enrollment code: promotion seeds the replay
+            // record with its step, so that exact code must NOT unlock
+            // again inside its window (see the replay assert below).
+            string enrollCode = CurrentTotpCode(secret);
+            var (vs, okp) = DashboardApi.VerifyPhoneTotp(config, enrollCode, path,
                 proofPassphrase: "the-real-passphrase");
             Assert.Equal(200, vs);
             Assert.True(Assert.IsType<OkDto>(okp).Ok);
@@ -126,10 +130,18 @@ public sealed class RestoreSessionTests : IDisposable
             Assert.Equal(400, badStatus);
             Assert.False(session.IsUnlocked);
 
-            // Right code: session unlocked with the STORED passphrase,
-            // and verified (it came from the machine's own store).
+            // Enrollment code replayed: refused — promotion consumed
+            // its step, and one code authorizes one proof.
+            var (replayStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(
+                config, session, enrollCode);
+            Assert.Equal(400, replayStatus);
+            Assert.False(session.IsUnlocked);
+
+            // Next step's code: session unlocked with the STORED
+            // passphrase, and verified (it came from the machine's
+            // own store).
             var (goodStatus, _) = DashboardApi.UnlockRestoreSessionWithPhone(
-                config, session, CurrentTotpCode(secret));
+                config, session, NextTotpCode(secret));
             Assert.Equal(200, goodStatus);
             Assert.True(session.IsUnlocked);
             Assert.True(session.IsVerified);
@@ -149,6 +161,22 @@ public sealed class RestoreSessionTests : IDisposable
             long step = DateTimeOffset.UtcNow.ToUnixTimeSeconds() /
                 FileKeep.Service.Security.TotpCrypto.TimeStepSeconds;
             return FileKeep.Service.Security.TotpCrypto.ComputeCode(secret, step);
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret); }
+    }
+
+    // The code for the NEXT time step: the enrollment code's step is
+    // consumed by promotion, so an unlock must use a fresh step. The
+    // guard's ±1 skew window accepts it, and it is always newer than
+    // the seeded step, so it is never a replay.
+    private static string NextTotpCode(string base32)
+    {
+        byte[] secret = FileKeep.Service.Security.TotpCrypto.FromBase32(base32);
+        try
+        {
+            long step = DateTimeOffset.UtcNow.ToUnixTimeSeconds() /
+                FileKeep.Service.Security.TotpCrypto.TimeStepSeconds;
+            return FileKeep.Service.Security.TotpCrypto.ComputeCode(secret, step + 1);
         }
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret); }
     }
