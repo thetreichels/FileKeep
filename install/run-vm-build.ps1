@@ -191,7 +191,7 @@ Write-Host ("  MSI built: {0:N0} bytes" -f $msi.Length)
 
 # Branded Burn bootstrapper: stock WixStandardBootstrapperApplication with the
 # FileKeep logo (see install/Bundle.wxs). No custom theme, so no splash
-# copy is needed — the old FileKeepTheme files were unreferenced and are removed.
+# copy is needed - the old FileKeepTheme files were unreferenced and are removed.
 # NOTE: the Bal NuGet package (WixToolset.Bal.wixext) ships its assembly as
 # WixToolset.BootstrapperApplications.wixext.dll, so the -ext moniker cannot
 # resolve it by name. Pass the assembly path explicitly.
@@ -212,7 +212,7 @@ if (-not $balDll) { throw "Bal extension assembly not found" }
 # Fail early with the actual cause instead of letting WiX report it.
 $staleSetup = Get-Process FileKeep-Setup -ErrorAction SilentlyContinue
 if ($staleSetup) {
-    throw "FileKeep-Setup.exe is still running (PIDs: $(($staleSetup.Id) -join ', ')) — close the installer (its window X, not just the app) and rebuild. Leaving it on the Success page blocks the bundle step."
+    throw "FileKeep-Setup.exe is still running (PIDs: $(($staleSetup.Id) -join ', ')) - close the installer (its window X, not just the app) and rebuild. Leaving it on the Success page blocks the bundle step."
 }
 wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d ProductVersion=$productVersion -d MsiPath=$msiPath -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
 if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
@@ -243,7 +243,7 @@ Write-Host "  Bundle signed via detach/sign/reattach/sign."
 
 Write-Host "=== 6/6 Test install + verify + uninstall ==="
 # A running GUI blocks file replacement on install (in-use exe) and directory
-# removal on uninstall (gui/ as its working directory) — stop it first so the
+# removal on uninstall (gui/ as its working directory) - stop it first so the
 # self-test tests the new build instead of the leftovers of the old one.
 Get-Process FileKeepGui -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep 2
@@ -258,7 +258,7 @@ foreach ($c in @("C:\Program Files\FileKeep\cli\FileKeep.exe",
 $svc = sc.exe query FileKeep
 Write-Host "  Service state:"
 Write-Host $svc
-# -notmatch on an array returns the non-matching lines (always truthy) — join first.
+# -notmatch on an array returns the non-matching lines (always truthy) - join first.
 if (($svc -join "`n") -notmatch "RUNNING") { Write-Host "  NOTE: service not running after install (expected: registered auto-start, starts on first boot / service start)" }
 
 Write-Host "  Uninstalling..."
