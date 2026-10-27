@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace FileKeep.Service;
@@ -161,39 +162,56 @@ public static class OfflineFoldersCatalog
     /// Persists entries under <paramref name="key"/>, atomically
     /// (temp file + move) so a torn write never leaves a half catalog.
     /// The plaintext is zeroed after encryption.
+    /// The plaintext JSON is written with <see cref="Utf8JsonWriter"/>,
+    /// not JsonNode: JsonArray-of-strings serialization fails under
+    /// trimming (2026-10-27 laptop proof: a file with chunks threw
+    /// "JsonTypeInfo metadata for type 'System.String' was not provided",
+    /// leaving an orphaned chunk and an unchanged catalog, while the
+    /// untrimmed sandbox suite passed — so do not switch this back to
+    /// JsonObject/JsonArray without a trimmed-build check).
     /// </summary>
     public static void Save(string catalogPath, byte[] key, IReadOnlyList<OfflineFolderEntry> entries)
     {
         ArgumentNullException.ThrowIfNull(key);
         if (key.Length != 32) throw new ArgumentException("Catalog key must be 32 bytes.", nameof(key));
-        var doc = new JsonObject { ["version"] = CatalogVersion };
-        var arr = new JsonArray();
-        foreach (var e in entries)
+        byte[] plaintext;
+        using (var ms = new MemoryStream())
         {
-            var filesArr = new JsonArray();
-            foreach (var f in e.Files)
+            using (var writer = new Utf8JsonWriter(ms))
             {
-                var chunksArr = new JsonArray();
-                foreach (string chunkId in f.ChunkIds)
-                    chunksArr.Add(chunkId);
-                filesArr.Add(new JsonObject
+                writer.WriteStartObject();
+                writer.WriteNumber("version", CatalogVersion);
+                writer.WritePropertyName("entries");
+                writer.WriteStartArray();
+                foreach (var e in entries)
                 {
-                    ["path"] = f.Path,
-                    ["size"] = f.Size,
-                    ["modifiedUtc"] = f.ModifiedUtc.ToString("O"),
-                    ["chunks"] = chunksArr,
-                });
+                    writer.WriteStartObject();
+                    writer.WriteString("name", e.Name);
+                    writer.WriteString("locationId", e.LocationId);
+                    writer.WriteString("addedUtc", e.AddedUtc.ToString("O"));
+                    writer.WritePropertyName("files");
+                    writer.WriteStartArray();
+                    foreach (var f in e.Files)
+                    {
+                        writer.WriteStartObject();
+                        writer.WriteString("path", f.Path);
+                        writer.WriteNumber("size", f.Size);
+                        writer.WriteString("modifiedUtc", f.ModifiedUtc.ToString("O"));
+                        writer.WritePropertyName("chunks");
+                        writer.WriteStartArray();
+                        foreach (string chunkId in f.ChunkIds)
+                            writer.WriteStringValue(chunkId);
+                        writer.WriteEndArray();
+                        writer.WriteEndObject();
+                    }
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
             }
-            arr.Add(new JsonObject
-            {
-                ["name"] = e.Name,
-                ["locationId"] = e.LocationId,
-                ["addedUtc"] = e.AddedUtc.ToString("O"),
-                ["files"] = filesArr,
-            });
+            plaintext = ms.ToArray();
         }
-        doc["entries"] = arr;
-        byte[] plaintext = Encoding.UTF8.GetBytes(doc.ToJsonString());
         byte[] nonce = RandomNumberGenerator.GetBytes(NonceSize);
         byte[] ciphertext = new byte[plaintext.Length];
         byte[] tag = new byte[TagSize];
