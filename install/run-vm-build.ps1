@@ -207,6 +207,13 @@ if (-not $balDll) {
         Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $balDll) { throw "Bal extension assembly not found" }
+# A previous installer left on its Success page still holds C:\ub\FileKeep-Setup.exe
+# open, which makes the bundle step fail cryptically with WIX7012 (access denied).
+# Fail early with the actual cause instead of letting WiX report it.
+$staleSetup = Get-Process FileKeep-Setup -ErrorAction SilentlyContinue
+if ($staleSetup) {
+    throw "FileKeep-Setup.exe is still running (PIDs: $(($staleSetup.Id) -join ', ')) — close the installer (its window X, not just the app) and rebuild. Leaving it on the Success page blocks the bundle step."
+}
 wix build -arch x64 -ext $balDll -d SrcRoot=$srcRoot -d ProductVersion=$productVersion -d MsiPath=$msiPath -o C:\ub\FileKeep-Setup.exe "$srcRoot\install\Bundle.wxs"
 if ($LASTEXITCODE -ne 0) { throw "wix bundle build failed" }
 $bundle = Get-Item C:\ub\FileKeep-Setup.exe

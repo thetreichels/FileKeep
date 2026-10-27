@@ -447,6 +447,44 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// Stores files chosen through a native picker (see NativeBridge.PickFiles)
+    /// by local path, instead of by browser upload. The dashboard is loopback-only
+    /// and CSRF-checked, so only the local GUI user can call this, exactly as with
+    /// the multipart upload — it exists because the Chromium file chooser does not
+    /// reliably open from a remote/automated session, while a native WinForms dialog
+    /// does. Each path is read from disk and stored through <see cref="StoreOfflineFile"/>,
+    /// so basename validation, chunking, and catalog persistence are identical.
+    /// Requires the unlocked session.
+    /// </summary>
+    public static (int Status, object Payload) AddOfflineFilesByPath(
+        ServiceConfig config, OfflineFoldersSession session, string catalogPath,
+        string folderName, IEnumerable<string> paths, Action<string>? log = null)
+    {
+        var stored = new List<OfflineFileDto>();
+        foreach (string path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return (400, new ErrorDto($"File not found: {path}"));
+            string fileName = Path.GetFileName(path);
+            FileStream stream;
+            try { stream = File.OpenRead(path); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return (400, new ErrorDto($"Could not read file: {fileName}"));
+            }
+            using (stream)
+            {
+                var (status, payload) = StoreOfflineFile(config, session, catalogPath,
+                    folderName, fileName, stream, File.GetLastWriteTimeUtc(path), log);
+                if (status != 200)
+                    return (status, payload);
+                stored.Add((OfflineFileDto)payload);
+            }
+        }
+        return (200, stored);
+    }
+
+    /// <summary>
     /// Removes a file's index entry from its folder and persists the
     /// catalog. The chunks stay on the location as orphans (see
     /// <see cref="StoreOfflineFile"/>); they are no longer reachable

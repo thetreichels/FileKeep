@@ -79,6 +79,37 @@ public class NativeBridge
     }
 
     /// <summary>
+    /// Shows the native Windows open-file dialog (multi-select) for adding files
+    /// to a Stealth Folder. Returns the selected paths joined by newlines, or
+    /// empty string if the user cancelled. A native dialog is used instead of the
+    /// Chromium file chooser because the chooser does not reliably open from a
+    /// remote/automated session, while this dialog does — the dashboard then
+    /// uploads by path (see /api/offline-folders/{folder}/files-by-path).
+    /// </summary>
+    public string PickFiles(string title)
+    {
+        string result = "";
+        if (_owner.InvokeRequired)
+        {
+            _owner.Invoke(() => result = PickFiles(title));
+            return result;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = string.IsNullOrEmpty(title) ? "Add files" : title,
+            Filter = "All files (*.*)|*.*",
+            Multiselect = true,
+            CheckFileExists = true,
+        };
+
+        if (dialog.ShowDialog(_owner) == DialogResult.OK)
+            result = string.Join("\n", dialog.FileNames);
+
+        return result;
+    }
+
+    /// <summary>
     /// Gets whether the tray icon is enabled.
     /// </summary>
     public bool GetTrayEnabled()
@@ -491,6 +522,13 @@ public class MainForm : Form
                         const path = await bridge.PickSaveFile(title || 'Save as', filter || '', defaultName || '');
                         return path || '';
                     } catch (e) { return ''; }
+                };
+                window.fileKeepPickFiles = async function(title) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        const joined = await bridge.PickFiles(title || 'Add files');
+                        return (joined || '').split('\n').filter(p => p);
+                    } catch (e) { return []; }
                 };
                 window.fileKeepOpenDav = async function(url) {
                     try {

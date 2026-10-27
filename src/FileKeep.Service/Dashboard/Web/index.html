@@ -612,7 +612,7 @@
             <select id="of-location"></select>
             <button onclick="ofAdd()">Create folder</button>
           </div>
-          <p id="st-loc-hint" style="color:var(--text-2);font-size:13px;margin:6px 0 0;display:none">No USB or SMB backup location yet — add one first (Backup jobs tab).</p>
+          <p id="st-loc-hint" style="color:var(--text-2);font-size:13px;margin:6px 0 0;display:none">No USB or SMB backup location yet — <button onclick="document.querySelector('[data-view=&quot;jobs&quot;]').click()">Add a USB or SMB location</button></p>
         </div>
         <div class="card">
           <div class="name" style="font-size:16px;font-weight:600">Folders</div>
@@ -624,7 +624,7 @@
           <div id="of-share" style="display:flex;flex-direction:column;gap:6px;margin:6px 0">
             <div style="font-size:12px;color:var(--text-2)">Open this folder in File Explorer — the share serves decrypted files from memory while unlocked:</div>
             <div style="display:flex;gap:6px"><input id="of-share-url" readonly style="flex:1"><button onclick="ofCopyShare()">Copy</button></div>
-            <label style="font-size:13px">Add files <input id="of-file-input" type="file" multiple onchange="ofAddFiles()"></label>
+            <label id="of-file-input-label" style="font-size:13px">Add files <input id="of-file-input" type="file" multiple onchange="ofAddFiles()"></label><button id="of-file-native" style="display:none" onclick="ofAddFilesNative()">Add files…</button>
           </div>
         </div>
         <div class="card" id="st-use" style="display:none">
@@ -5093,6 +5093,9 @@ async function ofShowFiles(folderName) {
   pane.style.display = 'flex';
   share.style.display = 'flex';
   document.getElementById('of-share-url').value = location.origin + '/dav/offline/' + encodeURIComponent(folderName) + '/';
+  const nativePicker = typeof window.fileKeepPickFiles === 'function';
+  document.getElementById('of-file-input-label').style.display = nativePicker ? 'none' : '';
+  document.getElementById('of-file-native').style.display = nativePicker ? '' : 'none';
   try {
     const files = await api('/api/offline-folders/' + encodeURIComponent(folderName) + '/files');
     pane.innerHTML = '';
@@ -5146,6 +5149,21 @@ async function ofAddFiles() {
     const r = await fetch('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
     if (!r.ok) { const t = await r.text(); let m = t; try { m = JSON.parse(t).error || t; } catch {} throw new Error(m); }
     input.value = '';
+    await ofShowFiles(ofFilesFolder);
+    toast('Files stored.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+// Native-picker add: in the desktop app the Chromium file chooser does not
+// reliably open (notably from a remote session), so use the host's native
+// dialog and upload by path. In a plain browser the <input type=file> above
+// stays, and this button is hidden.
+async function ofAddFilesNative() {
+  if (!ofFilesFolder) return;
+  if (typeof window.fileKeepPickFiles !== 'function') { toast('Native file picker is not available here.', 'bad'); return; }
+  const paths = await window.fileKeepPickFiles('Add files');
+  if (!paths.length) return;
+  try {
+    const res = await api('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files-by-path', { method: 'POST', body: JSON.stringify({ paths }) });
     await ofShowFiles(ofFilesFolder);
     toast('Files stored.', 'ok');
   } catch (e) { toast(e.message, 'bad'); }

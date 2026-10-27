@@ -1171,6 +1171,31 @@ public static class Dashboard
             return Results.Json(stored);
         });
 
+        // Native-picker upload: same store, paths instead of multipart bytes.
+        // See DashboardApi.AddOfflineFilesByPath for why this exists.
+        app.MapPost("/api/offline-folders/{folder}/files-by-path", async (string folder, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            if (!body.TryGetProperty("paths", out var pathsEl) || pathsEl.ValueKind != System.Text.Json.JsonValueKind.Array)
+                return Results.BadRequest(new ErrorDto("paths must be an array."));
+            var paths = new List<string>();
+            foreach (var p in pathsEl.EnumerateArray())
+            {
+                if (p.ValueKind != System.Text.Json.JsonValueKind.String)
+                    return Results.BadRequest(new ErrorDto("paths must be strings."));
+                paths.Add(p.GetString()!);
+            }
+            if (paths.Count == 0)
+                return Results.BadRequest(new ErrorDto("No files selected."));
+            var (status, payload) = DashboardApi.AddOfflineFilesByPath(config, offlineFoldersSession,
+                offlineFoldersPath, folder, paths, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapDelete("/api/offline-folders/{folder}/files/{*path}", (string folder, string path, HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
