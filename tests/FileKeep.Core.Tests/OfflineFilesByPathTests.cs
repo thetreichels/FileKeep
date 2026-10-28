@@ -175,4 +175,59 @@ public sealed class OfflineFilesByPathTests : IDisposable
         Assert.Equal("notes.txt", entry.Path);
         Assert.Equal("v2-longer-content".Length, entry.Size);
     }
+
+    [Fact]
+    public void ByPath_MidBatchStoreFailure_RollsBackEarlierFiles()
+    {
+        string shareDir = Path.Combine(_workDir, "share");
+        Directory.CreateDirectory(shareDir);
+        var location = new BackupLocation { Name = "Share", Type = "smb", Share = shareDir };
+        string catalog = Path.Combine(_workDir, "offline-folders.json");
+        var (config, session, _) = UnlockedFolder(_workDir, catalog, location);
+
+        string good = Path.Combine(_workDir, "good.txt");
+        // '|' passes the open phase (a real, readable file) but fails name
+        // validation inside the store, so it is a deterministic mid-batch
+        // failure after the first file already stored.
+        string bad = Path.Combine(_workDir, "bad|name.txt");
+        File.WriteAllText(good, "stored before the failure");
+        File.WriteAllText(bad, "fails validation");
+
+        var (status, _) = DashboardApi.AddOfflineFilesByPath(config, session, catalog, "Vault",
+            new[] { good, bad });
+        Assert.Equal(400, status);
+
+        var files = DashboardApi.GetOfflineFolderFiles(session, "Vault");
+        var list = Assert.IsAssignableFrom<List<OfflineFileDto>>(files.Payload);
+        Assert.Empty(list);
+    }
+
+    [Fact]
+    public void ByPath_MidBatchStoreFailure_RestoresReplacedEntry()
+    {
+        string shareDir = Path.Combine(_workDir, "share");
+        Directory.CreateDirectory(shareDir);
+        var location = new BackupLocation { Name = "Share", Type = "smb", Share = shareDir };
+        string catalog = Path.Combine(_workDir, "offline-folders.json");
+        var (config, session, _) = UnlockedFolder(_workDir, catalog, location);
+
+        string source = Path.Combine(_workDir, "notes.txt");
+        string bad = Path.Combine(_workDir, "bad|name.txt");
+        File.WriteAllText(source, "v1");
+        Assert.Equal(200, DashboardApi.AddOfflineFilesByPath(config, session, catalog, "Vault", new[] { source }).Status);
+
+        // The batch replaces notes.txt, then fails on the second file: the
+        // rollback must restore the original entry, not leave the replacement.
+        File.WriteAllText(source, "v2-longer-content");
+        File.WriteAllText(bad, "fails validation");
+        var (status, _) = DashboardApi.AddOfflineFilesByPath(config, session, catalog, "Vault",
+            new[] { source, bad });
+        Assert.Equal(400, status);
+
+        var files = DashboardApi.GetOfflineFolderFiles(session, "Vault");
+        var list = Assert.IsAssignableFrom<List<OfflineFileDto>>(files.Payload);
+        var entry = Assert.Single(list);
+        Assert.Equal("notes.txt", entry.Path);
+        Assert.Equal("v1".Length, entry.Size);
+    }
 }

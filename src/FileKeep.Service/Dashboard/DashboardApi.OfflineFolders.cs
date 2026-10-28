@@ -509,14 +509,19 @@ public static partial class DashboardApi
     /// does. Each path is read from disk and stored through <see cref="StoreOfflineFile"/>,
     /// so basename validation, chunking, and catalog persistence are identical.
     /// Requires the unlocked session.
-    /// Batch semantics (all-or-nothing for deterministic failures): duplicate
+    /// Batch semantics (transactional at the catalog level): duplicate
     /// basenames inside one selection are refused, and every file is opened
     /// before anything is stored, so a missing or unreadable file anywhere in
-    /// the batch fails the whole batch with nothing stored. (Previously the
-    /// files before the failure were already stored while the caller got an
-    /// error.) A name that already exists in the folder is still replaced by
-    /// <see cref="StoreOfflineFile"/> — that is the update path, shared with
-    /// the multipart upload, not a collision.
+    /// the batch fails the whole batch with nothing stored. If a later file
+    /// then fails to store, earlier files in the batch are rolled back out
+    /// of the catalog (their blobs stay on the location as unreachable
+    /// orphans, as with <see cref="DeleteOfflineFile"/>); a replaced entry
+    /// is restored to its pre-batch form. If the rollback persist itself
+    /// fails, the failure is logged and the partial batch remains — the
+    /// session is left matching disk rather than diverging from it.
+    /// A name that already exists in the folder is still replaced by
+    /// <see cref="StoreOfflineFile"/> on success — that is the update path,
+    /// shared with the multipart upload, not a collision.
     /// Service-identity limitation: paths are opened in the service process
     /// (LocalSystem), not in the GUI user's session, so user mapped drives,
     /// EFS-encrypted files, and other per-user locations may fail here with
@@ -548,6 +553,28 @@ public static partial class DashboardApi
         // whole batch with nothing stored. Streams are held open (handles,
         // not memory — content still streams through chunking per file).
         var opened = new List<(string FileName, FileStream Stream, DateTimeOffset Modified)>();
+        // Catalog snapshot for rollback: each successful store persists the
+        // catalog, so a failure on a later file must undo the earlier ones.
+        // StoreOfflineFile builds new entry lists (never mutates in place),
+        // so this copy stays pre-batch. The rollback restores the catalog
+        // only — blobs written before the failure stay on the location as
+        // unreachable orphans, and shared chunks must never be deleted.
+        List<OfflineFolderEntry>? snapshot = null;
+        void Rollback()
+        {
+            if (snapshot is null)
+                return;
+            var save = PersistOfflineFolders(session, catalogPath, snapshot);
+            if (save is not null)
+            {
+                // Disk still holds the partial batch; leave the session
+                // matching disk rather than diverging from it.
+                log?.Invoke("dashboard: offline by-path rollback failed to persist; earlier files in the batch remain stored");
+                return;
+            }
+            session.SetEntries(snapshot);
+            log?.Invoke("dashboard: offline by-path batch rolled back");
+        }
         try
         {
             foreach (string path in pathList)
@@ -562,17 +589,29 @@ public static partial class DashboardApi
                 }
                 opened.Add((Path.GetFileName(path), stream, File.GetLastWriteTimeUtc(path)));
             }
+            snapshot = session.GetEntries()?.ToList();
             var stored = new List<OfflineFileDto>();
-            foreach (var (fileName, stream, modified) in opened)
+            try
             {
-                using (stream)
+                foreach (var (fileName, stream, modified) in opened)
                 {
-                    var (status, payload) = StoreOfflineFile(config, session, catalogPath,
-                        folderName, fileName, stream, modified, log);
-                    if (status != 200)
-                        return (status, payload);
-                    stored.Add((OfflineFileDto)payload);
+                    using (stream)
+                    {
+                        var (status, payload) = StoreOfflineFile(config, session, catalogPath,
+                            folderName, fileName, stream, modified, log);
+                        if (status != 200)
+                        {
+                            Rollback();
+                            return (status, payload);
+                        }
+                        stored.Add((OfflineFileDto)payload);
+                    }
                 }
+            }
+            catch
+            {
+                Rollback();
+                throw;
             }
             return (200, stored);
         }
