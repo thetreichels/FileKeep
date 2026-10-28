@@ -9,11 +9,26 @@ namespace FileKeep.Service;
 /// <summary>
 /// Offline file content storage (slice 2). A file's bytes are split
 /// with the backup CDC chunker, each chunk is encrypted with the
-/// backup chunk machinery (<see cref="ChunkCrypto"/>, chunk ID =
-/// SHA-256 of the plaintext chunk), and the resulting blobs are stored
-/// content-addressed on the folder's location through the location's
-/// own blob store — so a disguised location's layout and header
-/// wrapping apply automatically, with no second storage path.
+/// backup chunk machinery (<see cref="ChunkCrypto"/>), and the
+/// resulting blobs are stored content-addressed on the folder's
+/// location through the location's own blob store — so a disguised
+/// location's layout and header wrapping apply automatically, with
+/// no second storage path.
+///
+/// Chunk IDs are key-derived: HMAC-SHA-256 of the plaintext chunk
+/// under the profile's file-content key. They are NOT plaintext
+/// hashes. A plaintext hash plus Put's skip-if-present dedup let two
+/// profiles sharing a destination collide: the second profile's
+/// store of identical content reused the first profile's blob,
+/// encrypted under a key it does not hold, and every read-back
+/// failed AES-GCM verification (2026-10-27 Save As bug). Key-derived
+/// IDs keep dedup within one profile (same key, same content, same
+/// ID) while different profiles get different IDs for identical
+/// content. Do NOT revert to a plaintext hash. Rekey deliberately
+/// preserves existing IDs (it re-encrypts in place with the catalog
+/// ID as AAD), so rekeyed blobs keep legacy IDs and still read;
+/// only new uploads use the key-derived scheme, and old catalogs
+/// keep reading their old blobs unchanged.
 ///
 /// Plaintext discipline: chunk plaintext buffers are zeroed as soon
 /// as their ciphertext exists (store) or their bytes have been
@@ -155,7 +170,12 @@ public static class OfflineFileStore
             int accumLen = 0;
             void Drain(int chunkLen)
             {
-                byte[] id32 = SHA256.HashData(accum.AsSpan(0, chunkLen));
+                // Key-derived chunk ID (see the class comment): HMAC
+                // of the plaintext chunk under the content key. The
+                // ID doubles as the AES-GCM AAD, exactly as before,
+                // and Retrieve reads it straight from the catalog, so
+                // no other path changes.
+                byte[] id32 = HMACSHA256.HashData(contentKey, accum.AsSpan(0, chunkLen));
                 try
                 {
                     byte[] blob = ChunkCrypto.Encrypt(accum.AsSpan(0, chunkLen), contentKey, id32);
