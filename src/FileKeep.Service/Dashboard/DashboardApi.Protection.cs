@@ -152,6 +152,9 @@ public static partial class DashboardApi
             log?.Invoke("dashboard: protection profile updated " +
                 $"(passphrase={request.PassphraseEnabled}, yubikey={request.YubiKeyEnabled}, " +
                 $"phone={request.PhoneEnabled}, link={linkMode})");
+            AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok,
+                $"passphrase={request.PassphraseEnabled} yubikey={request.YubiKeyEnabled} " +
+                $"phone={request.PhoneEnabled} link={linkMode}");
             return (200, GetProtectionProfile(config));
         }
         catch (Exception ex)
@@ -312,6 +315,7 @@ public static partial class DashboardApi
         if (TotpGuard.IsLockedOut)
         {
             log?.Invoke("dashboard: phone code refused — TOTP checks are locked out after failed attempts");
+            AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=totp-lockout");
             return (200, new OkDto(false));
         }
         try
@@ -340,6 +344,7 @@ public static partial class DashboardApi
             if (!ok)
             {
                 TotpGuard.ReportFailure(log);
+                AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=totp");
                 return (200, new OkDto(false));
             }
             if (!hasPending && !TotpGuard.AcceptStep(matchedStep.Value))
@@ -348,6 +353,7 @@ public static partial class DashboardApi
                 // or unlock cannot verify again inside its window.
                 TotpGuard.ReportFailure(log);
                 log?.Invoke("dashboard: phone code refused — that code was already used");
+                AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=totp-replay");
                 return (200, new OkDto(false));
             }
             if (ok && hasPending)
@@ -382,6 +388,7 @@ public static partial class DashboardApi
                     }
                 }
                 log?.Invoke("dashboard: phone authenticator secret promoted after verified enrollment");
+                AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok, "phone-added=true");
                 }
                 // Promotion succeeded: seed the replay record with the
                 // enrollment code's step, so that code cannot then be

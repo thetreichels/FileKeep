@@ -48,6 +48,10 @@ public sealed class NntpConfig
     [JsonPropertyName("redundancyMode")]
     public string RedundancyMode { get; set; } = "";
 
+    /// <summary>Typed redundancy mode (parsed at load; empty means fallback).</summary>
+    [JsonIgnore]
+    public RedundancyKind ParsedRedundancy => RedundancyKindParser.Parse(RedundancyMode);
+
     /// <summary>
     /// DPAPI-encrypted password (base64). Set via the dashboard; never holds plaintext.
     /// </summary>
@@ -85,6 +89,10 @@ public sealed class BackupLocation
     /// <summary><c>"nntp"</c>, <c>"smb"</c> or <c>"usb"</c>.</summary>
     [JsonPropertyName("type")]
     public string Type { get; set; } = "";
+
+    /// <summary>Typed location kind (parsed at load).</summary>
+    [JsonIgnore]
+    public LocationKind ParsedKind => LocationKindParser.Parse(Type);
 
     // ---- NNTP fields (type == "nntp") ----
 
@@ -177,13 +185,17 @@ public sealed class BackupLocation
     /// </summary>
     public string RedundancyMode { get; set; } = "";
 
+    /// <summary>Typed redundancy mode (parsed at load; empty means fallback).</summary>
+    [JsonIgnore]
+    public RedundancyKind ParsedRedundancy => RedundancyKindParser.Parse(RedundancyMode);
+
     /// <summary>True if a password is available (stored blob or env var).</summary>
     [JsonIgnore]
     public bool HasPassword =>
-        Type == "nntp"
+        ParsedKind == LocationKind.Nntp
             ? !string.IsNullOrEmpty(PasswordProtected) ||
               !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_NNTP_PASSWORD"))
-            : Type == "smb"
+            : ParsedKind == LocationKind.Smb
                 ? !string.IsNullOrEmpty(SmbPasswordProtected) ||
                   !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_SMB_PASSWORD"))
                 : true; // usb: no password needed
@@ -279,6 +291,10 @@ public sealed class BackupJobConfig
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "incremental";
 
+    /// <summary>Typed job mode (parsed at load).</summary>
+    [JsonIgnore]
+    public BackupMode ParsedMode => BackupModeParser.Parse(Mode);
+
     /// <summary>
     /// <c>"files"</c> (default) or <c>"disk"</c> (whole-disk image).
     /// For disk jobs, <see cref="Source"/> holds the device path
@@ -288,8 +304,16 @@ public sealed class BackupJobConfig
     [JsonPropertyName("jobType")]
     public string JobType { get; set; } = "files";
 
+    /// <summary>Typed job kind (parsed at load).</summary>
+    [JsonIgnore]
+    public JobKind ParsedJobKind => JobKindParser.Parse(JobType);
+
     /// <summary>True when this job captures a whole-disk image.</summary>
     [JsonIgnore]
+    // Deliberately a string comparison, not ParsedJobKind: the dashboard
+    // calls this on not-yet-validated job input (UpsertJob checks sources
+    // before Validate runs), where a throwing accessor would turn a 400
+    // into a 500. Validated configs can use ParsedJobKind instead.
     public bool IsDiskImage =>
         JobType.Equals("disk", StringComparison.OrdinalIgnoreCase);
 
@@ -404,6 +428,10 @@ public sealed class BackupJobConfig
     [JsonPropertyName("redundancyMode")]
     public string RedundancyMode { get; set; } = "none";
 
+    /// <summary>Typed redundancy mode (parsed at load).</summary>
+    [JsonIgnore]
+    public RedundancyKind ParsedRedundancy => RedundancyKindParser.Parse(RedundancyMode);
+
     /// <summary>
     /// Number of data chunks per XOR parity group. Default 10 (1 parity per
     /// 10 chunks, ~10% overhead). Higher values mean fewer parity files but
@@ -423,8 +451,9 @@ public sealed class ServiceConfig
 
     /// <summary>
     /// Dashboard bind address. Defaults to loopback only; the dashboard has
-    /// no authentication in v0.7, so do not bind it to a public interface
-    /// without a reverse proxy in front.
+    /// no authentication, so do not bind it to a public interface
+    /// without a reverse proxy in front (the loopback guard in
+    /// Dashboard.cs refuses non-loopback binds at startup).
     /// </summary>
     [JsonPropertyName("dashboardBind")]
     public string DashboardBind { get; set; } = "127.0.0.1";
@@ -665,6 +694,10 @@ public sealed class ServiceConfig
     [JsonPropertyName("protectionLinkMode")]
     public string ProtectionLinkMode { get; set; } = "or";
 
+    /// <summary>Typed protection link mode (parsed at load; empty means "or").</summary>
+    [JsonIgnore]
+    public LinkKind ParsedLink => LinkKindParser.Parse(ProtectionLinkMode);
+
     /// <summary>
     /// Display names of registered YubiKeys (e.g. "YubiKey 1"). Labels
     /// only — all keys are programmed with the same slot secret (see
@@ -796,7 +829,16 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException("A backup location has no name.");
             if (!locationNames.Add(loc.Name))
                 throw new InvalidOperationException($"Duplicate location name '{loc.Name}'.");
-            if (loc.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase))
+            LocationKind locKind;
+            try { locKind = loc.ParsedKind; }
+            catch (ArgumentException)
+            {
+                // A null type previously threw NullReferenceException out
+                // of the Equals call; it now gets this same load error.
+                throw new InvalidOperationException(
+                    $"Location '{loc.Name}' has unknown type '{loc.Type}' (expected \"nntp\", \"smb\", or \"usb\").");
+            }
+            if (locKind == LocationKind.Nntp)
             {
                 if (string.IsNullOrWhiteSpace(loc.Host))
                     throw new InvalidOperationException($"Location '{loc.Name}' (nntp) has no host.");
@@ -805,25 +847,25 @@ public sealed class ServiceConfig
                 if (loc.Connections < 1 || loc.Connections > 100)
                     throw new InvalidOperationException($"Location '{loc.Name}' connections must be between 1 and 100.");
             }
-            else if (loc.Type.Equals("smb", StringComparison.OrdinalIgnoreCase))
+            else if (locKind == LocationKind.Smb)
             {
                 if (string.IsNullOrWhiteSpace(loc.Share))
                     throw new InvalidOperationException($"Location '{loc.Name}' (smb) has no share path.");
             }
-            else if (loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+            else // Usb: the parser only yields these three kinds.
             {
                 if (string.IsNullOrWhiteSpace(loc.VolumeSerial))
                     throw new InvalidOperationException($"Location '{loc.Name}' (usb) has no volume serial.");
             }
-            else
+            if (!string.IsNullOrEmpty(loc.RedundancyMode))
             {
-                throw new InvalidOperationException(
-                    $"Location '{loc.Name}' has unknown type '{loc.Type}' (expected \"nntp\", \"smb\", or \"usb\").");
+                try { RedundancyKindParser.Parse(loc.RedundancyMode); }
+                catch (ArgumentException)
+                {
+                    throw new InvalidOperationException(
+                        $"Location '{loc.Name}' has unknown redundancyMode '{loc.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+                }
             }
-            if (!string.IsNullOrEmpty(loc.RedundancyMode) &&
-                loc.RedundancyMode is not ("none" or "xor" or "par2"))
-                throw new InvalidOperationException(
-                    $"Location '{loc.Name}' has unknown redundancyMode '{loc.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
         }
 
         // Empty jobs are valid: a fresh install has no jobs yet, and the
@@ -844,13 +886,18 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException($"Job '{job.Name}': disk-image jobs back up a single device.");
             ValidateNoNestedSources(job);
             ScheduleParser.Parse(job.Schedule); // validates format
-            if (job.Mode is not ("incremental" or "full"))
+            try { BackupModeParser.Parse(job.Mode); }
+            catch (ArgumentException)
+            {
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown mode '{job.Mode}' (expected \"incremental\" or \"full\").");
-            if (!job.JobType.Equals("files", StringComparison.OrdinalIgnoreCase) &&
-                !job.JobType.Equals("disk", StringComparison.OrdinalIgnoreCase))
+            }
+            try { JobKindParser.Parse(job.JobType); }
+            catch (ArgumentException)
+            {
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown jobType '{job.JobType}' (expected \"files\" or \"disk\").");
+            }
             if (job.Vss && job.BackupPrivilege)
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' and 'backupPrivilege' are mutually exclusive.");
@@ -860,17 +907,34 @@ public sealed class ServiceConfig
             // parityGroupSize < 2 with xor either hung parity
             // generation (0/negative) or silently produced no parity
             // (1) — all become load-time errors with the job named.
-            if (job.RedundancyMode is not ("none" or "xor" or "par2"))
+            // Unlike locations/providers, where an empty redundancyMode
+            // means "fall back to the job's", a job's own redundancyMode
+            // must name a mode: empty matched none of the three modes
+            // before the enum conversion and is still rejected — the
+            // parser's empty-to-None default does not apply here.
+            if (string.IsNullOrEmpty(job.RedundancyMode))
                 throw new InvalidOperationException(
                     $"Job '{job.Name}' has unknown redundancyMode '{job.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+            try { RedundancyKindParser.Parse(job.RedundancyMode); }
+            catch (ArgumentException)
+            {
+                throw new InvalidOperationException(
+                    $"Job '{job.Name}' has unknown redundancyMode '{job.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+            }
             try { VerificationModeParser.Parse(job.VerificationMode); }
             catch (ArgumentException ex)
             {
                 throw new InvalidOperationException($"Job '{job.Name}': {ex.Message}");
             }
-            bool xorInPlay = job.RedundancyMode == "xor"
-                || Locations.Any(l => l.RedundancyMode == "xor")
-                || EffectiveProviders.Any(p => p.RedundancyMode == "xor");
+            // Job and location redundancies are validated by this point;
+            // provider redundancies are not (their check runs below), so
+            // the provider leg stays a comparison — a garbage provider
+            // value is not xor, and its own check rejects it with its
+            // own message rather than surfacing as an ArgumentException.
+            bool xorInPlay = job.ParsedRedundancy == RedundancyKind.Xor
+                || Locations.Any(l => l.ParsedRedundancy == RedundancyKind.Xor)
+                || EffectiveProviders.Any(p => string.Equals(
+                    p.RedundancyMode, "xor", StringComparison.OrdinalIgnoreCase));
             if (xorInPlay && job.ParityGroupSize < 2)
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': parityGroupSize must be at least 2 when redundancyMode is \"xor\" (got {job.ParityGroupSize}).");
@@ -888,17 +952,32 @@ public sealed class ServiceConfig
                 throw new InvalidOperationException(
                     $"Job '{job.Name}': 'vss' requires Windows.");
         }
-        if (!string.IsNullOrEmpty(ProtectionLinkMode) &&
-            !ProtectionLinkMode.Equals("or", StringComparison.OrdinalIgnoreCase) &&
-            !ProtectionLinkMode.Equals("and", StringComparison.OrdinalIgnoreCase))
+        try { LinkKindParser.Parse(ProtectionLinkMode); }
+        catch (ArgumentException)
+        {
             throw new InvalidOperationException(
                 $"protectionLinkMode '{ProtectionLinkMode}' is invalid (expected \"or\" or \"and\").");
+        }
         if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
         {
             if (Nntp.Port is < 1 or > 65535)
                 throw new InvalidOperationException($"nntp.port {Nntp.Port} is out of range.");
             if (Nntp.Connections < 1 || Nntp.Connections > 100)
                 throw new InvalidOperationException("nntp.connections must be between 1 and 100.");
+            // The global NNTP entry's redundancy was never validated: a
+            // garbage value silently behaved as "none" in the uploader
+            // (the same silent-none bug SF-22 fixed for jobs). Blank-host
+            // globals are placeholders (uploads skip them), so only
+            // host-bearing globals are checked.
+            if (!string.IsNullOrEmpty(Nntp.RedundancyMode))
+            {
+                try { RedundancyKindParser.Parse(Nntp.RedundancyMode); }
+                catch (ArgumentException)
+                {
+                    throw new InvalidOperationException(
+                        $"nntp.redundancyMode '{Nntp.RedundancyMode}' is invalid (expected \"none\", \"xor\", or \"par2\").");
+                }
+            }
         }
         // Providers (SF-21): entries in the list get the same checks the
         // legacy singleton gets. A blank-host entry is a tolerated
@@ -914,10 +993,15 @@ public sealed class ServiceConfig
             if (provider.Connections < 1 || provider.Connections > 100)
                 throw new InvalidOperationException(
                     $"nntpProviders entry '{provider.Host}' connections must be between 1 and 100.");
-            if (!string.IsNullOrEmpty(provider.RedundancyMode) &&
-                provider.RedundancyMode is not ("none" or "xor" or "par2"))
-                throw new InvalidOperationException(
-                    $"nntpProviders entry '{provider.Host}' has unknown redundancyMode '{provider.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+            if (!string.IsNullOrEmpty(provider.RedundancyMode))
+            {
+                try { RedundancyKindParser.Parse(provider.RedundancyMode); }
+                catch (ArgumentException)
+                {
+                    throw new InvalidOperationException(
+                        $"nntpProviders entry '{provider.Host}' has unknown redundancyMode '{provider.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
+                }
+            }
         }
     }
 
@@ -925,7 +1009,10 @@ public sealed class ServiceConfig
     /// Rejects duplicate or nested source folders: backing up a folder
     /// already includes everything below it, so listing both would back up
     /// the nested files twice. The dashboard prevents this in the UI; this
-    /// is the server-side backstop for hand-edited configs.
+    /// is the server-side backstop for hand-edited configs. Comparison
+    /// is on canonical paths (see <see cref="PathCanonicalization"/>):
+    /// symlinks, junctions, and Windows 8.3 short paths naming the same
+    /// directory are caught, not just lexically identical spellings.
     /// </summary>
     public static void ValidateNoNestedSources(BackupJobConfig job)
     {
@@ -935,7 +1022,7 @@ public sealed class ServiceConfig
             string n;
             try
             {
-                n = Path.GetFullPath(s).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                n = PathCanonicalization.Canonicalize(s);
             }
             catch
             {

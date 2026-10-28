@@ -1420,7 +1420,7 @@ public sealed class BackupScheduler
                     {
                         (manifest, outcomes) = RunBatchedBackup(srcJob, repo, batchParent, snap, token);
                     }
-                    else if (srcJob.Mode == "full")
+                    else if (srcJob.ParsedMode == BackupMode.Full)
                     {
                         // NS-3: the operation token reaches into the
                         // backup itself — a stop aborts at the next file
@@ -1529,8 +1529,13 @@ public sealed class BackupScheduler
             {
                 rp.SetPhase(RunPhases.Finishing);
                 foreach (var (tName, tType, _) in ResolveTargets(job))
+                {
+                    // tType comes from a validated location type, so the
+                    // parse cannot fail; the string stays the display kind.
+                    var tKind = LocationKindParser.Parse(tType);
                     rp.RegisterDestination(tName, tType,
-                        tType == "nntp" ? "items" : tType == "smb" ? "files" : "chunks");
+                        tKind == LocationKind.Nntp ? "items" : tKind == LocationKind.Smb ? "files" : "chunks");
+                }
                 rp.SetExpectVerify(job.AutoVerify && done.Any(d => !d.Batched));
             }
         }
@@ -1981,7 +1986,7 @@ public sealed class BackupScheduler
         if (repo.LocalChunkStore is null)
             return false;
 
-        if (!job.IsDiskImage && job.Mode != "full")
+        if (!job.IsDiskImage && job.ParsedMode != BackupMode.Full)
         {
             string? parentId = LatestBackupIdForSource(repo, job.FirstSource);
             if (parentId is not null)
@@ -2132,7 +2137,7 @@ public sealed class BackupScheduler
                 throw new InvalidOperationException(failedTargets.Values.First());
 
             var usbLocs = targets
-                .Where(t => t.Type == "usb")
+                .Where(t => t.Loc.ParsedKind == LocationKind.Usb)
                 .Select(t => t.Loc)
                 .ToList();
 
@@ -3071,6 +3076,10 @@ public sealed class BackupScheduler
                 string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
                     ? nntp.RedundancyMode
                     : job.RedundancyMode;
+                // Parsed once for the comparisons below; the string still
+                // goes to the uploader, whose parameter stays a string
+                // (it is a runtime decision value, not config).
+                var redundancyKind = RedundancyKindParser.Parse(redundancy);
                 int uploaded = 0, skipped = 0;
                 // Parallel upload using the connection pool.
                 // Each thread acquires a connection, uploads, releases it.
@@ -3088,8 +3097,8 @@ public sealed class BackupScheduler
                 // positional groups of 10, trailing groups of < 2 skipped.
                 int dataUnits = useVolumes ? volumeGroups.Count : chunkIds.Length;
                 int parityGroups = dataUnits / 10 + (dataUnits % 10 >= 2 ? 1 : 0);
-                int parityUnits = redundancy == "xor" ? parityGroups
-                    : redundancy == "par2" ? parityGroups * 3 : 0;
+                int parityUnits = redundancyKind == RedundancyKind.Xor ? parityGroups
+                    : redundancyKind == RedundancyKind.Par2 ? parityGroups * 3 : 0;
 
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
@@ -3204,7 +3213,7 @@ public sealed class BackupScheduler
                     if (parityUnits > 0)
                     {
                         progress.SetPhase("parity");
-                        string parityLabel = redundancy == "xor" ? "XOR" : "PAR2";
+                        string parityLabel = redundancyKind == RedundancyKind.Xor ? "XOR" : "PAR2";
                         if (useVolumes)
                         {
                             var chunkMap = volumeEntries.ToDictionary(
@@ -3218,11 +3227,11 @@ public sealed class BackupScheduler
                                 string[] group = sortedVolIds.Skip(g).Take(10).ToArray();
                                 if (group.Length < 2)
                                     continue;
-                                parityGroupLists.AddRange(redundancy == "xor"
+                                parityGroupLists.AddRange(redundancyKind == RedundancyKind.Xor
                                     ? Redundancy.XorParity.GroupsFor(group, job.ParityGroupSize)
                                     : Redundancy.Par2Redundancy.GroupsFor(group));
                                 IReadOnlyDictionary<string, byte[]> blocks =
-                                    redundancy == "xor"
+                                    redundancyKind == RedundancyKind.Xor
                                         ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes, null, job.ParityGroupSize)
                                         : Redundancy.Par2Redundancy.GenerateParity(group, GetVolumeBytes);
                                 Parallel.ForEach(blocks, parallelOptions, kvp =>
@@ -3243,11 +3252,11 @@ public sealed class BackupScheduler
                         }
                         else
                         {
-                            parityGroupLists.AddRange(redundancy == "xor"
+                            parityGroupLists.AddRange(redundancyKind == RedundancyKind.Xor
                                 ? Redundancy.XorParity.GroupsFor(chunkIds, job.ParityGroupSize)
                                 : Redundancy.Par2Redundancy.GroupsFor(chunkIds));
                             IReadOnlyDictionary<string, byte[]> parityBlocks =
-                                redundancy == "xor"
+                                redundancyKind == RedundancyKind.Xor
                                     ? Redundancy.XorParity.GenerateParity(
                                         chunkIds, id => repo.GetChunkBlob(id), null, job.ParityGroupSize)
                                     : Redundancy.Par2Redundancy.GenerateParity(

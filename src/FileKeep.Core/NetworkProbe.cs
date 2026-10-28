@@ -42,9 +42,9 @@ public static class NetworkProbe
     public static bool IsLocationReachable(BackupLocation loc)
     {
         ArgumentNullException.ThrowIfNull(loc);
-        if (loc.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase))
+        if (loc.ParsedKind == LocationKind.Nntp)
             return IsTcpReachable(loc.Host, loc.Port > 0 ? loc.Port : 119);
-        if (loc.Type.Equals("smb", StringComparison.OrdinalIgnoreCase))
+        if (loc.ParsedKind == LocationKind.Smb)
         {
             string? server = SmbServerOf(loc.Share);
             return server is null || IsTcpReachable(server, 445);

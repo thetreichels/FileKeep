@@ -22,10 +22,16 @@ static string DefaultConfigPath()
 // scheduler, nothing in service.log). Every fatal startup error ALSO
 // goes to service.log beside the config (falling back to the temp dir
 // when even the config directory is unreachable).
-void WriteStartupError(string? cfgPath, string what, Exception ex)
+void WriteStartupError(string? cfgPath, string what, Exception ex, string? auditLine = null)
 {
-    string line = $"[{DateTime.Now:O}] FATAL startup: {what}: {ex.Message}{Environment.NewLine}";
-    Console.Error.WriteLine($"error: {what}: {ex.Message}");
+    // Security review rec 3: exception text is sanitized before it
+    // reaches any log — a subsystem that interpolates a blob or
+    // token into its message must not leak it into service.log or
+    // stderr. Paths and failure kinds survive sanitization (see
+    // StartupErrorSanitizer); only secret-shaped content is removed.
+    string safeMessage = StartupErrorSanitizer.Sanitize(ex.Message);
+    string line = $"[{DateTime.Now:O}] FATAL startup: {what}: {safeMessage}{Environment.NewLine}";
+    Console.Error.WriteLine($"error: {what}: {safeMessage}");
     string[] candidates =
     {
         cfgPath is not null
@@ -36,14 +42,27 @@ void WriteStartupError(string? cfgPath, string what, Exception ex)
     foreach (string candidate in candidates)
     {
         if (candidate.Length == 0) continue;
-        try { File.AppendAllText(candidate, line); return; } catch { /* try next */ }
+        try
+        {
+            File.AppendAllText(candidate, line);
+            if (auditLine is not null)
+                File.AppendAllText(candidate, auditLine + Environment.NewLine);
+            LogFileSecurity.RestrictLogFileBestEffort(candidate);
+            return;
+        }
+        catch { /* try next */ }
     }
 }
 
 string? configPath = null;
 try
 {
-    configPath = ArgValue(args, "--config") ?? DefaultConfigPath();
+    // Security review rec 3: canonicalize the user-supplied config
+    // path before any use, so a relative or oddly-spelled --config
+    // cannot make the service read, write, or log beside a different
+    // file than the operator intended. Invalid spellings throw here
+    // and take the sanitized startup-error path below.
+    configPath = Path.GetFullPath(ArgValue(args, "--config") ?? DefaultConfigPath());
 
 // First-run: if the config doesn't exist, seed it from the example file
 // installed in the docs subdirectory (Program Files\FileKeep\docs).
@@ -79,12 +98,24 @@ try
 }
 catch (Exception ex)
 {
-    WriteStartupError(configPath, $"could not load config '{configPath}'", ex);
+    WriteStartupError(configPath, $"could not load config '{configPath}'", ex,
+        AuditLog.Format(AuditLog.ConfigLoad, AuditLog.Fail, $"path={configPath}"));
     return 2;
 }
 
 string logDir = Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".";
 string logPath = Path.Combine(logDir, "service.log");
+// Security review rec 3: service.log will carry audit records, so
+// restrict it at startup (file-scoped; the directory also holds the
+// catalog and job state and is left alone). Best-effort: a missing
+// or unwritable directory must not fail startup.
+try
+{
+    if (!File.Exists(logPath))
+        File.WriteAllText(logPath, "");
+    LogFileSecurity.RestrictLogFileBestEffort(logPath);
+}
+catch { /* best effort */ }
 object logLock = new();
 void Log(string message)
 {
@@ -98,6 +129,9 @@ void Log(string message)
 }
 
 FileKeep.Core.UsbDriveResolver.DiagnosticLog = Log; // MU-17: USB resolution errors reach the log
+// Security review rec 6: the successful config load is itself an
+// audit event (a load failure is recorded by WriteStartupError).
+Log(AuditLog.Format(AuditLog.ConfigLoad, AuditLog.Ok, $"path={configPath}"));
 var scheduler = new BackupScheduler(config, log: Log,
     runStateFilePath: Path.Combine(logDir, "job-state.json"));
 

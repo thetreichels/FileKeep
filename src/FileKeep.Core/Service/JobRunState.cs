@@ -174,7 +174,7 @@ public static class JobStateEvaluator
             {
                 facts = new LocationFacts(false, false, false, false);
             }
-            else if (loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+            else if (loc.ParsedKind == LocationKind.Usb)
             {
                 bool present = UsbDriveResolver.ResolveBackupPath(
                     loc.VolumeSerial, loc.UsbFolder) is not null;

@@ -159,9 +159,7 @@ public static partial class DashboardApi
         try
         {
             var probes = config.SnapshotLocations()
-                .Where(l => l.Type is not null &&
-                    (l.Type.Equals("usb", StringComparison.OrdinalIgnoreCase) ||
-                     l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase)))
+                .Where(l => l.ParsedKind is LocationKind.Usb or LocationKind.Smb)
                 .Select(l => Task.Run(() =>
                 {
                     string? root = l.Type!.Equals("usb", StringComparison.OrdinalIgnoreCase)
@@ -431,7 +429,7 @@ public static partial class DashboardApi
             log?.Invoke($"dashboard: location '{loc.Name}' saved");
 
             // Auto-scan new SMB/USB locations for unknown backups
-            if (existing is null && (loc.Type == "smb" || loc.Type == "usb"))
+            if (existing is null && loc.ParsedKind is LocationKind.Smb or LocationKind.Usb)
             {
                 try
                 {
@@ -642,7 +640,7 @@ public static partial class DashboardApi
             // Sync the "Usenet" location with the new settings so
             // scheduled uploads (which use locations) don't go stale.
             var usenetLoc = config.Locations.FirstOrDefault(l =>
-                l.Type == "nntp" && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
+                l.ParsedKind == LocationKind.Nntp && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
             if (usenetLoc is not null && config.Nntp is not null)
             {
                 usenetLoc.Host = config.Nntp.Host;

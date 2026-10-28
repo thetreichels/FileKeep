@@ -29,7 +29,7 @@ public sealed class BackupRepository : IDisposable
     /// chunking this is <c>ChunkSize</c>; for CDC it is 4x the target
     /// average (the chunker's hard cap).
     /// </summary>
-    public int EffectiveMaxChunkSize => _config.ChunkingScheme == ChunkingSchemeCdc
+    public int EffectiveMaxChunkSize => _config.ParsedScheme == ChunkingKind.Cdc
         ? _config.ChunkSize * 4
         : _config.ChunkSize;
 
@@ -269,8 +269,11 @@ public sealed class BackupRepository : IDisposable
             ?? throw new InvalidDataException("repo.json is corrupt.");
         if (config.FormatVersion != FormatVersion)
             throw new NotSupportedException($"Repository format '{config.FormatVersion}' is not supported by this build (supports {FormatVersion}).");
-        if (config.ChunkingScheme is not (ChunkingSchemeFixed or ChunkingSchemeCdc))
+        try { ChunkingKindParser.Parse(config.ChunkingScheme); }
+        catch (ArgumentException)
+        {
             throw new NotSupportedException($"Repository chunking scheme '{config.ChunkingScheme}' is not supported by this build (supports {ChunkingSchemeFixed}, {ChunkingSchemeCdc}).");
+        }
 
         byte[] key = KeyDerivation.DeriveKey(
             passphrase, Convert.FromBase64String(config.KdfSaltB64), config.KdfIterations);
@@ -833,7 +836,7 @@ public sealed class BackupRepository : IDisposable
         catch (IOException) { size = -1; }
 
         using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        long total = _config.ChunkingScheme == ChunkingSchemeCdc
+        long total = _config.ParsedScheme == ChunkingKind.Cdc
             ? ChunkStreamCdc(stream, entry, fileHash, blobs, batch, cancellationToken)
             : ChunkStreamFixed(stream, entry, fileHash, buffer, blobs, batch, cancellationToken);
 

@@ -451,7 +451,7 @@ public static partial class DashboardApi
 
         IReadOnlyList<FileKeep.Core.BackupDiscovery.DiscoveredBackup> found;
         string scannedPath;
-        if (loc.Type == "smb")
+        if (loc.ParsedKind == LocationKind.Smb)
         {
             string? smbPassword = null;
             if (!string.IsNullOrEmpty(loc.SmbPasswordProtected))
@@ -644,7 +644,8 @@ public static partial class DashboardApi
     /// </summary>
     public static (int Status, object Payload) StartVerify(
         ServiceConfig config, string repo, string backupId,
-        RestoreSession? session = null, BackupScheduler? scheduler = null)
+        RestoreSession? session = null, BackupScheduler? scheduler = null,
+        Action<string>? log = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -662,8 +663,18 @@ public static partial class DashboardApi
             using var op = scheduler?.BeginDashboardOperation();
             try
             {
-                using var r = BackupRepository.Open(repo, passphrase);
-                var issues = r.Verify(backupId);
+                using var r = OpenRepoForAudit(repo, passphrase, backupId, "verify", log);
+                IReadOnlyList<string> issues;
+                try { issues = r.Verify(backupId); }
+                catch (Exception)
+                {
+                    AuditLog.Record(log, AuditLog.RestoreVerify, AuditLog.Fail,
+                        $"repo={repo} backupId={backupId} issues=exception");
+                    throw;
+                }
+                AuditLog.Record(log, AuditLog.RestoreVerify,
+                    issues.Count == 0 ? AuditLog.Ok : AuditLog.Fail,
+                    $"repo={repo} backupId={backupId} issues={issues.Count}");
                 OperationLog.Append(repo, "manual-verify",
                     issues.Count == 0 ? $"backupId={backupId} OK" : $"backupId={backupId} ISSUES: {string.Join("; ", issues.Take(5))}");
             }
@@ -738,7 +749,7 @@ public static partial class DashboardApi
         return job.EffectiveTargets
             .Select(t => locByName.TryGetValue(t, out var l) ? l : null)
             .FirstOrDefault(l => l is not null &&
-                l.Type.Equals("smb", StringComparison.OrdinalIgnoreCase));
+                l.ParsedKind == LocationKind.Smb);
     }
 
     public static (string? Share, string? User, string? Password) ResolveRestoreSmb(
@@ -788,7 +799,7 @@ public static partial class DashboardApi
         foreach (string target in job.EffectiveTargets)
         {
             if (locByName.TryGetValue(target, out var loc) &&
-                loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+                loc.ParsedKind == LocationKind.Usb)
             {
                 string? path = UsbDriveResolver.ResolveBackupPath(
                     loc.VolumeSerial ?? "", FileKeep.Core.Service.DisguisedLayout.UsbFolderFor(loc));
@@ -807,7 +818,7 @@ public static partial class DashboardApi
         FileKeep.Core.MergePolicy mergePolicy,
         string? smbShare = null, string? smbUser = null,
         RestoreSession? session = null, CancellationToken cancellationToken = default,
-        BackupScheduler? scheduler = null)
+        BackupScheduler? scheduler = null, Action<string>? log = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -887,7 +898,7 @@ public static partial class DashboardApi
                     if (usbFolder is not null)
                         ws.EnsureLocalChunks(usbFolder, null, effectiveToken, restoreUsbLayout);
                 }
-                using var r = BackupRepository.Open(repo, passphrase);
+                using var r = OpenRepoForAudit(repo, passphrase, backupId, "restore", log);
                 var restoreOptions = new FileKeep.Core.RestoreOptions { MergePolicy = mergePolicy };
                 var restoreResult = r.Restore(backupId, destDir, restoreOptions, effectiveToken);
                 // MU-15: a successful restore is the deferred proof for
@@ -1154,7 +1165,8 @@ public static partial class DashboardApi
     public static (int Status, object Payload) StartDiskRestore(
         ServiceConfig config, string repo, string backupId, string device, bool confirmed,
         RestoreSession? session = null, string? expectedModel = null, long? expectedSizeBytes = null,
-        CancellationToken cancellationToken = default, BackupScheduler? scheduler = null)
+        CancellationToken cancellationToken = default, BackupScheduler? scheduler = null,
+        Action<string>? log = null)
     {
         if (!IsKnownRepo(config, repo))
             return (400, new ErrorDto("Unknown repo (not a configured job)."));
@@ -1233,7 +1245,7 @@ public static partial class DashboardApi
                 EnsureDiskImageChunksStaged(repo, backupId, passphrase,
                     resolvedShare, resolvedUser, smbPassword, usbFolder,
                     effectiveToken, diskSmbLayout, diskUsbLayout);
-                using var r = BackupRepository.Open(repo, passphrase);
+                using var r = OpenRepoForAudit(repo, passphrase, backupId, "disk-restore", log);
                 r.RestoreDiskImage(backupId, device, effectiveToken);
                 // MU-15: deferred proof for a typed-secret unlock.
                 if (config.PassphraseYubiKey)
@@ -1371,6 +1383,30 @@ public static partial class DashboardApi
                         "disk restore aborted before writing to the target.", ex);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Opens a repository for a dashboard restore/verify operation
+    /// with an audit record for the open itself (security review
+    /// rec 6): success and failure are both recorded, and the
+    /// exception still propagates to the caller's FAILED handling.
+    /// </summary>
+    private static BackupRepository OpenRepoForAudit(
+        string repo, string passphrase, string backupId, string op, Action<string>? log)
+    {
+        try
+        {
+            var r = BackupRepository.Open(repo, passphrase);
+            AuditLog.Record(log, AuditLog.RepoOpen, AuditLog.Ok,
+                $"repo={repo} backupId={backupId} op={op}");
+            return r;
+        }
+        catch
+        {
+            AuditLog.Record(log, AuditLog.RepoOpen, AuditLog.Fail,
+                $"repo={repo} backupId={backupId} op={op}");
+            throw;
         }
     }
 }

@@ -112,10 +112,10 @@ public static partial class DashboardApi
                     string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
                 if (loc is null)
                     continue;
-                if (loc.Type.Equals("smb", StringComparison.OrdinalIgnoreCase) &&
+                if (loc.ParsedKind == LocationKind.Smb &&
                     string.IsNullOrWhiteSpace(loc.Share))
                     unmappable.Add($"SMB location '{loc.Name}' has no share path");
-                else if (loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase) &&
+                else if (loc.ParsedKind == LocationKind.Usb &&
                     string.IsNullOrWhiteSpace(loc.VolumeSerial))
                     unmappable.Add($"USB location '{loc.Name}' has no volume serial");
             }
@@ -132,15 +132,15 @@ public static partial class DashboardApi
                     string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase));
                 if (loc is null)
                     continue; // Unknown target already resolves to nothing; leave it alone.
-                if (loc.Type.Equals("nntp", StringComparison.OrdinalIgnoreCase))
+                if (loc.ParsedKind == LocationKind.Nntp)
                     continue; // Append-only: safe to share across keys.
                 BackupLocation fresh;
-                if (loc.Type.Equals("smb", StringComparison.OrdinalIgnoreCase))
+                if (loc.ParsedKind == LocationKind.Smb)
                 {
                     fresh = loc.Clone();
                     fresh.Share = loc.Share.TrimEnd('\\', '/') + "-migrated";
                 }
-                else if (loc.Type.Equals("usb", StringComparison.OrdinalIgnoreCase))
+                else if (loc.ParsedKind == LocationKind.Usb)
                 {
                     fresh = loc.Clone();
                     if (loc.DisguiseEnabled && !string.IsNullOrWhiteSpace(loc.CoverName))

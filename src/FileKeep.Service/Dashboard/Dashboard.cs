@@ -337,7 +337,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
-            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession, scheduler);
+            var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession, scheduler, log);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -424,7 +424,7 @@ public static class Dashboard
             // P2-C8: the host token lets a service stop interrupt the
             // restore between files/chunks so its outcome gets logged
             // instead of the process dying mid-write in silence.
-            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession, ct, scheduler);
+            var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession, ct, scheduler, log);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -493,7 +493,7 @@ public static class Dashboard
             bool confirmed = body.TryGetProperty("confirmed", out var c) && c.GetBoolean();
             string? deviceModel = body.TryGetProperty("deviceModel", out var dm) ? dm.GetString() : null;
             long? deviceSizeBytes = body.TryGetProperty("deviceSizeBytes", out var ds) && ds.TryGetInt64(out long s) ? s : null;
-            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes, ct, scheduler);
+            var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes, ct, scheduler, log);
             return Results.Json(payload, statusCode: status);
         });
 

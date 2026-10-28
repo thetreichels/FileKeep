@@ -100,7 +100,7 @@ public static class OfflineFileStore
     public static OfflineLocationStore ResolveStore(BackupLocation loc)
     {
         ArgumentNullException.ThrowIfNull(loc);
-        if (loc.Type == "smb")
+        if (loc.ParsedKind == LocationKind.Smb)
         {
             if (string.IsNullOrWhiteSpace(loc.Share))
                 throw new InvalidOperationException("That location has no share configured.");
@@ -120,7 +120,7 @@ public static class OfflineFileStore
             }
         }
 
-        if (loc.Type == "usb")
+        if (loc.ParsedKind == LocationKind.Usb)
         {
             if (string.IsNullOrWhiteSpace(loc.VolumeSerial))
                 throw new InvalidOperationException("That location has no volume serial configured.");

@@ -126,6 +126,7 @@ public static partial class DashboardApi
 
         log?.Invoke("dashboard: security settings change refused — " +
             "no valid proof of an existing unlock method was supplied");
+        AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=security-change");
         return (403, new ErrorDto(SecurityProofRequiredMessage));
     }
 

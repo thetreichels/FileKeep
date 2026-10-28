@@ -95,6 +95,8 @@ public static partial class DashboardApi
             log?.Invoke("dashboard: repository passphrase " +
                 (string.IsNullOrEmpty(passphrase) ? "cleared" :
                  useYubiKey ? "saved (DPAPI + YubiKey-wrapped)" : "saved (DPAPI-encrypted)"));
+            AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok,
+                string.IsNullOrEmpty(passphrase) ? "passphrase-cleared=true" : "passphrase-set=true");
             return (200, new OkYubiKeyDto(true, useYubiKey && !string.IsNullOrEmpty(passphrase)));
         }
         catch (Exception ex)
@@ -224,6 +226,7 @@ public static partial class DashboardApi
         {
             config.Save(configPath);
             log?.Invoke("dashboard: YubiKey linked to the repository passphrase");
+            AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok, "yubikey-linked=true");
             return (200, new OkYubiKeyDto(true, true));
         }
         catch (Exception ex)
@@ -278,6 +281,7 @@ public static partial class DashboardApi
         {
             config.Save(configPath);
             log?.Invoke("dashboard: generated secret set up (YubiKey-only mode)");
+            AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok, "generated-secret=true");
             return (200, new YubiKeySetupGeneratedDto(true, true,
                 GeneratedSecret.FormatForDisplay(secret)));
         }
@@ -297,7 +301,19 @@ public static partial class DashboardApi
     /// the secret is accepted unverified — a wrong secret fails closed
     /// at the first chunk decryption, exactly like the recovery wizard.
     /// </summary>
+    /// <summary>Audit wrapper: every unlock attempt is recorded, success or failure.</summary>
     public static (int Status, object Payload) UnlockRestoreSessionWithSecret(
+        ServiceConfig config, RestoreSession session, string? secret,
+        Action<string>? log = null)
+    {
+        var result = UnlockRestoreSessionWithSecretCore(config, session, secret, log);
+        AuditLog.Record(log, AuditLog.UnlockAttempt,
+            result.Status == 200 ? AuditLog.Ok : AuditLog.Fail,
+            "method=recovery-secret verified=no");
+        return result;
+    }
+
+    private static (int Status, object Payload) UnlockRestoreSessionWithSecretCore(
         ServiceConfig config, RestoreSession session, string? secret,
         Action<string>? log = null)
     {
@@ -448,10 +464,23 @@ public static partial class DashboardApi
         try { config.Save(configPath); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         log?.Invoke("dashboard: passphrase added to YubiKey-only profile (wraps generated secret)");
+        AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok, "passphrase-added=true");
         return (200, new OkDto(true));
     }
 
+    /// <summary>Audit wrapper: every unlock attempt is recorded, success or failure.</summary>
     public static (int Status, object Payload) UnlockRestoreSessionWithPassphrase(
+        ServiceConfig config, RestoreSession session, string? passphrase,
+        Action<string>? log = null)
+    {
+        var result = UnlockRestoreSessionWithPassphraseCore(config, session, passphrase, log);
+        AuditLog.Record(log, AuditLog.UnlockAttempt,
+            result.Status == 200 ? AuditLog.Ok : AuditLog.Fail,
+            "method=passphrase");
+        return result;
+    }
+
+    private static (int Status, object Payload) UnlockRestoreSessionWithPassphraseCore(
         ServiceConfig config, RestoreSession session, string? passphrase,
         Action<string>? log = null)
     {
@@ -491,7 +520,19 @@ public static partial class DashboardApi
     /// material, so without a resolvable stored passphrase there is
     /// nothing to release and the unlock refuses.
     /// </summary>
+    /// <summary>Audit wrapper: every unlock attempt is recorded, success or failure.</summary>
     public static (int Status, object Payload) UnlockRestoreSessionWithPhone(
+        ServiceConfig config, RestoreSession session, string? code,
+        Action<string>? log = null)
+    {
+        var result = UnlockRestoreSessionWithPhoneCore(config, session, code, log);
+        AuditLog.Record(log, AuditLog.UnlockAttempt,
+            result.Status == 200 ? AuditLog.Ok : AuditLog.Fail,
+            "method=totp");
+        return result;
+    }
+
+    private static (int Status, object Payload) UnlockRestoreSessionWithPhoneCore(
         ServiceConfig config, RestoreSession session, string? code,
         Action<string>? log = null)
     {
@@ -571,10 +612,12 @@ public static partial class DashboardApi
         }
         catch (TimeoutException)
         {
+            AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "op=program-spare reason=timeout");
             return (400, new ErrorDto("Timed out waiting for a YubiKey touch. Try again and touch the key when it flashes."));
         }
         catch (Exception ex)
         {
+            AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "op=program-spare reason=error");
             return (400, new ErrorDto($"Failed to program spare key: {ex.Message}" ));
         }
     }
@@ -584,7 +627,18 @@ public static partial class DashboardApi
     /// and holds it in <paramref name="session"/> memory. Only meaningful
     /// when the config has YubiKey mode enabled.
     /// </summary>
+    /// <summary>Audit wrapper: every unlock attempt is recorded, success or failure.</summary>
     public static (int Status, object Payload) UnlockRestoreSession(ServiceConfig config,
+        RestoreSession session, IYubiKeyProvider? provider, Action<string>? log = null)
+    {
+        var result = UnlockRestoreSessionCore(config, session, provider, log);
+        AuditLog.Record(log, AuditLog.UnlockAttempt,
+            result.Status == 200 ? AuditLog.Ok : AuditLog.Fail,
+            "method=yubikey");
+        return result;
+    }
+
+    private static (int Status, object Payload) UnlockRestoreSessionCore(ServiceConfig config,
         RestoreSession session, IYubiKeyProvider? provider, Action<string>? log = null)
     {
         if (!config.PassphraseYubiKey)

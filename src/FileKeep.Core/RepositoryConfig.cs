@@ -36,6 +36,10 @@ public sealed class RepositoryConfig
     [JsonPropertyName("chunking_scheme")]
     public string ChunkingScheme { get; set; } = "";
 
+    /// <summary>Typed chunking scheme (parsed at open).</summary>
+    [JsonIgnore]
+    public ChunkingKind ParsedScheme => ChunkingKindParser.Parse(ChunkingScheme);
+
     /// <summary>
     /// Target packed-volume size in bytes for Usenet uploads (default 100 MB, the scene-standard DVD9 RAR size).
     /// Chunks are greedily packed into volumes of at most this size; one
