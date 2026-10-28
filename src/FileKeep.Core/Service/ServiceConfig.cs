@@ -1,6 +1,4 @@
-using System.Text.Json;
 using System.Text.Json.Serialization;
-using FileKeep.Core.Json;
 using FileKeep.Core.Security;
 
 namespace FileKeep.Core.Service;
@@ -752,59 +750,19 @@ public sealed class ServiceConfig
     [JsonPropertyName("retentionRepostThresholdDays")]
     public int RetentionRepostThresholdDays { get; set; } = 30;
 
-    public static ServiceConfig Load(string path)
-    {
-        string json;
-        try { json = File.ReadAllText(path); }
-        catch (Exception ex) { throw new InvalidOperationException($"Cannot read service config '{path}': {ex.Message}", ex); }
-        ServiceConfig? config;
-        try
-        {
-            // Fail closed on typos: a misspelled key (e.g. "autoVeriy")
-            // must not silently fall back to a default.
-            config = FileKeepJsonOptions.Deserialize(json,
-                FileKeepJsonOptions.ServiceConfigLoad, FileKeepJsonContext.Default.ServiceConfig);
-        }
-        catch (JsonException ex) { throw new InvalidOperationException($"Invalid service config '{path}': {ex.Message}", ex); }
-        if (config is null)
-            throw new InvalidOperationException($"Invalid service config '{path}': empty document.");
-        // No backwards compatibility: the pre-locations config shapes
-        // are no longer migrated (MigrateToLocations is gone) and the
-        // retired per-job fields are gone too, so a legacy file fails
-        // to load under the fail-closed loader instead of loading
-        // inertly. Bare "nntp"/"smb" target tokens are NOT rewritten:
-        // they name no location, resolve to nothing at run time, and
-        // the job lands in the derived NeedsLocation state.
-        config.Validate();
-        return config;
-    }
+    /// <summary>
+    /// Loads a config from <paramref name="path"/>. Delegates to
+    /// <see cref="ServiceConfigPersistence.Load"/> (Stage 2 of the
+    /// config-lifecycle split); fail-closed semantics live there.
+    /// </summary>
+    public static ServiceConfig Load(string path) => ServiceConfigPersistence.Load(path);
 
     /// <summary>
     /// Validates and writes the configuration to <paramref name="path"/>
     /// (used by the dashboard Settings UI). Writes atomically via a temp file.
+    /// Delegates to <see cref="ServiceConfigPersistence.Save"/> (Stage 2).
     /// </summary>
-    public void Save(string path)
-    {
-        Validate();
-        // Serialize under the Jobs lock: dashboard handlers mutate Jobs on
-        // other threads, and serializing a concurrently-modified list throws
-        // or writes torn JSON.
-        string json;
-        lock (JobsLock)
-        {
-            json = FileKeepJsonOptions.Serialize(this,
-                FileKeepJsonOptions.ServiceConfigSave, FileKeepJsonContext.Default.ServiceConfig);
-        }
-        // Unique temp name: concurrent saves must not share a temp file.
-        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
-        File.WriteAllText(tmp, json);
-        try { File.Move(tmp, path, overwrite: true); }
-        catch
-        {
-            try { File.Delete(tmp); } catch { }
-            throw;
-        }
-    }
+    public void Save(string path) => ServiceConfigPersistence.Save(this, path);
 
     /// <summary>
     /// Validates this config. Delegates to
