@@ -61,6 +61,44 @@ public sealed class ServiceConfigPersistenceTests : IDisposable
     }
 
     [Fact]
+    public void Load_LockIdentity_MatchesStoreLock()
+    {
+        // Review finding (Stage 3): the lock-identity pin covered
+        // only `new ServiceConfig()`; the deserialize path must
+        // expose the same object too, or a future constructor change
+        // that forgets the store breaks it silently.
+        string path = PathFor("service.json");
+        ValidConfig(port: 18001).Save(path);
+
+        var loaded = ServiceConfig.Load(path);
+        Assert.NotNull(loaded.Store);
+        Assert.Same(loaded.JobsLock, loaded.Store.Lock);
+
+        // And a loaded config saves fine through that lock.
+        string path2 = PathFor("service2.json");
+        loaded.Save(path2);
+        Assert.Equal(18001, ServiceConfig.Load(path2).DashboardPort);
+        Assert.Empty(TempLeftovers());
+    }
+
+    [Fact]
+    public void Save_UnderCallerHeldLock_Succeeds()
+    {
+        // Review finding (Stage 3): 5 production sites call Save
+        // while holding JobsLock; Monitor re-entrancy plus the
+        // SaveLock ordering must keep that path working and the file
+        // complete.
+        string path = PathFor("service.json");
+        var config = ValidConfig(port: 18001);
+        lock (config.JobsLock)
+        {
+            config.Save(path);
+        }
+        Assert.Equal(18001, ServiceConfig.Load(path).DashboardPort);
+        Assert.Empty(TempLeftovers());
+    }
+
+    [Fact]
     public void Save_ReplacesExisting()
     {
         string path = PathFor("service.json");

@@ -10,7 +10,8 @@ namespace FileKeep.Core.Service;
 /// object. Same semantics, same messages, same timing —
 /// <see cref="ServiceConfig.Load"/> and <see cref="ServiceConfig.Save"/>
 /// only delegate here. No lock, DTO, or validation-rule changes: the
-/// lock stays on the config (Stage 3 moves it), validation stays in
+/// lock lives in ServiceConfigStore (Stage 3) and
+/// ServiceConfig.JobsLock delegates it, validation stays in
 /// ServiceConfigValidator (Stage 1).
 /// One deliberate deviation from a byte-identical move, disclosed:
 /// the original <c>Save</c> wrote the temp file outside the try, so a
@@ -22,9 +23,14 @@ namespace FileKeep.Core.Service;
 /// Second deviation, hardening (Joel, 2026-10-28): the original held
 /// the lock only around serialization, so concurrent same-path saves
 /// raced the move and lost on Windows. The temp-write+move now run
-/// under a static process-wide gate (SaveLock), taken sequentially
-/// after the instance lock — never co-held with it, so no
-/// lock-ordering hazard. An instance lock alone was tried first and
+/// under a static process-wide gate (SaveLock). Save itself takes
+/// the two locks sequentially — store lock for serialization,
+/// released before SaveLock for write+move — and never acquires the
+/// store lock while holding SaveLock, so the order is always store
+/// lock before SaveLock and no cycle exists. Callers may already
+/// hold the store lock across a Save call (dashboard handlers do);
+/// that re-locks legally and preserves the order. An instance lock
+/// alone was tried first and
 /// does NOT fix the race: the failing test saves through distinct
 /// config objects, which have distinct locks.
 /// </summary>
@@ -63,10 +69,14 @@ public static class ServiceConfigPersistence
     // concurrent overwriting moves (UnauthorizedAccessException for
     // the losers) while Linux rename always wins. This static gate
     // serializes the temp-write+move across all instances, so every
-    // save succeeds and the final file is one complete write. The two
-    // locks are never co-held: the store lock guards serialization,
-    // SaveLock guards write+move, taken sequentially — so there is no
-    // lock-ordering hazard. Stage 3 considered folding this gate into
+    // save succeeds and the final file is one complete write. Save
+    // itself takes the locks sequentially: the store lock guards
+    // serialization and is released before SaveLock guards write+move,
+    // and Save never acquires the store lock while holding SaveLock —
+    // so the order is always store lock before SaveLock and no cycle
+    // exists. (Callers may already hold the store lock across a Save
+    // call; that preserves the order.) Stage 3 considered folding
+    // this gate into
     // the store lock and deliberately kept it: the store lock guards
     // ONE config's data, while this gate guards the filesystem path
     // across instances — different resources, and deleting the gate
@@ -81,10 +91,11 @@ public static class ServiceConfigPersistence
         config.Validate();
         // Serialize under the config's lock: dashboard handlers mutate Jobs on
         // other threads, and serializing a concurrently-modified list throws
-        // or writes torn JSON. This is the SAME lock object the config
-        // exposes (Stage 3 moves it; this stage must not introduce a
-        // second one for the data), so a handler already holding it
-        // re-locks legally.
+        // or writes torn JSON. This is the store's lock object, exposed
+        // through the facade (Stage 3 moved it there); SaveLock below
+        // is a second lock object but guards a different resource (the
+        // filesystem path), not the data, so a handler already holding
+        // the store lock re-locks legally.
         string json;
         lock (config.JobsLock)
         {
