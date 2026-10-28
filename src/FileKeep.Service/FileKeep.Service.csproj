@@ -41,6 +41,7 @@
   <ItemGroup>
     <PackageReference Include="Yubico.YubiKey" Version="1.18.0" />
     <PackageReference Include="QRCoder" Version="1.4.3" />
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
   </ItemGroup>
 
   <!-- Trimming: the Yubico SDK uses reflection internally for HID device

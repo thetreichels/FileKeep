@@ -1,3 +1,6 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
+
 namespace FileKeep.Service;
 
 /// <summary>
@@ -10,17 +13,17 @@ namespace FileKeep.Service;
 /// job state, whose access must not change.
 /// <para>
 /// What is implemented here: on Unix, the file mode is set to 0600
-/// (owner read/write). On Windows, managed ACL application needs
-/// the System.IO.FileSystem.AccessControl package
-/// (<c>File.SetAccessControl</c> is not in the net10.0 shared
-/// framework), and that package is deliberately NOT added by this
-/// change — it would be a new runtime dependency for one helper,
-/// and it cannot be restored or verified from the Linux sandbox.
-/// The Windows branch is therefore a no-op today, flagged for a
-/// parent decision (add the package, or accept default ACLs on
-/// Windows log files). Do not reintroduce a P/Invoke ACL writer
-/// here without laptop validation: a wrong DACL could lock the
-/// service out of its own log.
+/// (owner read/write). On Windows, a protected DACL is applied via
+/// the System.IO.FileSystem.AccessControl package (<c>
+/// File.SetAccessControl</c> is not in the net10.0 shared
+/// framework): SYSTEM and Administrators get FullControl, no
+/// inherited rules survive. SYSTEM must stay on the DACL — the
+/// service runs as LocalSystem and writes the log itself; a DACL
+/// without it would lock the service out of its own log. The
+/// package API is cross-platform, so this compiles on Linux too;
+/// the branch only executes on Windows (runtime guard below), and
+/// the DACL itself is proven by the Windows-only test on the
+/// laptop, not in the sandbox.
 /// </para>
 /// Best-effort throughout: any failure is swallowed — a log file
 /// that cannot be restricted must still be writable, never a
@@ -41,8 +44,18 @@ public static class LogFileSecurity
                 return;
             if (OperatingSystem.IsWindows())
             {
-                // No-op today: see the class doc comment (AccessControl
-                // package not referenced). Best-effort by design.
+                var security = new FileSecurity();
+                security.SetAccessRuleProtection(
+                    isProtected: true, preserveInheritance: false);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new NTAccount(@"NT AUTHORITY\SYSTEM"),
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new NTAccount(@"BUILTIN\Administrators"),
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                new FileInfo(path).SetAccessControl(security);
                 return;
             }
             File.SetUnixFileMode(path,

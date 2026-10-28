@@ -321,8 +321,15 @@ public sealed class ProtectionProfileTests : IDisposable
     public void ServiceConfig_RoundTripsProtectionFields()
     {
         string path = ConfigPath();
+        // Fixture must be a valid profile under load enforcement
+        // (Joel, 2026-10-27): phone is secondary-only and "and"
+        // requires both primaries, so the round-trip config carries
+        // both primaries. The assertions below are about field
+        // round-tripping, not about phone-only validity.
         new ServiceConfig
         {
+            PassphraseProtected = "dpapi-copy-sentinel",
+            PassphraseYubiKey = true,
             PhoneAuthEnabled = true,
             ProtectionLinkMode = "and",
             YubiKeys = new List<string> { "YubiKey 1", "YubiKey 2" },

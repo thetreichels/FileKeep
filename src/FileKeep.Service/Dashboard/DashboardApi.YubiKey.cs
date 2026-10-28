@@ -47,6 +47,9 @@ public static partial class DashboardApi
         // Security fix (C-2): clearing or replacing the passphrase wipes
         // or replaces the whole unlock configuration — once a method is
         // enabled it requires a fresh proof of an existing method.
+        // Clearing additionally removes the added-passphrase wrap and
+        // the phone method (follow-up, Joel 2026-10-27): a clear that
+        // left them would leave live unlock methods behind.
         var proofRefusal = CheckSecurityChangeProof(config, yubiKeyProvider,
             proofPassphrase, proofYubiKey, log, proofTotp);
         if (proofRefusal is not null)
@@ -68,6 +71,12 @@ public static partial class DashboardApi
                 config.YubiKeyChallenge = null;
                 config.PassphraseYubiKeyWrapped = null;
                 config.YubiKeySlotSecretProtected = null;
+                config.PassphraseWrapProtected = null;
+                config.PassphraseWrapSaltB64 = null;
+                config.PassphraseWrapIterations = 0;
+                config.PhoneAuthEnabled = false;
+                config.PhoneTotpSecretProtected = null;
+                config.PendingPhoneTotpSecretProtected = null;
             }
         }
         else if (useYubiKey)

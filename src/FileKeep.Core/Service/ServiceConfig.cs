@@ -958,6 +958,26 @@ public sealed class ServiceConfig
             throw new InvalidOperationException(
                 $"protectionLinkMode '{ProtectionLinkMode}' is invalid (expected \"or\" or \"and\").");
         }
+        // Follow-up to the gaps audit (Joel, 2026-10-27): the
+        // protection profile's method-combination rules are enforced
+        // at load, not only at the profile endpoint. Phone is
+        // secondary-only (USB recovery cannot use TOTP), and "and"
+        // requires both primaries — mirroring SetProtectionProfile.
+        // Stored fields only: the scheduler passphrase env var is a
+        // runtime override, not a saved method, so a saved phone-only
+        // profile is invalid even when the env var happens to be set.
+        // Fresh configs still load: no phone, linkMode "or".
+        bool passphraseMethod = (!GeneratedSecretMode &&
+            !string.IsNullOrEmpty(PassphraseProtected)) ||
+            (!string.IsNullOrEmpty(PassphraseWrapProtected) &&
+             !string.IsNullOrEmpty(PassphraseWrapSaltB64));
+        bool yubiKeyMethod = GeneratedSecretMode || PassphraseYubiKey;
+        if (PhoneAuthEnabled && !passphraseMethod && !yubiKeyMethod)
+            throw new InvalidOperationException(
+                "Phone authenticator cannot be the only enabled method. Enable Passphrase or YubiKey first.");
+        if (ParsedLink == LinkKind.And && !(passphraseMethod && yubiKeyMethod))
+            throw new InvalidOperationException(
+                "\"and\" link mode requires both Passphrase and YubiKey to be enabled.");
         if (Nntp is not null && !string.IsNullOrWhiteSpace(Nntp.Host))
         {
             if (Nntp.Port is < 1 or > 65535)

@@ -11,12 +11,12 @@ namespace FileKeep.Core.Tests;
 /// live in code, and this file pins the full combination matrix at the
 /// layer that enforces each rule. Cells already covered elsewhere are
 /// NOT duplicated here — see the notes naming the covering test.
-/// Two honest splits are pinned, not fixed: (1) a phone-only profile
-/// is refused by the endpoint but LOADS fine (load-time validation
-/// checks only the linkMode string); (2) clearing the passphrase
-/// wipes the six unlock fields but leaves the added-passphrase wrap
-/// and the phone method in place. Both are reported as residual gaps;
-/// the tests pin actual behavior so a future fix updates them.
+/// Two former splits are now fixed (Joel, 2026-10-27): (1) the
+/// endpoint's method-combination rules are enforced at load —
+/// phone-only profiles and "and" profiles without both primaries
+/// fail Validate; (2) clearing the passphrase also removes the
+/// added-passphrase wrap and the phone method. The tests below pin
+/// the fixed behavior.
 /// </summary>
 public sealed class ProtectionModeMatrixTests : IDisposable
 {
@@ -74,31 +74,44 @@ public sealed class ProtectionModeMatrixTests : IDisposable
         }
     }
 
-    // ---- The load/endpoint split (residual gap, pinned not fixed) ----
+    // ---- Load enforcement of the profile method rules (Joel, 2026-10-27) ----
 
     [Fact]
-    public void Load_PhoneOnly_Accepted_EndpointRuleIsNotLoadEnforced()
+    public void Load_PhoneOnly_Rejected_AndRequiresBoth()
     {
-        // A phone-only profile LOADS: Validate checks the linkMode
-        // string only, never the method combination. The endpoint
-        // refusal is covered elsewhere (ProtectionProfileTests
-        // .RejectsPhoneSole on a fresh config; SecurityProofTests
-        // .Profile_PhoneOnly_RefusedEvenWithValidTotpProof on Windows
-        // for a phone-only config with a valid TOTP proof). Do not
-        // "fix" this test by adding load-time rejection without Joel's
-        // go — that would be new enforcement, and a hand-edited
-        // phone-only config that loads today would fail tomorrow.
+        // The profile endpoint's method-combination rules are now
+        // enforced at load (Validate), not only at the endpoint:
+        // phone is secondary-only, and "and" requires both primaries.
+        // The endpoint refusal is covered elsewhere
+        // (ProtectionProfileTests.RejectsPhoneSole on a fresh config;
+        // SecurityProofTests.Profile_PhoneOnly_RefusedEvenWithValidTotpProof
+        // on Windows for a phone-only config with a valid TOTP proof).
         var phoneOnly = new ServiceConfig { PhoneAuthEnabled = true, ProtectionLinkMode = "or" };
-        phoneOnly.Validate();
-        var profile = DashboardApi.GetProtectionProfile(phoneOnly);
-        Assert.True(profile.PhoneEnabled);
-        Assert.False(profile.PassphraseEnabled);
-        Assert.False(profile.YubiKeyEnabled);
+        var ex = Assert.Throws<InvalidOperationException>(() => phoneOnly.Validate());
+        Assert.Contains("only enabled method", ex.Message);
 
-        // Same split for the "and" rule: load accepts "and" with no
-        // methods at all; only the endpoint requires both.
-        var andAlone = new ServiceConfig { PhoneAuthEnabled = true, ProtectionLinkMode = "and" };
-        andAlone.Validate();
+        // Phone-only with "and" is rejected by the phone rule above.
+        var andPhoneOnly = new ServiceConfig { PhoneAuthEnabled = true, ProtectionLinkMode = "and" };
+        Assert.Throws<InvalidOperationException>(() => andPhoneOnly.Validate());
+
+        // "and" with exactly one primary is rejected too: "and"
+        // means both, per the endpoint rule.
+        var andOnePrimary = new ServiceConfig { PassphraseProtected = "x", ProtectionLinkMode = "and" };
+        var andEx = Assert.Throws<InvalidOperationException>(() => andOnePrimary.Validate());
+        Assert.Contains("both Passphrase and YubiKey", andEx.Message);
+
+        // "and" with no methods at all is rejected as well.
+        var andNone = new ServiceConfig { ProtectionLinkMode = "and" };
+        Assert.Throws<InvalidOperationException>(() => andNone.Validate());
+
+        // Legitimate states still load: fresh configs (no methods,
+        // linkMode "or"), single primaries under "or", both primaries
+        // under "and", and a primary plus phone under "or".
+        new ServiceConfig().Validate();
+        new ServiceConfig { PassphraseProtected = "x" }.Validate();
+        new ServiceConfig { GeneratedSecretMode = true }.Validate();
+        new ServiceConfig { PassphraseProtected = "x", PassphraseYubiKey = true, ProtectionLinkMode = "and" }.Validate();
+        new ServiceConfig { PassphraseProtected = "x", PhoneAuthEnabled = true }.Validate();
     }
 
     // ---- Typed passphrase vs YubiKey-only mode ----
@@ -119,16 +132,13 @@ public sealed class ProtectionModeMatrixTests : IDisposable
     }
 
     [Fact]
-    public void SetPassphrase_ClearWipesUnlockFields_Audits_LeavesWrapAndPhone()
+    public void SetPassphrase_ClearWipesUnlockFields_Audits_ClearsWrapAndPhone()
     {
         // C-2 claims clearing "wipes the whole unlock configuration".
-        // It wipes six fields (asserted). It does NOT clear the added-
-        // passphrase wrap or the phone method — after clearing, the
-        // profile still reports a passphrase method via the orphaned
-        // wrap, even though its generated secret is gone. That is a
-        // reported residual gap, pinned here so it cannot silently
-        // change shape; the fix (clearing the wrap + phone on clear)
-        // is a behavior change for Joel to approve, not this patch.
+        // It wipes six fields (asserted) and, since the 2026-10-27
+        // follow-up, the added-passphrase wrap and the phone method
+        // as well — after clearing, no method remains and the profile
+        // reports none.
         string secret = GeneratedSecret.Generate();
         Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, secret);
         var config = GeneratedConfig();
@@ -138,6 +148,8 @@ public sealed class ProtectionModeMatrixTests : IDisposable
         config.PassphraseWrapSaltB64 = "salt-sentinel";
         config.PassphraseWrapIterations = 600_000;
         config.PhoneAuthEnabled = true;
+        config.PhoneTotpSecretProtected = "totp-sentinel";
+        config.PendingPhoneTotpSecretProtected = "pending-sentinel";
         var (lines, log) = Capture();
 
         var (status, _) = DashboardApi.SetPassphrase(config, ConfigPath(), "",
@@ -150,10 +162,20 @@ public sealed class ProtectionModeMatrixTests : IDisposable
         Assert.Null(config.YubiKeyChallenge);
         Assert.Null(config.PassphraseYubiKeyWrapped);
         Assert.Null(config.YubiKeySlotSecretProtected);
-        // Leftovers (residual gap, see header):
-        Assert.Equal("wrap-sentinel", config.PassphraseWrapProtected);
-        Assert.True(config.PhoneAuthEnabled);
-        Assert.True(DashboardApi.GetProtectionProfile(config).PassphraseEnabled);
+        // The wrap and the phone method are cleared with it:
+        Assert.Null(config.PassphraseWrapProtected);
+        Assert.Null(config.PassphraseWrapSaltB64);
+        Assert.Equal(0, config.PassphraseWrapIterations);
+        Assert.False(config.PhoneAuthEnabled);
+        Assert.Null(config.PhoneTotpSecretProtected);
+        Assert.Null(config.PendingPhoneTotpSecretProtected);
+        // The env var above is proof scaffolding, not stored state:
+        // HasConfiguredPassphrase counts it, so restore the ambient
+        // value before asserting the cleared stored profile reports
+        // no methods (Dispose restores it too).
+        Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, _savedPassphrase);
+        Assert.False(DashboardApi.GetProtectionProfile(config).PassphraseEnabled);
+        Assert.False(DashboardApi.GetProtectionProfile(config).PhoneEnabled);
     }
 
     // ---- Mode-change audit records (Linux-runnable) ----
