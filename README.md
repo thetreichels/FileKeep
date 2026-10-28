@@ -22,6 +22,9 @@
 - **Windows service + web dashboard** for scheduled backups, styled like Windows Settings with dark-mode support
 - **Restore path hardening** — manifest paths are lexically anchored inside the destination (traversal, absolute, and UNC paths rejected) and pre-existing symlinks/junctions in the destination tree are never followed during restore
 - **Bootable WinRE recovery USB** (Windows 95 Setup-style wizard) for bare-metal restores — built ADK-free from the host's own WinRE image
+- **Stealth Folders** — encrypted folders kept on USB/SMB destinations (never Usenet), opened from memory while unlocked and locked away afterwards, with one-way Save As export and encrypted package export/import
+- **Disguised destinations** — a USB/SMB location can store its files under innocuous cover-folder names with deterministic hashed filenames, decoy files, and spoofed file headers instead of the usual chunks/manifests layout
+- **YubiKey and TOTP security** — passphrase-free YubiKey-only profiles, TOTP as a second factor, and restore gating that asks for proof once per GUI session instead of per restore
 
 ## Installation
 
@@ -92,6 +95,14 @@ Boot mode defaults to `Both` — an MBR-partitioned FAT32 volume that boots lega
 
 Only USB-attached drives are eligible targets; the command refuses fixed drives, checks the ISO fits, and declines when stdin isn't interactive (unless `--yes`).
 
+## Stealth Folders and disguised destinations
+
+Stealth Folders are offline folders: files kept encrypted on a USB or SMB destination, not posted to Usenet. Prerequisites are a security method (passphrase or YubiKey) and a USB/SMB backup location. Unlock once, create a folder, and add files from the desktop app's native picker or a browser upload — files are chunked and encrypted onto the location. While unlocked, the folder is served from memory over a loopback WebDAV share, so Open is memory-only (read-only or editable) and Save As is a one-way decrypted export. Locking drops the share, clears open tokens, and zeroes the keys. A folder can be exported as an encrypted package (you choose an export passphrase) and imported on another machine, where it is re-encrypted under that machine's secret; forgetting removes the catalog entry only, leaving destination chunks orphaned. Rekey moves a folder to a new secret. The offline unlock session is separate from the restore session, lapses after an hour idle, and TOTP can never unlock offline folders.
+
+A USB/SMB location can instead be disguised at creation (this cannot be changed afterwards): its files live under an innocuous cover folder name with deterministic SHA-256-derived filenames instead of the usual chunks/manifests layout, with optional decoy files and spoofed file headers (fake JPEG/PNG/MP4/MOV/AVI headers, detected and stripped on read). Offline files stored on a disguised location inherit its layout and header wrapping automatically.
+
+Changing the passphrase orphans banked vaults, since repos open by deriving their key from the passphrase. The Banked Vault tab's **Migrate vaults** button moves every job to fresh vaults under the new secret: fresh repos are created, jobs are re-pointed at them, and shared SMB/USB destinations get fresh pools (a sibling folder for SMB, a new folder or cover name for USB). Usenet locations are shared safely and left alone; the old repos are kept as previous vaults, and the next runs repopulate the new vaults from source. Leave the new-secret field blank to migrate after changing the passphrase, or type the new secret to migrate first and then change the passphrase to match before the next run.
+
 ## How it works
 
 1. **Chunk** — files are split into content-defined chunks (~4 MB default), hashed with SHA-256; identical chunks across backups are stored once
@@ -107,6 +118,9 @@ Every backup is independently verifiable, every uploaded object carries a crypto
 ## Security model
 
 - **Passphrase handling.** The key is derived at runtime and zeroed on dispose; it is never written to the repository. Prefer the `FILEKEEP_PASSPHRASE` environment variable or the interactive prompt — `--passphrase` on the command line is visible in the process list (the CLI warns about this).
+- **YubiKey-only profiles.** A passphrase-free profile: FileKeep generates a 256-bit secret, the YubiKey wraps it by challenge-response, and the wizard's recovery sheet shows the secret once as the paper path. A DPAPI copy stays on the machine for unattended scheduled backups, relinking a key re-wraps the same secret (generation is once-ever), and a passphrase can be added later as an additional wrap that never replaces the key. Spare keys can be programmed from the dashboard.
+- **TOTP second factor.** TOTP is secondary-only, never a sole method: it proves security-config changes and restores at the same level as a passphrase or key touch, with 5 failed codes causing a 5-minute lockout and one code usable for exactly one proof. USB/WinPE recovery never uses TOTP.
+- **Restore gating.** Backup jobs never prompt. Only restores ask: the first restore attempt in a GUI session prompts once (touch, passphrase/recovery secret, or TOTP — all equal), and further restores in that window proceed without re-prompting. Authorization lapses after an hour idle or when the GUI closes, and a reopened GUI always starts locked.
 - **What's public.** Chunk message-IDs embed the SHA-256 of the plaintext chunk (required for content addressing and dedup). Volume articles embed the SHA-256 of the packed volume bytes instead — still deterministic, so the guess-confirmation caveat applies to volume-packed uploads too. Ciphertext is safe, but anyone with an NZB can confirm guesses about plaintext. Filenames are plaintext in manifests (a v1 tradeoff for independent verifiability). There is no forward secrecy: a compromised passphrase decrypts all past Usenet posts.
 - **Dashboard.** Binds to loopback only. NNTP passwords are stored via Windows DPAPI and never exposed to the UI.
 - **Destructive commands.** `restore-disk` overwrites a block device; it requires typing the device path to confirm (or `--yes` for scripts).
@@ -140,7 +154,7 @@ Key engineering rules for contributors:
 
 ## Status
 
-FileKeep is in active development (v0.09.01). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, and the WinRE recovery environment are implemented and tested.
+FileKeep is in active development (v0.09.01). The full backup → Usenet upload → download → verify → restore loop is validated against a live Usenet provider. Retention management, Reed–Solomon parity, volume-packed uploads with provider size preflight, the Windows service/dashboard, VSS snapshots (CLI `--vss` and scheduled-job `"vss"` flag), SMB share targets, restore path hardening, the WinRE recovery environment, Stealth Folders, disguised destinations, YubiKey/TOTP security with restore gating, and vault migration are implemented and tested.
 
 On the roadmap: merge/selective restore (deferred to v2), scheduled deep verification, and broader provider compatibility testing.
 

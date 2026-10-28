@@ -491,6 +491,15 @@
           <button onclick="runRetentionCheck()">Check now</button>
         </div>
       </div>
+      <div class="card">
+        <div class="name">Migrate vaults after a passphrase change</div>
+        <div class="meta">A passphrase change orphans every banked vault: repos open by deriving their key from the passphrase, so a new passphrase cannot open old repos. Migration creates fresh vaults under the new secret, re-points every job at them, and gives shared SMB/USB destinations fresh pools. Usenet locations are shared safely and left alone. Old repos are kept as previous vaults, and the next runs repopulate the new vaults from source.</div>
+        <div class="row" style="margin-top:8px">
+          <label style="flex:1">New secret (blank = use the currently configured secret)<input id="vault-migrate-secret" type="password" autocomplete="off" style="width:100%"></label>
+          <button onclick="migrateVaults()">Migrate vaults…</button>
+        </div>
+        <p class="meta">Refused in YubiKey-only mode, where the root secret never changes. If you type a new secret here, migrate before changing the passphrase, then change the passphrase to match before the next run.</p>
+      </div>
       <div class="card" style="padding:8px 20px">
         <div class="row" id="vault-repo-row" style="display:none;margin-bottom:8px;align-items:center">
           <span style="color:var(--text-2);font-size:13px">Showing backups for:</span>
@@ -3331,6 +3340,24 @@ function showScanResults(unknown, source) {
 function closeScanResultsModal() {
   document.getElementById('scanResultsModal').style.display = 'none';
   window._scanResults = null;
+}
+async function migrateVaults() {
+  if (!confirm('Migrate every job\u2019s vault to fresh vaults under the new secret? Jobs are re-pointed at the new vaults, shared SMB/USB destinations get fresh pools, and the old repos are kept as previous vaults.')) return;
+  const body = secProofFields(true);
+  const secret = document.getElementById('vault-migrate-secret').value;
+  if (secret) body.newSecret = secret;
+  try {
+    const res = await api('/api/vaults/migrate', { method: 'POST', body: JSON.stringify(body) });
+    document.getElementById('vault-migrate-secret').value = '';
+    let msg = 'Migrated ' + res.jobsMigrated + ' job' + (res.jobsMigrated === 1 ? '' : 's') +
+      ' to ' + res.repos.length + ' fresh vault' + (res.repos.length === 1 ? '' : 's');
+    if (res.locationsCreated && res.locationsCreated.length)
+      msg += ' (' + res.locationsCreated.length + ' fresh location' + (res.locationsCreated.length === 1 ? '' : 's') + ')';
+    msg += '.';
+    if (res.warnings && res.warnings.length) msg += ' Warning: ' + res.warnings.join(' ');
+    toast(msg, 'ok');
+    load();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 async function importDiscoveredBackup(index) {
   const u = (window._scanResults || [])[index];
