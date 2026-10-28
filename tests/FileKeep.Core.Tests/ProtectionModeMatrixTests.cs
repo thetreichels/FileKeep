@@ -303,18 +303,37 @@ public sealed class ProtectionModeMatrixTests : IDisposable
         if (!OperatingSystem.IsWindows())
             throw Xunit.Sdk.SkipException.ForSkip(
                 "DPAPI credential storage requires Windows; phone promotion success path is Windows-only.");
+        // Verify promotes the pending secret to live; it does NOT
+        // enable the method — the caller enables phone via the
+        // profile step after a successful verify (VerifyPhoneTotp's
+        // documented contract). The fixture therefore carries a
+        // stored passphrase: phone is secondary-only, so the profile
+        // step needs a primary, and its proof is the typed
+        // passphrase against the DPAPI copy.
         string path = ConfigPath();
-        var config = new ServiceConfig();
+        var config = new ServiceConfig
+        {
+            PassphraseProtected = FileKeep.Core.Dpapi.Protect("test-pass"),
+        };
         var (lines, log) = Capture();
-        var (setupStatus, setupPayload) = DashboardApi.SetupPhoneTotp(config, path);
+        var (setupStatus, setupPayload) = DashboardApi.SetupPhoneTotp(config, path, log,
+            proofPassphrase: "test-pass");
         Assert.Equal(200, setupStatus);
         string secret = Assert.IsType<PhoneSetupDto>(setupPayload).Secret.Replace(" ", "");
         var (verifyStatus, verifyPayload) = DashboardApi.VerifyPhoneTotp(
-            config, CurrentTotpCode(secret), path, log);
+            config, CurrentTotpCode(secret), path, log, proofPassphrase: "test-pass");
         Assert.Equal(200, verifyStatus);
         Assert.True(Assert.IsType<OkDto>(verifyPayload).Ok);
-        Assert.True(config.PhoneAuthEnabled);
         Assert.Null(config.PendingPhoneTotpSecretProtected);
         Assert.Contains("AUDIT security.mode ok phone-added=true", lines);
+        var (profileStatus, _) = DashboardApi.SetProtectionProfile(config, path,
+            new ProtectionProfileRequest
+            {
+                PassphraseEnabled = true, YubiKeyEnabled = false,
+                PhoneEnabled = true, LinkMode = "or",
+                ProofPassphrase = "test-pass",
+            }, log);
+        Assert.Equal(200, profileStatus);
+        Assert.True(config.PhoneAuthEnabled);
     }
 }

@@ -186,10 +186,13 @@ public sealed class OfflineFilesByPathTests : IDisposable
         var (config, session, _) = UnlockedFolder(_workDir, catalog, location);
 
         string good = Path.Combine(_workDir, "good.txt");
-        // '|' passes the open phase (a real, readable file) but fails name
-        // validation inside the store, so it is a deterministic mid-batch
-        // failure after the first file already stored.
-        string bad = Path.Combine(_workDir, "bad|name.txt");
+        // A 129-character segment passes creation and opening on every
+        // platform but fails the store's 128-character segment limit,
+        // so it is a deterministic mid-batch failure after the first
+        // file already stored. (An earlier version used 'bad|name.txt',
+        // whose '|' is uncreatable on Windows, so setup threw before
+        // the product code ran.)
+        string bad = Path.Combine(_workDir, new string('a', 129) + ".txt");
         File.WriteAllText(good, "stored before the failure");
         File.WriteAllText(bad, "fails validation");
 
@@ -212,7 +215,9 @@ public sealed class OfflineFilesByPathTests : IDisposable
         var (config, session, _) = UnlockedFolder(_workDir, catalog, location);
 
         string source = Path.Combine(_workDir, "notes.txt");
-        string bad = Path.Combine(_workDir, "bad|name.txt");
+        // Same cross-platform mid-batch failure as RollsBackEarlierFiles:
+        // a 129-character segment the store's validation rejects.
+        string bad = Path.Combine(_workDir, new string('a', 129) + ".txt");
         File.WriteAllText(source, "v1");
         Assert.Equal(200, DashboardApi.AddOfflineFilesByPath(config, session, catalog, "Vault", new[] { source }).Status);
 

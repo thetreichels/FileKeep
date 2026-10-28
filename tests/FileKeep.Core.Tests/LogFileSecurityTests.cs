@@ -5,10 +5,10 @@ using Xunit;
 namespace FileKeep.Core.Tests;
 
 /// <summary>
-/// Log-file restriction (security review rec 3). The Windows ACL
-/// branch is covered by a Windows-only test below (laptop
-/// validation); the Unix branch and the best-effort contract are
-/// proven here.
+/// Log-file restriction (security review rec 3). The Unix branch
+/// is proven here; on Windows this test proves the DACL ends up
+/// protected, with the exact rule shape covered by the
+/// Windows-only test below (laptop validation).
 /// </summary>
 public sealed class LogFileSecurityTests : IDisposable
 {
@@ -28,11 +28,22 @@ public sealed class LogFileSecurityTests : IDisposable
     [Fact]
     public void UnixFile_RestrictedToOwnerOnly()
     {
-        if (OperatingSystem.IsWindows())
-            throw Xunit.Sdk.SkipException.ForSkip("Unix file modes do not apply on Windows (ACL branch needs laptop validation).");
         string path = Path.Combine(_dir, "service.log");
         File.WriteAllText(path, "line\n");
         LogFileSecurity.RestrictLogFileBestEffort(path);
+        if (OperatingSystem.IsWindows())
+        {
+            // Unix file modes do not apply on Windows: the method
+            // takes the ACL branch instead. The
+            // platform-appropriate proof is that the DACL ended up
+            // protected (no inherited access); the exact rule shape
+            // is the Windows-only test below's job. Every branch
+            // asserts: dynamic skip is not an option, since VSTest
+            // reports SkipException throws as Failed.
+            var security = new FileInfo(path).GetAccessControl();
+            Assert.True(security.AreAccessRulesProtected);
+            return;
+        }
         UnixFileMode mode = File.GetUnixFileMode(path);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
     }
