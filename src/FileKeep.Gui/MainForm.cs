@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -84,7 +85,8 @@ public class NativeBridge
     /// empty string if the user cancelled. A native dialog is used instead of the
     /// Chromium file chooser because the chooser does not reliably open from a
     /// remote/automated session, while this dialog does — the dashboard then
-    /// uploads by path (see /api/offline-folders/{folder}/files-by-path).
+    /// uploads the files from this process (see UploadFiles) or, where that
+    /// bridge is unavailable, by path (see /api/offline-folders/{folder}/files-by-path).
     /// </summary>
     public string PickFiles(string title)
     {
@@ -160,6 +162,111 @@ public class NativeBridge
             return false;
         }
     }
+
+    /// <summary>
+    /// Uploads files picked by the native dialog from THIS process (the
+    /// interactive user's session) as multipart/form-data to the existing
+    /// offline-files endpoint, instead of sending paths for the service
+    /// (LocalSystem) to read. That matters for user mapped drives,
+    /// EFS-encrypted files, and other per-user locations the service
+    /// cannot see. Returns the server's batch result JSON
+    /// ({stored, failed}) merged with any files this process could not
+    /// read, or {"error": ...} when the upload itself failed. The CSRF
+    /// token comes from the page (it already holds it); the dashboard
+    /// URL is the same one this shell navigates to. Uploads use a long
+    /// timeout because loopback transfers of large files take a while;
+    /// multipart spooling on the server applies exactly as with browser
+    /// uploads.
+    /// </summary>
+    public async Task<string> UploadFiles(string folder, string csrfToken, string pathsJson)
+    {
+        List<string> paths;
+        try
+        {
+            paths = JsonSerializer.Deserialize<List<string>>(pathsJson) ?? new List<string>();
+        }
+        catch
+        {
+            return "{\"error\":\"Invalid file list.\"}";
+        }
+        var failed = new List<JsonObject>();
+        using var content = new MultipartFormDataContent();
+        foreach (string path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                failed.Add(new JsonObject { ["path"] = Path.GetFileName(path), ["error"] = "File not found" });
+                continue;
+            }
+            try
+            {
+                var stream = File.OpenRead(path);
+                content.Add(new StreamContent(stream), "files", Path.GetFileName(path));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failed.Add(new JsonObject { ["path"] = Path.GetFileName(path), ["error"] = "Could not read file" });
+            }
+        }
+        string url = MainForm.DashboardUrl + "api/offline-folders/" + Uri.EscapeDataString(folder ?? "") + "/files";
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(30) };
+            using var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.Add("X-CSRF-Token", csrfToken ?? "");
+            request.Content = content;
+            using var response = await http.SendAsync(request).ConfigureAwait(false);
+            string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                string message = "Upload failed";
+                try
+                {
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.String)
+                        message = err.GetString() ?? message;
+                }
+                catch { }
+                var errorResult = new JsonObject { ["error"] = message };
+                if (failed.Count > 0)
+                {
+                    var arr = new JsonArray();
+                    foreach (var f in failed) arr.Add(f);
+                    errorResult["failed"] = arr;
+                }
+                return errorResult.ToJsonString();
+            }
+            JsonNode? node;
+            try { node = JsonNode.Parse(body); }
+            catch { node = null; }
+            if (node is JsonObject result)
+            {
+                var arr = result["failed"] as JsonArray ?? new JsonArray();
+                if (result["failed"] is null) result["failed"] = arr;
+                foreach (var f in failed) arr.Add(f);
+                if (result["stored"] is null) result["stored"] = new JsonArray();
+                return result.ToJsonString();
+            }
+            if (node is JsonArray stored)
+            {
+                var arr = new JsonArray();
+                foreach (var f in failed) arr.Add(f);
+                return new JsonObject { ["stored"] = stored, ["failed"] = arr }.ToJsonString();
+            }
+            return body;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            var errorResult = new JsonObject { ["error"] = ex.Message };
+            if (failed.Count > 0)
+            {
+                var arr = new JsonArray();
+                foreach (var f in failed) arr.Add(f);
+                errorResult["failed"] = arr;
+            }
+            return errorResult.ToJsonString();
+        }
+    }
 }
 
 /// <summary>
@@ -179,7 +286,7 @@ public class MainForm : Form
     // bind/port change in service.json (with the service restarted)
     // used to leave a running GUI pointing at the old address until
     // the GUI itself was relaunched.
-    private static string DashboardUrl => ResolveDashboardUrl();
+    internal static string DashboardUrl => ResolveDashboardUrl();
 
     /// <summary>
     /// The dashboard address (MU-7): the service lets the bind/port be
@@ -529,6 +636,12 @@ public class MainForm : Form
                         const joined = await bridge.PickFiles(title || 'Add files');
                         return (joined || '').split('\n').filter(p => p);
                     } catch (e) { return []; }
+                };
+                window.fileKeepUploadFiles = async function(folder, csrf, paths) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        return await bridge.UploadFiles(folder || '', csrf || '', JSON.stringify(paths || [])) || '';
+                    } catch (e) { return ''; }
                 };
                 window.fileKeepOpenDav = async function(url) {
                     try {

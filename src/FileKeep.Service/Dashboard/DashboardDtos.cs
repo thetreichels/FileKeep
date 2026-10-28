@@ -408,6 +408,18 @@ public sealed record OfflineFileDto(
     [property: JsonPropertyName("size")] long Size,
     [property: JsonPropertyName("modifiedUtc")] string ModifiedUtc);
 
+/// <summary>One file that a batch store did not store, with the reason.</summary>
+public sealed record OfflineFileFailureDto(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("error")] string Error);
+
+/// <summary>Per-file outcome of a batch store (multipart upload): files
+/// stored plus files that failed, so a partial batch is reported honestly
+/// instead of failing the whole batch or silently dropping files.</summary>
+public sealed record OfflineBatchResultDto(
+    [property: JsonPropertyName("stored")] List<OfflineFileDto> Stored,
+    [property: JsonPropertyName("failed")] List<OfflineFileFailureDto> Failed);
+
 public sealed record PhoneSetupDto(
     [property: JsonPropertyName("otpauthUri")] string OtpauthUri,
     [property: JsonPropertyName("secret")] string Secret,

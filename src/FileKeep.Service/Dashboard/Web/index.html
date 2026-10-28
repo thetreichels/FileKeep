@@ -5148,9 +5148,11 @@ async function ofAddFiles() {
   try {
     const r = await fetch('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
     if (!r.ok) { const t = await r.text(); let m = t; try { m = JSON.parse(t).error || t; } catch {} throw new Error(m); }
+    let res = null; try { res = await r.json(); } catch {}
     input.value = '';
     await ofShowFiles(ofFilesFolder);
-    toast('Files stored.', 'ok');
+    if (res && Array.isArray(res.failed) && res.failed.length) toast('Stored ' + (Array.isArray(res.stored) ? res.stored.length : 0) + '; failed: ' + res.failed.map(f => f.path).join(', '), 'bad');
+    else toast('Files stored.', 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
 // Native-picker add: in the desktop app the Chromium file chooser does not
@@ -5162,6 +5164,22 @@ async function ofAddFilesNative() {
   if (typeof window.fileKeepPickFiles !== 'function') { toast('Native file picker is not available here.', 'bad'); return; }
   const paths = await window.fileKeepPickFiles('Add files');
   if (!paths.length) return;
+  // Prefer the host upload: files are read in the user's session, so
+  // mapped drives and user-encrypted files work. Without the bridge
+  // upload, fall back to by-path (the service reads them instead).
+  if (typeof window.fileKeepUploadFiles === 'function') {
+    try {
+      const raw = await window.fileKeepUploadFiles(ofFilesFolder, csrfToken, paths);
+      if (!raw) throw new Error('Upload failed.');
+      const res = JSON.parse(raw);
+      await ofShowFiles(ofFilesFolder);
+      if (res.error) { toast(res.error, 'bad'); return; }
+      const stored = Array.isArray(res.stored) ? res.stored : [], failed = Array.isArray(res.failed) ? res.failed : [];
+      if (failed.length) toast('Stored ' + stored.length + '; failed: ' + failed.map(f => f.path).join(', '), 'bad');
+      else toast('Files stored.', 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+    return;
+  }
   try {
     const res = await api('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files-by-path', { method: 'POST', body: JSON.stringify({ paths }) });
     await ofShowFiles(ofFilesFolder);

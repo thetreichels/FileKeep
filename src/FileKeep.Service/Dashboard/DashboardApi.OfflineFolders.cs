@@ -447,6 +447,60 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// Stores a batch of already-opened streams (multipart upload) with
+    /// per-file outcomes. Duplicate basenames are refused upfront (the
+    /// same collapse hazard as files-by-path) and a locked session is
+    /// refused upfront too. Individual store failures do NOT abort the
+    /// batch: unlike files-by-path, multipart streams cannot be
+    /// prevalidated without consuming them, and buffering plaintext to
+    /// disk to stage them is forbidden here — so each failure is
+    /// reported in <see cref="OfflineBatchResultDto.Failed"/> and the
+    /// rest still store. The caller transfers stream ownership: every
+    /// stream is disposed here on all paths (double dispose is safe).
+    /// </summary>
+    public static (int Status, object Payload) StoreOfflineFilesBatch(
+        ServiceConfig config, OfflineFoldersSession session, string catalogPath,
+        string folderName, IEnumerable<(string FileName, Stream Content, DateTimeOffset Modified)> files,
+        Action<string>? log = null)
+    {
+        var list = files.ToList();
+        try
+        {
+            var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (fileName, _, _) in list)
+            {
+                if (!seenNames.Add(fileName))
+                    return (400, new ErrorDto($"Duplicate file name in selection: {fileName}"));
+            }
+            if (session.GetEntries() is null)
+                return (403, new ErrorDto("Offline Folders is locked."));
+            var stored = new List<OfflineFileDto>();
+            var failed = new List<OfflineFileFailureDto>();
+            foreach (var (fileName, content, modified) in list)
+            {
+                using (content)
+                {
+                    var (status, payload) = StoreOfflineFile(config, session, catalogPath,
+                        folderName, fileName, content, modified, log);
+                    if (status == 200)
+                        stored.Add((OfflineFileDto)payload);
+                    else
+                        failed.Add(new OfflineFileFailureDto(fileName,
+                            payload is ErrorDto err ? err.Error : "Could not store file."));
+                }
+            }
+            return (200, new OfflineBatchResultDto(stored, failed));
+        }
+        finally
+        {
+            foreach (var (_, content, _) in list)
+            {
+                try { content.Dispose(); } catch { }
+            }
+        }
+    }
+
+    /// <summary>
     /// Stores files chosen through a native picker (see NativeBridge.PickFiles)
     /// by local path, instead of by browser upload. The dashboard is loopback-only
     /// and CSRF-checked, so only the local GUI user can call this, exactly as with
@@ -455,33 +509,83 @@ public static partial class DashboardApi
     /// does. Each path is read from disk and stored through <see cref="StoreOfflineFile"/>,
     /// so basename validation, chunking, and catalog persistence are identical.
     /// Requires the unlocked session.
+    /// Batch semantics (all-or-nothing for deterministic failures): duplicate
+    /// basenames inside one selection are refused, and every file is opened
+    /// before anything is stored, so a missing or unreadable file anywhere in
+    /// the batch fails the whole batch with nothing stored. (Previously the
+    /// files before the failure were already stored while the caller got an
+    /// error.) A name that already exists in the folder is still replaced by
+    /// <see cref="StoreOfflineFile"/> — that is the update path, shared with
+    /// the multipart upload, not a collision.
+    /// Service-identity limitation: paths are opened in the service process
+    /// (LocalSystem), not in the GUI user's session, so user mapped drives,
+    /// EFS-encrypted files, and other per-user locations may fail here with
+    /// "Could not read file" even though the picker could see them. Reading
+    /// in the GUI and sending bytes would remove this limitation; until then
+    /// the failure is upfront and stores nothing.
     /// </summary>
     public static (int Status, object Payload) AddOfflineFilesByPath(
         ServiceConfig config, OfflineFoldersSession session, string catalogPath,
         string folderName, IEnumerable<string> paths, Action<string>? log = null)
     {
-        var stored = new List<OfflineFileDto>();
-        foreach (string path in paths)
+        var pathList = paths.ToList();
+        // Duplicate basenames in one batch would collapse to a single catalog
+        // entry (StoreOfflineFile replaces by path), silently dropping one
+        // file. Refuse the batch before storing anything.
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in pathList)
         {
-            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            if (string.IsNullOrWhiteSpace(path))
                 return (400, new ErrorDto($"File not found: {path}"));
             string fileName = Path.GetFileName(path);
-            FileStream stream;
-            try { stream = File.OpenRead(path); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            if (!string.IsNullOrEmpty(fileName) && !seenNames.Add(fileName))
+                return (400, new ErrorDto($"Duplicate file name in selection: {fileName}"));
+        }
+        // Locked session: fail before opening anything.
+        if (session.GetEntries() is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        // Open every file first, so a missing or unreadable file fails the
+        // whole batch with nothing stored. Streams are held open (handles,
+        // not memory — content still streams through chunking per file).
+        var opened = new List<(string FileName, FileStream Stream, DateTimeOffset Modified)>();
+        try
+        {
+            foreach (string path in pathList)
             {
-                return (400, new ErrorDto($"Could not read file: {fileName}"));
+                if (!File.Exists(path))
+                    return (400, new ErrorDto($"File not found: {path}"));
+                FileStream stream;
+                try { stream = File.OpenRead(path); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    return (400, new ErrorDto($"Could not read file: {Path.GetFileName(path)}"));
+                }
+                opened.Add((Path.GetFileName(path), stream, File.GetLastWriteTimeUtc(path)));
             }
-            using (stream)
+            var stored = new List<OfflineFileDto>();
+            foreach (var (fileName, stream, modified) in opened)
             {
-                var (status, payload) = StoreOfflineFile(config, session, catalogPath,
-                    folderName, fileName, stream, File.GetLastWriteTimeUtc(path), log);
-                if (status != 200)
-                    return (status, payload);
-                stored.Add((OfflineFileDto)payload);
+                using (stream)
+                {
+                    var (status, payload) = StoreOfflineFile(config, session, catalogPath,
+                        folderName, fileName, stream, modified, log);
+                    if (status != 200)
+                        return (status, payload);
+                    stored.Add((OfflineFileDto)payload);
+                }
+            }
+            return (200, stored);
+        }
+        finally
+        {
+            // Disposing twice is a no-op for FileStream; this covers streams
+            // not yet consumed when an early return or a mid-batch failure
+            // exits the loop above.
+            foreach (var (_, stream, _) in opened)
+            {
+                try { stream.Dispose(); } catch { }
             }
         }
-        return (200, stored);
     }
 
     /// <summary>

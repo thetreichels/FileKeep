@@ -1155,20 +1155,18 @@ public static class Dashboard
             IFormCollection form;
             try { form = await request.ReadFormAsync(); }
             catch { return Results.BadRequest(new ErrorDto("Invalid upload.")); }
-            var stored = new List<OfflineFileDto>();
-            foreach (var file in form.Files)
-            {
-                // Browsers send basenames; the store path validates
-                // strictly, so a hostile name is a 400, not a traversal.
-                string fileName = Path.GetFileName(file.FileName);
-                await using var stream = file.OpenReadStream();
-                var (status, payload) = DashboardApi.StoreOfflineFile(config, offlineFoldersSession,
-                    offlineFoldersPath, folder, fileName, stream, DateTimeOffset.UtcNow, log);
-                if (status != 200)
-                    return Results.Json(payload, statusCode: status);
-                stored.Add((OfflineFileDto)payload);
-            }
-            return Results.Json(stored);
+            // Batch semantics differ from files-by-path on purpose:
+            // multipart streams cannot be prevalidated without consuming
+            // them, so duplicate basenames are refused upfront while
+            // per-file store failures are reported per file instead of
+            // aborting the batch. Browsers send basenames; the store
+            // path validates strictly, so a hostile name is a per-file
+            // failure, not a traversal.
+            var batch = form.Files.Select(f =>
+                (Path.GetFileName(f.FileName), f.OpenReadStream(), DateTimeOffset.UtcNow)).ToList();
+            var (status, payload) = DashboardApi.StoreOfflineFilesBatch(config, offlineFoldersSession,
+                offlineFoldersPath, folder, batch, log);
+            return Results.Json(payload, statusCode: status);
         });
 
         // Native-picker upload: same store, paths instead of multipart bytes.
