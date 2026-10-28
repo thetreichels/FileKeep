@@ -575,9 +575,7 @@ public static partial class DashboardApi
             {
                 using var client = new FileKeep.Core.Nntp.NntpClient(loc.Host, loc.Port, loc.Ssl);
                 client.Connect();
-                string? pw = Environment.GetEnvironmentVariable("FILEKEEP_NNTP_PASSWORD");
-                if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.PasswordProtected))
-                    pw = FileKeep.Core.Dpapi.Unprotect(loc.PasswordProtected);
+                string? pw = SecretResolver.ResolvePassword(BackupScheduler.NntpPasswordEnvVar, loc.PasswordProtected);
                 if (!string.IsNullOrEmpty(loc.Username))
                     client.Authenticate(loc.Username, pw ?? "");
                 return (200, new OkMessageDto(true, $"Connected to {loc.Host}:{loc.Port}." ));
@@ -594,9 +592,7 @@ public static partial class DashboardApi
             }
             else
             {
-                string? pw = Environment.GetEnvironmentVariable("FILEKEEP_SMB_PASSWORD");
-                if (string.IsNullOrEmpty(pw) && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
-                    pw = FileKeep.Core.Dpapi.Unprotect(loc.SmbPasswordProtected);
+                string? pw = SecretResolver.ResolvePassword(BackupScheduler.SmbPasswordEnvVar, loc.SmbPasswordProtected);
                 using var share = FileKeep.Core.SmbShare.Connect(loc.Share, loc.SmbUser, pw);
                 return (200, new OkMessageDto(true, $"Share {loc.Share} is reachable." ));
             }

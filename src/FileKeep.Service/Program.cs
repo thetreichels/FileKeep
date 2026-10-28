@@ -1,3 +1,4 @@
+using FileKeep.Core.Security;
 using FileKeep.Core.Service;
 using FileKeep.Service;
 
@@ -29,6 +30,10 @@ void WriteStartupError(string? cfgPath, string what, Exception ex, string? audit
     // token into its message must not leak it into service.log or
     // stderr. Paths and failure kinds survive sanitization (see
     // StartupErrorSanitizer); only secret-shaped content is removed.
+    // Note: this startup sink keeps StartupErrorSanitizer (landed,
+    // tested); the operational Log sink uses SecretScrubber, whose
+    // rules differ (base32 secret shapes, hex chunk IDs preserved).
+    // Both are backstops, not licenses to log secrets.
     string safeMessage = StartupErrorSanitizer.Sanitize(ex.Message);
     string line = $"[{DateTime.Now:O}] FATAL startup: {what}: {safeMessage}{Environment.NewLine}";
     Console.Error.WriteLine($"error: {what}: {safeMessage}");
@@ -119,13 +124,17 @@ catch { /* best effort */ }
 object logLock = new();
 void Log(string message)
 {
-    string line = $"[{DateTime.Now:O}] {message}{Environment.NewLine}";
+    // Scrubbed at the sink: every operational log line passes through
+    // the single scrub function, so secret-shaped content cannot leak
+    // via a future log call. Paths and chunk IDs survive by design.
+    string safe = SecretScrubber.Scrub(message) ?? "";
+    string line = $"[{DateTime.Now:O}] {safe}{Environment.NewLine}";
     lock (logLock)
     {
         try { File.AppendAllText(logPath, line); } catch { /* best effort */ }
     }
     if (consoleMode)
-        Console.WriteLine(message);
+        Console.WriteLine(safe);
 }
 
 FileKeep.Core.UsbDriveResolver.DiagnosticLog = Log; // MU-17: USB resolution errors reach the log

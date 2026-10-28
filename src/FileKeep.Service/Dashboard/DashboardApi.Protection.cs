@@ -30,9 +30,7 @@ public static partial class DashboardApi
     /// or DPAPI-stored copy), mirroring <see cref="GetPassphraseStatus"/>.
     /// </summary>
     public static bool HasConfiguredPassphrase(ServiceConfig config) =>
-        !string.IsNullOrEmpty(
-            Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar)) ||
-        !string.IsNullOrEmpty(config.PassphraseProtected);
+        SecretResolver.HasSecret(BackupScheduler.PassphraseEnvVar, config.PassphraseProtected);
 
     /// <summary>
     /// Builds the current protection profile for the dashboard wizard.

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using FileKeep.Core;
 using FileKeep.Core.Service;
+using FileKeep.Core.Security;
 
 namespace FileKeep.Service;
 
@@ -104,9 +105,7 @@ public static class OfflineFileStore
         {
             if (string.IsNullOrWhiteSpace(loc.Share))
                 throw new InvalidOperationException("That location has no share configured.");
-            string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-            if (string.IsNullOrEmpty(password) && !string.IsNullOrEmpty(loc.SmbPasswordProtected))
-                password = Dpapi.Unprotect(loc.SmbPasswordProtected);
+            string? password = SecretResolver.ResolvePassword(BackupScheduler.SmbPasswordEnvVar, loc.SmbPasswordProtected);
             var share = SmbShare.Connect(loc.Share, loc.SmbUser, password);
             try
             {

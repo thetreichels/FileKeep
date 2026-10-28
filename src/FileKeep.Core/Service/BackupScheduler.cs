@@ -3,6 +3,7 @@ namespace FileKeep.Core.Service;
 using System.Text.Json;
 using FileKeep.Core.Json;
 using FileKeep.Core.Nntp;
+using FileKeep.Core.Security;
 
 /// <summary>
 /// Clock abstraction so the scheduler is unit-testable.
@@ -312,18 +313,14 @@ public sealed class BackupScheduler
     {
         passphrase = null;
         problem = null;
-        string? fromEnv = Environment.GetEnvironmentVariable(PassphraseEnvVar);
-        if (!string.IsNullOrEmpty(fromEnv))
-        {
-            passphrase = fromEnv;
-            return true;
-        }
-        if (string.IsNullOrEmpty(config.PassphraseProtected))
-            return false;
         try
         {
-            passphrase = Dpapi.Unprotect(config.PassphraseProtected);
-            return true;
+            // Precedence (SecretResolver): env var wins, else the DPAPI
+            // blob, else none. The helper returns null exactly when no
+            // blob exists, so problem stays null in that case, as before;
+            // it throws only when a blob exists but does not decrypt.
+            passphrase = SecretResolver.ResolvePassword(PassphraseEnvVar, config.PassphraseProtected);
+            return passphrase is not null;
         }
         catch (Exception ex)
         {
@@ -855,9 +852,7 @@ public sealed class BackupScheduler
         if (nzb.Files.Count == 0)
             throw new InvalidOperationException("NZB contains no files.");
         var nntp = providers[0];
-        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+        string? nntpPassword = SecretResolver.ResolvePassword(NntpPasswordEnvVar, nntp.PasswordProtected);
 
         using var repo = BackupRepository.Open(repoPath, passphrase);
         using var client = new Nntp.NntpClient(nntp.Host, nntp.Port, nntp.Ssl);
@@ -987,9 +982,7 @@ public sealed class BackupScheduler
                         $"(backup {record.BackupId}). Retention for that provider cannot be " +
                         "checked; configure the provider or remove its upload records.");
 
-                string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-                if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-                    nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+                string? nntpPassword = SecretResolver.ResolvePassword(NntpPasswordEnvVar, nntp.PasswordProtected);
 
                 var pool = new Nntp.NntpConnectionPool(
                     nntp.Host, nntp.Port, nntp.Ssl,
@@ -2017,9 +2010,7 @@ public sealed class BackupScheduler
     private Nntp.NntpBatchUploader CreateBatchUploader(
         BackupRepository repo, string backupId, BackupJobConfig job, NntpConfig nntp)
     {
-        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-            nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+        string? nntpPassword = SecretResolver.ResolvePassword(NntpPasswordEnvVar, nntp.PasswordProtected);
         string redundancy = !string.IsNullOrEmpty(nntp.RedundancyMode)
             ? nntp.RedundancyMode
             : job.RedundancyMode;
@@ -2116,9 +2107,7 @@ public sealed class BackupScheduler
                 if (string.IsNullOrWhiteSpace(share))
                     throw new InvalidOperationException(
                         $"Job '{job.Name}' targets SMB but no share is configured.");
-                string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
-                if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
-                    smbPassword = Dpapi.Unprotect(passwordProtected);
+                string? smbPassword = SecretResolver.ResolvePassword(SmbPasswordEnvVar, passwordProtected);
                 try
                 {
                     smbConns.Add((loc.Name, SmbShare.Connect(share, user, smbPassword), loc));
@@ -2665,9 +2654,7 @@ public sealed class BackupScheduler
             throw new InvalidOperationException(
                 $"Job '{job.Name}' targets SMB but no share is configured.");
 
-        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
-        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
-            smbPassword = Dpapi.Unprotect(passwordProtected);
+        string? smbPassword = SecretResolver.ResolvePassword(SmbPasswordEnvVar, passwordProtected);
 
         string? volumeLetter = GetVolumeLetterForDevice(job.FirstSource);
 
@@ -2712,9 +2699,7 @@ public sealed class BackupScheduler
         Log($"job '{job.Name}': streaming disk image to Usenet " +
             $"(sparse={job.Sparse}, volumes=100MB)...");
         // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
-        string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-        if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(provider.PasswordProtected))
-            nntpPassword = Dpapi.Unprotect(provider.PasswordProtected);
+        string? nntpPassword = SecretResolver.ResolvePassword(NntpPasswordEnvVar, provider.PasswordProtected);
 
         using var client = new Nntp.NntpClient(provider.Host, provider.Port, provider.Ssl);
         client.Connect();
@@ -2822,9 +2807,7 @@ public sealed class BackupScheduler
         if (string.IsNullOrWhiteSpace(share))
             throw new InvalidOperationException(
                 $"Job '{job.Name}' targets an SMB location but no share is configured.");
-        string? smbPassword = Environment.GetEnvironmentVariable(SmbPasswordEnvVar);
-        if (string.IsNullOrEmpty(smbPassword) && !string.IsNullOrEmpty(passwordProtected))
-            smbPassword = Dpapi.Unprotect(passwordProtected);
+        string? smbPassword = SecretResolver.ResolvePassword(SmbPasswordEnvVar, passwordProtected);
 
         string locName = loc.Name;
         Log($"job '{job.Name}': syncing backup {backupId} to '{locName}' ({share})");
@@ -3046,9 +3029,7 @@ public sealed class BackupScheduler
             }
             attempted++;
             // Env var takes precedence; otherwise decrypt the DPAPI-stored password.
-            string? nntpPassword = Environment.GetEnvironmentVariable(NntpPasswordEnvVar);
-            if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.PasswordProtected))
-                nntpPassword = Dpapi.Unprotect(nntp.PasswordProtected);
+            string? nntpPassword = SecretResolver.ResolvePassword(NntpPasswordEnvVar, nntp.PasswordProtected);
             if (string.IsNullOrEmpty(nntpPassword) && !string.IsNullOrEmpty(nntp.Username))
             {
                 errors.Add($"{nntp.Host}: password not configured");

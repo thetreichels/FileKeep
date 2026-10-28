@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FileKeep.Core.Json;
+using FileKeep.Core.Security;
 
 namespace FileKeep.Core.Service;
 
@@ -71,8 +72,7 @@ public sealed class NntpConfig
     /// <summary>True if a password is available (stored blob or env var).</summary>
     [JsonIgnore]
     public bool HasPassword =>
-        !string.IsNullOrEmpty(PasswordProtected) ||
-        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_NNTP_PASSWORD"));
+        SecretResolver.HasSecret(BackupScheduler.NntpPasswordEnvVar, PasswordProtected);
 }
 
 /// <summary>
@@ -193,11 +193,9 @@ public sealed class BackupLocation
     [JsonIgnore]
     public bool HasPassword =>
         ParsedKind == LocationKind.Nntp
-            ? !string.IsNullOrEmpty(PasswordProtected) ||
-              !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_NNTP_PASSWORD"))
+            ? SecretResolver.HasSecret(BackupScheduler.NntpPasswordEnvVar, PasswordProtected)
             : ParsedKind == LocationKind.Smb
-                ? !string.IsNullOrEmpty(SmbPasswordProtected) ||
-                  !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FILEKEEP_SMB_PASSWORD"))
+                ? SecretResolver.HasSecret(BackupScheduler.SmbPasswordEnvVar, SmbPasswordProtected)
                 : true; // usb: no password needed
 
     /// <summary>

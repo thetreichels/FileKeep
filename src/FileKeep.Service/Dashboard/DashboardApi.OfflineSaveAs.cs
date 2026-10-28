@@ -1,5 +1,6 @@
 using FileKeep.Core;
 using FileKeep.Core.Service;
+using FileKeep.Core.Security;
 
 namespace FileKeep.Service;
 
@@ -94,12 +95,9 @@ public static partial class DashboardApi
                         return (400, new ErrorDto("That location is not an SMB location."));
                     if (string.IsNullOrWhiteSpace(location.Share))
                         return (400, new ErrorDto("That location has no share configured."));
-                    string? password = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-                    if (string.IsNullOrEmpty(password) && !string.IsNullOrEmpty(location.SmbPasswordProtected))
-                    {
-                        try { password = FileKeep.Core.Dpapi.Unprotect(location.SmbPasswordProtected); }
-                        catch { return (400, new ErrorDto("That location's stored credentials could not be read.")); }
-                    }
+                    string? password;
+                    try { password = SecretResolver.ResolvePassword(BackupScheduler.SmbPasswordEnvVar, location.SmbPasswordProtected); }
+                    catch { return (400, new ErrorDto("That location's stored credentials could not be read.")); }
                     try { share = SmbShare.Connect(location.Share, location.SmbUser, password, createIfMissing: false); }
                     catch { return (400, new ErrorDto("That SMB share could not be reached.")); }
                     destPath = share.Combine(writeName);

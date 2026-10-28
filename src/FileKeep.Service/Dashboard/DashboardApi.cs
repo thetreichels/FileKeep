@@ -454,11 +454,8 @@ public static partial class DashboardApi
         if (loc.ParsedKind == LocationKind.Smb)
         {
             string? smbPassword = null;
-            if (!string.IsNullOrEmpty(loc.SmbPasswordProtected))
-            {
-                try { smbPassword = FileKeep.Core.Dpapi.Unprotect(loc.SmbPasswordProtected); }
-                catch { /* use no password */ }
-            }
+            try { smbPassword = SecretResolver.ResolvePassword(BackupScheduler.SmbPasswordEnvVar, loc.SmbPasswordProtected); }
+            catch { /* use no password */ }
             scannedPath = loc.Share;
             found = FileKeep.Core.BackupDiscovery.ScanSmbShare(
                 loc.Share, loc.SmbUser, smbPassword, log);
@@ -761,9 +758,7 @@ public static partial class DashboardApi
         string? smbPassword = null;
         if (!string.IsNullOrWhiteSpace(smbShare))
         {
-            smbPassword = Environment.GetEnvironmentVariable(BackupScheduler.SmbPasswordEnvVar);
-            if (string.IsNullOrEmpty(smbPassword) && smbLoc is not null && !string.IsNullOrEmpty(smbLoc.SmbPasswordProtected))
-                smbPassword = FileKeep.Core.Dpapi.Unprotect(smbLoc.SmbPasswordProtected);
+            smbPassword = SecretResolver.ResolvePassword(BackupScheduler.SmbPasswordEnvVar, smbLoc?.SmbPasswordProtected);
             if (string.IsNullOrWhiteSpace(smbUser))
                 smbUser = smbLoc?.SmbUser;
         }
