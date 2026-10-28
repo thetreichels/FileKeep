@@ -1654,8 +1654,10 @@ async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) {
     const t = await r.text();
-    let msg = t;
-    try { const j = JSON.parse(t); msg = j.error || j.message || t; } catch { /* not JSON, use raw text */ }
+    // A bare error status (e.g. the CSRF 403, which carries no body) must
+    // not become an empty toast: fall back to the HTTP status.
+    let msg = t || ('Request failed (HTTP ' + r.status + ')');
+    try { const j = JSON.parse(t); msg = j.error || j.message || msg; } catch { /* not JSON, use raw text */ }
     throw new Error(msg);
   }
   return r.status === 202 ? null : r.json();
@@ -5147,7 +5149,7 @@ async function ofAddFiles() {
   for (const file of input.files) fd.append('files', file, file.name);
   try {
     const r = await fetch('/api/offline-folders/' + encodeURIComponent(ofFilesFolder) + '/files', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
-    if (!r.ok) { const t = await r.text(); let m = t; try { m = JSON.parse(t).error || t; } catch {} throw new Error(m); }
+    if (!r.ok) { const t = await r.text(); let m = t || ('Upload failed (HTTP ' + r.status + ')'); try { m = JSON.parse(t).error || m; } catch {} throw new Error(m); }
     let res = null; try { res = await r.json(); } catch {}
     input.value = '';
     await ofShowFiles(ofFilesFolder);
