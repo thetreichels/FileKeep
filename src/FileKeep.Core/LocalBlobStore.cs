@@ -79,13 +79,22 @@ public sealed class LocalBlobStore : IBlobStore
             try
             {
                 File.Move(tmp, path);
-                TryFlushDirectory(Path.GetDirectoryName(path)!);
             }
-            catch (IOException) when (File.Exists(path))
+            catch (IOException ex) when (IsAlreadyExists(ex))
             {
-                // Another thread committed this exact chunk concurrently
-                // (content-addressed: identical bytes). Treat as dedup hit.
+                // Lost the race with another writer that committed this
+                // exact chunk concurrently. The chunk ID is the SHA-256
+                // of the plaintext, so the winner's blob decrypts to the
+                // same plaintext (the nonce travels in the blob) — this
+                // is a dedup hit, not a failure. The cause is checked
+                // at failure time, not by re-probing the filesystem: a
+                // concurrent prune may delete the winner's blob between
+                // a failed Move and any later existence check, which
+                // used to turn this handled race into a throw.
             }
+            // Best-effort only and never throws (see TryFlushDirectory),
+            // so it sits outside the Move's catch.
+            TryFlushDirectory(Path.GetDirectoryName(path)!);
         }
         finally
         {
@@ -123,13 +132,22 @@ public sealed class LocalBlobStore : IBlobStore
             try
             {
                 File.Move(tmp, path);
-                TryFlushDirectory(Path.GetDirectoryName(path)!);
             }
-            catch (IOException) when (File.Exists(path))
+            catch (IOException ex) when (IsAlreadyExists(ex))
             {
-                // Another thread committed this exact chunk concurrently
-                // (content-addressed: identical bytes). Treat as dedup hit.
+                // Lost the race with another writer that committed this
+                // exact chunk concurrently. The chunk ID is the SHA-256
+                // of the plaintext, so the winner's blob decrypts to the
+                // same plaintext (the nonce travels in the blob) — this
+                // is a dedup hit, not a failure. The cause is checked
+                // at failure time, not by re-probing the filesystem: a
+                // concurrent prune may delete the winner's blob between
+                // a failed Move and any later existence check, which
+                // used to turn this handled race into a throw.
             }
+            // Best-effort only and never throws (see TryFlushDirectory),
+            // so it sits outside the Move's catch.
+            TryFlushDirectory(Path.GetDirectoryName(path)!);
         }
         finally
         {
@@ -148,6 +166,22 @@ public sealed class LocalBlobStore : IBlobStore
     /// created moments earlier (the chunk's hh folder in its parent) is
     /// covered only by the filesystem's own journaling, not by this flush.
     /// </summary>
+    /// <summary>
+    /// True when an <see cref="IOException"/> is the OS reporting that
+    /// the move destination already exists — the lost-a-race-with-
+    /// another-writer case. Verified empirically on both platforms
+    /// (2026-10-27, bare File.Move onto an existing file): Windows
+    /// reports Win32 ERROR_ALREADY_EXISTS (183) as 0x800700B7; Linux
+    /// reports raw errno EEXIST (17) as 0x11. Checking the failure
+    /// cause at failure time, instead of re-probing the filesystem,
+    /// is what makes this race-proof: a concurrent prune may delete
+    /// the winner's blob between a failed Move and any later
+    /// existence check.
+    /// </summary>
+    private static bool IsAlreadyExists(IOException ex) =>
+        ex.HResult == unchecked((int)0x800700B7) // Windows ERROR_ALREADY_EXISTS
+        || ex.HResult == 0x11; // Linux EEXIST
+
     private static void TryFlushDirectory(string dir)
     {
         if (OperatingSystem.IsWindows())
