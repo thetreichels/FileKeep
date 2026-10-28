@@ -64,10 +64,16 @@ public static class ServiceConfigPersistence
     // the losers) while Linux rename always wins. This static gate
     // serializes the temp-write+move across all instances, so every
     // save succeeds and the final file is one complete write. The two
-    // locks are never co-held: JobsLock guards serialization, SaveLock
-    // guards write+move, taken sequentially — so there is no
-    // lock-ordering hazard, and Stage 3's store work only has to
-    // delete this gate when it owns locking.
+    // locks are never co-held: the store lock guards serialization,
+    // SaveLock guards write+move, taken sequentially — so there is no
+    // lock-ordering hazard. Stage 3 considered folding this gate into
+    // the store lock and deliberately kept it: the store lock guards
+    // ONE config's data, while this gate guards the filesystem path
+    // across instances — different resources, and deleting the gate
+    // would break the ConcurrentSamePath guarantee on Windows (the
+    // store lock held through the whole save still would not
+    // serialize distinct config objects). The gate stays, explained,
+    // as the single cross-instance file-write lock.
     private static readonly object SaveLock = new();
 
     public static void Save(ServiceConfig config, string path)

@@ -442,6 +442,18 @@ public sealed class BackupJobConfig
 /// </summary>
 public sealed class ServiceConfig
 {
+    public ServiceConfig()
+    {
+        Store = new ServiceConfigStore(this);
+    }
+
+    /// <summary>
+    /// The guarded store (Stage 3): owns the lock, the snapshot
+    /// copies, and the effective-provider view. Not serialized.
+    /// </summary>
+    [JsonIgnore]
+    public ServiceConfigStore Store { get; }
+
     [JsonPropertyName("dashboardPort")]
     public int DashboardPort { get; set; } = 15789;
 
@@ -458,49 +470,36 @@ public sealed class ServiceConfig
     public List<BackupJobConfig> Jobs { get; set; } = new();
 
     /// <summary>
-    /// Guards concurrent access to ALL mutable config state — Jobs,
-    /// Locations, NntpProviders, the top-level Nntp, and the protection
-    /// fields (P2-C1/C2: Jobs were guarded; everything else was mutated
-    /// unlocked while handlers and the scheduler read it lock-free,
-    /// which tore saves and handed running jobs half-edited locations).
-    /// Dashboard HTTP handlers and the scheduler run on different
-    /// threads; every mutation — and every enumeration that isn't a
-    /// Snapshot* copy — must hold this lock. (Named JobsLock for
-    /// historical reasons; the contract covers the whole config.)
+    /// The store's lock object (Stage 3): the SAME object the store
+    /// holds, so every existing lock site keeps working unchanged.
+    /// See <see cref="ServiceConfigStore.Lock"/> for the contract.
+    /// Kept as the facade path until every external lock site is
+    /// migrated to store entry points, site by site.
     /// </summary>
     [JsonIgnore]
-    public readonly object JobsLock = new();
+    public object JobsLock => Store.Lock;
 
     /// <summary>
     /// Returns a snapshot copy of the Jobs list taken under <see cref="JobsLock"/>.
     /// Use this for all read-only iterations outside the lock.
+    /// Delegates to <see cref="ServiceConfigStore.SnapshotJobs"/>.
     /// </summary>
-    public List<BackupJobConfig> SnapshotJobs()
-    {
-        lock (JobsLock)
-            return Jobs.ToList();
-    }
+    public List<BackupJobConfig> SnapshotJobs() => Store.SnapshotJobs();
 
     /// <summary>
     /// Returns a snapshot copy of the Locations list taken under
     /// <see cref="JobsLock"/>. Use this for all read-only iterations
     /// outside the lock.
+    /// Delegates to <see cref="ServiceConfigStore.SnapshotLocations"/>.
     /// </summary>
-    public List<BackupLocation> SnapshotLocations()
-    {
-        lock (JobsLock)
-            return Locations.ToList();
-    }
+    public List<BackupLocation> SnapshotLocations() => Store.SnapshotLocations();
 
     /// <summary>
     /// Returns a snapshot copy of the NntpProviders list taken under
     /// <see cref="JobsLock"/>.
+    /// Delegates to <see cref="ServiceConfigStore.SnapshotProviders"/>.
     /// </summary>
-    public List<NntpConfig> SnapshotProviders()
-    {
-        lock (JobsLock)
-            return NntpProviders.ToList();
-    }
+    public List<NntpConfig> SnapshotProviders() => Store.SnapshotProviders();
 
     /// <summary>
     /// Named backup destinations (Usenet providers and SMB shares). Jobs
@@ -705,21 +704,10 @@ public sealed class ServiceConfig
     /// <summary>
     /// Gets the effective list of global Usenet providers: NntpProviders
     /// if non-empty, otherwise the single Nntp config as a singleton list.
+    /// Delegates to <see cref="ServiceConfigStore.EffectiveProviders"/>.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public IReadOnlyList<NntpConfig> EffectiveProviders
-    {
-        get
-        {
-            // Snapshot copy under the lock (P2-C2): returning the live
-            // list let the scheduler's provider list alias a list the
-            // dashboard could replace or mutate mid-run.
-            lock (JobsLock)
-                return NntpProviders.Count > 0 ? NntpProviders.ToList() :
-                    Nntp is not null ? new[] { Nntp } :
-                    Array.Empty<NntpConfig>();
-        }
-    }
+    public IReadOnlyList<NntpConfig> EffectiveProviders => Store.EffectiveProviders;
 
     /// <summary>
     /// Enable automatic retention checks. When true, the scheduler periodically
