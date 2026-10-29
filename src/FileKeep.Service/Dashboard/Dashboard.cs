@@ -7,6 +7,7 @@ using FileKeep.Core.Json;
 using FileKeep.Core.Nntp;
 using FileKeep.Core.Security;
 using FileKeep.Core.Service;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace FileKeep.Service;
 
@@ -108,6 +109,110 @@ public static class Dashboard
                 $"dashboardBind '{bind}' is not a loopback address. The dashboard has no " +
                 "authentication and must not be exposed to a network — set dashboardBind " +
                 "to 127.0.0.1, ::1, or localhost, or remove the setting.");
+    }
+
+    /// <summary>
+    /// Registers the Stealth Folders WebDAV routes (/dav/offline/**).
+    /// Internal so the through-Kestrel regression test exercises the
+    /// real production wiring, including the sync-I/O opt-in above.
+    /// </summary>
+    internal static void MapOfflineDavRoutes(WebApplication app, OfflineFoldersDavHandler offlineDav)
+    {
+        // Slice 2 WebDAV share (/dav/offline/**). Deliberately NOT
+        // CSRF-checked: Explorer cannot send the dashboard token, and
+        // browsers cannot issue these methods cross-origin without a
+        // CORS preflight this host never satisfies. The gate is the
+        // card session itself, plus loopback-only binding.
+        app.MapMethods("/dav/offline/{**rest}",
+            new[] { "OPTIONS", "PROPFIND", "GET", "PUT", "DELETE", "LOCK", "UNLOCK", "MKCOL" },
+            async (HttpContext ctx, string? rest) =>
+            {
+                // Chunked file transfers read/write the body stream
+                // synchronously (OfflineChunkStore.Store/Retrieve);
+                // Kestrel disallows sync I/O by default and a Task.Run
+                // wrapper does not bypass the ban, so this loopback-only
+                // route opts its requests in. Narrower than the
+                // server-wide AllowSynchronousIO the portable reader uses.
+                ctx.Features.Get<IHttpBodyControlFeature>()!.AllowSynchronousIO = true;
+                var segments = new List<string>();
+                if (!string.IsNullOrEmpty(rest))
+                {
+                    foreach (string raw in rest.Split('/', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        try { segments.Add(Uri.UnescapeDataString(raw)); }
+                        catch
+                        {
+                            ctx.Response.StatusCode = 400;
+                            await ctx.Response.WriteAsync("Invalid path.");
+                            return;
+                        }
+                    }
+                }
+                int depth = 1;
+                if (ctx.Request.Headers.TryGetValue("Depth", out var depthHeader))
+                {
+                    depth = depthHeader.ToString() switch
+                    {
+                        "0" => 0,
+                        "1" => 1,
+                        "infinity" => int.MaxValue,
+                        _ => 1,
+                    };
+                }
+                string? token = null;
+                if (ctx.Request.Headers.TryGetValue("Lock-Token", out var lockHeader))
+                    token = lockHeader.ToString().Trim('<', '>', ' ');
+                else if (ctx.Request.Headers.TryGetValue("If", out var ifHeader))
+                {
+                    string ifValue = ifHeader.ToString();
+                    int at = ifValue.IndexOf("opaquelocktoken:", StringComparison.Ordinal);
+                    if (at >= 0)
+                    {
+                        int end = ifValue.IndexOfAny(new[] { '>', ' ', ')' }, at);
+                        token = end < 0 ? ifValue[at..] : ifValue[at..end];
+                    }
+                }
+                string? openToken = ctx.Request.Query.TryGetValue("open", out var openValues)
+                    ? openValues.ToString()
+                    : null;
+                var davRequest = new OfflineFoldersDavHandler.DavRequest
+                {
+                    Method = ctx.Request.Method,
+                    Segments = segments.ToArray(),
+                    Depth = depth,
+                    Body = ctx.Request.Method is "PUT" ? ctx.Request.Body : null,
+                    LockToken = token,
+                    OpenToken = string.IsNullOrEmpty(openToken) ? null : openToken,
+                };
+                var result = offlineDav.Handle(davRequest);
+                foreach (var (name, value) in result.Headers)
+                    ctx.Response.Headers[name] = value;
+                if (result.ContentType is not null)
+                    ctx.Response.ContentType = result.ContentType;
+                if (result.ContentLength is not null)
+                    ctx.Response.ContentLength = result.ContentLength;
+                ctx.Response.StatusCode = result.Status;
+                try
+                {
+                    if (result.BodyBytes is not null)
+                        await ctx.Response.Body.WriteAsync(result.BodyBytes);
+                    else if (result.BodyWriter is not null)
+                        await result.BodyWriter(ctx.Response.Body);
+                }
+                catch (OfflineFoldersDavHandler.DavStreamException)
+                {
+                    // Headers already sent: the only safe failure is
+                    // aborting the connection, which the client reads
+                    // as a failed transfer, never as good bytes.
+                    ctx.Abort();
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    ctx.Abort();
+                    return;
+                }
+            });
     }
 
     public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
@@ -1240,94 +1345,7 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
-        // Slice 2 WebDAV share (/dav/offline/**). Deliberately NOT
-        // CSRF-checked: Explorer cannot send the dashboard token, and
-        // browsers cannot issue these methods cross-origin without a
-        // CORS preflight this host never satisfies. The gate is the
-        // card session itself, plus loopback-only binding.
-        app.MapMethods("/dav/offline/{**rest}",
-            new[] { "OPTIONS", "PROPFIND", "GET", "PUT", "DELETE", "LOCK", "UNLOCK", "MKCOL" },
-            async (HttpContext ctx, string? rest) =>
-            {
-                var segments = new List<string>();
-                if (!string.IsNullOrEmpty(rest))
-                {
-                    foreach (string raw in rest.Split('/', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        try { segments.Add(Uri.UnescapeDataString(raw)); }
-                        catch
-                        {
-                            ctx.Response.StatusCode = 400;
-                            await ctx.Response.WriteAsync("Invalid path.");
-                            return;
-                        }
-                    }
-                }
-                int depth = 1;
-                if (ctx.Request.Headers.TryGetValue("Depth", out var depthHeader))
-                {
-                    depth = depthHeader.ToString() switch
-                    {
-                        "0" => 0,
-                        "1" => 1,
-                        "infinity" => int.MaxValue,
-                        _ => 1,
-                    };
-                }
-                string? token = null;
-                if (ctx.Request.Headers.TryGetValue("Lock-Token", out var lockHeader))
-                    token = lockHeader.ToString().Trim('<', '>', ' ');
-                else if (ctx.Request.Headers.TryGetValue("If", out var ifHeader))
-                {
-                    string ifValue = ifHeader.ToString();
-                    int at = ifValue.IndexOf("opaquelocktoken:", StringComparison.Ordinal);
-                    if (at >= 0)
-                    {
-                        int end = ifValue.IndexOfAny(new[] { '>', ' ', ')' }, at);
-                        token = end < 0 ? ifValue[at..] : ifValue[at..end];
-                    }
-                }
-                string? openToken = ctx.Request.Query.TryGetValue("open", out var openValues)
-                    ? openValues.ToString()
-                    : null;
-                var davRequest = new OfflineFoldersDavHandler.DavRequest
-                {
-                    Method = ctx.Request.Method,
-                    Segments = segments.ToArray(),
-                    Depth = depth,
-                    Body = ctx.Request.Method is "PUT" ? ctx.Request.Body : null,
-                    LockToken = token,
-                    OpenToken = string.IsNullOrEmpty(openToken) ? null : openToken,
-                };
-                var result = offlineDav.Handle(davRequest);
-                foreach (var (name, value) in result.Headers)
-                    ctx.Response.Headers[name] = value;
-                if (result.ContentType is not null)
-                    ctx.Response.ContentType = result.ContentType;
-                if (result.ContentLength is not null)
-                    ctx.Response.ContentLength = result.ContentLength;
-                ctx.Response.StatusCode = result.Status;
-                try
-                {
-                    if (result.BodyBytes is not null)
-                        await ctx.Response.Body.WriteAsync(result.BodyBytes);
-                    else if (result.BodyWriter is not null)
-                        await result.BodyWriter(ctx.Response.Body);
-                }
-                catch (OfflineFoldersDavHandler.DavStreamException)
-                {
-                    // Headers already sent: the only safe failure is
-                    // aborting the connection, which the client reads
-                    // as a failed transfer, never as good bytes.
-                    ctx.Abort();
-                    return;
-                }
-                catch (OperationCanceledException)
-                {
-                    ctx.Abort();
-                    return;
-                }
-            });
+        MapOfflineDavRoutes(app, offlineDav);
 
         await app.RunAsync(ct);
     }
