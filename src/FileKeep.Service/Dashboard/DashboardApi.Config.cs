@@ -253,18 +253,12 @@ public static partial class DashboardApi
                     return (400, new ErrorDto($"Source folder does not exist: {src}"));
         try { ServiceConfig.ValidateNoNestedSources(job); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
-        // Validate schedule format and mode via a temporary config.
-        var test = new ServiceConfig
-        {
-            DashboardPort = config.DashboardPort,
-            DashboardBind = config.DashboardBind,
-            Nntp = config.Nntp,
-            Locations = config.SnapshotLocations(),
-            Jobs = config.SnapshotJobs()
-                .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))
-                .Concat(new[] { job }).ToList(),
-        };
-        try { test.Validate(); }
+        // Validate the candidate job via the builder (Stage 5): it builds
+        // the candidate config from the live config plus this job and
+        // validates it, so no unvalidated config is ever held. The
+        // candidate itself is validation-only; the change is applied to
+        // the live config under JobsLock below, as before.
+        try { new ServiceConfigBuilder(config).WithJob(job).Build(); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         // A job may REMAIN without an upload target but may not be
         // CREATED without one: scheduled jobs must upload to at least one
