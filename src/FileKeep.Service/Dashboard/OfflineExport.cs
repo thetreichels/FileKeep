@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FileKeep.Core;
@@ -13,6 +11,15 @@ namespace FileKeep.Service;
 /// the user chooses at export time. The reader (part 3) consumes
 /// this format, so it is versioned and fail-closed: a mismatched
 /// format refuses rather than garbling.
+///
+/// This class is now a thin adapter over
+/// <see cref="OfflineExportEnvelope"/> in Core (the reader must NOT
+/// reference Service, so the envelope implementation lives there).
+/// The format, the payload shapes, and the public API here are
+/// unchanged — the Service payload is mapped to the Core payload,
+/// encrypted by Core, and mapped back — so existing packages and
+/// tests behave exactly as before, and a package written by the
+/// Service decrypts under the reader and vice versa.
 ///
 /// Envelope (JSON, snake_case like repo.json — this is a file
 /// format, not a dashboard response): format tag, PBKDF2 salt +
@@ -31,13 +38,28 @@ namespace FileKeep.Service;
 /// </summary>
 public static class OfflineExport
 {
-    public const string Format = "FileKeep offline export v1";
+    public const string Format = OfflineExportEnvelope.Format;
+
+    /// <summary>Package scope: a whole-folder manifest.</summary>
+    public const string ScopeFolder = OfflineExportEnvelope.ScopeFolder;
+
+    /// <summary>Package scope: exactly one file's entry, for per-file export.</summary>
+    public const string ScopeFile = OfflineExportEnvelope.ScopeFile;
 
     /// <summary>Decrypted export payload: the folder, its location pointer, and its files.</summary>
     public sealed class Payload
     {
         [JsonPropertyName("folder")]
         public string Folder { get; set; } = "";
+
+        /// <summary>
+        /// Package scope: "folder" or "file" (see
+        /// <see cref="OfflineExportEnvelope"/>). Absent in older
+        /// packages, which read as folders.
+        /// </summary>
+        [JsonPropertyName("scope")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Scope { get; set; }
 
         [JsonPropertyName("location")]
         public LocationPointer Location { get; set; } = new();
@@ -105,14 +127,73 @@ public static class OfflineExport
 
     /// <summary>
     /// Builds an encrypted package for <paramref name="folder"/> on
-    /// <paramref name="location"/>. Throws
-    /// <see cref="InvalidOperationException"/> for non-SMB/USB
-    /// locations (offline folders store on USB/SMB only).
+    /// <paramref name="location"/>, containing all of the folder's
+    /// files. Throws <see cref="InvalidOperationException"/> for
+    /// non-SMB/USB locations (offline folders store on USB/SMB only).
     /// </summary>
     public static OfflineExportPackageDto CreatePackage(
-        OfflineFolderEntry folder, BackupLocation location, string exportPassphrase)
+        OfflineFolderEntry folder, BackupLocation location, string exportPassphrase) =>
+        BuildPackage(folder.Name, BuildPointer(folder, location),
+            folder.Files.Select(f => new OfflineExportEnvelope.FileRef
+            {
+                Path = f.Path,
+                Size = f.Size,
+                ModifiedUtc = f.ModifiedUtc,
+                ChunkIds = f.ChunkIds.ToList(),
+            }).ToList(), ScopeFolder, exportPassphrase);
+
+    /// <summary>
+    /// Builds an encrypted package holding exactly one file's entry
+    /// from <paramref name="folder"/>: the same v1 envelope and the
+    /// same location pointer, so the reader (part 3) and the import
+    /// path treat it as a package — but no other file's name or
+    /// chunk reference leaves the machine. The scope is "file"; the
+    /// import side merges it into the named folder.
+    /// </summary>
+    public static OfflineExportPackageDto CreateFilePackage(
+        OfflineFolderEntry folder, OfflineFileEntry file, BackupLocation location, string exportPassphrase) =>
+        BuildPackage(folder.Name, BuildPointer(folder, location),
+            new List<OfflineExportEnvelope.FileRef>
+            {
+                new()
+                {
+                    Path = file.Path,
+                    Size = file.Size,
+                    ModifiedUtc = file.ModifiedUtc,
+                    ChunkIds = file.ChunkIds.ToList(),
+                },
+            }, ScopeFile, exportPassphrase);
+
+    private static OfflineExportPackageDto BuildPackage(
+        string folderName, LocationPointer pointer,
+        List<OfflineExportEnvelope.FileRef> files, string scope, string exportPassphrase)
     {
         ArgumentException.ThrowIfNullOrEmpty(exportPassphrase);
+        var payload = new OfflineExportEnvelope.Payload
+        {
+            Folder = folderName,
+            Scope = scope,
+            Location = new OfflineExportEnvelope.LocationPointer
+            {
+                Type = pointer.Type,
+                Name = pointer.Name,
+                Share = pointer.Share,
+                VolumeSerial = pointer.VolumeSerial,
+                VolumeLabel = pointer.VolumeLabel,
+                UsbFolder = pointer.UsbFolder,
+                DisguiseEnabled = pointer.DisguiseEnabled,
+                CoverName = pointer.CoverName,
+                DisguiseDecoys = pointer.DisguiseDecoys,
+            },
+            Files = files,
+        };
+        var package = OfflineExportEnvelope.CreatePackage(payload, exportPassphrase);
+        return new OfflineExportPackageDto(package.Format, package.KdfSaltB64,
+            package.KdfIterations, package.NonceB64, package.DataB64);
+    }
+
+    private static LocationPointer BuildPointer(OfflineFolderEntry folder, BackupLocation location)
+    {
         var pointer = new LocationPointer
         {
             Type = location.Type.ToLowerInvariant(),
@@ -136,42 +217,7 @@ public static class OfflineExport
             throw new InvalidOperationException(
                 $"Offline folder '{folder.Name}' is on a '{location.Type}' location — exports cover USB/SMB only.");
         }
-        var payload = new Payload
-        {
-            Folder = folder.Name,
-            Location = pointer,
-            Files = folder.Files.Select(f => new FileRef
-            {
-                Path = f.Path,
-                Size = f.Size,
-                ModifiedUtc = f.ModifiedUtc,
-                ChunkIds = f.ChunkIds.ToList(),
-            }).ToList(),
-        };
-        byte[] plaintext = JsonSerializer.SerializeToUtf8Bytes(payload);
-        byte[] salt = RandomNumberGenerator.GetBytes(32);
-        byte[] key = DeriveKey(exportPassphrase, salt, BackupRepository.DefaultKdfIterations);
-        byte[] nonce = RandomNumberGenerator.GetBytes(ChunkCrypto.NonceSizeBytes);
-        byte[] ciphertext = new byte[plaintext.Length];
-        byte[] tag = new byte[ChunkCrypto.TagSizeBytes];
-        try
-        {
-            using (var gcm = new AesGcm(key, ChunkCrypto.TagSizeBytes))
-                gcm.Encrypt(nonce, plaintext, ciphertext, tag);
-            byte[] data = new byte[ciphertext.Length + tag.Length];
-            ciphertext.CopyTo(data, 0);
-            tag.CopyTo(data, ciphertext.Length);
-            return new OfflineExportPackageDto(Format,
-                Convert.ToBase64String(salt), BackupRepository.DefaultKdfIterations,
-                Convert.ToBase64String(nonce), Convert.ToBase64String(data));
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-            CryptographicOperations.ZeroMemory(key);
-            CryptographicOperations.ZeroMemory(ciphertext);
-            CryptographicOperations.ZeroMemory(tag);
-        }
+        return pointer;
     }
 
     /// <summary>
@@ -183,70 +229,33 @@ public static class OfflineExport
     /// </summary>
     public static Payload DecryptPackage(OfflineExportPackageDto package, string exportPassphrase)
     {
-        ArgumentException.ThrowIfNullOrEmpty(exportPassphrase);
-        if (!string.Equals(package.Format, Format, StringComparison.Ordinal))
-            throw new InvalidDataException(
-                $"Unsupported export format '{package.Format}' (expected '{Format}') — refusing rather than garbling.");
-        byte[] salt, nonce, data;
-        try
+        var core = OfflineExportEnvelope.DecryptPackage(
+            new OfflineExportEnvelope.Package(package.Format, package.KdfSaltB64,
+                package.KdfIterations, package.NonceB64, package.DataB64),
+            exportPassphrase);
+        return new Payload
         {
-            salt = Convert.FromBase64String(package.KdfSaltB64);
-            nonce = Convert.FromBase64String(package.NonceB64);
-            data = Convert.FromBase64String(package.DataB64);
-        }
-        catch (FormatException ex)
-        {
-            throw new InvalidDataException("Export package encoding is malformed.", ex);
-        }
-        if (data.Length < ChunkCrypto.TagSizeBytes)
-            throw new InvalidDataException("Export package data is too short.");
-        byte[] key = DeriveKey(exportPassphrase, salt, package.KdfIterations);
-        byte[] plaintext = new byte[data.Length - ChunkCrypto.TagSizeBytes];
-        try
-        {
-            using (var gcm = new AesGcm(key, ChunkCrypto.TagSizeBytes))
-                gcm.Decrypt(nonce,
-                    data.AsSpan(0, plaintext.Length),
-                    data.AsSpan(plaintext.Length, ChunkCrypto.TagSizeBytes),
-                    plaintext);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(key);
-        }
-        try
-        {
-            var payload = JsonSerializer.Deserialize<Payload>(plaintext)
-                ?? throw new InvalidDataException("Export payload is empty.");
-            string? nameError = OfflineFoldersCatalog.ValidateName(payload.Folder);
-            if (nameError is not null)
-                throw new InvalidDataException($"Export folder name is invalid: {nameError}");
-            if (payload.Location.Type is not ("smb" or "usb"))
-                throw new InvalidDataException($"Export location type '{payload.Location.Type}' is not smb/usb.");
-            foreach (var file in payload.Files)
-                foreach (string chunkId in file.ChunkIds)
-                {
-                    try { _ = Hashing.HexToBytes(chunkId); }
-                    catch (FormatException ex)
-                    {
-                        throw new InvalidDataException($"Export chunk id '{chunkId}' is not hex.", ex);
-                    }
-                }
-            return payload;
-        }
-        catch (JsonException ex)
-        {
-            throw new InvalidDataException("Export payload is not valid JSON.", ex);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-        }
-    }
-
-    private static byte[] DeriveKey(string passphrase, byte[] salt, int iterations)
-    {
-        using var pbkdf2 = new Rfc2898DeriveBytes(passphrase, salt, iterations, HashAlgorithmName.SHA512);
-        return pbkdf2.GetBytes(32);
+            Folder = core.Folder,
+            Scope = core.Scope,
+            Location = new LocationPointer
+            {
+                Type = core.Location.Type,
+                Name = core.Location.Name,
+                Share = core.Location.Share,
+                VolumeSerial = core.Location.VolumeSerial,
+                VolumeLabel = core.Location.VolumeLabel,
+                UsbFolder = core.Location.UsbFolder,
+                DisguiseEnabled = core.Location.DisguiseEnabled,
+                CoverName = core.Location.CoverName,
+                DisguiseDecoys = core.Location.DisguiseDecoys,
+            },
+            Files = core.Files.Select(f => new FileRef
+            {
+                Path = f.Path,
+                Size = f.Size,
+                ModifiedUtc = f.ModifiedUtc,
+                ChunkIds = f.ChunkIds.ToList(),
+            }).ToList(),
+        };
     }
 }

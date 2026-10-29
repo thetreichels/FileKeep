@@ -168,8 +168,11 @@ public sealed class OfflineExportTests : IDisposable
     }
 
     [Fact]
-    public void Handler_Import_DuplicateAndWrongPassphrase_Refused()
+    public void Handler_Import_DuplicateMerges_AndWrongPassphrase_Refused()
     {
+        // Slice 3 part 2: importing a package for an existing folder
+        // MERGES (same-path replaced, new paths appended) instead of
+        // refusing — a per-file export imports into its own folder.
         var config = new ServiceConfig();
         config.Locations.Add(SmbLocation());
         var package = OfflineExport.CreatePackage(FolderEntry(), SmbLocation(), ExportSecret);
@@ -179,13 +182,89 @@ public sealed class OfflineExportTests : IDisposable
         var (firstStatus, _) = DashboardApi.ImportOfflineFolder(config, session, catalog, package, ExportSecret);
         Assert.Equal(200, firstStatus);
         var (dupStatus, dupPayload) = DashboardApi.ImportOfflineFolder(config, session, catalog, package, ExportSecret);
-        Assert.Equal(400, dupStatus);
-        Assert.Contains("already exists", ErrorOf(dupPayload));
+        Assert.Equal(200, dupStatus);
+        Assert.True(Assert.IsType<OfflineImportSummaryDto>(dupPayload).Merged);
         Assert.Single(session.GetEntries()!);
+        Assert.Equal(2, session.GetEntries()![0].Files.Count);
 
         var (wrongStatus, _) = DashboardApi.ImportOfflineFolder(config, session, catalog, package, "wrong");
         Assert.Equal(400, wrongStatus);
         Assert.Single(session.GetEntries()!);
+    }
+
+    [Fact]
+    public void Handler_ExportFile_OneFilePackage_AndMerge()
+    {
+        var config = new ServiceConfig();
+        config.Locations.Add(SmbLocation());
+        var folder = FolderEntry();
+        var session = UnlockedSession(new List<OfflineFolderEntry> { folder });
+
+        var (status, payload) = DashboardApi.ExportOfflineFile(
+            config, session, "F", "dir/b.txt", ExportSecret);
+        Assert.Equal(200, status);
+        var result = Assert.IsType<OfflineExportResultDto>(payload);
+        Assert.Equal("F-b.txt.filekeep-export.json", result.FileName);
+        var decrypted = OfflineExport.DecryptPackage(result.Package, ExportSecret);
+        Assert.Equal("F", decrypted.Folder);
+        Assert.Equal("NAS", decrypted.Location.Name);
+        var only = Assert.Single(decrypted.Files);
+        Assert.Equal("dir/b.txt", only.Path);
+        Assert.Equal(2, only.ChunkIds.Count);
+        // No plaintext filenames or credentials outside the blob.
+        string envelope = JsonSerializer.Serialize(result.Package);
+        Assert.DoesNotContain("dir/b.txt", envelope);
+        Assert.DoesNotContain("must-never-export", envelope);
+        Assert.DoesNotContain("someuser", envelope);
+        Assert.DoesNotContain("backups", envelope);
+
+        // Wrong passphrase fails; locked is 403; missing file is 404.
+        Assert.ThrowsAny<CryptographicException>(() =>
+            OfflineExport.DecryptPackage(result.Package, "wrong"));
+        var locked = new OfflineFoldersSession();
+        var (lockedStatus, _) = DashboardApi.ExportOfflineFile(config, locked, "F", "dir/b.txt", ExportSecret);
+        Assert.Equal(403, lockedStatus);
+        var (missingStatus, missingPayload) = DashboardApi.ExportOfflineFile(config, session, "F", "nope.txt", ExportSecret);
+        Assert.Equal(404, missingStatus);
+        Assert.Contains("No such offline file", ErrorOf(missingPayload));
+        var (noPassStatus, _) = DashboardApi.ExportOfflineFile(config, session, "F", "dir/b.txt", "");
+        Assert.Equal(400, noPassStatus);
+
+        // Importing the one-file package into a catalog that holds
+        // an older copy of the folder replaces that file and keeps
+        // the others (replace + append).
+        string catalog = CatalogPath();
+        var older = new OfflineFolderEntry("F", "NAS", DateTimeOffset.UtcNow)
+        {
+            Files = new()
+            {
+                new("a.txt", 5, DateTimeOffset.UtcNow, new[] { ChunkId("chunk-a") }),
+                new("dir/b.txt", 1, DateTimeOffset.UtcNow, new[] { ChunkId("stale") }),
+            },
+        };
+        var target = UnlockedSession(new List<OfflineFolderEntry> { older });
+        var (importStatus, importPayload) = DashboardApi.ImportOfflineFolder(
+            config, target, catalog, result.Package, ExportSecret);
+        Assert.Equal(200, importStatus);
+        var summary = Assert.IsType<OfflineImportSummaryDto>(importPayload);
+        Assert.True(summary.Merged);
+        Assert.Equal(1, summary.Files);
+        var merged = Assert.Single(target.GetEntries()!);
+        Assert.Equal(2, merged.Files.Count);
+        Assert.Equal(ChunkId("chunk-a"), Assert.Single(merged.Files.Where(f => f.Path == "a.txt")).ChunkIds[0]);
+        Assert.Equal(new[] { ChunkId("chunk-b1"), ChunkId("chunk-b2") },
+            merged.Files.Single(f => f.Path == "dir/b.txt").ChunkIds);
+
+        // A one-file package into an empty catalog creates the folder.
+        string catalog2 = CatalogPath();
+        var empty = UnlockedSession(new List<OfflineFolderEntry>());
+        var (newStatus, newPayload) = DashboardApi.ImportOfflineFolder(
+            config, empty, catalog2, result.Package, ExportSecret);
+        Assert.Equal(200, newStatus);
+        Assert.False(Assert.IsType<OfflineImportSummaryDto>(newPayload).Merged);
+        var created = Assert.Single(empty.GetEntries()!);
+        Assert.Equal("F", created.Name);
+        Assert.Single(created.Files);
     }
 
     [Fact]

@@ -147,14 +147,7 @@ public static partial class DashboardApi
         OfflineRekeySummaryDto summary;
         try
         {
-            summary = OfflineRekey.Rewrite(catalogPath, old, newSecret, locationId =>
-            {
-                var location = config.SnapshotLocations().FirstOrDefault(l =>
-                    string.Equals(l.Name, locationId, StringComparison.OrdinalIgnoreCase));
-                if (location is null)
-                    throw new InvalidOperationException($"Location '{locationId}' no longer exists.");
-                return OfflineFileStore.ResolveStore(location);
-            }, log);
+            summary = OfflineRekey.Rewrite(catalogPath, old, newSecret, OfflineStoreResolver(config), log);
         }
         catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
         {
@@ -165,6 +158,80 @@ public static partial class DashboardApi
         if (summary.Failures.Count > 0)
             log?.Invoke("dashboard: offline folders rekey incomplete — catalog left under the old secret; fix the failures and re-run.");
         return (200, summary);
+    }
+
+    /// <summary>Maps a folder's location name to its chunk store (USB/SMB only).</summary>
+    private static Func<string, OfflineFileStore.OfflineLocationStore> OfflineStoreResolver(ServiceConfig config) =>
+        locationId =>
+        {
+            var location = config.SnapshotLocations().FirstOrDefault(l =>
+                string.Equals(l.Name, locationId, StringComparison.OrdinalIgnoreCase));
+            if (location is null)
+                throw new InvalidOperationException($"Location '{locationId}' no longer exists.");
+            return OfflineFileStore.ResolveStore(location);
+        };
+
+    /// <summary>
+    /// SetPassphrase hook (auto-rekey, fail-closed): when the
+    /// passphrase is being replaced in passphrase mode and an
+    /// offline catalog file exists, rewrites the catalog and its
+    /// chunks from the currently configured secret to
+    /// <paramref name="newPassphrase"/> BEFORE the config is
+    /// touched. Returns null when there is nothing to do; otherwise
+    /// an error result that aborts the passphrase change with the
+    /// config untouched.
+    /// </summary>
+    public static (int Status, object Payload)? RekeyOfflineForPassphraseChange(
+        ServiceConfig config, OfflineFoldersSession session, string catalogPath,
+        string newPassphrase,
+        Func<string, OfflineFileStore.OfflineLocationStore> resolveStore,
+        Action<string>? log = null)
+    {
+        if (!File.Exists(catalogPath))
+            return null;
+        if (session.IsUnlocked)
+            return (400, new ErrorDto(
+                "Lock Offline Folders first — changing the passphrase rekeys the offline catalog, " +
+                "which runs only while the card is locked. The passphrase was NOT changed."));
+        // Already under the new secret (a manual rekey ran first, or
+        // a no-op change): nothing to do.
+        try
+        {
+            _ = OfflineFoldersCatalog.Load(catalogPath, OfflineFoldersCatalog.DeriveKey(newPassphrase));
+            return null;
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
+        {
+            // Not under the new secret — fall through to the rewrite.
+        }
+        if (!BackupScheduler.TryGetPassphrase(config, out string? oldSecret, out string? problem) ||
+            string.IsNullOrEmpty(oldSecret))
+            return (400, new ErrorDto(
+                "An offline folders catalog exists that is not under the new passphrase, and the current " +
+                "secret could not be resolved on this PC" +
+                (string.IsNullOrEmpty(problem) ? "" : $" ({problem})") +
+                " — rekey Offline Folders manually (Stealth tab, old secret typed) or delete the catalog " +
+                "file, then retry. The passphrase was NOT changed."));
+        OfflineRekeySummaryDto summary;
+        try
+        {
+            summary = OfflineRekey.Rewrite(catalogPath, oldSecret, newPassphrase, resolveStore, log);
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
+        {
+            return (400, new ErrorDto(
+                "The offline folders catalog could not be decrypted with the current secret — it may already be " +
+                "under a different secret, or the file is damaged. Rekey it manually (Stealth tab) before " +
+                "changing the passphrase. The passphrase was NOT changed."));
+        }
+        if (summary.Failures.Count > 0)
+            return (400, new ErrorDto(
+                $"Offline rekey hit {summary.Failures.Count} failure(s) — the catalog was left under the old " +
+                $"secret and the passphrase was NOT changed. Fix the failures and retry, or rekey manually " +
+                $"(Stealth tab). First failure: {summary.Failures[0]}"));
+        log?.Invoke($"dashboard: offline folders auto-rekeyed for passphrase change " +
+            $"({summary.Rewritten} chunks rewritten, {summary.Skipped} skipped).");
+        return null;
     }
 
     /// <summary>
@@ -201,14 +268,159 @@ public static partial class DashboardApi
     }
 
     /// <summary>
+    /// Exports a single file as an encrypted package (slice 3,
+    /// part 2): the same envelope as a folder export, with the
+    /// folder name and location pointer unchanged and Files
+    /// containing exactly that one file. Requires the unlocked
+    /// card. The download filename is the folder name plus the
+    /// file's basename, sanitized so it is a safe filename.
+    /// </summary>
+    public static (int Status, object Payload) ExportOfflineFile(
+        ServiceConfig config, OfflineFoldersSession session, string folderName,
+        string filePath, string? exportPassphrase, Action<string>? log = null)
+    {
+        var entries = session.GetEntries();
+        if (entries is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        var folder = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+        if (folder is null)
+            return (404, new ErrorDto("No such offline folder."));
+        var file = folder.Files.FirstOrDefault(f =>
+            string.Equals(f.Path, filePath, StringComparison.OrdinalIgnoreCase));
+        if (file is null)
+            return (404, new ErrorDto("No such offline file."));
+        if (string.IsNullOrEmpty(exportPassphrase))
+            return (400, new ErrorDto("An export passphrase is required."));
+        var location = config.SnapshotLocations().FirstOrDefault(l =>
+            string.Equals(l.Name, folder.LocationId, StringComparison.OrdinalIgnoreCase));
+        if (location is null)
+            return (400, new ErrorDto(
+                $"The folder's location '{folder.LocationId}' no longer exists — nothing to point the export at."));
+        OfflineExportPackageDto package;
+        try { package = OfflineExport.CreateFilePackage(folder, file, location, exportPassphrase); }
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        log?.Invoke($"dashboard: offline file '{file.Path}' from folder '{folder.Name}' exported.");
+        return (200, new OfflineExportResultDto(SafeExportFileName(folder.Name, file.Path), package));
+    }
+
+    /// <summary>
+    /// Exports a folder as a full export (slice 3, part 3): the
+    /// encrypted manifest package plus every chunk, into
+    /// <c>destination/FileKeepReader/</c> (manifest +
+    /// <c>chunks/</c>, the on-stick layout the portable reader
+    /// reads). Chunks are copied before the manifest is written,
+    /// so the manifest is the commit marker. A chunk missing from
+    /// the source does not fail the export: it is reported in
+    /// the summary, and the reader reports that file incomplete
+    /// per file — never garbled. Requires the unlocked card.
+    /// </summary>
+    public static (int Status, object Payload) ExportOfflineFull(
+        ServiceConfig config, OfflineFoldersSession session, string folderName,
+        string destDir, string? exportPassphrase, Action<string>? log = null)
+    {
+        var entries = session.GetEntries();
+        if (entries is null)
+            return (403, new ErrorDto("Offline Folders is locked."));
+        var folder = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, folderName, StringComparison.OrdinalIgnoreCase));
+        if (folder is null)
+            return (404, new ErrorDto("No such offline folder."));
+        if (string.IsNullOrEmpty(exportPassphrase))
+            return (400, new ErrorDto("An export passphrase is required."));
+        if (string.IsNullOrWhiteSpace(destDir))
+            return (400, new ErrorDto("A destination folder is required."));
+        var location = config.SnapshotLocations().FirstOrDefault(l =>
+            string.Equals(l.Name, folder.LocationId, StringComparison.OrdinalIgnoreCase));
+        if (location is null)
+            return (400, new ErrorDto(
+                $"The folder's location '{folder.LocationId}' no longer exists — nothing to copy chunks from."));
+        OfflineFileStore.OfflineLocationStore store;
+        try { store = OfflineFileStore.ResolveStore(location); }
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        try
+        {
+            return ExportOfflineFull(folder, location, store.Store, destDir, exportPassphrase, log);
+        }
+        finally { store.Dispose(); }
+    }
+
+    /// <summary>Full-export core over an explicit source store
+    /// (test seam: tests drive it with a plain local store instead
+    /// of a live USB/SMB location).</summary>
+    internal static (int Status, object Payload) ExportOfflineFull(
+        OfflineFolderEntry folder, BackupLocation location, IBlobStore source,
+        string destDir, string exportPassphrase, Action<string>? log = null)
+    {
+        string readerDir = FileKeep.Core.OfflineStickLayout.ReaderFolder(destDir);
+        var dest = new LocalBlobStore(readerDir);
+        int copied = 0, skipped = 0;
+        var missingFiles = new List<string>();
+        int missingChunks = 0;
+        foreach (var file in folder.Files)
+        {
+            bool fileMissing = false;
+            foreach (string chunkId in file.ChunkIds)
+            {
+                if (dest.Exists(chunkId)) { skipped++; continue; }
+                byte[] blob;
+                try { blob = source.Get(chunkId); }
+                catch (InvalidDataException) { fileMissing = true; missingChunks++; continue; }
+                dest.Put(chunkId, blob);
+                CryptographicOperations.ZeroMemory(blob);
+                copied++;
+            }
+            if (fileMissing) missingFiles.Add(file.Path);
+        }
+        OfflineExportPackageDto package;
+        try { package = OfflineExport.CreatePackage(folder, location, exportPassphrase); }
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        string manifestPath = FileKeep.Core.OfflineStickLayout.ManifestPath(destDir);
+        string json = System.Text.Json.JsonSerializer.Serialize(package,
+            DashboardJsonContext.Default.OfflineExportPackageDto);
+        FileKeep.Core.OfflineStickLayout.WritePackageAtomic(manifestPath, json);
+        log?.Invoke($"dashboard: offline folder '{folder.Name}' full-exported to '{readerDir}' " +
+            $"({folder.Files.Count} files, {copied} chunks copied, {skipped} already present, {missingChunks} missing).");
+        return (200, new OfflineExportFullSummaryDto(folder.Name, folder.Files.Count,
+            folder.Files.Sum(f => f.ChunkIds.Count), copied, skipped,
+            missingChunks, missingFiles, readerDir));
+    }
+
+    /// <summary>File name portion of a catalog path, split on either separator (paths may arrive either way).</summary>
+    internal static string FileBaseName(string path)
+    {
+        int cut = Math.Max(path.LastIndexOf('/'), path.LastIndexOf('\\'));
+        return cut < 0 ? path : path[(cut + 1)..];
+    }
+
+    /// <summary>
+    /// Sanitizes a folder + file pair into a download filename: the
+    /// folder name, a dash, and the file's basename, with
+    /// Windows-invalid filename characters replaced by dashes.
+    /// </summary>
+    internal static string SafeExportFileName(string folderName, string filePath)
+    {
+        string raw = $"{folderName}-{FileBaseName(filePath)}.filekeep-export.json";
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new System.Text.StringBuilder(raw.Length);
+        foreach (char c in raw)
+            sb.Append(invalid.Contains(c) ? '-' : c);
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Imports an export package into this machine's catalog,
     /// re-encrypting it under the card secret. Requires the unlocked
     /// card. No data moves — chunks already sit on the destination,
     /// content-addressed; only the knowledge of what they add up to
-    /// travels. Refuses a duplicate folder name; warns when no local
-    /// location matches the pointer (the folder will not resolve
-    /// until one is added) or when a same-named local location is
-    /// a different type.
+    /// travels. A package for a folder name that already exists
+    /// MERGES into that folder (a per-file export into its folder,
+    /// or a folder re-import): same-path entries are replaced by
+    /// the imported entry, new paths are appended, and the summary
+    /// reports Merged. A package for a new name creates the folder.
+    /// Warns when no local location matches the pointer (the folder
+    /// will not resolve until one is added) or when a same-named
+    /// local location is a different type.
     /// </summary>
     public static (int Status, object Payload) ImportOfflineFolder(
         ServiceConfig config, OfflineFoldersSession session, string catalogPath,
@@ -227,18 +439,62 @@ public static partial class DashboardApi
             return (400, new ErrorDto(
                 "The package could not be decrypted — wrong export passphrase, or the file is damaged or not an export."));
         }
-        if (entries.Any(e => string.Equals(e.Name, payload.Folder, StringComparison.OrdinalIgnoreCase)))
-            return (400, new ErrorDto($"A folder named '{payload.Folder}' already exists — forget or rename it first."));
-        var entry = new OfflineFolderEntry(payload.Folder, payload.Location.Name, DateTimeOffset.UtcNow)
+        // A per-file package holds exactly one file; a folder-scope
+        // package may hold any number. Merge semantics are the same
+        // for both: an existing folder merges (same-path entries are
+        // replaced by the imported entry, new paths are appended), a
+        // new name creates the folder.
+        if (string.Equals(payload.Scope, OfflineExport.ScopeFile, StringComparison.Ordinal) &&
+            payload.Files.Count != 1)
+            return (400, new ErrorDto("A per-file export package holds exactly one file."));
+        var existing = entries.FirstOrDefault(e =>
+            string.Equals(e.Name, payload.Folder, StringComparison.OrdinalIgnoreCase));
+        bool merged;
+        if (existing is not null)
         {
-            Files = payload.Files.Select(f => new OfflineFileEntry(
-                f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList())).ToList(),
-        };
-        entries.Add(entry);
+            // Merge: same-path entries are replaced by the imported
+            // entry, new paths are appended. The list is replaced,
+            // never mutated in place, so a session snapshot cannot
+            // observe a half-updated index. The folder keeps its
+            // existing location pointer: a per-file package carries
+            // the same pointer as its folder, and a folder re-import
+            // must not silently re-point a folder the user may have
+            // repaired to a different location.
+            var mergedFiles = existing.Files.ToList();
+            foreach (var f in payload.Files)
+            {
+                var imported = new OfflineFileEntry(
+                    f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList());
+                mergedFiles.RemoveAll(e =>
+                    string.Equals(e.Path, f.Path, StringComparison.OrdinalIgnoreCase));
+                mergedFiles.Add(imported);
+            }
+            existing.Files = mergedFiles;
+            merged = true;
+        }
+        else
+        {
+            var entry = new OfflineFolderEntry(payload.Folder, payload.Location.Name, DateTimeOffset.UtcNow)
+            {
+                Files = payload.Files.Select(f => new OfflineFileEntry(
+                    f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList())).ToList(),
+            };
+            entries.Add(entry);
+            merged = false;
+        }
         var save = PersistOfflineFolders(session, catalogPath, entries);
         if (save is not null)
             return save.Value;
         session.SetEntries(entries);
+        var warnings = ImportLocationWarnings(config, payload);
+        log?.Invoke($"dashboard: offline folder '{payload.Folder}' imported ({payload.Files.Count} files{(merged ? ", merged" : "")}).");
+        return (200, new OfflineImportSummaryDto(payload.Folder, payload.Files.Count,
+            payload.Files.Sum(f => f.ChunkIds.Count), warnings, merged));
+    }
+
+    /// <summary>Location-pointer warnings shared by folder and per-file imports.</summary>
+    private static List<string> ImportLocationWarnings(ServiceConfig config, OfflineExport.Payload payload)
+    {
         var warnings = new List<string>();
         var local = config.SnapshotLocations().FirstOrDefault(l =>
             string.Equals(l.Name, payload.Location.Name, StringComparison.OrdinalIgnoreCase));
@@ -246,9 +502,7 @@ public static partial class DashboardApi
             warnings.Add($"No local location named '{payload.Location.Name}' — the folder will not resolve until one is added.");
         else if (!string.Equals(local.Type, payload.Location.Type, StringComparison.OrdinalIgnoreCase))
             warnings.Add($"Local location '{payload.Location.Name}' is '{local.Type}' but the package says '{payload.Location.Type}'.");
-        log?.Invoke($"dashboard: offline folder '{payload.Folder}' imported ({payload.Files.Count} files).");
-        return (200, new OfflineImportSummaryDto(payload.Folder, payload.Files.Count,
-            payload.Files.Sum(f => f.ChunkIds.Count), warnings));
+        return warnings;
     }
 
     /// <summary>

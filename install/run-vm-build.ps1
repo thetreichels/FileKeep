@@ -154,6 +154,12 @@ dotnet publish src/FileKeep.Recovery/FileKeep.Recovery.csproj -c Release -r win-
 if ($LASTEXITCODE -ne 0) { throw "Recovery publish failed" }
 dotnet publish src/FileKeep.Gui/FileKeep.Gui.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\gui /p:PublishSingleFile=true @verProps
 if ($LASTEXITCODE -ne 0) { throw "GUI publish failed" }
+# Portable reader (Stealth Folders slice 3, part 3): published and
+# signed like the other exes, but NOT packaged into the MSI — it
+# is a portable stick tool, pointed at by the WinRE reader step
+# and copied by hand, not an installed program.
+dotnet publish src/FileKeep.Reader/FileKeep.Reader.csproj -c Release -r win-x64 --self-contained -o C:\ub\publish\reader /p:PublishSingleFile=true @verProps
+if ($LASTEXITCODE -ne 0) { throw "Reader publish failed" }
 
 Write-Host "=== 3/6 Verifying required MSI payload files ==="
 $required = @(
@@ -174,7 +180,8 @@ Invoke-CodeSigning -Files @(
     "C:\ub\publish\cli\FileKeep.exe",
     "C:\ub\publish\service\FileKeepService.exe",
     "C:\ub\publish\recovery\FileKeepRecovery.exe",
-    "C:\ub\publish\gui\FileKeepGui.exe"
+    "C:\ub\publish\gui\FileKeepGui.exe",
+    "C:\ub\publish\reader\FileKeepReader.exe"
 )
 
 # Build the VSS helper (MSVC or MinGW)

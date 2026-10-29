@@ -50,12 +50,45 @@ param(
     [string]$BinaryDir = "",
     [string]$MountDir = "C:\winre-mount",
     [switch]$SkipReenable,
-    [switch]$Force
+    [switch]$Force,
+    # Portable reader step (Stealth Folders slice 3, part 3):
+    # user-chosen, never forced. The exe (and, at the user's
+    # choice, a manifest-only package file or a full export
+    # folder) is copied to the stick/image root under
+    # FileKeepReader\ for manual launch on a running Windows
+    # machine — no autorun. The files are inert in booted WinPE;
+    # running the reader there is NOT promised. The C# side
+    # (DashboardApi.WinRe.ValidateReaderOptions) checks these
+    # before the build starts; the script re-checks here so a
+    # bad path fails fast, before any formatting.
+    [switch]$IncludeReader,
+    [string]$ReaderExe = "",
+    [string]$ReaderExportPath = "",
+    [ValidateSet("None", "Manifest", "Full")]
+    [string]$ReaderExportMode = "None"
 )
 
 $ErrorActionPreference = "Stop"
 
 function Fail($msg) { Write-Error $msg; exit 1 }
+
+# Portable reader step (slice 3, part 3): copies the reader exe
+# (and, at the user's choice, a manifest-only package or a full
+# export) onto the stick/image root under FileKeepReader\, for
+# manual launch on a running Windows machine. Deliberately NOT
+# injected into the WIM: the files are inert in booted WinPE.
+function Copy-ReaderStep($targetRoot) {
+    if (-not $IncludeReader) { return }
+    $readerDir = Join-Path $targetRoot "FileKeepReader"
+    New-Item -ItemType Directory -Force -Path $readerDir | Out-Null
+    Write-Host "Copying portable reader..."
+    Copy-Item $ReaderExe $readerDir -Force
+    if ($ReaderExportMode -eq "Manifest") {
+        Copy-Item $ReaderExportPath (Join-Path $readerDir "manifest.filekeep-export.json") -Force
+    } elseif ($ReaderExportMode -eq "Full") {
+        Copy-Item (Join-Path $ReaderExportPath "*") $readerDir -Recurse -Force
+    }
+}
 
 # --- Mode selection ---
 # USB mode: writes directly to a USB drive (destructive).
@@ -65,6 +98,17 @@ $script:ImageMode = $ImagePath -ne ""
 if ($script:ImageMode -and ($DriveLetter -ne "" -or $DiskNumber -ge 0)) { Fail "Specify either -DriveLetter/-DiskNumber or -ImagePath, not both." }
 if (-not $script:ImageMode -and $DriveLetter -eq "" -and $DiskNumber -lt 0) { Fail "Specify -DriveLetter or -DiskNumber (USB) or -ImagePath (disk image)." }
 if ($DriveLetter -ne "" -and $DiskNumber -ge 0) { Fail "Specify either -DriveLetter or -DiskNumber, not both." }
+if ($IncludeReader) {
+    if ($ReaderExe -eq "" -or -not (Test-Path $ReaderExe)) { Fail "Reader exe not found: $ReaderExe" }
+    if ($ReaderExportMode -ne "None") {
+        if ($ReaderExportPath -eq "") { Fail "Reader export mode '$ReaderExportMode' requires an export path." }
+        if ($ReaderExportMode -eq "Manifest" -and -not (Test-Path $ReaderExportPath -PathType Leaf)) { Fail "Reader export package not found: $ReaderExportPath" }
+        if ($ReaderExportMode -eq "Full") {
+            if (-not (Test-Path $ReaderExportPath -PathType Container)) { Fail "Reader full export folder not found: $ReaderExportPath" }
+            if (-not (Test-Path (Join-Path $ReaderExportPath "manifest.filekeep-export.json"))) { Fail "Reader full export folder has no manifest.filekeep-export.json." }
+        }
+    }
+} elseif ($ReaderExportPath -ne "") { Fail "A reader export path was given without -IncludeReader." }
 
 # bcdboot firmware flag: ALL copies both UEFI and BIOS boot files.
 $script:BcdBootFlag = @{ UEFI = "UEFI"; BIOS = "BIOS"; Both = "ALL" }[$BootMode]
@@ -464,6 +508,7 @@ Set-Content -Path (Join-Path $MARKERROOT "BUILD-INCOMPLETE.txt") -Encoding ASCII
             $imgFk = Join-Path $targetRoot "FileKeep"
             New-Item -ItemType Directory -Force -Path $imgFk | Out-Null
             Copy-Item (Join-Path $stageDir "*") $imgFk -Recurse -Force
+            Copy-ReaderStep $targetRoot
 
             Write-Host "Copying boot files..."
             bcdboot C:\Windows /s $targetRoot /f $script:BcdBootFlag
@@ -570,6 +615,7 @@ Set-Content -Path (Join-Path $MARKERROOT "BUILD-INCOMPLETE.txt") -Encoding ASCII
         $usbFk = Join-Path $script:UsbRoot "FileKeep"
         New-Item -ItemType Directory -Force -Path $usbFk | Out-Null
         Copy-Item (Join-Path $stageDir "*") $usbFk -Recurse -Force
+        Copy-ReaderStep $script:UsbRoot
 
         Write-Host "Copying boot files..."
         bcdboot C:\Windows /s "$($script:UsbLetter):" /f $script:BcdBootFlag

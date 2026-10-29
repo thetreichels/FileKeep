@@ -37,12 +37,19 @@ public static partial class DashboardApi
     /// under the challenge-response-derived KEK; a DPAPI copy is still kept
     /// so scheduled backups run unattended. Restores then require a touch
     /// to open a session.
+    /// Passphrase hook: replacing the passphrase in passphrase mode
+    /// auto-rekeys the Offline Folders catalog first (fail-closed — a
+    /// catalog that cannot be rekeyed aborts the change); clearing the
+    /// passphrase or switching to YubiKey mode cannot rekey the same
+    /// way, so those return a warning instead.
     /// </summary>
     public static (int Status, object Payload) SetPassphrase(ServiceConfig config,
         string configPath, string? passphrase, bool useYubiKey,
         IYubiKeyProvider? yubiKeyProvider, Action<string>? log = null,
         string? proofPassphrase = null, bool proofYubiKey = false,
-        string? proofTotp = null)
+        string? proofTotp = null,
+        OfflineFoldersSession? offlineSession = null, string? offlineCatalogPath = null,
+        Func<string, OfflineFileStore.OfflineLocationStore>? offlineStoreResolver = null)
     {
         // Security fix (C-2): clearing or replacing the passphrase wipes
         // or replaces the whole unlock configuration — once a method is
@@ -61,8 +68,12 @@ public static partial class DashboardApi
         // YubiKey branch's hardware interaction stays OUTSIDE the lock
         // (a touch wait must not block other handlers); its config
         // writes lock inside SetupYubiKeyOnConfig.
+        string? warning = null;
         if (string.IsNullOrEmpty(passphrase))
         {
+            if (offlineCatalogPath is not null && File.Exists(offlineCatalogPath))
+                warning = "The offline folders catalog stays under the old secret. After you set up a new " +
+                    "unlock method, rekey it (Stealth tab) with the old passphrase as the old secret — or export it first.";
             lock (config.JobsLock)
             {
                 config.PassphraseProtected = null;
@@ -87,9 +98,21 @@ public static partial class DashboardApi
                 config.YubiKeySlot, storePassphraseCopy: true);
             if (error is not null)
                 return error.Value;
+            if (offlineCatalogPath is not null && File.Exists(offlineCatalogPath))
+                warning = "The offline folders catalog was NOT rekeyed by this change. Export your offline " +
+                    "folders first (Stealth tab), then re-import the packages after the switch to move them " +
+                    "under the new secret.";
         }
         else
         {
+            if (offlineSession is not null && offlineCatalogPath is not null)
+            {
+                var hookRefusal = RekeyOfflineForPassphraseChange(
+                    config, offlineSession, offlineCatalogPath, passphrase,
+                    offlineStoreResolver ?? OfflineStoreResolver(config), log);
+                if (hookRefusal is not null)
+                    return hookRefusal.Value;
+            }
             lock (config.JobsLock)
             {
                 config.PassphraseProtected = Dpapi.Protect(passphrase);
@@ -106,7 +129,7 @@ public static partial class DashboardApi
                  useYubiKey ? "saved (DPAPI + YubiKey-wrapped)" : "saved (DPAPI-encrypted)"));
             AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok,
                 string.IsNullOrEmpty(passphrase) ? "passphrase-cleared=true" : "passphrase-set=true");
-            return (200, new OkYubiKeyDto(true, useYubiKey && !string.IsNullOrEmpty(passphrase)));
+            return (200, new OkYubiKeyDto(true, useYubiKey && !string.IsNullOrEmpty(passphrase), warning));
         }
         catch (Exception ex)
         {

@@ -239,14 +239,88 @@ public static partial class DashboardApi
     /// USB mode (driveLetter or diskNumber): destructive, the target USB drive is formatted.
     /// Image mode (imagePath): builds a bootable .vhdx disk image file instead.
     /// </summary>
+    /// <summary>
+    /// Validates the user-chosen reader step for a WinRE build
+    /// (slice 3, part 3): the reader exe plus, at the user's choice,
+    /// a manifest-only package file or a full export folder, copied
+    /// onto the recovery stick/image under FileKeepReader\ for
+    /// manual launch (no autorun). Returns an error message, or
+    /// null when the options are valid. Pure validation (no IO
+    /// beyond existence checks) so it is unit-testable without
+    /// Windows, WinPE, or actual USB writes.
+    /// </summary>
+    internal static string? ValidateReaderOptions(
+        string? readerExe, string? readerExportPath, string? readerExportMode)
+    {
+        string mode = string.IsNullOrWhiteSpace(readerExportMode) ? "None" : readerExportMode.Trim();
+        if (mode != "None" && mode != "Manifest" && mode != "Full")
+            return "Reader export mode must be None, Manifest, or Full.";
+        bool hasExe = !string.IsNullOrWhiteSpace(readerExe);
+        bool hasExport = !string.IsNullOrWhiteSpace(readerExportPath);
+        if (mode != "None" && !hasExe)
+            return "A reader export requires the reader exe path.";
+        if (hasExport && mode == "None")
+            return "A reader export path was given without an export mode.";
+        if (mode != "None" && !hasExport)
+            return $"Reader export mode '{mode}' requires an export path.";
+        if (hasExe && !File.Exists(readerExe!))
+            return $"Reader exe not found: {readerExe}";
+        if (hasExport)
+        {
+            if (mode == "Manifest" && !File.Exists(readerExportPath!))
+                return $"Reader export package not found: {readerExportPath}";
+            if (mode == "Full")
+            {
+                if (!Directory.Exists(readerExportPath!))
+                    return $"Reader full export folder not found: {readerExportPath}";
+                if (!File.Exists(Path.Combine(readerExportPath!,
+                        FileKeep.Core.OfflineStickLayout.ManifestFileName)))
+                    return $"Reader full export folder has no {FileKeep.Core.OfflineStickLayout.ManifestFileName}.";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Script arguments for the reader step, in the order the
+    /// build script expects. Empty when no reader step was chosen.
+    /// Values travel via ArgumentList, never an Arguments string,
+    /// so user-controlled paths cannot inject PowerShell.
+    /// </summary>
+    internal static List<string> BuildReaderArguments(
+        string? readerExe, string? readerExportPath, string? readerExportMode)
+    {
+        var args = new List<string>();
+        if (string.IsNullOrWhiteSpace(readerExe) && string.IsNullOrWhiteSpace(readerExportPath))
+            return args;
+        args.Add("-IncludeReader");
+        if (!string.IsNullOrWhiteSpace(readerExe))
+        {
+            args.Add("-ReaderExe");
+            args.Add(readerExe!);
+        }
+        if (!string.IsNullOrWhiteSpace(readerExportPath))
+        {
+            args.Add("-ReaderExportPath");
+            args.Add(readerExportPath!);
+            args.Add("-ReaderExportMode");
+            args.Add(string.IsNullOrWhiteSpace(readerExportMode) ? "None" : readerExportMode.Trim());
+        }
+        return args;
+    }
+
     public static (int Status, object Payload) StartWinReBuild(string driveLetter, int diskNumber, string imagePath, string? sourceDir, string bootMode, int imageSizeMB,
-        string? expectedModel = null, long? expectedSizeBytes = null)
+        string? expectedModel = null, long? expectedSizeBytes = null,
+        string? readerExe = null, string? readerExportPath = null, string? readerExportMode = null)
     {
         if (!OperatingSystem.IsWindows())
             return (400, new ErrorDto("WinRE recovery media creation requires Windows."));
         bootMode = (bootMode ?? "Both").Trim();
         if (bootMode != "UEFI" && bootMode != "BIOS" && bootMode != "Both")
             return (400, new ErrorDto("bootMode must be UEFI, BIOS, or Both."));
+        string? readerError = ValidateReaderOptions(readerExe, readerExportPath, readerExportMode);
+        if (readerError is not null)
+            return (400, new ErrorDto(readerError));
 
         // Validate everything BEFORE claiming the running flag: every return
         // below must leave _winReBuildStatus untouched, or a rejected request
@@ -420,6 +494,14 @@ public static partial class DashboardApi
                     psi.ArgumentList.Add("-SourceDir");
                     psi.ArgumentList.Add(sourceDir);
                 }
+                // Reader step (slice 3, part 3): user-chosen, never
+                // forced. The script copies the exe (+ export, if
+                // chosen) to the stick/image root under
+                // FileKeepReader\, for manual launch on a running
+                // Windows machine — the files are inert in booted
+                // WinPE, and running the reader there is not promised.
+                foreach (string a in BuildReaderArguments(readerExe, readerExportPath, readerExportMode))
+                    psi.ArgumentList.Add(a);
                 using var proc = System.Diagnostics.Process.Start(psi)!;
                 lock (_winReBuildStepsLock) { _winReBuildProcess = proc; }
                 try

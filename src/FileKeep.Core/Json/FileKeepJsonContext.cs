@@ -30,6 +30,11 @@ namespace FileKeep.Core.Json;
 [JsonSerializable(typeof(YubiKeyLinkRequest))]
 [JsonSerializable(typeof(RepositoryConfig))]
 [JsonSerializable(typeof(BackupManifest))]
+[JsonSerializable(typeof(OfflineExportEnvelope.Package))]
+[JsonSerializable(typeof(OfflineExportEnvelope.Payload))]
+[JsonSerializable(typeof(OfflineExportEnvelope.LocationPointer))]
+[JsonSerializable(typeof(OfflineExportEnvelope.FileRef))]
+[JsonSerializable(typeof(List<OfflineExportEnvelope.FileRef>))]
 public partial class FileKeepJsonContext : JsonSerializerContext
 {
 }

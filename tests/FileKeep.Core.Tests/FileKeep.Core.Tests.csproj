@@ -17,6 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FileKeep.Core\FileKeep.Core.csproj" />
     <ProjectReference Include="..\..\src\FileKeep.Service\FileKeep.Service.csproj" />
+    <ProjectReference Include="..\..\src\FileKeep.Reader\FileKeep.Reader.csproj" />
   </ItemGroup>
 
 </Project>

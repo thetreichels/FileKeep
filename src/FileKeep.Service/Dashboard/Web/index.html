@@ -659,6 +659,14 @@
             </div>
             <p id="st-save-label" style="color:var(--text-2);font-size:13px;margin:0"></p>
           </div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+            <div style="font-weight:600;font-size:13px">Export this file only — encrypted package</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <input id="st-file-export-pass" type="password" placeholder="Export passphrase for this file" autocomplete="off">
+              <button onclick="stExportFile()">Export file…</button>
+            </div>
+            <p style="color:var(--text-2);font-size:13px;margin:0">Same encrypted package as a folder export, but with only this file inside. Importing it into a machine that already has the folder merges it in (replaces the same file, keeps the rest); importing it elsewhere creates the folder. The package holds no credentials and no plaintext filenames.</p>
+          </div>
         </div>
         <div class="card" id="st-actions" style="display:none">
           <div class="name" style="font-size:16px;font-weight:600" id="st-actions-name">Folder actions</div>
@@ -670,6 +678,11 @@
           <p style="color:#c00;font-size:13px;margin:6px 0">Forget removes this folder from this machine's catalog only (destination chunks stay, orphaned and opaque). Without an export first, the folder is unrecoverable from this machine.</p>
           <p id="st-forget-note" style="font-size:13px;margin:6px 0;display:none"></p>
           <p style="color:var(--text-2);font-size:13px;margin:6px 0">Export writes one encrypted package — location pointer + manifest, no credentials, no plaintext filenames.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">
+            <input id="st-export-full-dest" type="text" placeholder="Full export destination folder" autocomplete="off" style="flex:1">
+            <button onclick="stExportFull()">Export full to folder…</button>
+          </div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Full export writes the package plus every chunk into destination\FileKeepReader\ — the folder the portable reader opens, and the folder a recovery-USB build can copy. Missing chunks are reported, not fatal.</p>
         </div>
         <div class="card">
           <div class="name" style="font-size:16px;font-weight:600">Currently open</div>
@@ -1276,6 +1289,19 @@
           </label>
         </div>
         <div class="meta" style="margin-top:4px">The drive is erased and made bootable. Use a stick you can spare — 2 GB or larger.</div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+          <div style="font-weight:600;font-size:13px">Portable reader (optional)</div>
+          <div style="font-size:13px;color:var(--text-2)">Copies the FileKeep reader onto the stick under FileKeepReader\, for manual launch on a running Windows machine — no autorun, and inert in booted WinPE. With an export, the stick also carries that folder's files (manifest-only by default choice, full as an opt-in).</div>
+          <input id="winre-reader-exe" type="text" placeholder="Reader exe path (e.g. C:\ub\publish\reader\FileKeepReader.exe)" autocomplete="off">
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <select id="winre-reader-mode">
+              <option value="None" selected>No export (reader only)</option>
+              <option value="Manifest">Manifest-only export</option>
+              <option value="Full">Full export (manifest + chunks)</option>
+            </select>
+            <input id="winre-reader-export" type="text" placeholder="Export file (manifest) or full-export folder (manifest + chunks at its root)" autocomplete="off" style="flex:1">
+          </div>
+        </div>
         <div class="row" style="margin-top:8px">
           <button class="accent" onclick="startWinReBuild()">Create USB…</button>
         </div>
@@ -2744,6 +2770,9 @@ async function startWinReBuild() {
   const target = document.getElementById('winre-target').value;
   if (!target) { toast('Select a target first.', 'err'); return; }
   const bootMode = document.getElementById('winre-bootmode').value;
+  const readerExe = document.getElementById('winre-reader-exe').value.trim() || null;
+  const readerExportMode = document.getElementById('winre-reader-mode').value;
+  const readerExportPath = document.getElementById('winre-reader-export').value.trim() || null;
   let body, confirmText;
   if (target.startsWith('usb:')) {
     const diskNum = target.substring(4);
@@ -2756,7 +2785,8 @@ async function startWinReBuild() {
     // the format to a different disk.
     body = { diskNumber: parseInt(diskNum, 10), sourceDir: null, bootMode,
              expectedModel: opt?.dataset.model || null,
-             expectedSizeBytes: opt?.dataset.size ? parseInt(opt.dataset.size, 10) : null };
+             expectedSizeBytes: opt?.dataset.size ? parseInt(opt.dataset.size, 10) : null,
+             readerExe, readerExportPath, readerExportMode };
   } else if (target === 'folder') {
     let fileName = document.getElementById('winre-filename').value.trim() || 'filekeep-recovery';
     if (!/\.vhdx$/i.test(fileName)) fileName += '.vhdx';
@@ -2769,7 +2799,8 @@ async function startWinReBuild() {
       if (check.exists && !window.confirm(imagePath + ' already exists. Overwrite it?')) return;
     } catch (e) { /* check is best-effort */ }
     confirmText = 'Build WinRE disk image at ' + imagePath + '? This takes several minutes.';
-    body = { imagePath, sourceDir: null, bootMode, imageSizeMB: 4096 };
+    body = { imagePath, sourceDir: null, bootMode, imageSizeMB: 4096,
+             readerExe, readerExportPath, readerExportMode };
   }
   if (!window.confirm(confirmText)) return;
   try {
@@ -4073,7 +4104,7 @@ async function secSavePassphrase() {
   // later wizard steps send back (the server's gate accepts it).
   const wrapMode = !!secProfile.yubiKeyOnly;
   try {
-    await api(wrapMode ? '/api/security/passphrase-wrap' : '/api/config/passphrase', {
+    const res = await api(wrapMode ? '/api/security/passphrase-wrap' : '/api/config/passphrase', {
       method: 'POST',
       // When a method already exists this is a CHANGE, so the request
       // carries proof of the current one (prompted if not held); on
@@ -4081,6 +4112,7 @@ async function secSavePassphrase() {
       // sent or required.
       body: JSON.stringify({ passphrase: p1, ...secProofFields(secServerHadMethod) }),
     });
+    if (res && res.warning) toast(res.warning, 'bad');
     // From here on the server HAS a method; this run's passphrase is
     // the proof later wizard steps (link, profile save) send back.
     secWizardPassphrase = p1;
@@ -5138,29 +5170,26 @@ async function ofShowFiles(folderName) {
         row.style.alignItems = 'center';
         const b = document.createElement('button');
         b.textContent = f.path + ' (' + f.size + ' bytes)';
-        b.title = 'Click for Open / Save As; double-click to copy the share address for File Explorer';
+        b.title = 'Click or double-click for Open / Save As';
         b.style.flex = '1';
         b.style.textAlign = 'left';
         b.onclick = () => stShowUse(folderName, f.path);
-        b.ondblclick = () => ofCopyFileUrl(f.path);
+        const e = document.createElement('button');
+        e.textContent = 'Export…';
+        e.title = 'Export just this file as an encrypted package';
+        e.onclick = () => { stShowUse(folderName, f.path); document.getElementById('st-file-export-pass').focus(); };
         const x = document.createElement('button');
         x.textContent = '×';
         x.title = 'Remove file';
         x.onclick = () => ofDeleteFile(folderName, f.path);
         row.appendChild(b);
+        row.appendChild(e);
         row.appendChild(x);
         pane.appendChild(row);
       });
     }
   } catch (e) { toast(e.message, 'bad'); }
   stUpdateActions();
-}
-async function ofCopyFileUrl(path) {
-  const url = location.origin + '/dav/offline/' + encodeURIComponent(ofFilesFolder) + '/' + path.split('/').map(encodeURIComponent).join('/');
-  try {
-    await navigator.clipboard.writeText(url);
-    toast('Share address copied — paste it into File Explorer to open the file.', 'ok');
-  } catch { toast(url, 'ok'); }
 }
 function ofCopyShare() {
   const el = document.getElementById('of-share-url');
@@ -5250,6 +5279,7 @@ function stShowUse(folderName, path) {
 function stHideUse() {
   stUseFolder = null;
   stUseFile = null;
+  document.getElementById('st-file-export-pass').value = '';
   document.getElementById('st-use').style.display = 'none';
 }
 function stUseDavUrl() {
@@ -5425,6 +5455,34 @@ async function stExport() {
     toast('Exported ' + ofSelected + '.', 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
+async function stExportFile() {
+  if (!stUseFolder || !stUseFile) return;
+  const pass = document.getElementById('st-file-export-pass').value;
+  try {
+    const res = await api('/api/offline-folders/export-file', { method: 'POST', body: JSON.stringify({ folder: stUseFolder, file: stUseFile, exportPassphrase: pass }) });
+    const blob = new Blob([JSON.stringify(res.package, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = res.fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    document.getElementById('st-file-export-pass').value = '';
+    toast('Exported ' + stUseFile + '.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function stExportFull() {
+  if (!ofSelected) return;
+  const pass = document.getElementById('st-export-pass').value;
+  const dest = document.getElementById('st-export-full-dest').value.trim();
+  if (!dest) { toast('Choose a destination folder first.', 'bad'); return; }
+  try {
+    const res = await api('/api/offline-folders/export-full', { method: 'POST', body: JSON.stringify({ folder: ofSelected, destination: dest, exportPassphrase: pass }) });
+    let msg = 'Full export of ' + res.folder + ' to ' + res.destination + ' (' + res.files + ' files, ' + res.copied + ' chunks copied, ' + res.skipped + ' already present).';
+    if (res.missingChunks) msg += ' Missing: ' + res.missingChunks + ' chunks in ' + res.missingFiles.join(', ') + '.';
+    document.getElementById('st-export-pass').value = '';
+    toast(msg, 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
 async function stImport() {
   const input = document.getElementById('st-import-file');
   const pass = document.getElementById('st-import-pass').value;
@@ -5432,7 +5490,7 @@ async function stImport() {
   try {
     const pkg = JSON.parse(await input.files[0].text());
     const res = await api('/api/offline-folders/import', { method: 'POST', body: JSON.stringify({ package: pkg, exportPassphrase: pass }) });
-    let msg = 'Imported ' + res.folder + ' (' + res.files + ' files).';
+    let msg = (res.merged ? 'Merged into ' : 'Imported ') + res.folder + ' (' + res.files + ' files).';
     if (res.warnings && res.warnings.length) msg += ' Warnings: ' + res.warnings.join(' ');
     input.value = '';
     document.getElementById('st-import-pass').value = '';

@@ -518,7 +518,10 @@ public static class Dashboard
             int imageSizeMB = body.TryGetProperty("imageSizeMB", out var ism) && ism.ValueKind == JsonValueKind.Number ? ism.GetInt32() : 4096;
             string? expectedModel = body.TryGetProperty("expectedModel", out var em) && em.ValueKind == JsonValueKind.String ? em.GetString() : null;
             long? expectedSizeBytes = body.TryGetProperty("expectedSizeBytes", out var es) && es.ValueKind == JsonValueKind.Number ? es.GetInt64() : null;
-            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB, expectedModel, expectedSizeBytes);
+            string? readerExe = body.TryGetProperty("readerExe", out var re) && re.ValueKind == JsonValueKind.String ? re.GetString() : null;
+            string? readerExportPath = body.TryGetProperty("readerExportPath", out var rep) && rep.ValueKind == JsonValueKind.String ? rep.GetString() : null;
+            string? readerExportMode = body.TryGetProperty("readerExportMode", out var rem) && rem.ValueKind == JsonValueKind.String ? rem.GetString() : null;
+            var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB, expectedModel, expectedSizeBytes, readerExe, readerExportPath, readerExportMode);
             return Results.Json(payload, statusCode: status);
         });
 
@@ -720,7 +723,7 @@ public static class Dashboard
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
-            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
+            var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp, offlineFoldersSession, OfflineFoldersCatalog.CatalogPathFor(configPath));
             return Results.Json(payload, statusCode: status);
         });
 
@@ -983,6 +986,40 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A folder is required."));
             var (status, payload) = DashboardApi.ExportOfflineFolder(config, offlineFoldersSession,
                 folder, exportPassphrase, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/export-file", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            string? file = body.TryGetProperty("file", out var fiEl) ? fiEl.GetString() : null;
+            string? exportPassphrase = body.TryGetProperty("exportPassphrase", out var pEl) ? pEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(file))
+                return Results.BadRequest(new ErrorDto("A folder and a file are required."));
+            var (status, payload) = DashboardApi.ExportOfflineFile(config, offlineFoldersSession,
+                folder, file, exportPassphrase, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/export-full", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? folder = body.TryGetProperty("folder", out var fEl) ? fEl.GetString() : null;
+            string? destination = body.TryGetProperty("destination", out var dEl) ? dEl.GetString() : null;
+            string? exportPassphrase = body.TryGetProperty("exportPassphrase", out var pEl) ? pEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(destination))
+                return Results.BadRequest(new ErrorDto("A folder and a destination are required."));
+            var (status, payload) = DashboardApi.ExportOfflineFull(config, offlineFoldersSession,
+                folder, destination, exportPassphrase, log);
             return Results.Json(payload, statusCode: status);
         });
 

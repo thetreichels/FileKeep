@@ -31,7 +31,8 @@ public sealed record OkDetailDto(
 
 public sealed record OkYubiKeyDto(
     [property: JsonPropertyName("ok")] bool Ok,
-    [property: JsonPropertyName("yubikey")] bool Yubikey);
+    [property: JsonPropertyName("yubikey")] bool Yubikey,
+    [property: JsonPropertyName("warning")] string? Warning = null);
 
 /// <summary>
 /// Response for <c>POST /api/yubikey/setup-generated</c>: the one and
@@ -140,12 +141,30 @@ public sealed record OfflineExportResultDto(
     [property: JsonPropertyName("fileName")] string FileName,
     [property: JsonPropertyName("package")] OfflineExportPackageDto Package);
 
-/// <summary>Result of POST /api/offline-folders/import.</summary>
+/// <summary>Result of POST /api/offline-folders/import.
+/// <see cref="Merged"/> is true when the package merged into an
+/// existing folder (same-path entries replaced, new paths
+/// appended); false when it created a new folder.</summary>
 public sealed record OfflineImportSummaryDto(
     [property: JsonPropertyName("folder")] string Folder,
     [property: JsonPropertyName("files")] int Files,
     [property: JsonPropertyName("chunks")] int Chunks,
-    [property: JsonPropertyName("warnings")] IReadOnlyList<string> Warnings);
+    [property: JsonPropertyName("warnings")] IReadOnlyList<string> Warnings,
+    [property: JsonPropertyName("merged")] bool Merged = false);
+
+/// <summary>Result of POST /api/offline-folders/export-full:
+/// the manifest + chunk copy into destination/FileKeepReader/.
+/// Missing chunks do not fail the export: they are reported here
+/// and the reader reports those files incomplete per file.</summary>
+public sealed record OfflineExportFullSummaryDto(
+    [property: JsonPropertyName("folder")] string Folder,
+    [property: JsonPropertyName("files")] int Files,
+    [property: JsonPropertyName("chunks")] int Chunks,
+    [property: JsonPropertyName("copied")] int Copied,
+    [property: JsonPropertyName("skipped")] int Skipped,
+    [property: JsonPropertyName("missingChunks")] int MissingChunks,
+    [property: JsonPropertyName("missingFiles")] IReadOnlyList<string> MissingFiles,
+    [property: JsonPropertyName("destination")] string Destination);
 
 /// <summary>Result of POST /api/offline-folders/forget: the entry is
 /// gone, the destination chunks are untouched and orphaned, and
