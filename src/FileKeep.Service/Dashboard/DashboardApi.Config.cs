@@ -257,7 +257,7 @@ public static partial class DashboardApi
         // the candidate config from the live config plus this job and
         // validates it, so no unvalidated config is ever held. The
         // candidate itself is validation-only; the change is applied to
-        // the live config under JobsLock below, as before.
+        // the live config via the store's ApplyJob below, as before.
         try { new ServiceConfigBuilder(config).WithJob(job).Build(); }
         catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
         // A job may REMAIN without an upload target but may not be
@@ -273,20 +273,14 @@ public static partial class DashboardApi
         if (isCreate && job.EffectiveTargets.Count == 0)
             return (400, new ErrorDto("Scheduled jobs must have at least one upload target (Usenet or network location)."));
 
-        // Apply to the live config under the Jobs lock. Replace the object
+        // Apply to the live config via the store. Replace the object
         // rather than mutating in place: the scheduler may be running a job
         // with the old config object, and it must see a consistent snapshot.
-        lock (config.JobsLock)
-        {
-            var existing = config.Jobs.FirstOrDefault(j =>
-                j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase));
-            // Jobs carry no credentials: jobs name locations in Targets,
-            // and connection details + passwords live on the location.
-            if (existing is null)
-                config.Jobs.Add(job);
-            else
-                config.Jobs[config.Jobs.IndexOf(existing)] = job;
-        }
+        // (Candidate-apply: the candidate was validated by the builder
+        // above, outside the lock; ApplyJob only swaps it in.)
+        // Jobs carry no credentials: jobs name locations in Targets,
+        // and connection details + passwords live on the location.
+        config.Store.ApplyJob(job);
         try
         {
             config.Save(configPath);
@@ -308,19 +302,13 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string name,
         Action<string>? log = null)
     {
-        lock (config.JobsLock)
-        {
-            var existing = config.Jobs.FirstOrDefault(j =>
-                j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-                return (400, new ErrorDto($"Unknown job '{name}'." ));
-            // No last-job guard: zero jobs is a valid state (it is the
-            // fresh-install state), and the GUI's per-delete confirm is
-            // the accident protection. A previous guard here (7943f06)
-            // was an invented invariant with no product requirement
-            // behind it; removed 2026-10-20 at the user's decision.
-            config.Jobs.Remove(existing);
-        }
+        // No last-job guard: zero jobs is a valid state (it is the
+        // fresh-install state), and the GUI's per-delete confirm is
+        // the accident protection. A previous guard here (7943f06)
+        // was an invented invariant with no product requirement
+        // behind it; removed 2026-10-20 at the user's decision.
+        if (!config.Store.ApplyDeleteJob(name))
+            return (400, new ErrorDto($"Unknown job '{name}'." ));
         try
         {
             // SF-20: persist through the safe path like every other
@@ -366,64 +354,23 @@ public static partial class DashboardApi
             !FileKeep.Core.Service.DisguisedLayout.IsValidCoverName(loc.CoverName, out string? coverError))
             return (400, new ErrorDto(coverError!));
 
-        // P2-C1: lookup + field-by-field mutation under the config
-        // lock — unlocked, a concurrent save/scan or a running job
-        // could observe a torn location (new host, old credentials).
-        BackupLocation? existing;
-        lock (config.JobsLock)
-        {
-            existing = config.Locations.FirstOrDefault(l =>
-                l.Name.Equals(loc.Name, StringComparison.OrdinalIgnoreCase));
-            // Encrypt supplied passwords; blank keeps the stored blob.
-            string? pwBlob = existing?.PasswordProtected;
-            if (!string.IsNullOrEmpty(loc.PasswordPlaintext))
-                pwBlob = FileKeep.Core.Dpapi.Protect(loc.PasswordPlaintext);
-            string? smbPwBlob = existing?.SmbPasswordProtected;
-            if (!string.IsNullOrEmpty(loc.SmbPasswordPlaintext))
-                smbPwBlob = FileKeep.Core.Dpapi.Protect(loc.SmbPasswordPlaintext);
-            loc.PasswordProtected = pwBlob;
-            loc.SmbPasswordProtected = smbPwBlob;
-            loc.PasswordPlaintext = null;
-            loc.SmbPasswordPlaintext = null;
-
-            if (existing is null)
-                config.Locations.Add(loc);
-            else
-            {
-                // Disguise settings are immutable after creation: a
-                // location's on-destination layout is derived from them,
-                // so changing them would orphan every chunk already
-                // written there. Delete and recreate to re-clothe.
-                if (existing.DisguiseEnabled != loc.DisguiseEnabled ||
-                    !string.Equals(existing.CoverName, loc.CoverName, StringComparison.Ordinal) ||
-                    existing.DisguiseDecoys != loc.DisguiseDecoys)
-                    return (400, new ErrorDto(
-                        "Disguise settings cannot be changed on an existing location. " +
-                        "Delete it and create a new disguised location instead."));
-                existing.Type = loc.Type;
-                existing.Host = loc.Host; existing.Port = loc.Port;
-                existing.Ssl = loc.Ssl; existing.Username = loc.Username;
-                existing.Connections = loc.Connections;
-                existing.Newsgroup = loc.Newsgroup;
-                existing.RetentionDays = loc.RetentionDays;
-                existing.PasswordProtected = pwBlob;
-                existing.Share = loc.Share; existing.SmbUser = loc.SmbUser;
-                existing.SmbPasswordProtected = smbPwBlob;
-                existing.VolumeSerial = loc.VolumeSerial;
-                existing.VolumeLabel = loc.VolumeLabel;
-                existing.UsbFolder = loc.UsbFolder;
-                existing.DisguiseEnabled = loc.DisguiseEnabled;
-                existing.CoverName = loc.CoverName;
-                existing.DisguiseDecoys = loc.DisguiseDecoys;
-            }
-        }
+        // Candidate-apply, with the live-state-dependent part inside
+        // the store: lookup + blob preservation + DPAPI + disguise
+        // check + field copy all run under the store lock in
+        // ApplyLocation, so a concurrent upsert cannot interleave
+        // and lose the new blob, and a torn location is never
+        // observable. See ApplyLocation for the exact order.
+        var outcome = config.Store.ApplyLocation(loc);
+        if (outcome.DisguiseError is not null)
+            return (400, new ErrorDto(outcome.DisguiseError));
+        bool isCreate = outcome.IsCreate;
         try
         {
             config.Save(configPath);
             log?.Invoke($"dashboard: location '{loc.Name}' saved");
 
             // Auto-scan new SMB/USB locations for unknown backups
-            if (existing is null && loc.ParsedKind is LocationKind.Smb or LocationKind.Usb)
+            if (isCreate && loc.ParsedKind is LocationKind.Smb or LocationKind.Usb)
             {
                 try
                 {
@@ -453,29 +400,14 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string name,
         Action<string>? log = null)
     {
-        var strippedFrom = new List<string>();
-        // P2-C1: the lookup and the Remove belong inside the same lock
-        // as the job-target strip — both sat outside it, racing other
-        // config mutations.
-        lock (config.JobsLock)
-        {
-            var existing = config.Locations.FirstOrDefault(l =>
-                l.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-                return (400, new ErrorDto($"Unknown location '{name}'." ));
-            foreach (var job in config.Jobs)
-            {
-                var targets = job.EffectiveTargets
-                    .Where(t => !t.Equals(name, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (targets.Count != job.EffectiveTargets.Count)
-                {
-                    job.Targets = targets;
-                    strippedFrom.Add(job.Name);
-                }
-            }
-            config.Locations.Remove(existing);
-        }
+        // P2-C1: the lookup, the job-target strip, and the Remove
+        // all run atomically under the store lock in
+        // ApplyDeleteLocation — whole lists are NOT replaced from a
+        // snapshot here, so a job added between a snapshot and the
+        // apply cannot be lost.
+        var (found, strippedFrom) = config.Store.ApplyDeleteLocation(name);
+        if (!found)
+            return (400, new ErrorDto($"Unknown location '{name}'." ));
         try
         {
             config.Save(configPath);
@@ -498,14 +430,11 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string name, bool paused,
         Action<string>? log = null)
     {
-        lock (config.JobsLock)
-        {
-            var job = config.Jobs.FirstOrDefault(j =>
-                j.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (job is null)
-                return (400, new ErrorDto($"Unknown job '{name}'." ));
-            job.Paused = paused;
-        }
+        // Candidate-apply via a clone swap: ApplySetJobPaused swaps
+        // in a clone with the new value under the store lock, never
+        // mutating the live job object before commit.
+        if (!config.Store.ApplySetJobPaused(name, paused))
+            return (400, new ErrorDto($"Unknown job '{name}'." ));
         try
         {
             config.Save(configPath);
@@ -527,22 +456,14 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, string jobName,
         string locationName, Action<string>? log = null)
     {
-        lock (config.JobsLock)
-        {
-            if (!config.Locations.Any(l =>
-                    l.Name.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
-                return (400, new ErrorDto($"Unknown location '{locationName}'." ));
-            var job = config.Jobs.FirstOrDefault(j =>
-                j.Name.Equals(jobName, StringComparison.OrdinalIgnoreCase));
-            if (job is null)
-                return (400, new ErrorDto($"Unknown job '{jobName}'." ));
-            var targets = job.EffectiveTargets.ToList();
-            if (!targets.Any(t => t.Equals(locationName, StringComparison.OrdinalIgnoreCase)))
-            {
-                targets.Add(locationName);
-                job.Targets = targets;
-            }
-        }
+        // Both existence checks run inside the store lock in
+        // ApplyAttachLocation (location first, then job, as before),
+        // and the job is swapped for a clone with the new target list.
+        var attach = config.Store.ApplyAttachLocation(jobName, locationName);
+        if (attach == ServiceConfigStore.AttachLocationOutcome.UnknownLocation)
+            return (400, new ErrorDto($"Unknown location '{locationName}'." ));
+        if (attach == ServiceConfigStore.AttachLocationOutcome.UnknownJob)
+            return (400, new ErrorDto($"Unknown job '{jobName}'." ));
         try
         {
             config.Save(configPath);
@@ -601,68 +522,34 @@ public static partial class DashboardApi
         BackupScheduler scheduler, string configPath, NntpConfig nntp,
         Action<string>? log = null)
     {
-        // P2-C2: the Nntp assignment, the "Usenet" location sync, and the
-        // save all mutated shared config unlocked. One lock across the
-        // mutation + validate + save (Save's own lock is reentrant).
-        lock (config.JobsLock)
-        {
-        // Empty host clears the Usenet configuration.
-        if (string.IsNullOrWhiteSpace(nntp.Host))
-        {
-            config.Nntp = null;
-        }
-        else
-        {
-            // If a new plaintext password was supplied, encrypt it via DPAPI.
-            // If blank, keep the existing stored blob (the UI never receives the password).
-            string? blobToKeep = config.Nntp?.PasswordProtected;
-            if (!string.IsNullOrEmpty(nntp.PasswordPlaintext))
-                blobToKeep = Dpapi.Protect(nntp.PasswordPlaintext);
-            nntp.PasswordProtected = blobToKeep;
-            nntp.PasswordPlaintext = null; // never persist plaintext
-            config.Nntp = nntp;
-        }
+        // Candidate-apply, with a disclosed narrowing (see
+        // ApplyNntp): mutate + validate + Usenet sync run under the
+        // store lock in ApplyNntp, as before; Save + Reload now run
+        // outside it, like every other Config site. The return data
+        // is captured under the lock in the outcome, so the log and
+        // response cannot report a concurrent UpdateNntp call's host.
+        // Never return the encrypted blob to the UI; just report whether one is stored.
+        // Named DTO, registered in DashboardJsonContext: this used to
+        // return an anonymous type, whose metadata the trimmer strips
+        // — in the published build the response body came back empty
+        // (the SF-1 class of bug; the endpoint is not called by the
+        // current page, which is why it survived both audit passes).
         try
         {
-            // Validate NNTP fields if a host is set (Validate() checks
-            // the whole config, this included).
-            config.Validate();
-            // Sync the "Usenet" location with the new settings so
-            // scheduled uploads (which use locations) don't go stale.
-            var usenetLoc = config.Locations.FirstOrDefault(l =>
-                l.ParsedKind == LocationKind.Nntp && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
-            if (usenetLoc is not null && config.Nntp is not null)
-            {
-                usenetLoc.Host = config.Nntp.Host;
-                usenetLoc.Port = config.Nntp.Port;
-                usenetLoc.Ssl = config.Nntp.Ssl;
-                usenetLoc.Username = config.Nntp.Username;
-                usenetLoc.Connections = config.Nntp.Connections;
-                usenetLoc.Newsgroup = config.Nntp.Newsgroup;
-                usenetLoc.RetentionDays = config.Nntp.RetentionDays;
-                usenetLoc.PasswordProtected = config.Nntp.PasswordProtected;
-                usenetLoc.RedundancyMode = config.Nntp.RedundancyMode;
-            }
+            var outcome = config.Store.ApplyNntp(nntp);
             config.Save(configPath);
             scheduler.ReloadJobs(config);
-            log?.Invoke($"dashboard: Usenet provider {(config.Nntp is null ? "cleared" : $"set to {config.Nntp.Host}")}");
-            // Never return the encrypted blob to the UI; just report whether one is stored.
-            // Named DTO, registered in DashboardJsonContext: this used to
-            // return an anonymous type, whose metadata the trimmer strips
-            // — in the published build the response body came back empty
-            // (the SF-1 class of bug; the endpoint is not called by the
-            // current page, which is why it survived both audit passes).
-            object safe = config.Nntp is null
+            log?.Invoke($"dashboard: Usenet provider {(outcome.Cleared ? "cleared" : $"set to {outcome.Host}")}");
+            object safe = outcome.Cleared
                 ? new HasPasswordDto(false)
                 : new ConfigNntpDto(
-                    config.Nntp.Host, config.Nntp.Port, config.Nntp.Username,
-                    config.Nntp.Ssl, config.Nntp.Connections, config.Nntp.HasPassword);
+                    outcome.Host, outcome.Port, outcome.Username,
+                    outcome.Ssl, outcome.Connections, outcome.HasPassword);
             return (200, safe);
         }
         catch (Exception ex)
         {
             return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
-        }
         }
     }
 

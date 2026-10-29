@@ -548,11 +548,11 @@ public sealed class BackupScheduler
             var oldByName = _jobs.ToDictionary(j => j.Config.Name,
                 StringComparer.OrdinalIgnoreCase);
             _jobs.Clear();
-            // Snapshot the job configs under the Jobs lock: UpsertJob/DeleteJob
-            // may replace the list concurrently (D5).
-            List<BackupJobConfig> jobConfigs;
-            lock (config.JobsLock)
-                jobConfigs = config.Jobs.ToList();
+            // Snapshot the job configs via the store: UpsertJob/DeleteJob
+            // may replace the list concurrently (D5). SnapshotJobs
+            // copies under the store lock internally, so no explicit
+            // lock is needed here.
+            List<BackupJobConfig> jobConfigs = config.SnapshotJobs();
             foreach (var jc in jobConfigs)
             {
                 var schedule = ScheduleParser.Parse(jc.Schedule);
