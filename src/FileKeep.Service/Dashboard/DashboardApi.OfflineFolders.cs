@@ -415,9 +415,11 @@ public static partial class DashboardApi
     /// content-addressed; only the knowledge of what they add up to
     /// travels. A package for a folder name that already exists
     /// MERGES into that folder (a per-file export into its folder,
-    /// or a folder re-import): same-path entries are replaced by
-    /// the imported entry, new paths are appended, and the summary
-    /// reports Merged. A package for a new name creates the folder.
+    /// or a folder re-import): new paths are appended and the summary
+    /// reports Merged — but a same-path entry is never silently
+    /// replaced. The import is refused (400) naming the conflicting
+    /// path, so the user deletes it first and re-imports deliberately.
+    /// A package for a new name creates the folder.
     /// Warns when no local location matches the pointer (the folder
     /// will not resolve until one is added) or when a same-named
     /// local location is a different type.
@@ -441,9 +443,9 @@ public static partial class DashboardApi
         }
         // A per-file package holds exactly one file; a folder-scope
         // package may hold any number. Merge semantics are the same
-        // for both: an existing folder merges (same-path entries are
-        // replaced by the imported entry, new paths are appended), a
-        // new name creates the folder.
+        // for both: an existing folder merges (new paths are appended),
+        // a new name creates the folder. A same-path entry is never
+        // silently replaced — it refuses the import instead.
         if (string.Equals(payload.Scope, OfflineExport.ScopeFile, StringComparison.Ordinal) &&
             payload.Files.Count != 1)
             return (400, new ErrorDto("A per-file export package holds exactly one file."));
@@ -452,22 +454,30 @@ public static partial class DashboardApi
         bool merged;
         if (existing is not null)
         {
-            // Merge: same-path entries are replaced by the imported
-            // entry, new paths are appended. The list is replaced,
-            // never mutated in place, so a session snapshot cannot
-            // observe a half-updated index. The folder keeps its
-            // existing location pointer: a per-file package carries
-            // the same pointer as its folder, and a folder re-import
-            // must not silently re-point a folder the user may have
-            // repaired to a different location.
+            // Merge, fail-closed on conflict: new paths are appended,
+            // but a same-path entry is never silently replaced — the
+            // import is refused and names the conflicting path, so the
+            // user deletes it first and re-imports deliberately. The
+            // list is replaced, never mutated in place, so a session
+            // snapshot cannot observe a half-updated index. The folder
+            // keeps its existing location pointer: a per-file package
+            // carries the same pointer as its folder, and a folder
+            // re-import must not silently re-point a folder the user
+            // may have repaired to a different location.
+            var conflicts = payload.Files
+                .Where(f => existing.Files.Any(e =>
+                    string.Equals(e.Path, f.Path, StringComparison.OrdinalIgnoreCase)))
+                .Select(f => f.Path)
+                .ToList();
+            if (conflicts.Count > 0)
+                return (400, new ErrorDto(
+                    $"Already in folder '{existing.Name}': {string.Join(", ", conflicts)} — " +
+                    $"delete {(conflicts.Count == 1 ? "it" : "them")} first, then import again."));
             var mergedFiles = existing.Files.ToList();
             foreach (var f in payload.Files)
             {
-                var imported = new OfflineFileEntry(
-                    f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList());
-                mergedFiles.RemoveAll(e =>
-                    string.Equals(e.Path, f.Path, StringComparison.OrdinalIgnoreCase));
-                mergedFiles.Add(imported);
+                mergedFiles.Add(new OfflineFileEntry(
+                    f.Path, f.Size, f.ModifiedUtc, f.ChunkIds.ToList()));
             }
             existing.Files = mergedFiles;
             merged = true;

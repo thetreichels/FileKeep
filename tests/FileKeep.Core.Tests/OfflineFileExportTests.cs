@@ -234,7 +234,7 @@ public sealed class OfflineFileExportTests : IDisposable
     }
 
     [Fact]
-    public void Handler_ImportFile_DuplicatePath_Replaced()
+    public void Handler_ImportFile_DuplicatePath_Refused()
     {
         var config = new ServiceConfig();
         config.Locations.Add(SmbLocation());
@@ -247,15 +247,13 @@ public sealed class OfflineFileExportTests : IDisposable
         string catalog = CatalogPath();
         var targetSession = UnlockedSession(new List<OfflineFolderEntry> { FolderEntry() });
         var (status, payload) = DashboardApi.ImportOfflineFolder(config, targetSession, catalog, package, ExportSecret);
-        Assert.Equal(200, status);
-        var summary = Assert.IsType<OfflineImportSummaryDto>(payload);
-        Assert.True(summary.Merged);
-        // Same-path entry replaced by the imported one (chunk id
-        // "chunk-a" from the export), not duplicated and not refused.
+        Assert.Equal(400, status);
+        Assert.Contains("a.txt", ErrorOf(payload));
+        // Nothing changed: no duplicate, no silent swap.
         var files = Assert.Single(targetSession.GetEntries()!).Files;
         Assert.Equal(2, files.Count);
-        var replaced = Assert.Single(files, f => f.Path == "a.txt");
-        Assert.Equal(new[] { ChunkId("chunk-a") }, replaced.ChunkIds);
+        Assert.Equal(new[] { ChunkId("chunk-a") },
+            Assert.Single(files, f => f.Path == "a.txt").ChunkIds);
     }
 
     [Fact]

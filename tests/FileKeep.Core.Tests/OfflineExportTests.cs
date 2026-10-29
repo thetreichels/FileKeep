@@ -168,11 +168,11 @@ public sealed class OfflineExportTests : IDisposable
     }
 
     [Fact]
-    public void Handler_Import_DuplicateMerges_AndWrongPassphrase_Refused()
+    public void Handler_Import_DuplicateRefused_AndWrongPassphrase_Refused()
     {
         // Slice 3 part 2: importing a package for an existing folder
-        // MERGES (same-path replaced, new paths appended) instead of
-        // refusing — a per-file export imports into its own folder.
+        // MERGES new paths — but a same-path entry refuses the import
+        // instead of being silently replaced.
         var config = new ServiceConfig();
         config.Locations.Add(SmbLocation());
         var package = OfflineExport.CreatePackage(FolderEntry(), SmbLocation(), ExportSecret);
@@ -182,8 +182,8 @@ public sealed class OfflineExportTests : IDisposable
         var (firstStatus, _) = DashboardApi.ImportOfflineFolder(config, session, catalog, package, ExportSecret);
         Assert.Equal(200, firstStatus);
         var (dupStatus, dupPayload) = DashboardApi.ImportOfflineFolder(config, session, catalog, package, ExportSecret);
-        Assert.Equal(200, dupStatus);
-        Assert.True(Assert.IsType<OfflineImportSummaryDto>(dupPayload).Merged);
+        Assert.Equal(400, dupStatus);
+        Assert.Contains("Already in folder", ErrorOf(dupPayload));
         Assert.Single(session.GetEntries()!);
         Assert.Equal(2, session.GetEntries()![0].Files.Count);
 
@@ -193,7 +193,7 @@ public sealed class OfflineExportTests : IDisposable
     }
 
     [Fact]
-    public void Handler_ExportFile_OneFilePackage_AndMerge()
+    public void Handler_ExportFile_OneFilePackage_AndDuplicateRefused()
     {
         var config = new ServiceConfig();
         config.Locations.Add(SmbLocation());
@@ -231,8 +231,7 @@ public sealed class OfflineExportTests : IDisposable
         Assert.Equal(400, noPassStatus);
 
         // Importing the one-file package into a catalog that holds
-        // an older copy of the folder replaces that file and keeps
-        // the others (replace + append).
+        // the same path refuses instead of silently replacing it.
         string catalog = CatalogPath();
         var older = new OfflineFolderEntry("F", "NAS", DateTimeOffset.UtcNow)
         {
@@ -245,15 +244,12 @@ public sealed class OfflineExportTests : IDisposable
         var target = UnlockedSession(new List<OfflineFolderEntry> { older });
         var (importStatus, importPayload) = DashboardApi.ImportOfflineFolder(
             config, target, catalog, result.Package, ExportSecret);
-        Assert.Equal(200, importStatus);
-        var summary = Assert.IsType<OfflineImportSummaryDto>(importPayload);
-        Assert.True(summary.Merged);
-        Assert.Equal(1, summary.Files);
-        var merged = Assert.Single(target.GetEntries()!);
-        Assert.Equal(2, merged.Files.Count);
-        Assert.Equal(ChunkId("chunk-a"), Assert.Single(merged.Files.Where(f => f.Path == "a.txt")).ChunkIds[0]);
-        Assert.Equal(new[] { ChunkId("chunk-b1"), ChunkId("chunk-b2") },
-            merged.Files.Single(f => f.Path == "dir/b.txt").ChunkIds);
+        Assert.Equal(400, importStatus);
+        Assert.Contains("dir/b.txt", ErrorOf(importPayload));
+        var untouched = Assert.Single(target.GetEntries()!);
+        Assert.Equal(2, untouched.Files.Count);
+        Assert.Equal(new[] { ChunkId("stale") },
+            untouched.Files.Single(f => f.Path == "dir/b.txt").ChunkIds);
 
         // A one-file package into an empty catalog creates the folder.
         string catalog2 = CatalogPath();
