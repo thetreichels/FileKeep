@@ -126,7 +126,10 @@ public sealed class OfflineDavKestrelTests : IDisposable
             using var client = NewClient();
             using var put = await client.PutAsync(@base + "/dav/offline/Vault/kestrel.txt",
                 new ByteArrayContent(Upload));
-            Assert.Equal(System.Net.HttpStatusCode.OK, put.StatusCode);
+            // New file: 201 Created (204 on overwrite) — either way the
+            // synchronous request-body read worked through Kestrel.
+            Assert.True(put.StatusCode is System.Net.HttpStatusCode.Created or System.Net.HttpStatusCode.NoContent,
+                "PUT status: " + put.StatusCode);
             using var get = await client.GetAsync(@base + "/dav/offline/Vault/kestrel.txt");
             Assert.Equal(System.Net.HttpStatusCode.OK, get.StatusCode);
             Assert.Equal(Upload, await get.Content.ReadAsByteArrayAsync());
