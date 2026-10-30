@@ -1149,6 +1149,31 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapPost("/api/offline-folders/import-by-path", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? packagePath = body.TryGetProperty("packagePath", out var ppEl) ? ppEl.GetString() : null;
+            string? exportPassphrase = body.TryGetProperty("exportPassphrase", out var pEl) ? pEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(packagePath))
+                return Results.BadRequest(new ErrorDto("An export package path is required."));
+            OfflineExportPackageDto? package = null;
+            try
+            {
+                var json = await System.IO.File.ReadAllTextAsync(packagePath);
+                package = System.Text.Json.JsonSerializer.Deserialize<OfflineExportPackageDto>(json);
+            }
+            catch { /* falls through to the null check */ }
+            if (package is null)
+                return Results.BadRequest(new ErrorDto("The selected file is not a valid export package."));
+            var (status, payload) = DashboardApi.ImportOfflineFolder(config, offlineFoldersSession,
+                offlineFoldersPath, package, exportPassphrase, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/offline-folders/forget", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

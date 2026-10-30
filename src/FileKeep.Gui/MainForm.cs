@@ -112,6 +112,37 @@ public class NativeBridge
     }
 
     /// <summary>
+    /// Shows the native Windows open-file dialog (single-select) for choosing a
+    /// Stealth Folder export package (.json) to import. Returns the selected path,
+    /// or empty string if the user cancelled. A native dialog is used instead of
+    /// the Chromium file chooser because the chooser does not reliably work from
+    /// a remote/automated session — the import form's &lt;input type=file&gt; left
+    /// its Import button dead (2026-10-29 GUI pass).
+    /// </summary>
+    public string PickImportFile(string title)
+    {
+        string result = "";
+        if (_owner.InvokeRequired)
+        {
+            _owner.Invoke(() => result = PickImportFile(title));
+            return result;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = string.IsNullOrEmpty(title) ? "Choose export package" : title,
+            Filter = "FileKeep export package (*.json)|*.json|All files (*.*)|*.*",
+            Multiselect = false,
+            CheckFileExists = true,
+        };
+
+        if (dialog.ShowDialog(_owner) == DialogResult.OK)
+            result = dialog.FileName;
+
+        return result;
+    }
+
+    /// <summary>
     /// Gets whether the tray icon is enabled.
     /// </summary>
     public bool GetTrayEnabled()
@@ -636,6 +667,13 @@ public class MainForm : Form
                         const joined = await bridge.PickFiles(title || 'Add files');
                         return (joined || '').split('\n').filter(p => p);
                     } catch (e) { return []; }
+                };
+                window.fileKeepPickImportFile = async function(title) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        const path = await bridge.PickImportFile(title || 'Choose export package');
+                        return path || '';
+                    } catch (e) { return ''; }
                 };
                 window.fileKeepUploadFiles = async function(folder, csrf, paths) {
                     try {

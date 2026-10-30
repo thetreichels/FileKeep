@@ -26,6 +26,7 @@
   .toast { padding: 12px 16px; border-radius: 6px; background: #323232; color: white; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); max-width: 380px; animation: toast-in 0.2s ease-out; }
   .toast.ok { background: #107c10; }
   .toast.err { background: #c42b1c; }
+  .toast.bad { background: #c42b1c; }
   @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   /* Invalid field highlighting. */
   input.invalid, select.invalid { border-color: var(--bad) !important; background: #fdf0ef; }
@@ -370,6 +371,7 @@
     & .toast { background: #3a3a3a; border: 1px solid #4d4d4d; }
     & .toast.ok { background: #0f7a0f; }
     & .toast.err { background: #a4262c; }
+    & .toast.bad { background: #a4262c; }
     /* Invalid fields: dark red tint instead of light pink. */
     & input.invalid, & select.invalid { background: #3a1d1d; }
     /* Multi-folder explanation bar on dark surfaces. */
@@ -607,8 +609,10 @@
         <div class="card" id="st-import" style="display:none">
           <div class="name" style="font-size:16px;font-weight:600">Import a Stealth Folder</div>
           <p style="color:var(--text-2);font-size:13px;margin:6px 0">Import re-encrypts the package into this machine's catalog under its own secret. No data moves — only knowledge does.</p>
-          <div style="display:flex;gap:6px;flex-wrap:wrap">
-            <input id="st-import-file" type="file" accept=".json,application/json">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <button onclick="stChooseImportPackage()">Choose package…</button>
+            <span id="st-import-file-label" style="font-size:13px;color:var(--text-2)">No package chosen</span>
+            <input id="st-import-file" type="file" accept=".json,application/json" style="display:none" onchange="stImportFileChanged()">
             <input id="st-import-pass" type="password" placeholder="Export passphrase" autocomplete="off">
             <button onclick="stImport()">Import</button>
           </div>
@@ -5483,16 +5487,41 @@ async function stExportFull() {
     toast(msg, 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
+let stImportPath = '';
+async function stChooseImportPackage() {
+  if (typeof window.fileKeepPickImportFile === 'function') {
+    const path = await window.fileKeepPickImportFile('Choose export package');
+    if (path) {
+      stImportPath = path;
+      document.getElementById('st-import-file-label').textContent = path.split(/[\\/]/).pop();
+    }
+    return;
+  }
+  // Fallback when the native bridge is unavailable: use the file input directly.
+  document.getElementById('st-import-file').click();
+}
+function stImportFileChanged() {
+  stImportPath = '';
+  const f = document.getElementById('st-import-file').files[0];
+  document.getElementById('st-import-file-label').textContent = f ? f.name : 'No package chosen';
+}
 async function stImport() {
-  const input = document.getElementById('st-import-file');
   const pass = document.getElementById('st-import-pass').value;
-  if (!input.files.length) { toast('Choose an export package file first.', 'bad'); return; }
   try {
-    const pkg = JSON.parse(await input.files[0].text());
-    const res = await api('/api/offline-folders/import', { method: 'POST', body: JSON.stringify({ package: pkg, exportPassphrase: pass }) });
+    let res;
+    if (stImportPath) {
+      res = await api('/api/offline-folders/import-by-path', { method: 'POST', body: JSON.stringify({ packagePath: stImportPath, exportPassphrase: pass }) });
+    } else {
+      const input = document.getElementById('st-import-file');
+      if (!input.files.length) { toast('Choose an export package first.', 'bad'); return; }
+      const pkg = JSON.parse(await input.files[0].text());
+      res = await api('/api/offline-folders/import', { method: 'POST', body: JSON.stringify({ package: pkg, exportPassphrase: pass }) });
+    }
     let msg = (res.merged ? 'Merged into ' : 'Imported ') + res.folder + ' (' + res.files + ' files).';
     if (res.warnings && res.warnings.length) msg += ' Warnings: ' + res.warnings.join(' ');
-    input.value = '';
+    stImportPath = '';
+    document.getElementById('st-import-file').value = '';
+    document.getElementById('st-import-file-label').textContent = 'No package chosen';
     document.getElementById('st-import-pass').value = '';
     await ofRefresh();
     toast(msg, 'ok');
