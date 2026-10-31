@@ -43,7 +43,7 @@ public sealed class BackupPrivilegeSnapshotProvider : ISnapshotProvider
             throw new PlatformNotSupportedException(
                 "Backup privilege file access requires Windows. Use NullSnapshotProvider (live read) on other platforms.");
 
-        SnapshotRoot = Path.GetFullPath(sourceDir);
+        SnapshotRoot = FileKeep.Core.Service.PathCanonicalization.Canonicalize(sourceDir);
         EnableBackupPrivilege();
     }
 

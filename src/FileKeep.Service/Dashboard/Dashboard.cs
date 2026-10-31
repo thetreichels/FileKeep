@@ -77,39 +77,15 @@ public static class Dashboard
          body.TryGetProperty("proofTotp", out var pt) ? pt.GetString() : null);
 
     /// <summary>
-    /// True only for loopback bind values: "localhost" (any case), any
-    /// 127.x.x.x literal, ::1 (bracketed or not). Classification is purely
-    /// textual — no DNS resolution — so a hostname that merely resolves to
-    /// loopback does not qualify, and neither do wildcards (0.0.0.0, ::, *)
-    /// or LAN addresses.
+    /// Loopback-bind guard, shared with the portable reader via
+    /// <see cref="FileKeep.Core.Service.LoopbackGuard"/>. Kept here as a
+    /// thin forwarder so existing call sites and tests don't churn; the
+    /// rule itself lives in Core. This stays out of
+    /// ServiceConfig.Validate so the config still loads for the CLI and
+    /// other non-dashboard paths.
     /// </summary>
-    public static bool IsLoopbackBind(string? bind)
-    {
-        string value = (bind ?? "").Trim();
-        if (value.StartsWith('[') && value.EndsWith(']'))
-            value = value[1..^1];
-        if (value.Equals("localhost", StringComparison.OrdinalIgnoreCase))
-            return true;
-        return IPAddress.TryParse(value, out var address) && IPAddress.IsLoopback(address);
-    }
-
-    /// <summary>
-    /// The dashboard has no authentication, so a non-loopback bind exposes
-    /// a LocalSystem-privilege API to the network (finding D-1). Refuse
-    /// loudly at startup — the same presentation as an unparseable bind
-    /// (Kestrel throws and SF-6's supervisor takes the service down rather
-    /// than run half a service) — instead of silently serving. This lives
-    /// here, not in ServiceConfig.Validate, so the config still loads for
-    /// the CLI and other non-dashboard paths.
-    /// </summary>
-    internal static void RequireLoopbackBind(string? bind)
-    {
-        if (!IsLoopbackBind(bind))
-            throw new InvalidOperationException(
-                $"dashboardBind '{bind}' is not a loopback address. The dashboard has no " +
-                "authentication and must not be exposed to a network — set dashboardBind " +
-                "to 127.0.0.1, ::1, or localhost, or remove the setting.");
-    }
+    internal static void RequireLoopbackBind(string? bind) =>
+        FileKeep.Core.Service.LoopbackGuard.RequireLoopbackBind(bind);
 
     /// <summary>
     /// Registers the Stealth Folders WebDAV routes (/dav/offline/**).

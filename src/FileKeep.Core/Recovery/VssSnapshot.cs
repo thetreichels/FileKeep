@@ -155,7 +155,7 @@ public sealed class VssSnapshot : FileKeep.Core.ISnapshotProvider
         }
 
         SnapshotPath = path.Trim();
-        _sourceDir = Path.GetFullPath(sourceDir);
+        _sourceDir = FileKeep.Core.Service.PathCanonicalization.Canonicalize(sourceDir);
     }
 
     private static string DrainStderr(Task<string> stderrTask)

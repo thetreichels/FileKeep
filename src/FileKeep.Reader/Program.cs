@@ -177,9 +177,15 @@ try
         // path is unproven and likely shares the failure; flagged
         // in the slice 3 report, not changed here.)
         builder.WebHost.ConfigureKestrel(o => o.AllowSynchronousIO = true);
+        // Loopback-only, fail-closed: the reader serves decrypted content
+        // with no authentication. The guard runs even though the bind is
+        // currently hardcoded, so a future change that makes it
+        // configurable cannot silently open it to the network.
+        string readerBind = "127.0.0.1";
+        FileKeep.Core.Service.LoopbackGuard.RequireLoopbackBind(readerBind);
         builder.WebHost.UseUrls(portArg is not null
-            ? $"http://127.0.0.1:{portArg.Value}"
-            : "http://127.0.0.1:0");
+            ? $"http://{readerBind}:{portArg.Value}"
+            : $"http://{readerBind}:0");
         var app = builder.Build();
         app.Map("{**path}", async (HttpContext ctx) =>
         {

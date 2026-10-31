@@ -49,7 +49,7 @@ public sealed class NullSnapshotProvider : ISnapshotProvider
 {
     public NullSnapshotProvider(string sourceDir)
     {
-        SnapshotRoot = Path.GetFullPath(sourceDir);
+        SnapshotRoot = FileKeep.Core.Service.PathCanonicalization.Canonicalize(sourceDir);
     }
 
     public string SnapshotRoot { get; }

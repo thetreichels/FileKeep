@@ -250,7 +250,12 @@ public static partial class DashboardApi
                 catch (Exception ex)
                 {
                     CryptographicOperations.ZeroMemory(folderKey);
-                    throw new ArgumentException($"YubiKey setup failed: {ex.Message}");
+                    // Never interpolate ex.Message: an inner exception message
+                    // is not a trusted string — it can carry secret-bearing
+                    // values. Log the type for diagnosis; the caller sees a
+                    // stable, secret-free message.
+                    throw new ArgumentException(
+                        $"YubiKey setup failed ({ex.GetType().Name}).");
                 }
             }
             case "totp":
