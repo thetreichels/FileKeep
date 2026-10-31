@@ -24,7 +24,7 @@ public sealed class DashboardBindGuardTests
             "127.0.0.1", "127.0.0.2", "127.255.0.1",
             "::1", "[::1]",
         })
-            Assert.True(Dashboard.IsLoopbackBind(bind), $"expected loopback: '{bind}'");
+            Assert.True(FileKeep.Core.Service.LoopbackGuard.IsLoopbackBind(bind), $"expected loopback: '{bind}'");
     }
 
     [Fact]
@@ -36,7 +36,7 @@ public sealed class DashboardBindGuardTests
             "192.168.1.10", "10.0.0.5", "172.16.0.1",
             "example.com", "myhost", "localhost.localdomain", "127.0.0.1.evil.com",
         })
-            Assert.False(Dashboard.IsLoopbackBind(bind), $"expected refusal: '{bind}'");
+            Assert.False(FileKeep.Core.Service.LoopbackGuard.IsLoopbackBind(bind), $"expected refusal: '{bind}'");
     }
 
     [Fact]
