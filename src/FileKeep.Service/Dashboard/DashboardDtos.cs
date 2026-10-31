@@ -11,8 +11,21 @@ namespace FileKeep.Service;
 /// JSON contract the dashboard frontend expects.
 /// </summary>
 
-public sealed record ErrorDto(
-    [property: JsonPropertyName("error")] string Error);
+public sealed record ErrorDto
+{
+    [JsonPropertyName("error")]
+    public string Error { get; init; }
+
+    public ErrorDto(string error)
+    {
+        // Defense in depth: 36 dashboard endpoints return ex.Message
+        // through this DTO. Exception messages are untrusted strings —
+        // if any ever carries a secret-bearing value, scrubbing here
+        // keeps it out of the browser. Backend diagnostics keep the
+        // raw message in the server log (already scrubbed at the sink).
+        Error = FileKeep.Core.Security.SecretScrubber.Scrub(error) ?? "";
+    }
+}
 
 public sealed record OkDto(
     [property: JsonPropertyName("ok")] bool Ok);
