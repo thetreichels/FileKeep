@@ -1308,6 +1308,63 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        // Per-folder security (2026-10-30, Joel): create without unlock,
+        // per-folder unlock/lock for custom-key folders.
+        string offlineFoldersDir = Path.GetDirectoryName(offlineFoldersPath) ?? ".";
+
+        app.MapPost("/api/offline-folders/create", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? name = body.TryGetProperty("name", out var n) ? n.GetString() : null;
+            string? locationId = body.TryGetProperty("locationId", out var l) ? l.GetString() : null;
+            string? securityMode = body.TryGetProperty("securityMode", out var s) ? s.GetString() : null;
+            var (status, payload) = DashboardApi.CreateOfflineFolderWithProof(config, offlineFoldersSession,
+                offlineFoldersPath, offlineFoldersDir, name, locationId, securityMode, body, yubiKeyProvider, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/{name}/unlock", async (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            var (status, payload) = DashboardApi.UnlockCustomFolder(offlineFoldersSession,
+                offlineFoldersDir, name, body, yubiKeyProvider, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/offline-folders/{name}/lock", (string name, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            offlineFoldersSession.LockCustomFolder(name);
+            log?.Invoke($"dashboard: custom offline folder locked ({name})");
+            return Results.Json(new OkDto(true));
+        });
+
+        app.MapGet("/api/offline-folders/custom", (HttpRequest request) =>
+        {
+            // Lists custom folders (names + lock states) for the per-folder UI.
+            // Names are visible while locked by design (required for unlock buttons).
+            var index = DashboardApi.LoadCustomIndex(offlineFoldersDir);
+            var unlocked = offlineFoldersSession.GetUnlockedCustomFolders();
+            var list = index.Select(e => new
+            {
+                name = e.Name,
+                locationId = e.LocationId,
+                addedUtc = e.AddedUtc.ToString("O"),
+                kind = e.Kind,
+                unlocked = unlocked.Contains(e.Name, StringComparer.Ordinal),
+            }).ToList();
+            return Results.Json(list);
+        });
+
         // Slice 2: file list / upload / delete within an offline folder.
         app.MapGet("/api/offline-folders/{folder}/files", (string folder) =>
         {

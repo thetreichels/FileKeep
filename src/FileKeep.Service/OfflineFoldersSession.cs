@@ -20,11 +20,26 @@ public sealed class OfflineFoldersSession
     /// <summary>Idle expiry for an unlocked card session. Default 1 hour (same as restores).</summary>
     public static TimeSpan IdleTimeout { get; set; } = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// Idle expiry for a per-folder custom-key session. Default 15 minutes
+    /// (Joel 2026-10-30). Shorter than the global session because custom
+    /// folders (especially TOTP-gated) are higher-value targets.
+    /// </summary>
+    public static TimeSpan CustomFolderIdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
+
     private readonly object _lock = new();
     private byte[]? _catalogKey;
     private byte[]? _contentKey;
     private List<OfflineFolderEntry> _entries = new();
     private DateTime _lastUsedUtc;
+
+    /// <summary>
+    /// Per-folder unlock states for <see cref="FolderSecurityMode.Custom"/>
+    /// folders. Key is the folder name (ordinal). Each holds the folder's
+    /// decrypted key + entry, with its own idle timer.
+    /// </summary>
+    private readonly Dictionary<string, CustomFolderUnlock> _customUnlocks =
+        new(StringComparer.Ordinal);
 
     /// <summary>True if a catalog key is currently held and not expired.</summary>
     public bool IsUnlocked
@@ -160,5 +175,114 @@ public sealed class OfflineFoldersSession
             _contentKey = null;
         }
         _entries = new();
+        foreach (var u in _customUnlocks.Values)
+            u.Wipe();
+        _customUnlocks.Clear();
+    }
+
+    /// <summary>
+    /// Unlocks a single custom-key folder. Stores a copy of the folder key
+    /// and the decrypted entry. Any previous unlock for this folder is wiped.
+    /// </summary>
+    public void UnlockCustomFolder(string folderName, byte[] folderKey, OfflineFolderEntry entry)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(folderName);
+        ArgumentNullException.ThrowIfNull(folderKey);
+        ArgumentNullException.ThrowIfNull(entry);
+        var unlock = new CustomFolderUnlock(folderKey.ToArray(), entry);
+        lock (_lock)
+        {
+            if (_customUnlocks.TryGetValue(folderName, out var old))
+                old.Wipe();
+            _customUnlocks[folderName] = unlock;
+        }
+    }
+
+    /// <summary>
+    /// Returns the unlock state for a custom folder, or null if locked/expired.
+    /// Refreshes the idle timer on success.
+    /// </summary>
+    public CustomFolderUnlock? GetCustomFolderUnlock(string folderName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(folderName);
+        lock (_lock)
+        {
+            if (!_customUnlocks.TryGetValue(folderName, out var u))
+                return null;
+            if (DateTime.UtcNow - u.LastUsedUtc > CustomFolderIdleTimeout)
+            {
+                u.Wipe();
+                _customUnlocks.Remove(folderName);
+                return null;
+            }
+            u.LastUsedUtc = DateTime.UtcNow;
+            return u;
+        }
+    }
+
+    /// <summary>
+    /// Locks a single custom folder, wiping its key and entry.
+    /// </summary>
+    public void LockCustomFolder(string folderName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(folderName);
+        lock (_lock)
+        {
+            if (_customUnlocks.TryGetValue(folderName, out var u))
+            {
+                u.Wipe();
+                _customUnlocks.Remove(folderName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Names of currently unlocked custom folders (for UI lock states).
+    /// </summary>
+    public IReadOnlyList<string> GetUnlockedCustomFolders()
+    {
+        lock (_lock)
+        {
+            var now = DateTime.UtcNow;
+            var expired = new List<string>();
+            var result = new List<string>();
+            foreach (var kv in _customUnlocks)
+            {
+                if (now - kv.Value.LastUsedUtc > CustomFolderIdleTimeout)
+                    expired.Add(kv.Key);
+                else
+                    result.Add(kv.Key);
+            }
+            foreach (var k in expired)
+            {
+                _customUnlocks[k].Wipe();
+                _customUnlocks.Remove(k);
+            }
+            return result;
+        }
+    }
+}
+
+/// <summary>
+/// Unlock state for one <see cref="FolderSecurityMode.Custom"/> folder:
+/// the folder's decrypted key and entry, with a last-used timestamp for
+/// idle expiry. The key is zeroed on wipe.
+/// </summary>
+public sealed class CustomFolderUnlock
+{
+    public byte[] FolderKey { get; }
+    public OfflineFolderEntry Entry { get; }
+    public DateTime LastUsedUtc { get; set; }
+
+    public CustomFolderUnlock(byte[] folderKey, OfflineFolderEntry entry)
+    {
+        FolderKey = folderKey;
+        Entry = entry;
+        LastUsedUtc = DateTime.UtcNow;
+    }
+
+    public void Wipe()
+    {
+        CryptographicOperations.ZeroMemory(FolderKey);
     }
 }

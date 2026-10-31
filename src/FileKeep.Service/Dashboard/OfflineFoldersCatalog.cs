@@ -19,6 +19,20 @@ public sealed record OfflineFolderEntry(string Name, string LocationId, DateTime
     /// session snapshot cannot observe a half-updated index.
     /// </summary>
     public List<OfflineFileEntry> Files { get; set; } = new();
+
+    /// <summary>
+    /// How this folder is secured: <see cref="FolderSecurityMode.Global"/>
+    /// (the FileKeep global key — the pre-existing behavior) or
+    /// <see cref="FolderSecurityMode.Custom"/> (its own independent key).
+    /// Defaults to Global for backward compatibility with existing entries.
+    /// </summary>
+    public FolderSecurityMode SecurityMode { get; set; } = FolderSecurityMode.Global;
+
+    /// <summary>
+    /// Key material for <see cref="FolderSecurityMode.Custom"/> folders.
+    /// Null for global folders.
+    /// </summary>
+    public CustomFolderKeyInfo? CustomKey { get; set; }
 }
 
 /// <summary>
@@ -189,6 +203,30 @@ public static class OfflineFoldersCatalog
                     writer.WriteString("name", e.Name);
                     writer.WriteString("locationId", e.LocationId);
                     writer.WriteString("addedUtc", e.AddedUtc.ToString("O"));
+                    writer.WriteString("securityMode", e.SecurityMode.ToString());
+                    if (e.CustomKey is not null)
+                    {
+                        writer.WritePropertyName("customKey");
+                        writer.WriteStartObject();
+                        writer.WriteString("kind", e.CustomKey.Kind);
+                        if (e.CustomKey.SaltB64 is not null)
+                            writer.WriteString("saltB64", e.CustomKey.SaltB64);
+                        if (e.CustomKey.Iterations != 0)
+                            writer.WriteNumber("iterations", e.CustomKey.Iterations);
+                        if (e.CustomKey.ChallengeB64 is not null)
+                            writer.WriteString("challengeB64", e.CustomKey.ChallengeB64);
+                        if (e.CustomKey.WrappedKeyB64 is not null)
+                            writer.WriteString("wrappedKeyB64", e.CustomKey.WrappedKeyB64);
+                        if (e.CustomKey.YubiKeySlot != 0)
+                            writer.WriteNumber("yubiKeySlot", e.CustomKey.YubiKeySlot);
+                        if (e.CustomKey.KeyProtectedB64 is not null)
+                            writer.WriteString("keyProtectedB64", e.CustomKey.KeyProtectedB64);
+                        if (e.CustomKey.TotpSecretProtectedB64 is not null)
+                            writer.WriteString("totpSecretProtectedB64", e.CustomKey.TotpSecretProtectedB64);
+                        if (e.CustomKey.SecondTotpSecretProtectedB64 is not null)
+                            writer.WriteString("secondTotpSecretProtectedB64", e.CustomKey.SecondTotpSecretProtectedB64);
+                        writer.WriteEndObject();
+                    }
                     writer.WritePropertyName("files");
                     writer.WriteStartArray();
                     foreach (var f in e.Files)
@@ -286,6 +324,30 @@ public static class OfflineFoldersCatalog
                     if (!DateTimeOffset.TryParse(added, out var addedUtc))
                         addedUtc = DateTimeOffset.UtcNow;
                     var entry = new OfflineFolderEntry(name, locationId, addedUtc);
+                    // Per-folder security (2026-10-30): "securityMode" is
+                    // "Global" or "Custom"; absent means Global (backward
+                    // compatible with pre-existing catalogs).
+                    if (e["securityMode"] is JsonValue sm &&
+                        sm.GetValueKind() == System.Text.Json.JsonValueKind.String &&
+                        Enum.TryParse<FolderSecurityMode>(sm.GetValue<string>(), out var mode))
+                    {
+                        entry.SecurityMode = mode;
+                    }
+                    if (e["customKey"] is JsonObject ck)
+                    {
+                        entry.CustomKey = new CustomFolderKeyInfo
+                        {
+                            Kind = (string?)ck["kind"] ?? "",
+                            SaltB64 = (string?)ck["saltB64"],
+                            Iterations = (int?)ck["iterations"] ?? 0,
+                            ChallengeB64 = (string?)ck["challengeB64"],
+                            WrappedKeyB64 = (string?)ck["wrappedKeyB64"],
+                            YubiKeySlot = (int?)ck["yubiKeySlot"] ?? 0,
+                            KeyProtectedB64 = (string?)ck["keyProtectedB64"],
+                            TotpSecretProtectedB64 = (string?)ck["totpSecretProtectedB64"],
+                            SecondTotpSecretProtectedB64 = (string?)ck["secondTotpSecretProtectedB64"],
+                        };
+                    }
                     // Version 1 catalogs carry no file index; they load
                     // as folders with no files, and Save rewrites them
                     // as version 2 on the next persist.

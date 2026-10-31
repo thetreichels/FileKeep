@@ -593,12 +593,21 @@
       <div id="of-locked">
         <div class="card">
           <div style="font-weight:600">🔒 Locked</div>
-          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Folder names stay hidden until you unlock. To make a folder, unlock first — creating lives in the unlocked view, so nothing about your folders leaks while locked.</p>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Folder names stay hidden until you unlock. You can add a new folder without unlocking — it will be created without revealing existing folders.</p>
           <div style="display:flex;flex-direction:column;gap:6px;max-width:320px">
             <input id="of-pass" type="password" placeholder="Passphrase" autocomplete="off">
             <button onclick="ofUnlockPass()">Unlock</button>
             <button onclick="ofUnlockTouch()">Unlock with YubiKey</button>
           </div>
+        </div>
+        <div class="card">
+          <div class="name" style="font-size:16px;font-weight:600">Add Stealth Folder</div>
+          <p style="color:var(--text-2);font-size:13px;margin:6px 0">Create a new folder without unlocking. Choose whether it uses the FileKeep key or its own independent key.</p>
+          <button onclick="ofShowAddDialog()">Add Stealth Folder…</button>
+        </div>
+        <div class="card" id="of-custom-list-card" style="display:none">
+          <div class="name" style="font-size:16px;font-weight:600">Folders</div>
+          <div id="of-custom-list" style="display:flex;flex-direction:column;gap:8px;margin:6px 0"></div>
         </div>
       </div>
       <div id="of-unlocked" style="display:none">
@@ -5054,6 +5063,8 @@ async function ofRefresh() {
     document.getElementById('of-unlocked').style.display = locked ? 'none' : '';
     document.getElementById('st-rekey-form').style.display = locked ? 'flex' : 'none';
     document.getElementById('st-rekey-unlocked').style.display = locked ? 'none' : '';
+    // Custom folders are listed even while locked (per-folder unlock UI).
+    await ofRefreshCustomList();
     if (locked) { ofSelected = null; ofFilesFolder = null; stHideUse(); stForgetArmed = false; document.getElementById('st-files-card').style.display = 'none'; document.getElementById('st-actions').style.display = 'none'; return; }
     const folders = await api('/api/offline-folders');
     const list = document.getElementById('of-list');
@@ -5571,7 +5582,211 @@ initTheme();
 load();
 ofRefresh();
 setInterval(load, 30000);
+
+// Add Stealth Folder dialog (2026-10-30, Joel: dedicated Add without unlock)
+async function ofShowAddDialog() {
+  document.getElementById('of-add-dialog').style.display = 'flex';
+  document.getElementById('of-add-name').value = '';
+  // Populate locations
+  try {
+    const cfg = await api('/api/config');
+    const sel = document.getElementById('of-add-location');
+    sel.innerHTML = '';
+    (cfg.locations || []).filter(l => l.type === 'usb' || l.type === 'smb').forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.name;
+      o.textContent = l.name + ' (' + l.type + ')';
+      sel.appendChild(o);
+    });
+  } catch (e) { /* service-down banner covers this */ }
+  ofAddSecChange();
+  await ofRefreshCustomList();
+}
+
+function ofHideAddDialog() {
+  document.getElementById('of-add-dialog').style.display = 'none';
+}
+
+function ofAddSecChange() {
+  const isCustom = document.querySelector('input[name="of-add-sec"]:checked').value === 'custom';
+  document.getElementById('of-add-custom').style.display = isCustom ? '' : 'none';
+  document.getElementById('of-add-global-proof').style.display = isCustom ? 'none' : '';
+  const kind = document.querySelector('input[name="of-add-kind"]:checked');
+  if (kind) ofAddKindChange();
+}
+
+function ofAddKindChange() {
+  const kind = document.querySelector('input[name="of-add-kind"]:checked').value;
+  document.getElementById('of-add-pp').style.display = kind === 'passphrase' ? '' : 'none';
+  document.getElementById('of-add-totp-info').style.display = kind === 'totp' ? '' : 'none';
+}
+// Wire kind change
+document.querySelectorAll('input[name="of-add-kind"]').forEach(r => r.addEventListener('change', ofAddKindChange));
+
+async function ofAddSubmit() {
+  const name = document.getElementById('of-add-name').value.trim();
+  const locationId = document.getElementById('of-add-location').value;
+  const securityMode = document.querySelector('input[name="of-add-sec"]:checked').value;
+  if (!name) { toast('Enter a folder name.', 'bad'); return; }
+  if (!locationId) { toast('Choose a location.', 'bad'); return; }
+
+  const body = { name, locationId, securityMode };
+  if (securityMode === 'custom') {
+    const kind = document.querySelector('input[name="of-add-kind"]:checked').value;
+    body.customKind = kind;
+    if (kind === 'passphrase') {
+      const pp = document.getElementById('of-add-newpp').value;
+      const cp = document.getElementById('of-add-confirmpp').value;
+      if (pp.length < 8) { toast('Passphrase must be at least 8 characters.', 'bad'); return; }
+      if (pp !== cp) { toast('Passphrases do not match.', 'bad'); return; }
+      body.newPassphrase = pp;
+    }
+    // YubiKey and TOTP: backend handles the flow; TOTP QR shown after creation.
+  } else {
+    const proofpp = document.getElementById('of-add-proofpp').value;
+    if (proofpp) body.proofPassphrase = proofpp;
+  }
+
+  try {
+    const res = await api('/api/offline-folders/create', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    ofHideAddDialog();
+    toast('Stealth folder added.', 'ok');
+    // Clear sensitive fields
+    document.getElementById('of-add-newpp').value = '';
+    document.getElementById('of-add-confirmpp').value = '';
+    document.getElementById('of-add-proofpp').value = '';
+    await ofRefresh();
+    await ofRefreshCustomList();
+    // If TOTP, show QR for enrollment
+    if (res && res.totpQr) {
+      alert('Scan this QR code with your authenticator app, then verify a code to activate:\n\n' + res.totpQr);
+    }
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+async function ofRefreshCustomList() {
+  try {
+    const list = await api('/api/offline-folders/custom');
+    const card = document.getElementById('of-custom-list-card');
+    const div = document.getElementById('of-custom-list');
+    if (!list || !list.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    div.innerHTML = '';
+    list.forEach(f => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:4px';
+      const name = document.createElement('span');
+      name.style.cssText = 'flex:1;font-weight:600';
+      name.textContent = f.name + ' (' + f.kind + ')';
+      row.appendChild(name);
+      const status = document.createElement('span');
+      status.style.cssText = 'font-size:12px;color:var(--text-2)';
+      status.textContent = f.unlocked ? 'Unlocked' : 'Locked';
+      row.appendChild(status);
+      if (!f.unlocked) {
+        const btn = document.createElement('button');
+        btn.textContent = 'Unlock';
+        btn.onclick = () => ofUnlockCustomPrompt(f.name, f.kind);
+        row.appendChild(btn);
+      } else {
+        const btn = document.createElement('button');
+        btn.textContent = 'Lock';
+        btn.onclick = async () => {
+          await api('/api/offline-folders/' + encodeURIComponent(f.name) + '/lock', { method: 'POST', body: '{}' });
+          await ofRefreshCustomList();
+        };
+        row.appendChild(btn);
+      }
+      div.appendChild(row);
+    });
+  } catch (e) { /* locked or service down */ }
+}
+
+async function ofUnlockCustomPrompt(folderName, kind) {
+  let body = {};
+  if (kind === 'passphrase') {
+    const pp = prompt('Enter passphrase for "' + folderName + '":');
+    if (!pp) return;
+    body.proofPassphrase = pp;
+  } else if (kind === 'totp') {
+    const code = prompt('Enter TOTP code for "' + folderName + '":');
+    if (!code) return;
+    body.proofTotp = code;
+  } else if (kind === 'yubikey') {
+    body.proofYubiKey = true;
+    toast('Touch your YubiKey…', '');
+  }
+  try {
+    await api('/api/offline-folders/' + encodeURIComponent(folderName) + '/unlock', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    toast('Folder unlocked.', 'ok');
+    await ofRefreshCustomList();
+  } catch (e) { toast(e.message, 'bad'); }
+}
 </script>
+
+<!-- Add Stealth Folder dialog (2026-10-30, Joel: dedicated Add without unlock) -->
+<div id="of-add-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;align-items:center;justify-content:center">
+  <div style="background:var(--bg);border-radius:8px;padding:24px;max-width:480px;width:90%;max-height:90vh;overflow-y:auto">
+    <div style="font-size:18px;font-weight:600;margin-bottom:16px">Add Stealth Folder</div>
+
+    <label style="display:block;margin-bottom:12px">
+      <div style="font-size:13px;margin-bottom:4px">Folder name</div>
+      <input id="of-add-name" type="text" placeholder="Folder name" maxlength="128" autocomplete="off" style="width:100%">
+    </label>
+
+    <label style="display:block;margin-bottom:12px">
+      <div style="font-size:13px;margin-bottom:4px">Location</div>
+      <select id="of-add-location" style="width:100%"></select>
+    </label>
+
+    <div style="font-size:13px;margin-bottom:8px;font-weight:600">Security</div>
+    <label style="display:block;margin-bottom:8px">
+      <input type="radio" name="of-add-sec" value="global" checked onchange="ofAddSecChange()">
+      Use FileKeep key — one key opens this folder and your backups.
+    </label>
+    <label style="display:block;margin-bottom:12px">
+      <input type="radio" name="of-add-sec" value="custom" onchange="ofAddSecChange()">
+      Create new key for this folder — independent passphrase, YubiKey, or TOTP.
+    </label>
+
+    <div id="of-add-custom" style="display:none;border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
+      <div style="font-size:13px;margin-bottom:8px;font-weight:600">New key method</div>
+      <label style="display:block;margin-bottom:8px">
+        <input type="radio" name="of-add-kind" value="passphrase" checked> Passphrase
+      </label>
+      <div id="of-add-pp" style="margin-left:24px;margin-bottom:12px">
+        <input id="of-add-newpp" type="password" placeholder="New passphrase (min 8 chars)" autocomplete="new-password" style="width:100%;margin-bottom:6px">
+        <input id="of-add-confirmpp" type="password" placeholder="Confirm passphrase" autocomplete="new-password" style="width:100%">
+      </div>
+      <label style="display:block;margin-bottom:8px">
+        <input type="radio" name="of-add-kind" value="yubikey"> YubiKey
+      </label>
+      <label style="display:block;margin-bottom:8px">
+        <input type="radio" name="of-add-kind" value="totp"> TOTP (phone authenticator)
+      </label>
+      <div id="of-add-totp-info" style="display:none;margin-left:24px;font-size:12px;color:var(--text-2)">
+        A QR code will be shown after creation. Scan it, then verify a code to activate.
+      </div>
+    </div>
+
+    <div id="of-add-global-proof" style="margin-bottom:12px">
+      <div style="font-size:12px;color:var(--text-2);margin-bottom:6px">If Offline Folders is locked, provide proof of the FileKeep key:</div>
+      <input id="of-add-proofpp" type="password" placeholder="Passphrase (if locked)" autocomplete="off" style="width:100%">
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button onclick="ofHideAddDialog()">Cancel</button>
+      <button onclick="ofAddSubmit()" style="background:var(--accent);color:white">Create Folder</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
 
