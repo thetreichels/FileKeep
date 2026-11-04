@@ -515,6 +515,26 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapPost("/api/operations/export-bundle", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            string repo = GetBodyString(body, "repo");
+            var exportRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.ExportBundleRequestDto>(
+                body.GetRawText(),
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new DashboardApi.ExportBundleRequestDto();
+            // The repo comes as a separate field, not in the DTO
+            var (status, payload) = DashboardApi.ExportBundle(
+                config, repo, exportRequest, restoreSession, yubiKeyProvider, ct, log);
+            if (status == 200 && payload is byte[] bundleBytes)
+            {
+                return Results.File(bundleBytes, "application/octet-stream", "backup.kfb");
+            }
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/operations/restore/cancel", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))

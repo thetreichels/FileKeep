@@ -569,6 +569,7 @@
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeRestoreModal()">Cancel</button>
+            <button onclick="switchToExportFromRestore()">Export as bundle…</button>
             <button class="accent" id="restoreModalGo" onclick="submitRestore()">Start recovery</button>
           </div>
         </div>
@@ -580,6 +581,37 @@
           <div id="scanResultsBody" style="margin-top:12px"></div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeScanResultsModal()">Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="exportModal" class="modal" style="display:none">
+        <div class="modal-box">
+          <h2 style="margin-top:0">Export as bundle</h2>
+          <p class="meta">Package this backup as an encrypted <code>.kfb</code> bundle for the iOS secure workspace.</p>
+          <div id="exportModalTitle" style="font-weight:600;margin:12px 0"></div>
+          <div class="meta" id="exportModalSub"></div>
+          <div style="margin-top:12px">
+            <div style="font-weight:600;margin-bottom:6px">Unlock methods</div>
+            <label class="check"><input type="checkbox" id="exp-use-pass" checked onchange="updateExportForm()"> Passphrase</label>
+            <label class="check"><input type="checkbox" id="exp-use-yk" onchange="updateExportForm()"> YubiKey</label>
+          </div>
+          <div id="exp-pass-row" style="margin-top:8px">
+            <input id="exp-passphrase" type="password" placeholder="Bundle passphrase" autocomplete="new-password" style="flex:1;width:100%">
+            <input id="exp-passphrase2" type="password" placeholder="Confirm passphrase" autocomplete="new-password" style="flex:1;width:100%;margin-top:6px">
+          </div>
+          <div id="exp-link-row" style="margin-top:8px;display:none">
+            <label>Multiple methods:
+              <select id="exp-link-mode">
+                <option value="or" selected>Any one unlocks (OR)</option>
+                <option value="and">All required together (AND)</option>
+              </select>
+            </label>
+          </div>
+          <div class="meta" style="margin-top:8px">YubiKey will prompt for a touch when you export. The bundle opens in the iOS app with the methods you pick here.</div>
+          <div id="export-error" style="display:none;color:var(--bad);font-size:13px;margin-top:8px"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+            <button onclick="closeExportModal()">Cancel</button>
+            <button class="accent" id="exportModalGo" onclick="submitExport()">Export bundle</button>
           </div>
         </div>
       </div>
@@ -2149,7 +2181,8 @@ async function loadRepo() {
       `<td><button onclick="uploadBackup(${jsAttr(b.backupId)})">Upload</button> ` +
       `<button onclick="verifyBackup(${jsAttr(b.backupId)})">Verify</button> ` +
       `<button onclick="downloadNzb(${jsAttr(b.backupId)})">NZB</button> ` +
-      `<button onclick="openRestoreModal(${jsAttr(b.backupId)},${jsAttr(b.type)})">Restore</button></td></tr>`).join('')
+      `<button onclick="openRestoreModal(${jsAttr(b.backupId)},${jsAttr(b.type)})">Restore</button> ` +
+      `<button onclick="openExportModal(${jsAttr(b.backupId)})">Export</button></td></tr>`).join('')
       || '<tr><td colspan="4" style="color:var(--text-2)">No backups yet.</td></tr>';
   const vcEl = document.getElementById('vault-count');
   if (vcEl) vcEl.textContent = bs.length;
@@ -2596,6 +2629,108 @@ async function openRestoreModal(backupId, type) {
 }
 function closeRestoreModal() {
   document.getElementById('restoreModal').style.display = 'none';
+}
+function switchToExportFromRestore() {
+  const backupId = restoreTarget ? restoreTarget.backupId : null;
+  closeRestoreModal();
+  if (backupId) openExportModal(backupId);
+}
+// Export bundle modal
+let exportTarget = null;
+async function openExportModal(backupId) {
+  if (!await ensureRestoreSession()) return;
+  exportTarget = { backupId };
+  document.getElementById('exportModalTitle').textContent = 'Export backup';
+  document.getElementById('exportModalSub').textContent = 'Backup ' + backupId.substring(0, 8) + '\u2026';
+  document.getElementById('export-error').style.display = 'none';
+  document.getElementById('exp-passphrase').value = '';
+  document.getElementById('exp-passphrase2').value = '';
+  document.getElementById('exp-use-pass').checked = true;
+  document.getElementById('exp-use-yk').checked = false;
+  updateExportForm();
+  document.getElementById('exportModal').style.display = '';
+}
+function closeExportModal() {
+  document.getElementById('exportModal').style.display = 'none';
+  exportTarget = null;
+}
+function updateExportForm() {
+  const usePass = document.getElementById('exp-use-pass').checked;
+  const useYk = document.getElementById('exp-use-yk').checked;
+  document.getElementById('exp-pass-row').style.display = usePass ? '' : 'none';
+  document.getElementById('exp-link-row').style.display = (usePass && useYk) ? '' : 'none';
+}
+async function submitExport() {
+  const errEl = document.getElementById('export-error');
+  errEl.style.display = 'none';
+  const usePass = document.getElementById('exp-use-pass').checked;
+  const useYk = document.getElementById('exp-use-yk').checked;
+  if (!usePass && !useYk) {
+    errEl.textContent = 'Pick at least one unlock method.';
+    errEl.style.display = '';
+    return;
+  }
+  const methods = [];
+  if (usePass) {
+    const p1 = document.getElementById('exp-passphrase').value;
+    const p2 = document.getElementById('exp-passphrase2').value;
+    if (!p1) {
+      errEl.textContent = 'Enter a passphrase for the bundle.';
+      errEl.style.display = '';
+      return;
+    }
+    if (p1 !== p2) {
+      errEl.textContent = 'Passphrases do not match.';
+      errEl.style.display = '';
+      return;
+    }
+    methods.push({ type: 'passphrase', passphrase: p1 });
+  }
+  if (useYk) {
+    methods.push({ type: 'yubikey-hmac-sha1', slot: 2 });
+  }
+  const requireAll = (usePass && useYk) &&
+    document.getElementById('exp-link-mode').value === 'and';
+  const go = document.getElementById('exportModalGo');
+  go.disabled = true;
+  go.textContent = useYk ? 'Touch your YubiKey…' : 'Exporting…';
+  try {
+    const resp = await fetch('/api/operations/export-bundle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({
+        repo: currentRepo(),
+        backupId: exportTarget.backupId,
+        methods: methods,
+        requireAll: requireAll
+      })
+    });
+    if (!resp.ok) {
+      let msg = 'Export failed (' + resp.status + ').';
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'backup-' + exportTarget.backupId.substring(0, 8) + '.kfb';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    closeExportModal();
+    toast('Bundle exported.', 'ok');
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = '';
+  } finally {
+    go.disabled = false;
+    go.textContent = 'Export bundle';
+    // Clear passphrases from the form
+    document.getElementById('exp-passphrase').value = '';
+    document.getElementById('exp-passphrase2').value = '';
+  }
 }
 function pickNzbFileDirect() {
   document.getElementById('nzb-direct-picker').click();
