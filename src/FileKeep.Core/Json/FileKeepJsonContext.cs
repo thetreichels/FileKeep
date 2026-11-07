@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using FileKeep.Core.Bundle;
 using FileKeep.Core.Nntp;
 using FileKeep.Core.Service;
 
@@ -35,6 +36,7 @@ namespace FileKeep.Core.Json;
 [JsonSerializable(typeof(OfflineExportEnvelope.LocationPointer))]
 [JsonSerializable(typeof(OfflineExportEnvelope.FileRef))]
 [JsonSerializable(typeof(List<OfflineExportEnvelope.FileRef>))]
+[JsonSerializable(typeof(BundleHeader))]
 public partial class FileKeepJsonContext : JsonSerializerContext
 {
 }

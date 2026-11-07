@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FileKeep.Core.Json;
 
 namespace FileKeep.Core.Bundle;
 
@@ -64,7 +65,7 @@ public static class BundleWriter
 		{
 			for (int i = 0; i < entries.Count; i++)
 				entries[i].Offset = offsets[i];
-			byte[] headerJson = JsonSerializer.SerializeToUtf8Bytes(newHeader);
+			byte[] headerJson = JsonSerializer.SerializeToUtf8Bytes(newHeader, FileKeepJsonContext.Default.BundleHeader);
 			blob = new byte[8 + headerJson.Length + TotalLength(segments)];
 			Encoding.ASCII.GetBytes("FKBO").CopyTo(blob, 0);
 			BitConverter.GetBytes(headerJson.Length).CopyTo(blob, 4);
