@@ -143,6 +143,7 @@ FileKeep.Core.UsbDriveResolver.DiagnosticLog = Log; // MU-17: USB resolution err
 Log(AuditLog.Format(AuditLog.ConfigLoad, AuditLog.Ok, $"path={configPath}"));
 var scheduler = new BackupScheduler(config, log: Log,
     runStateFilePath: Path.Combine(logDir, "job-state.json"));
+var relayPoller = new RelayPoller(() => RelayPoller.ResolveFromConfig(config), log: Log);
 
 Console.WriteLine(
     $"filekeep-service: {config.Jobs.Count} job(s); " +
@@ -167,13 +168,13 @@ return 0;
 
 async Task RunAllAsync(CancellationToken ct)
 {
-    // If either half dies, the whole service must die with it (SF-6) —
-    // a bare WhenAll would run the scheduler forever behind a dead
-    // dashboard while the host reports RUNNING.
-    await ServiceSupervisor.RunTogetherAsync(
-        "dashboard", t => Dashboard.RunAsync(config, scheduler, configPath, t, Log),
-        "scheduler", t => scheduler.RunAsync(t),
-        ct);
+    // If any third dies, the whole service must die with it (SF-6) —
+    // a bare WhenAll would run the survivors forever behind a dead
+    // half while the host reports RUNNING.
+    await ServiceSupervisor.RunTogetherAsync(ct,
+        ("dashboard", t => Dashboard.RunAsync(config, scheduler, configPath, t, Log, relayPoller)),
+        ("scheduler", t => scheduler.RunAsync(t)),
+        ("relay", t => relayPoller.RunAsync(t)));
 }
 
 static string? ArgValue(string[] args, string name)

@@ -85,4 +85,55 @@ public sealed class ServiceSupervisorTests
         await firstStopped.WaitAsync(TimeSpan.FromSeconds(5));
         await secondStopped.WaitAsync(TimeSpan.FromSeconds(5));
     }
+
+    [Fact]
+    public async Task ThirdHalfFault_FailsTheService_AndStopsTheOthers()
+    {
+        var (first, firstStopped) = Forever();
+        var (second, secondStopped) = Forever();
+        var boom = new InvalidOperationException("relay poller died");
+        Func<CancellationToken, Task> faulty = _ => Task.FromException(boom);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ServiceSupervisor.RunTogetherAsync(
+                CancellationToken.None,
+                ("dashboard", first), ("scheduler", second), ("relay", faulty)));
+        Assert.Same(boom, ex);
+        await firstStopped.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondStopped.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ThreeHalves_AllRunUntilCancellation()
+    {
+        var (first, firstStopped) = Forever();
+        var (second, secondStopped) = Forever();
+        var (third, thirdStopped) = Forever();
+        using var cts = new CancellationTokenSource();
+
+        Task run = ServiceSupervisor.RunTogetherAsync(
+            cts.Token,
+            ("dashboard", first), ("scheduler", second), ("relay", third));
+        cts.Cancel();
+        await run.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstStopped.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondStopped.WaitAsync(TimeSpan.FromSeconds(5));
+        await thirdStopped.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ThirdHalfEndingCleanly_StillFailsTheService()
+    {
+        var (first, firstStopped) = Forever();
+        var (second, secondStopped) = Forever();
+        Func<CancellationToken, Task> endsCleanly = _ => Task.CompletedTask;
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ServiceSupervisor.RunTogetherAsync(
+                CancellationToken.None,
+                ("dashboard", first), ("scheduler", second), ("relay", endsCleanly)));
+        Assert.Contains("relay", ex.Message);
+        await firstStopped.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondStopped.WaitAsync(TimeSpan.FromSeconds(5));
+    }
 }

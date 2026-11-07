@@ -14,38 +14,54 @@ namespace FileKeep.Service;
 /// </summary>
 public static class ServiceSupervisor
 {
-    public static async Task RunTogetherAsync(
+    public static Task RunTogetherAsync(
         string firstName, Func<CancellationToken, Task> first,
         string secondName, Func<CancellationToken, Task> second,
-        CancellationToken ct)
+        CancellationToken ct) =>
+        RunTogetherAsync(ct, (firstName, first), (secondName, second));
+
+    /// <summary>
+    /// Runs any number of long-lived halves as one unit: if any half
+    /// faults — or simply ends — the others are stopped and the failure
+    /// propagates to the host. The two-half overload above is the common
+    /// case; the relay poller runs as a third half alongside the
+    /// dashboard and the scheduler.
+    /// </summary>
+    public static async Task RunTogetherAsync(
+        CancellationToken ct, params (string Name, Func<CancellationToken, Task> Run)[] halves)
     {
+        if (halves.Length == 0)
+            throw new ArgumentException("At least one half is required.", nameof(halves));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        Task firstTask = first(linked.Token);
-        Task secondTask = second(linked.Token);
+        Task[] tasks = halves.Select(h => h.Run(linked.Token)).ToArray();
         try
         {
-            await Task.WhenAny(firstTask, secondTask).ConfigureAwait(false);
+            await Task.WhenAny(tasks).ConfigureAwait(false);
 
             // A faulted half fails the whole service — surface it now
-            // instead of waiting on the survivor.
-            if (firstTask.IsFaulted) await firstTask.ConfigureAwait(false);
-            if (secondTask.IsFaulted) await secondTask.ConfigureAwait(false);
+            // instead of waiting on the survivors.
+            foreach (Task task in tasks)
+                if (task.IsFaulted)
+                    await task.ConfigureAwait(false);
 
             if (!ct.IsCancellationRequested)
             {
-                string ended = firstTask.IsCompleted ? firstName : secondName;
+                Task? ended = tasks.FirstOrDefault(t => t.IsCompleted);
+                string name = ended is null
+                    ? halves[0].Name
+                    : halves[Array.IndexOf(tasks, ended)].Name;
                 throw new InvalidOperationException(
-                    $"The {ended} stopped unexpectedly; shutting the service down " +
+                    $"The {name} stopped unexpectedly; shutting the service down " +
                     "so the failure is visible instead of running half a service.");
             }
         }
         finally
         {
             linked.Cancel();
-            // Give the surviving half a bounded chance to observe the
-            // cancellation; never let shutdown hang on it, and observe
+            // Give the surviving halves a bounded chance to observe the
+            // cancellation; never let shutdown hang on them, and observe
             // any late fault so it can't surface as unobserved.
-            Task all = Task.WhenAll(firstTask, secondTask);
+            Task all = Task.WhenAll(tasks);
             _ = all.ContinueWith(t => { _ = t.Exception; },
                 TaskContinuationOptions.OnlyOnFaulted);
             await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(10)))

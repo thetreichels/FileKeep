@@ -192,7 +192,8 @@ public static class Dashboard
     }
 
     public static async Task RunAsync(ServiceConfig config, BackupScheduler scheduler,
-        string configPath, CancellationToken ct, Action<string>? log = null)
+        string configPath, CancellationToken ct, Action<string>? log = null,
+        RelayPoller? relayPoller = null)
     {
         // D-1: never bind a non-loopback dashboard (see RequireLoopbackBind).
         RequireLoopbackBind(config.DashboardBind);
@@ -532,6 +533,60 @@ public static class Dashboard
             {
                 return Results.File(bundleBytes, "application/octet-stream", "backup.kfb");
             }
+            return Results.Json(payload, statusCode: status);
+        });
+
+        // iOS relay (docs/ios-relay-protocol.md): pairing, beam, status.
+        app.MapGet("/api/relay/status", () =>
+        {
+            var (status, payload) = DashboardApi.GetRelayStatus(config, relayPoller);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/relay/pair", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var pairRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayPairRequestDto>(
+                body.GetRawText(),
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new DashboardApi.RelayPairRequestDto();
+            var (status, payload) = DashboardApi.PairRelay(config, configPath, pairRequest, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/relay/unpair", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.UnpairRelay(config, configPath, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/relay/beam", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var beamRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayBeamRequestDto>(
+                body.GetRawText(),
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new DashboardApi.RelayBeamRequestDto();
+            var (status, payload) = DashboardApi.BeamBundle(
+                config, beamRequest.KfbPath, beamRequest.Name, beamRequest.LifetimeHours, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapGet("/api/relay/drops", () =>
+        {
+            var (status, payload) = DashboardApi.ListRelayDrops(config);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapGet("/api/relay/inbox", () =>
+        {
+            var (status, payload) = DashboardApi.ListRelayInbox(config);
             return Results.Json(payload, statusCode: status);
         });
 

@@ -80,6 +80,17 @@ namespace FileKeep.Service;
 [JsonSerializable(typeof(WinReBuildStatusDto))]
 [JsonSerializable(typeof(WinReBuildStepDto))]
 [JsonSerializable(typeof(List<WinReBuildStepDto>))]
+[JsonSerializable(typeof(DashboardApi.RelayStatusDto))]
+[JsonSerializable(typeof(DashboardApi.RelayPairingDto))]
+[JsonSerializable(typeof(DashboardApi.RelayPairRequestDto))]
+[JsonSerializable(typeof(DashboardApi.RelayBeamRequestDto))]
+[JsonSerializable(typeof(DashboardApi.RelayBeamDto))]
+[JsonSerializable(typeof(DashboardApi.RelayDropDto))]
+[JsonSerializable(typeof(DashboardApi.RelayDropDto[]))]
+[JsonSerializable(typeof(DashboardApi.RelayInboxBundleDto))]
+[JsonSerializable(typeof(DashboardApi.RelayInboxBundleDto[]))]
+[JsonSerializable(typeof(DashboardApi.RelayPendingApprovalDto))]
+[JsonSerializable(typeof(List<DashboardApi.RelayPendingApprovalDto>))]
 [JsonSerializable(typeof(JsonElement))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {

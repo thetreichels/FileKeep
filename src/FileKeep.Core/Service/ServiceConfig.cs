@@ -267,6 +267,32 @@ public sealed class ServiceConfig
     public List<string> YubiKeys { get; set; } = new();
 
     /// <summary>
+    /// Relay folder for the iOS ↔ desktop connection
+    /// (docs/ios-relay-protocol.md): a static folder exposed both ways —
+    /// SMB-writable, HTTP-readable, no server code. The desktop writes
+    /// signed mailbox/drops here; the phone reads over HTTP and writes
+    /// back via SMB when home. Null or empty means the relay is disabled.
+    /// </summary>
+    [JsonPropertyName("relayFolder")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RelayFolder { get; set; }
+
+    /// <summary>
+    /// DPAPI-protected pairing secret for the iOS relay (base64 of the
+    /// 32 random bytes, see <see cref="Core.Relay.RelayCrypto"/>).
+    /// Exchanged once via QR at pairing; the phone stores its copy in
+    /// the iOS Keychain. Both sides derive the same HMAC + encryption
+    /// keys from it. Null means no phone is paired. The plaintext never
+    /// touches disk; the dashboard pairing endpoint sets this via
+    /// <c>Dpapi.Protect</c> and the relay poller reads it via
+    /// <c>Dpapi.Unprotect</c> (Windows only, same as the other
+    /// <c>*Protected</c> fields).
+    /// </summary>
+    [JsonPropertyName("relayPairingSecretProtected")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RelayPairingSecretProtected { get; set; }
+
+    /// <summary>
     /// Gets the effective list of global Usenet providers: NntpProviders
     /// if non-empty, otherwise the single Nntp config as a singleton list.
     /// Delegates to <see cref="ServiceConfigStore.EffectiveProviders"/>.
