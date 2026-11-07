@@ -130,3 +130,45 @@ public sealed class AckBody
     [JsonPropertyName("status")]
     public string Status { get; set; } = "";
 }
+
+/// <summary>
+/// Body of an <c>approval-request</c> mailbox message (JSON, encrypted;
+/// protocol §7). The desktop writes one when a restore needs the phone
+/// as second key: the nonce is the challenge the phone's reply must
+/// echo, <c>what</c> names the action being approved ("restore").
+/// </summary>
+public sealed class ApprovalRequestBody
+{
+    [JsonPropertyName("nonce")]
+    public string Nonce { get; set; } = "";
+
+    [JsonPropertyName("what")]
+    public string What { get; set; } = "";
+
+    [JsonPropertyName("detail")]
+    public string Detail { get; set; } = "";
+
+    [JsonPropertyName("createdUtc")]
+    public DateTimeOffset CreatedUtc { get; set; }
+}
+
+/// <summary>
+/// Body of an <c>approval</c> mailbox message (JSON, encrypted;
+/// protocol §7). The phone writes one in reply to an
+/// <c>approval-request</c>: <c>nonce</c> echoes the request's challenge,
+/// <c>refId</c> the request's message id, <c>approved</c> the verdict.
+/// The desktop also writes this shape when it answers a
+/// phone-originated approval request (then <c>refId</c> is the request's
+/// message id and <c>nonce</c> is empty).
+/// </summary>
+public sealed class ApprovalBody
+{
+    [JsonPropertyName("nonce")]
+    public string Nonce { get; set; } = "";
+
+    [JsonPropertyName("refId")]
+    public string RefId { get; set; } = "";
+
+    [JsonPropertyName("approved")]
+    public bool Approved { get; set; }
+}

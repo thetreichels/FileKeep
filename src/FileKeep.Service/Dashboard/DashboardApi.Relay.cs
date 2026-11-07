@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
 using FileKeep.Core;
 using FileKeep.Core.Relay;
@@ -52,6 +53,45 @@ public static partial class DashboardApi
 
         [JsonPropertyName("bodyJson")]
         public string BodyJson { get; set; } = "";
+    }
+
+    /// <summary>Issued phone-approval request (protocol §7): the challenge nonce + expiry.</summary>
+    public sealed class RelayPhoneApprovalRequestDto
+    {
+        [JsonPropertyName("nonce")]
+        public string Nonce { get; set; } = "";
+
+        [JsonPropertyName("expiresUtc")]
+        public DateTimeOffset ExpiresUtc { get; set; }
+    }
+
+    /// <summary>Claim body for <c>POST /api/restore/unlock-phone-approval</c>.</summary>
+    public sealed class RelayPhoneApprovalClaimDto
+    {
+        [JsonPropertyName("nonce")]
+        public string Nonce { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Claim outcome for <c>POST /api/restore/unlock-phone-approval</c>:
+    /// <c>claimed</c> when the session unlocked, <c>expired</c> when the
+    /// request expired unanswered (ask the phone again), neither when the
+    /// phone has not replied yet.
+    /// </summary>
+    public sealed class RelayPhoneApprovalClaimStatusDto
+    {
+        [JsonPropertyName("claimed")]
+        public bool Claimed { get; set; }
+
+        [JsonPropertyName("expired")]
+        public bool Expired { get; set; }
+    }
+
+    /// <summary>Respond body for <c>POST /api/relay/approvals/{id}/respond</c>.</summary>
+    public sealed class RelayApprovalRespondDto
+    {
+        [JsonPropertyName("approved")]
+        public bool Approved { get; set; }
     }
 
     public sealed class RelayStatusDto
@@ -382,6 +422,146 @@ public static partial class DashboardApi
             });
         }
         return (200, list.ToArray());
+    }
+
+    /// <summary>
+    /// Asks the paired phone to approve a restore (protocol §7): writes an
+    /// <c>approval-request</c> (challenge nonce + what is being approved)
+    /// to the phone's mailbox and records the request in the poller so the
+    /// phone's reply can be matched. The phone shows "Approve restore?"
+    /// and answers with Face ID; the dashboard claims the reply via
+    /// <see cref="ClaimPhoneApproval"/>.
+    /// </summary>
+    public static (int Status, object Payload) RequestPhoneApproval(
+        ServiceConfig config,
+        RelayPoller? poller,
+        Action<string>? log = null)
+    {
+        if (poller is null)
+            return (400, new ErrorDto("Relay poller is not running."));
+        if (!TryGetRelayWriter(config, out RelayWriter? writer, out string? error))
+            return (400, new ErrorDto(error!));
+        string nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        var body = new ApprovalRequestBody
+        {
+            Nonce = nonce,
+            What = "restore",
+            Detail = "Approve restore authorization",
+            CreatedUtc = DateTimeOffset.UtcNow,
+        };
+        try
+        {
+            writer!.WriteMessage(
+                RelayMessageKinds.ApprovalRequest,
+                Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalRequestBody)));
+        }
+        catch (Exception ex)
+        {
+            return (500, new ErrorDto($"Could not write the approval request: {ex.Message}"));
+        }
+        poller.RecordApprovalRequest(nonce, body.What, body.Detail);
+        log?.Invoke("dashboard: restore approval requested from phone");
+        return (200, new RelayPhoneApprovalRequestDto
+        {
+            Nonce = nonce,
+            ExpiresUtc = DateTimeOffset.UtcNow + RelayPoller.ApprovalRequestLifetime,
+        });
+    }
+
+    /// <summary>
+    /// Claims a phone approval for a restore (protocol §7): when the
+    /// poller has consumed a matching <c>approval</c> reply, unlocks the
+    /// restore session exactly like the TOTP path — the approval carries
+    /// no key material, so it releases the machine's stored passphrase.
+    /// Always returns 200 with the claim status: <c>claimed</c> when the
+    /// session unlocked, <c>expired</c> when the request expired
+    /// unanswered (ask the phone again). A declined approval (or a reply
+    /// for anything but a restore) refuses with 400, and the approval is
+    /// consumed either way — one approval unlocks one restore, never twice.
+    /// </summary>
+    public static (int Status, object Payload) ClaimPhoneApproval(
+        ServiceConfig config,
+        RestoreSession session,
+        RelayPoller? poller,
+        string? nonce,
+        Action<string>? log = null)
+    {
+        if (poller is null)
+            return (400, new ErrorDto("Relay poller is not running."));
+        if (string.IsNullOrWhiteSpace(nonce))
+            return (400, new ErrorDto("nonce is required."));
+        ReceivedApproval? approval = poller.PeekApproval(nonce);
+        if (approval is null)
+        {
+            bool stillWaiting = poller.HasPendingApprovalRequest(nonce);
+            return (200, new RelayPhoneApprovalClaimStatusDto
+            {
+                Claimed = false,
+                Expired = !stillWaiting,
+            });
+        }
+        // Consume first: whatever the verdict, this approval is spent.
+        poller.TryTakeApproval(nonce);
+        if (!approval.Approved)
+        {
+            AuditLog.Record(log, AuditLog.UnlockAttempt, AuditLog.Fail, "method=phone-approval");
+            return (400, new ErrorDto("The phone declined the restore approval."));
+        }
+        if (approval.What != "restore")
+        {
+            AuditLog.Record(log, AuditLog.UnlockAttempt, AuditLog.Fail, "method=phone-approval");
+            return (400, new ErrorDto("That approval was not for a restore."));
+        }
+        if (!BackupScheduler.TryGetPassphrase(config, out string? passphrase, out string? problem))
+        {
+            AuditLog.Record(log, AuditLog.UnlockAttempt, AuditLog.Fail, "method=phone-approval");
+            return (400, new ErrorDto(problem ??
+                "Phone approval needs the stored passphrase copy on this PC, which isn't " +
+                "available — unlock with your YubiKey or recovery secret instead."));
+        }
+        session.Unlock(passphrase);
+        log?.Invoke("dashboard: restore session unlocked via phone approval");
+        AuditLog.Record(log, AuditLog.UnlockAttempt, AuditLog.Ok, "method=phone-approval");
+        return (200, new RelayPhoneApprovalClaimStatusDto { Claimed = true, Expired = false });
+    }
+
+    /// <summary>
+    /// Answers a phone-originated approval request (surfaced by the
+    /// poller): writes the verdict as an <c>approval</c> message to the
+    /// phone's mailbox and deletes the request from the phone's outbox so
+    /// it stops surfacing as pending. The verdict carries no key material
+    /// and never unlocks anything by itself.
+    /// </summary>
+    public static (int Status, object Payload) RespondToApproval(
+        ServiceConfig config,
+        RelayPoller? poller,
+        string? id,
+        bool approved,
+        Action<string>? log = null)
+    {
+        if (poller is null)
+            return (400, new ErrorDto("Relay poller is not running."));
+        if (string.IsNullOrWhiteSpace(id))
+            return (400, new ErrorDto("id is required."));
+        if (!poller.Status.PendingApprovals.Any(a => a.Id == id))
+            return (404, new ErrorDto("That approval request is no longer pending."));
+        if (!TryGetRelayWriter(config, out RelayWriter? writer, out string? error))
+            return (400, new ErrorDto(error!));
+        var body = new ApprovalBody { Nonce = "", RefId = id, Approved = approved };
+        try
+        {
+            writer!.WriteMessage(
+                RelayMessageKinds.Approval,
+                Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalBody)));
+        }
+        catch (Exception ex)
+        {
+            return (500, new ErrorDto($"Could not write the approval reply: {ex.Message}"));
+        }
+        if (TryGetRelayInbox(config, out RelayInbox? inbox, out _))
+            inbox!.DeleteMessage(id);
+        log?.Invoke($"dashboard: phone approval request {id} answered (approved={approved})");
+        return (200, new OkDto(true));
     }
 
     private static bool TryGetRelayWriter(ServiceConfig config, out RelayWriter? writer, out string? error)

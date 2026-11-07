@@ -205,6 +205,37 @@ public sealed class RelayInbox
         return _writer.WriteMessage(RelayMessageKinds.Ack, Encoding.UTF8.GetBytes(bodyJson));
     }
 
+    /// <summary>
+    /// Deletes a phone message from <c>mailbox/laptop/</c> after it has
+    /// been answered: removes the .bin and the index entry, re-signing
+    /// the index (sequence increases, never backwards). Returns false
+    /// when the message id is not in the index.
+    /// </summary>
+    public bool DeleteMessage(string id)
+    {
+        RelayIndex index = RelayWriter.ReadIndex(LaptopMailboxDir, _hmacKey);
+        int removed = index.Messages.RemoveAll(e => e.Id == id);
+        if (removed == 0)
+            return false;
+        index.Sequence++;
+        index.Hmac = RelayCrypto.ComputeIndexHmac(_hmacKey, index.Sequence, index.Messages);
+        RelayWriter.WriteAtomic(
+            Path.Combine(LaptopMailboxDir, "index.json"),
+            Encoding.UTF8.GetBytes(RelayJson.Serialize(index, RelayJson.Indented, RelayJsonContext.Default.RelayIndex)),
+            overwrite: true);
+        string binPath = Path.Combine(LaptopMailboxDir, id + ".bin");
+        try
+        {
+            if (File.Exists(binPath))
+                File.Delete(binPath);
+        }
+        catch
+        {
+            // Best effort; a locked file stays for the next pass.
+        }
+        return true;
+    }
+
     /// <summary>Deletes an inbox bundle and its companion files after import.</summary>
     public void DeleteBundle(string token)
     {

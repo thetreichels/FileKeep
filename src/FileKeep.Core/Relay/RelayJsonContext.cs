@@ -20,6 +20,8 @@ namespace FileKeep.Core.Relay;
 [JsonSerializable(typeof(RelayInboxMetadata))]
 [JsonSerializable(typeof(DropReadyBody))]
 [JsonSerializable(typeof(AckBody))]
+[JsonSerializable(typeof(ApprovalRequestBody))]
+[JsonSerializable(typeof(ApprovalBody))]
 public partial class RelayJsonContext : JsonSerializerContext
 {
 }

@@ -143,6 +143,35 @@ public class NativeBridge
     }
 
     /// <summary>
+    /// Native file picker for a .kfb bundle (relay beam). Same pattern as
+    /// <see cref="PickImportFile"/>: the Chromium file chooser is
+    /// unreliable from a remote/automated session, so beaming picks
+    /// through the native dialog.
+    /// </summary>
+    public string PickKfbFile(string title)
+    {
+        string result = "";
+        if (_owner.InvokeRequired)
+        {
+            _owner.Invoke(() => result = PickKfbFile(title));
+            return result;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = string.IsNullOrEmpty(title) ? "Choose bundle to beam" : title,
+            Filter = "FileKeep bundle (*.kfb)|*.kfb|All files (*.*)|*.*",
+            Multiselect = false,
+            CheckFileExists = true,
+        };
+
+        if (dialog.ShowDialog(_owner) == DialogResult.OK)
+            result = dialog.FileName;
+
+        return result;
+    }
+
+    /// <summary>
     /// Gets whether the tray icon is enabled.
     /// </summary>
     public bool GetTrayEnabled()
@@ -672,6 +701,13 @@ public class MainForm : Form
                     try {
                         const bridge = chrome.webview.hostObjects.fileKeep;
                         const path = await bridge.PickImportFile(title || 'Choose export package');
+                        return path || '';
+                    } catch (e) { return ''; }
+                };
+                window.fileKeepPickKfbFile = async function(title) {
+                    try {
+                        const bridge = chrome.webview.hostObjects.fileKeep;
+                        const path = await bridge.PickKfbFile(title || 'Choose bundle to beam');
                         return path || '';
                     } catch (e) { return ''; }
                 };

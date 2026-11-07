@@ -172,4 +172,148 @@ public class RelayDashboardTests : IDisposable
         var (status, _) = DashboardApi.ListRelayInbox(config);
         Assert.Equal(400, status);
     }
+
+    private RelayPoller PollerWithKeys() =>
+        new(() => (_relayRoot, new RelayPoller.RelayKeys(_hmacKey, _encKey)));
+
+    private void SimulatePhoneApproval(string id, string nonce, bool approved)
+    {
+        string mailboxDir = Path.Combine(_relayRoot, "mailbox", "laptop");
+        var body = new ApprovalBody { Nonce = nonce, RefId = "req-1", Approved = approved };
+        byte[] bin = RelayCrypto.EncryptMessage(_encKey, _hmacKey, id,
+            System.Text.Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalBody)));
+        Directory.CreateDirectory(mailboxDir);
+        File.WriteAllBytes(Path.Combine(mailboxDir, id + ".bin"), bin);
+        var index = new RelayIndex
+        {
+            Sequence = 1,
+            Messages = new List<RelayIndexEntry>
+            {
+                new() { Id = id, Kind = RelayMessageKinds.Approval, CreatedUtc = DateTimeOffset.UtcNow, Size = bin.Length },
+            },
+        };
+        index.Hmac = RelayCrypto.ComputeIndexHmac(_hmacKey, index.Sequence, index.Messages);
+        File.WriteAllText(Path.Combine(mailboxDir, "index.json"),
+            RelayJson.Serialize(index, RelayJson.Indented, RelayJsonContext.Default.RelayIndex));
+    }
+
+    [Fact]
+    public void RequestPhoneApproval_NoPoller_Returns400()
+    {
+        var config = new ServiceConfig { RelayFolder = _relayRoot };
+        var (status, _) = DashboardApi.RequestPhoneApproval(config, null);
+        Assert.Equal(400, status);
+    }
+
+    [Fact]
+    public void RespondToApproval_NoPoller_Returns400()
+    {
+        var config = new ServiceConfig { RelayFolder = _relayRoot };
+        var (status, _) = DashboardApi.RespondToApproval(config, null, "m1", approved: true);
+        Assert.Equal(400, status);
+    }
+
+    [Fact]
+    public void RespondToApproval_UnknownId_Returns404()
+    {
+        var poller = PollerWithKeys();
+        poller.PollOnce();
+        var config = new ServiceConfig { RelayFolder = _relayRoot };
+        var (status, _) = DashboardApi.RespondToApproval(config, poller, "no-such-id", approved: true);
+        Assert.Equal(404, status);
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_NoPoller_Returns400()
+    {
+        var config = new ServiceConfig();
+        var session = new FileKeep.Service.RestoreSession();
+        var (status, _) = DashboardApi.ClaimPhoneApproval(config, session, null, "nonce-1");
+        Assert.Equal(400, status);
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_EmptyNonce_Returns400()
+    {
+        var poller = PollerWithKeys();
+        var config = new ServiceConfig();
+        var session = new FileKeep.Service.RestoreSession();
+        var (status, _) = DashboardApi.ClaimPhoneApproval(config, session, poller, "");
+        Assert.Equal(400, status);
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_Waiting_ReturnsNotClaimedNotExpired()
+    {
+        var poller = PollerWithKeys();
+        poller.RecordApprovalRequest("nonce-w", "restore", "Approve restore authorization");
+        var config = new ServiceConfig();
+        var session = new FileKeep.Service.RestoreSession();
+        var (status, payload) = DashboardApi.ClaimPhoneApproval(config, session, poller, "nonce-w");
+        Assert.Equal(200, status);
+        var dto = Assert.IsType<DashboardApi.RelayPhoneApprovalClaimStatusDto>(payload);
+        Assert.False(dto.Claimed);
+        Assert.False(dto.Expired);
+        Assert.False(session.IsUnlocked);
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_UnknownNonce_ReturnsExpired()
+    {
+        var poller = PollerWithKeys();
+        var config = new ServiceConfig();
+        var session = new FileKeep.Service.RestoreSession();
+        var (status, payload) = DashboardApi.ClaimPhoneApproval(config, session, poller, "nonce-nope");
+        Assert.Equal(200, status);
+        var dto = Assert.IsType<DashboardApi.RelayPhoneApprovalClaimStatusDto>(payload);
+        Assert.False(dto.Claimed);
+        Assert.True(dto.Expired);
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_ApprovedUnlocksSessionWithStoredPassphrase()
+    {
+        string? saved = Environment.GetEnvironmentVariable(BackupScheduler.PassphraseEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, "env-passphrase");
+            var poller = PollerWithKeys();
+            poller.RecordApprovalRequest("nonce-ok", "restore", "Approve restore authorization");
+            SimulatePhoneApproval("m-ok", "nonce-ok", approved: true);
+            poller.PollOnce();
+
+            var config = new ServiceConfig();
+            var session = new FileKeep.Service.RestoreSession();
+            var (status, payload) = DashboardApi.ClaimPhoneApproval(config, session, poller, "nonce-ok");
+            Assert.Equal(200, status);
+            var dto = Assert.IsType<DashboardApi.RelayPhoneApprovalClaimStatusDto>(payload);
+            Assert.True(dto.Claimed);
+            Assert.True(session.IsUnlocked);
+            Assert.True(session.IsVerified);
+            Assert.Equal("env-passphrase", session.GetPassphrase());
+            // One approval unlocks one restore — claiming again expires.
+            var (status2, payload2) = DashboardApi.ClaimPhoneApproval(config, session, poller, "nonce-ok");
+            Assert.Equal(200, status2);
+            Assert.True(Assert.IsType<DashboardApi.RelayPhoneApprovalClaimStatusDto>(payload2).Expired);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(BackupScheduler.PassphraseEnvVar, saved);
+        }
+    }
+
+    [Fact]
+    public void ClaimPhoneApproval_Declined_Returns400AndStaysLocked()
+    {
+        var poller = PollerWithKeys();
+        poller.RecordApprovalRequest("nonce-no", "restore", "Approve restore authorization");
+        SimulatePhoneApproval("m-no", "nonce-no", approved: false);
+        poller.PollOnce();
+
+        var config = new ServiceConfig();
+        var session = new FileKeep.Service.RestoreSession();
+        var (status, _) = DashboardApi.ClaimPhoneApproval(config, session, poller, "nonce-no");
+        Assert.Equal(400, status);
+        Assert.False(session.IsUnlocked);
+    }
 }

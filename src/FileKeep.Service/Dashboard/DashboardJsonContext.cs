@@ -91,6 +91,10 @@ namespace FileKeep.Service;
 [JsonSerializable(typeof(DashboardApi.RelayInboxBundleDto[]))]
 [JsonSerializable(typeof(DashboardApi.RelayPendingApprovalDto))]
 [JsonSerializable(typeof(List<DashboardApi.RelayPendingApprovalDto>))]
+[JsonSerializable(typeof(DashboardApi.RelayPhoneApprovalRequestDto))]
+[JsonSerializable(typeof(DashboardApi.RelayPhoneApprovalClaimDto))]
+[JsonSerializable(typeof(DashboardApi.RelayPhoneApprovalClaimStatusDto))]
+[JsonSerializable(typeof(DashboardApi.RelayApprovalRespondDto))]
 [JsonSerializable(typeof(JsonElement))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {

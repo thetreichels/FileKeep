@@ -590,6 +590,20 @@ public static class Dashboard
             return Results.Json(payload, statusCode: status);
         });
 
+        app.MapPost("/api/relay/approvals/{id}/respond", async (HttpRequest request, string id) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var respondRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayApprovalRespondDto>(
+                body.GetRawText(),
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new DashboardApi.RelayApprovalRespondDto();
+            var (status, payload) = DashboardApi.RespondToApproval(
+                config, relayPoller, id, respondRequest.Approved, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
         app.MapPost("/api/operations/restore/cancel", async (HttpRequest request) =>
         {
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
@@ -1077,6 +1091,28 @@ public static class Dashboard
             return Results.Content(
                 JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
                 "application/json");
+        });
+
+        // iOS relay (protocol §7): ask the paired phone to approve a
+        // restore, then claim its reply to unlock the session.
+        app.MapPost("/api/restore/request-phone-approval", (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.RequestPhoneApproval(config, relayPoller, log);
+            return Results.Json(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/restore/unlock-phone-approval", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            System.Text.Json.JsonElement body;
+            try { body = await request.ReadFromJsonAsync<System.Text.Json.JsonElement>(); }
+            catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
+            string? nonce = body.TryGetProperty("nonce", out var n) ? n.GetString() : null;
+            var (status, payload) = DashboardApi.ClaimPhoneApproval(config, restoreSession, relayPoller, nonce, log);
+            return Results.Json(payload, statusCode: status);
         });
 
         app.MapPost("/api/restore/lock", (HttpRequest request) =>

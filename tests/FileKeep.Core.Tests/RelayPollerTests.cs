@@ -186,6 +186,67 @@ public class RelayPollerTests : IDisposable
         Assert.Contains("Approve restore", approval.BodyJson);
     }
 
+    private void SimulatePhoneApproval(string id, string nonce, bool approved)
+    {
+        var body = new ApprovalBody { Nonce = nonce, RefId = "req-1", Approved = approved };
+        SimulatePhoneMessage(id, RelayMessageKinds.Approval,
+            Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalBody)));
+    }
+
+    [Fact]
+    public void PollOnce_PhoneApproval_MatchedToRequest_IsConsumedAndClaimable()
+    {
+        var poller = Poller(_relayRoot, Keys);
+        poller.RecordApprovalRequest("nonce-1", "restore", "Approve restore authorization");
+        SimulatePhoneApproval("m2", "nonce-1", approved: true);
+        poller.PollOnce();
+
+        ReceivedApproval? taken = poller.TryTakeApproval("nonce-1");
+        Assert.NotNull(taken);
+        Assert.True(taken.Approved);
+        Assert.Equal("restore", taken.What);
+        // Consumed: the message is gone from the phone's mailbox.
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(_relayRoot, "mailbox", "laptop"), "*.bin"));
+        // And one approval unlocks one restore — no replay.
+        Assert.Null(poller.TryTakeApproval("nonce-1"));
+    }
+
+    [Fact]
+    public void PollOnce_PhoneApproval_Unmatched_IsLeftInPlace()
+    {
+        var poller = Poller(_relayRoot, Keys);
+        poller.RecordApprovalRequest("nonce-1", "restore", "Approve restore authorization");
+        SimulatePhoneApproval("m3", "nonce-other", approved: true);
+        poller.PollOnce();
+
+        Assert.Null(poller.TryTakeApproval("nonce-other"));
+        Assert.Null(poller.TryTakeApproval("nonce-1"));
+        Assert.True(poller.HasPendingApprovalRequest("nonce-1"));
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(_relayRoot, "mailbox", "laptop"), "*.bin"));
+    }
+
+    [Fact]
+    public void PollOnce_PhoneApproval_Declined_IsClaimableAsDeclined()
+    {
+        var poller = Poller(_relayRoot, Keys);
+        poller.RecordApprovalRequest("nonce-2", "restore", "Approve restore authorization");
+        SimulatePhoneApproval("m4", "nonce-2", approved: false);
+        poller.PollOnce();
+
+        ReceivedApproval? taken = poller.TryTakeApproval("nonce-2");
+        Assert.NotNull(taken);
+        Assert.False(taken.Approved);
+    }
+
+    [Fact]
+    public void TryTakeApproval_WithoutPoll_IsNull()
+    {
+        var poller = Poller(_relayRoot, Keys);
+        poller.RecordApprovalRequest("nonce-3", "restore", "Approve restore authorization");
+        Assert.Null(poller.TryTakeApproval("nonce-3"));
+        Assert.True(poller.HasPendingApprovalRequest("nonce-3"));
+    }
+
     [Fact]
     public void PollOnce_EmptyRelay_RunsClean()
     {

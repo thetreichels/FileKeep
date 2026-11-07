@@ -6,21 +6,26 @@ using FileKeep.Core.Service;
 namespace FileKeep.Service;
 
 /// <summary>
-/// Polls the relay's phone side (docs/ios-relay-protocol.md §8) on the
+/// Polls the relay's phone side (docs/ios-relay-protocol.md §7–§8) on the
 /// service's behalf: prunes expired drops, verifies phone-dropped bundles,
-/// imports the good ones, acks them, and surfaces pending approval
-/// messages. Runs as the third supervised half alongside the dashboard
-/// and the scheduler (see Program.cs).
+/// imports the good ones, acks them, surfaces pending approval
+/// messages, and matches phone approval replies (§7) against approval
+/// requests the desktop issued. Runs as the third supervised half
+/// alongside the dashboard and the scheduler (see Program.cs).
 ///
 /// A fault in one pass must not kill the poller (SF-18 pattern, same as
 /// the scheduler): the pass is logged and retried next cycle. The poller
 /// never touches the phone's outbox files except to delete bundles it
-/// has imported; rejected bundles stay in place for the dashboard to show.
+/// has imported and approval messages it has consumed; rejected bundles
+/// stay in place for the dashboard to show.
 /// </summary>
 public sealed class RelayPoller
 {
     /// <summary>Derived relay keys (HMAC + encryption), from the pairing secret.</summary>
     public sealed record RelayKeys(byte[] HmacKey, byte[] EncKey);
+
+    /// <summary>How long a desktop-issued approval request stays claimable.</summary>
+    public static readonly TimeSpan ApprovalRequestLifetime = TimeSpan.FromMinutes(15);
 
     private readonly Func<(string? Folder, RelayKeys? Keys)> _resolve;
     private readonly Action<string>? _log;
@@ -29,6 +34,13 @@ public sealed class RelayPoller
     private readonly object _statusLock = new();
     private RelayPollerStatus _status = RelayPollerStatus.Disabled;
     private string _lastLoggedState = "";
+
+    // Approval requests the desktop issued (§7), awaiting the phone's
+    // reply; and phone replies already matched, awaiting a claim by the
+    // dashboard (one approval unlocks one restore — no replay).
+    private readonly object _approvalLock = new();
+    private readonly List<PendingApprovalRequest> _pendingRequests = new();
+    private readonly List<ReceivedApproval> _receivedApprovals = new();
 
     /// <param name="resolve">Returns the current relay folder + keys (re-resolved every pass, so pairing changes apply without a restart).</param>
     /// <param name="pollInterval">Seconds between passes; default 60.</param>
@@ -63,6 +75,70 @@ public sealed class RelayPoller
     public RelayPollerStatus Status
     {
         get { lock (_statusLock) return _status; }
+    }
+
+    /// <summary>
+    /// Records a desktop-issued approval request (§7) so a later phone
+    /// reply can be matched to it. Called by the dashboard when the user
+    /// asks the phone to approve a restore.
+    /// </summary>
+    public void RecordApprovalRequest(string nonce, string what, string detail)
+    {
+        lock (_approvalLock)
+        {
+            PruneApprovalRequestsLocked(DateTimeOffset.UtcNow);
+            _pendingRequests.RemoveAll(r => r.Nonce == nonce);
+            _pendingRequests.Add(new PendingApprovalRequest(
+                nonce, what, detail, DateTimeOffset.UtcNow + ApprovalRequestLifetime));
+        }
+    }
+
+    /// <summary>
+    /// Peeks at a matched phone approval for <paramref name="nonce"/>
+    /// without consuming it, so the caller can validate everything else
+    /// before taking it (a failed claim must not burn the approval).
+    /// </summary>
+    public ReceivedApproval? PeekApproval(string nonce)
+    {
+        lock (_approvalLock)
+        {
+            return _receivedApprovals.FirstOrDefault(a => a.Nonce == nonce);
+        }
+    }
+
+    /// <summary>
+    /// Takes a matched phone approval for <paramref name="nonce"/>, if the
+    /// poller has consumed one. A taken approval is gone — one approval
+    /// unlocks one restore, never twice. Returns null while the phone has
+    /// not replied yet (or the request expired unanswered).
+    /// </summary>
+    public ReceivedApproval? TryTakeApproval(string nonce)
+    {
+        lock (_approvalLock)
+        {
+            int i = _receivedApprovals.FindIndex(a => a.Nonce == nonce);
+            if (i < 0)
+                return null;
+            ReceivedApproval approval = _receivedApprovals[i];
+            _receivedApprovals.RemoveAt(i);
+            return approval;
+        }
+    }
+
+    /// <summary>Whether a request for <paramref name="nonce"/> is still awaiting the phone.</summary>
+    public bool HasPendingApprovalRequest(string nonce)
+    {
+        lock (_approvalLock)
+        {
+            PruneApprovalRequestsLocked(DateTimeOffset.UtcNow);
+            return _pendingRequests.Any(r => r.Nonce == nonce);
+        }
+    }
+
+    private void PruneApprovalRequestsLocked(DateTimeOffset now)
+    {
+        _pendingRequests.RemoveAll(r => r.ExpiresUtc <= now);
+        _receivedApprovals.RemoveAll(a => a.ReceivedUtc + ApprovalRequestLifetime <= now);
     }
 
     /// <summary>Main loop: runs until <paramref name="stopping"/> is cancelled.</summary>
@@ -176,6 +252,51 @@ public sealed class RelayPoller
                     message.Entry.CreatedUtc,
                     System.Text.Encoding.UTF8.GetString(message.Plaintext)));
             }
+            else if (message.Entry.Kind == RelayMessageKinds.Approval && message.Plaintext is not null)
+            {
+                // §7 reply: the phone answered a desktop-issued request.
+                // Match it by nonce; a matched reply is consumed (the
+                // message is deleted) and held for the dashboard to claim
+                // — one approval unlocks one restore. An unmatched reply
+                // answers nothing the desktop asked; leave it in place.
+                ApprovalBody? body;
+                try
+                {
+                    body = RelayJson.Deserialize(
+                        System.Text.Encoding.UTF8.GetString(message.Plaintext),
+                        RelayJson.Default, RelayJsonContext.Default.ApprovalBody);
+                }
+                catch
+                {
+                    body = null;
+                }
+                if (body is null || string.IsNullOrEmpty(body.Nonce))
+                {
+                    Log($"relay: phone approval {message.Entry.Id} has no usable nonce; left in place");
+                    continue;
+                }
+                bool matched;
+                lock (_approvalLock)
+                {
+                    PruneApprovalRequestsLocked(now);
+                    matched = _pendingRequests.Any(r => r.Nonce == body.Nonce);
+                    if (matched)
+                    {
+                        PendingApprovalRequest request = _pendingRequests.First(r => r.Nonce == body.Nonce);
+                        _pendingRequests.Remove(request);
+                        _receivedApprovals.RemoveAll(a => a.Nonce == body.Nonce);
+                        _receivedApprovals.Add(new ReceivedApproval(
+                            body.Nonce, body.Approved, request.What, now));
+                    }
+                }
+                if (!matched)
+                {
+                    Log($"relay: phone approval {message.Entry.Id} matches no pending request; left in place");
+                    continue;
+                }
+                inbox.DeleteMessage(message.Entry.Id);
+                Log($"relay: phone approval for '{body.Nonce}' received (approved={body.Approved})");
+            }
         }
 
         SetStatus(new RelayPollerStatus(
@@ -232,3 +353,18 @@ public sealed record RelayPollerStatus(
 
 /// <summary>A pending phone approval request surfaced by the poller.</summary>
 public sealed record PendingApproval(string Id, DateTimeOffset CreatedUtc, string BodyJson);
+
+/// <summary>
+/// A desktop-issued approval request (§7) awaiting the phone's reply.
+/// Expires unanswered after <see cref="RelayPoller.ApprovalRequestLifetime"/>.
+/// </summary>
+public sealed record PendingApprovalRequest(
+    string Nonce, string What, string Detail, DateTimeOffset ExpiresUtc);
+
+/// <summary>
+/// A phone approval reply matched to a desktop-issued request, held for
+/// the dashboard to claim. One approval unlocks one restore — claiming
+/// removes it, so it can never be replayed.
+/// </summary>
+public sealed record ReceivedApproval(
+    string Nonce, bool Approved, string What, DateTimeOffset ReceivedUtc);

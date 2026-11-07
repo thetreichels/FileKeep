@@ -455,6 +455,35 @@
         <div class="meta" id="upEta" style="margin-top:4px"></div>
         <div id="upDests"></div>
       </div>
+      <h2>iPhone relay</h2>
+      <div class="card" id="relayCard">
+        <div class="name" style="font-size:16px;font-weight:600">iPhone relay</div>
+        <div class="meta" id="relayStatus" style="color:var(--text-2);margin:4px 0 8px">Loading…</div>
+        <div id="relayPairForm" style="display:none">
+          <div class="row" style="margin-bottom:8px">
+            <input id="relayFolderInput" type="text" autocomplete="off" spellcheck="false" placeholder="Relay folder (e.g. a shared folder the phone can reach)" style="flex:1">
+          </div>
+          <div class="row" style="margin-bottom:8px">
+            <input id="relayUrlInput" type="text" autocomplete="off" spellcheck="false" placeholder="Relay web address (e.g. https://relay.treichel.co)" style="flex:1">
+            <button class="accent" onclick="pairRelay()">Pair iPhone</button>
+          </div>
+          <div id="relayQr" style="display:none;margin-top:8px">
+            <div class="meta" style="margin-bottom:4px">Scan with FileKeep on your iPhone:</div>
+            <div id="relayQrSvg" style="background:#fff;padding:8px;display:inline-block;border-radius:4px"></div>
+          </div>
+        </div>
+        <div id="relayPaired" style="display:none">
+          <div class="row" style="margin-bottom:8px;align-items:center">
+            <span class="meta" id="relayFolderLine" style="flex:1"></span>
+            <button onclick="unpairRelay()">Unpair</button>
+            <button class="accent" onclick="beamToPhone()">Beam a bundle to phone</button>
+          </div>
+          <div id="relayBeamResult" class="meta" style="display:none;margin-bottom:8px"></div>
+          <div id="relayApprovals"></div>
+          <div id="relayDrops"></div>
+          <div id="relayInbox"></div>
+        </div>
+      </div>
     </div>
     <div class="view" id="view-vault">
       <h1>Banked Vault</h1>
@@ -522,6 +551,10 @@
           <span style="color:var(--text-2);font-size:13px">Or use your phone authenticator:</span>
           <input id="restore-phone-input" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="6-digit code" style="width:130px;font-family:monospace" onkeydown="if (event.key === 'Enter') unlockRestoreWithPhone()">
           <button class="accent" onclick="unlockRestoreWithPhone()">Unlock with phone</button>
+        </div>
+        <div class="row" id="restore-phone-approval-row" style="display:none;margin-bottom:8px;align-items:center">
+          <span style="color:var(--text-2);font-size:13px">Or approve from your paired iPhone — it shows the request and you confirm with Face ID:</span>
+          <button id="restore-phone-approval-btn" class="accent" onclick="requestPhoneApproval()" style="margin-left:auto">Ask phone to approve</button>
         </div>
         <div class="row" id="restore-passphrase-row" style="display:none;margin-bottom:8px;align-items:center">
           <span style="color:var(--text-2);font-size:13px">Or enter your repository passphrase:</span>
@@ -1950,6 +1983,8 @@ async function load() {
   } catch (e) { /* setup card stays hidden on error */ }
   // Start upload progress polling
   startUploadPolling();
+  // iPhone relay card (Overview).
+  loadRelayCard();
   // Vault job switcher (WALK-7): one vault per job. Rebuild the options
   // on every load so job adds/deletes show up, keeping the current
   // selection when its job still exists. The switcher row only appears
@@ -2477,6 +2512,112 @@ async function lockRestoreSession() {
   try { await api('/api/restore/lock', { method: 'POST' }); } catch (e) { /* ignore */ }
   refreshRestoreSession();
 }
+// iPhone relay card (Overview): pairing, beam, drops, inbox, approvals.
+async function loadRelayCard() {
+  const statusEl = document.getElementById('relayStatus');
+  const pairForm = document.getElementById('relayPairForm');
+  const pairedEl = document.getElementById('relayPaired');
+  if (!statusEl) return;
+  let s;
+  try {
+    s = await api('/api/relay/status');
+  } catch (e) {
+    statusEl.textContent = 'Relay unavailable: ' + e.message;
+    return;
+  }
+  const stateText = s.configured ? (s.paired ? 'Paired' : 'Folder set — no phone paired') : 'Not configured';
+  statusEl.textContent = stateText + ' · ' + (s.state || '')
+    + (s.lastPollUtc ? ' · last poll ' + new Date(s.lastPollUtc).toLocaleTimeString() : '')
+    + ' · ' + s.bundlesImported + ' imported, ' + s.bundlesRejected + ' rejected, ' + s.dropsPruned + ' drops pruned'
+    + (s.lastError ? ' · error: ' + s.lastError : '');
+  if (pairForm) pairForm.style.display = s.paired ? 'none' : '';
+  if (pairedEl) pairedEl.style.display = s.paired ? '' : 'none';
+  const folderLine = document.getElementById('relayFolderLine');
+  if (folderLine) folderLine.textContent = s.relayFolder ? 'Relay folder: ' + s.relayFolder : '';
+  const apprEl = document.getElementById('relayApprovals');
+  if (apprEl) {
+    apprEl.innerHTML = (s.pendingApprovals || []).map(a => {
+      let detail = a.bodyJson;
+      try { const j = JSON.parse(a.bodyJson); detail = j.detail || j.what || a.bodyJson; } catch { /* raw body */ }
+      return `<div class="row" style="margin-bottom:8px;align-items:center">
+        <div class="grow"><div class="name">Approval request from your iPhone</div>
+        <div class="meta">${esc(detail)} · ${esc(new Date(a.createdUtc).toLocaleString())}</div></div>
+        <button class="accent" onclick="respondToApproval(${jsAttr(a.id)}, true)">Approve</button>
+        <button onclick="respondToApproval(${jsAttr(a.id)}, false)">Deny</button>
+      </div>`;
+    }).join('');
+  }
+  if (!s.paired) return;
+  try {
+    const drops = await api('/api/relay/drops');
+    const dropsEl = document.getElementById('relayDrops');
+    if (dropsEl) {
+      dropsEl.innerHTML = drops.length
+        ? '<div class="meta" style="margin:8px 0 4px">Beamed drops (waiting on the phone):</div>' + drops.map(d =>
+          `<div class="row"><div class="grow"><div class="name">${esc(d.name)}</div>
+          <div class="meta">expires ${esc(new Date(d.expiryUtc).toLocaleString())} · ${d.verified ? 'verified' : 'UNVERIFIED'}</div></div></div>`).join('')
+        : '';
+    }
+  } catch (e) { /* drops stay empty on error */ }
+  try {
+    const inbox = await api('/api/relay/inbox');
+    const inboxEl = document.getElementById('relayInbox');
+    if (inboxEl) {
+      inboxEl.innerHTML = inbox.length
+        ? '<div class="meta" style="margin:8px 0 4px">Bundles from your iPhone:</div>' + inbox.map(b =>
+          `<div class="row"><div class="grow"><div class="name">${esc(b.name)}</div>
+          <div class="meta">${esc(b.signatureValid ? 'signature OK' : 'BAD SIGNATURE — ' + (b.rejectionReason || ''))} · par2 ${esc(b.par2Status)}</div></div></div>`).join('')
+        : '';
+    }
+  } catch (e) { /* inbox stays empty on error */ }
+}
+async function pairRelay() {
+  const folder = (document.getElementById('relayFolderInput').value || '').trim();
+  const url = (document.getElementById('relayUrlInput').value || '').trim();
+  if (!folder) { toast('Enter the relay folder first.', 'err'); return; }
+  if (!url) { toast('Enter the relay web address first.', 'err'); return; }
+  try {
+    const r = await api('/api/relay/pair', { method: 'POST', body: JSON.stringify({ relayFolder: folder, relayBaseUrl: url }) });
+    const qrEl = document.getElementById('relayQr');
+    const svgEl = document.getElementById('relayQrSvg');
+    if (qrEl) qrEl.style.display = '';
+    if (svgEl) svgEl.innerHTML = r.qrSvg;
+    toast('Scan the QR code with FileKeep on your iPhone.', 'ok');
+    loadRelayCard();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function unpairRelay() {
+  try {
+    await api('/api/relay/unpair', { method: 'POST' });
+    toast('iPhone unpaired.', 'ok');
+    loadRelayCard();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function beamToPhone() {
+  if (typeof window.fileKeepPickKfbFile !== 'function') {
+    toast('Beaming needs the desktop app file picker.', 'err');
+    return;
+  }
+  const path = await window.fileKeepPickKfbFile('Choose bundle to beam');
+  if (!path) return;
+  try {
+    const r = await api('/api/relay/beam', { method: 'POST', body: JSON.stringify({ kfbPath: path }) });
+    const el = document.getElementById('relayBeamResult');
+    if (el) {
+      el.style.display = '';
+      el.textContent = 'Beamed ' + r.name + ' — on your iPhone within minutes, expires ' + new Date(r.expiryUtc).toLocaleString() + '.';
+    }
+    toast('Bundle beamed to your iPhone.', 'ok');
+    loadRelayCard();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function respondToApproval(id, approved) {
+  try {
+    await api('/api/relay/approvals/' + encodeURIComponent(id) + '/respond', { method: 'POST', body: JSON.stringify({ approved }) });
+    toast(approved ? 'Approval sent to your iPhone.' : 'Request denied.', 'ok');
+    loadRelayCard();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function unlockRestoreSession() {
   // The session row's own unlock: a YubiKey touch, same endpoint the
   // Restore buttons use, but reachable while locked (WALK-2).
@@ -2494,12 +2635,13 @@ async function refreshRestoreSession() {
   const srow = document.getElementById('restore-secret-row');
   const prow = document.getElementById('restore-phone-row');
   const pprow = document.getElementById('restore-passphrase-row');
+  const parow = document.getElementById('restore-phone-approval-row');
   if (!row || !st) return;
   try {
     const s = await api('/api/restore/session');
     // Restores are gated whenever ANY unlock method is enabled, not
     // just in YubiKey mode — the session row renders on restoresGated.
-    if (!s.restoresGated) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; return; }
+    if (!s.restoresGated) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; if (parow) parow.style.display = 'none'; return; }
     row.style.display = '';
     st.className = 'yk-badge ' + (s.unlocked ? 'unlocked' : 'locked');
     // MU-15: a typed-secret unlock is not yet proven — the badge says
@@ -2532,7 +2674,16 @@ async function refreshRestoreSession() {
     // passphrase+YubiKey mode the endpoint refuses, so the row stays
     // hidden there even though passphraseEnabled is true.
     if (pprow) pprow.style.display = (s.passphraseEnabled && !s.unlocked && (!s.yubikey || s.passphraseWrap)) ? '' : 'none';
-  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; }
+    // Phone approval (protocol §7): shown when a phone is paired and
+    // the session is locked. The relay status is the source of truth.
+    if (parow) {
+      if (s.unlocked) {
+        parow.style.display = 'none';
+      } else {
+        api('/api/relay/status').then(rs => { parow.style.display = rs.paired ? '' : 'none'; }).catch(() => { parow.style.display = 'none'; });
+      }
+    }
+  } catch (e) { row.style.display = 'none'; if (srow) srow.style.display = 'none'; if (prow) prow.style.display = 'none'; if (pprow) pprow.style.display = 'none'; if (parow) parow.style.display = 'none'; }
 }
 async function unlockRestoreWithPhone() {
   const input = document.getElementById('restore-phone-input');
@@ -2553,6 +2704,50 @@ async function unlockRestoreWithPhone() {
   } catch (e) {
     showErr(e.message);
   }
+}
+// Phone approval (protocol §7): ask the paired iPhone to approve a
+// restore, then poll the claim endpoint until it answers or expires.
+let phoneApprovalPoll = null;
+async function requestPhoneApproval() {
+  const btn = document.getElementById('restore-phone-approval-btn');
+  const errEl = document.getElementById('restore-secret-error');
+  const showErr = msg => { errEl.textContent = msg; errEl.style.display = msg ? '' : 'none'; };
+  showErr('');
+  if (phoneApprovalPoll) { clearInterval(phoneApprovalPoll); phoneApprovalPoll = null; }
+  let r;
+  try {
+    r = await api('/api/restore/request-phone-approval', { method: 'POST' });
+  } catch (e) { showErr(e.message); return; }
+  toast('Approval requested — check your iPhone.', 'ok');
+  if (btn) btn.disabled = true;
+  const started = Date.now();
+  phoneApprovalPoll = setInterval(async () => {
+    if (Date.now() - started > 15 * 60 * 1000) {
+      clearInterval(phoneApprovalPoll); phoneApprovalPoll = null;
+      if (btn) btn.disabled = false;
+      showErr('The approval request expired — ask the phone again.');
+      return;
+    }
+    try {
+      const s = await api('/api/restore/unlock-phone-approval', { method: 'POST', body: JSON.stringify({ nonce: r.nonce }) });
+      if (s.claimed) {
+        clearInterval(phoneApprovalPoll); phoneApprovalPoll = null;
+        if (btn) btn.disabled = false;
+        toast('Restore session unlocked via phone approval.', 'ok');
+        refreshRestoreSession();
+        loadRepo();
+      } else if (s.expired) {
+        clearInterval(phoneApprovalPoll); phoneApprovalPoll = null;
+        if (btn) btn.disabled = false;
+        showErr('The approval request expired — ask the phone again.');
+      }
+      // Otherwise still waiting; keep polling.
+    } catch (e) {
+      clearInterval(phoneApprovalPoll); phoneApprovalPoll = null;
+      if (btn) btn.disabled = false;
+      showErr(e.message);
+    }
+  }, 5000);
 }
 async function unlockRestoreWithSecret() {
   const input = document.getElementById('restore-secret-input');
