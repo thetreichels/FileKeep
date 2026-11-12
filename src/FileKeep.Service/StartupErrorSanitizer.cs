@@ -31,9 +31,6 @@ namespace FileKeep.Service;
 /// </summary>
 public static partial class StartupErrorSanitizer
 {
-    /// <summary>Minimum length of a base64-alphabet run treated as secret-shaped.</summary>
-    public const int MinSecretRunLength = 32;
-
     // A continuous run of base64-alphabet characters, with optional
     // padding. Greedy: a longer run is one token, not several.
     [GeneratedRegex("[A-Za-z0-9+/]{32,}={0,2}", RegexOptions.Compiled)]

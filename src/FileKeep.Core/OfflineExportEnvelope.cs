@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -249,23 +248,6 @@ public static class OfflineExportEnvelope
         }
     }
 
-    /// <summary>Parses an envelope from its JSON text without decrypting. Returns null when not an export envelope.</summary>
-    public static Package? TryParseEnvelope(string json)
-    {
-        try
-        {
-            var package = JsonSerializer.Deserialize(json,
-                Json.FileKeepJsonContext.Default.Package);
-            if (package is null || string.IsNullOrWhiteSpace(package.Format))
-                return null;
-            return package;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
     private static string? ValidateFolderName(string? name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -282,7 +264,6 @@ public static class OfflineExportEnvelope
 
     private static byte[] DeriveKey(string passphrase, byte[] salt, int iterations)
     {
-        using var pbkdf2 = new Rfc2898DeriveBytes(passphrase, salt, iterations, HashAlgorithmName.SHA512);
-        return pbkdf2.GetBytes(32);
+        return Rfc2898DeriveBytes.Pbkdf2(passphrase, salt, iterations, HashAlgorithmName.SHA512, 32);
     }
 }

@@ -199,28 +199,6 @@ public sealed class OfflineFoldersSession
     }
 
     /// <summary>
-    /// Returns the unlock state for a custom folder, or null if locked/expired.
-    /// Refreshes the idle timer on success.
-    /// </summary>
-    public CustomFolderUnlock? GetCustomFolderUnlock(string folderName)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(folderName);
-        lock (_lock)
-        {
-            if (!_customUnlocks.TryGetValue(folderName, out var u))
-                return null;
-            if (DateTime.UtcNow - u.LastUsedUtc > CustomFolderIdleTimeout)
-            {
-                u.Wipe();
-                _customUnlocks.Remove(folderName);
-                return null;
-            }
-            u.LastUsedUtc = DateTime.UtcNow;
-            return u;
-        }
-    }
-
-    /// <summary>
     /// Locks a single custom folder, wiping its key and entry.
     /// </summary>
     public void LockCustomFolder(string folderName)

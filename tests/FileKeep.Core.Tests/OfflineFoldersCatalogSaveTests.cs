@@ -7,9 +7,6 @@
 // catalog plaintext with Utf8JsonWriter instead. This test pins the
 // roundtrip (save with chunks, load back identical); the trim behavior
 // itself was verified with a trimmed publish, not this test.
-using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Security.Cryptography;
 using FileKeep.Service;
 using Xunit;

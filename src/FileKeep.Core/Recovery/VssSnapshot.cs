@@ -55,9 +55,6 @@ public sealed class VssSnapshot : FileKeep.Core.ISnapshotProvider
     /// </summary>
     public string? SnapshotPath { get; private set; }
 
-    /// <inheritdoc/>
-    public string ProviderId => "vss";
-
     /// <summary>
     /// Creates the shadow copy. Throws on failure — never returns a
     /// live path as a fallback.

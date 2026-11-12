@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;
 using FileKeep.Core.Security;
 
 namespace FileKeep.Recovery;
@@ -24,7 +23,6 @@ namespace FileKeep.Recovery;
 /// </summary>
 public static class YubiKeyRecovery
 {
-    private const ushort YubicoVid = 0x1050;
     private const ushort VendorUsagePage = 0xFF00;
 
     // ykpers slot commands for HMAC-SHA1 challenge-response.
@@ -237,14 +235,6 @@ public static class YubiKeyRecovery
         public Guid InterfaceClassGuid;
         public int Flags;
         public nint Reserved;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct SP_DEVICE_INTERFACE_DETAIL_DATA
-    {
-        public int cbSize;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string DevicePath;
     }
 
     private static string? GetDevicePath(nint devInfo,

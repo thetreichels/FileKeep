@@ -1,4 +1,3 @@
-using System.Threading;
 using FileKeep.Core;
 using FileKeep.Core.Nntp;
 using FileKeep.Core.Service;

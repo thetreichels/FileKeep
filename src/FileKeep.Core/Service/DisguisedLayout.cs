@@ -222,9 +222,6 @@ public sealed class DisguisedLayout
         _ => Array.Empty<byte>(),
     };
 
-    /// <summary>Longest header in <see cref="HeaderForExtension"/> (the .jpg one).</summary>
-    public static int MaxHeaderLength { get; } = 20;
-
     /// <summary>
     /// Prepends the extension's fake header to <paramref name="content"/>
     /// (no-op for headerless extensions). The header is keyed off the
