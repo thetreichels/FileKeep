@@ -58,12 +58,12 @@ public sealed class TlsByDefaultTests : IDisposable
     [Fact]
     public void Config_OmittedSslAndPort_LoadsAsTls()
     {
-        var config = Load("""{ "nntp": { "host": "news.example.com", "username": "u" } }""");
-        Assert.NotNull(config.Nntp);
-        Assert.True(config.Nntp!.Ssl);
-        Assert.Equal(563, config.Nntp.Port);
+        var config = Load("""{ "nntpProviders": [ { "host": "news.example.com", "username": "u" } ] }""");
+        var provider = Assert.Single(config.NntpProviders);
+        Assert.True(provider.Ssl);
+        Assert.Equal(563, provider.Port);
         // Since Phase 6 removed the load-time location migration, no
-        // locations are derived from the top-level shape. (Locations
+        // locations are derived from the provider list. (Locations
         // written to the file parse with the same TLS defaults — see
         // Location_OmittedSslAndPort_LoadsAsTls.)
         Assert.Empty(config.Locations);
@@ -86,21 +86,18 @@ public sealed class TlsByDefaultTests : IDisposable
     {
         // Stored-config semantics: an explicit false/119 in service.json
         // is a recorded user choice, not a default — load must not
-        // rewrite it to TLS. (The location checked here is one written
-        // to the file; the load-time migration that used to derive an
-        // "Usenet" location from the top-level shape was removed in
-        // Phase 6.)
+        // rewrite it to TLS.
         var config = Load("""
             {
-              "nntp": { "host": "news.example.com", "port": 119, "ssl": false },
+              "nntpProviders": [ { "host": "news.example.com", "port": 119, "ssl": false } ],
               "locations": [
                 { "name": "plain", "type": "nntp", "host": "news.other.example",
                   "port": 119, "ssl": false } ]
             }
             """);
-        Assert.NotNull(config.Nntp);
-        Assert.False(config.Nntp!.Ssl);
-        Assert.Equal(119, config.Nntp.Port);
+        var provider = Assert.Single(config.NntpProviders);
+        Assert.False(provider.Ssl);
+        Assert.Equal(119, provider.Port);
         var loc = Assert.Single(config.Locations, l => l.Name == "plain");
         Assert.False(loc.Ssl);
         Assert.Equal(119, loc.Port);

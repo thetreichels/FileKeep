@@ -23,7 +23,7 @@ public sealed class ServiceConfigStore
 
     /// <summary>
     /// Guards concurrent access to ALL mutable config state — Jobs,
-    /// Locations, NntpProviders, the top-level Nntp, and the protection
+    /// Locations, NntpProviders, and the protection
     /// fields (P2-C1/C2: Jobs were guarded; everything else was mutated
     /// unlocked while handlers and the scheduler read it lock-free,
     /// which tore saves and handed running jobs half-edited locations).
@@ -66,9 +66,9 @@ public sealed class ServiceConfigStore
             return _config.NntpProviders.ToList();
     }
 
-    /// <summary>
-    /// Gets the effective list of global Usenet providers: NntpProviders
-    /// if non-empty, otherwise the single Nntp config as a singleton list.
+    /// Gets the effective list of global Usenet providers: the
+    /// <see cref="ServiceConfig.NntpProviders"/> list (empty when none
+    /// are configured).
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public IReadOnlyList<NntpConfig> EffectiveProviders
@@ -79,9 +79,7 @@ public sealed class ServiceConfigStore
             // list let the scheduler's provider list alias a list the
             // dashboard could replace or mutate mid-run.
             lock (Lock)
-                return _config.NntpProviders.Count > 0 ? _config.NntpProviders.ToList() :
-                    _config.Nntp is not null ? new[] { _config.Nntp } :
-                    Array.Empty<NntpConfig>();
+                return _config.NntpProviders.ToList();
         }
     }
 
@@ -92,23 +90,21 @@ public sealed class ServiceConfigStore
     // lock, then one of these Apply methods swaps it into the live
     // config under Lock, in microseconds. The handler then Saves and
     // reloads exactly as before, outside the lock. That matches the
-    // Config sites today (all of them Save outside the lock except
-    // UpdateNntp — see ApplyNntp below).
+    // Config sites today (all of them Save outside the lock).
     //
     // The hard constraint is today's atomicity, which limits pure
     // candidate-apply: wherever today's lock block reads live state
     // to decide what to write, that read + write move INTO the Apply
     // method under lock, not out to a snapshot check. The documented
     // exceptions are ApplyLocation (blob lookup + DPAPI + disguise
-    // check), ApplyAttachLocation (both existence checks),
-    // ApplyDeleteLocation (strip + remove), and ApplyNntp (mutate +
-    // validate + Usenet sync). Those are typed store operations by
-    // necessity, not candidate swaps — the alternative (snapshot
-    // checks outside the lock) would introduce races that did not
-    // exist today. DPAPI Protect inside ApplyLocation/ApplyNntp is
+    // check), ApplyAttachLocation (both existence checks), and
+    // ApplyDeleteLocation (strip + remove). Those are typed store
+    // operations by necessity, not candidate swaps — the alternative
+    // (snapshot checks outside the lock) would introduce races that
+    // did not exist today. DPAPI Protect inside ApplyLocation is
     // short CPU work, not a hardware wait, so it does not break the
     // no-lock-around-hardware-waits rule. No Apply method Saves,
-    // reloads, or does file IO (ApplyNntp validates, as today).
+    // reloads, or does file IO.
 
     /// <summary>
     /// Swaps a job into the live list by name under the lock: same
@@ -334,76 +330,4 @@ public sealed class ServiceConfigStore
         }
     }
 
-    /// <summary>Result of <see cref="ApplyNntp"/>, captured under the lock.</summary>
-    public sealed record ApplyNntpOutcome(
-        bool Cleared, string Host, int Port, string Username, bool Ssl,
-        int Connections, bool HasPassword);
-
-    /// <summary>
-    /// Applies an NNTP update under the lock, exactly as the old
-    /// UpdateNntp lock block did up to the Save: empty host clears
-    /// the configuration; otherwise the existing blob is kept unless
-    /// a plaintext password is supplied (then DPAPI-protected, inside
-    /// the lock, as with ApplyLocation), plaintext is cleared, and
-    /// the Nntp object is assigned. Then the whole config is
-    /// validated under the lock (a validation failure leaves the
-    /// live Nntp assigned and skips the sync, as before), and the
-    /// "Usenet" location is synced from the new settings. The
-    /// return data is captured under the lock, so the handler's log
-    /// and response cannot report a concurrent UpdateNntp call's
-    /// host.
-    /// DELIBERATE CHANGE, disclosed: today Save + ReloadJobs also
-    /// ran inside this lock; they now run in the handler outside it,
-    /// like every other Config site. That narrows the atomic window
-    /// (Validate + sync are still atomic; sync + Save are not), but
-    /// Save re-validates the whole config before writing, so an
-    /// invalid state still cannot be persisted, and moving Reload
-    /// outside removes a lock-order inversion that existed today:
-    /// UpdateNntp acquired Store.Lock then _stateLock (via Reload),
-    /// while every other Reload path acquires _stateLock then
-    /// Store.Lock (via EffectiveProviders). No other site's
-    /// atomicity changes.
-    /// </summary>
-    public ApplyNntpOutcome ApplyNntp(NntpConfig nntp)
-    {
-        lock (Lock)
-        {
-            if (string.IsNullOrWhiteSpace(nntp.Host))
-            {
-                _config.Nntp = null;
-            }
-            else
-            {
-                string? blobToKeep = _config.Nntp?.PasswordProtected;
-                if (!string.IsNullOrEmpty(nntp.PasswordPlaintext))
-                    blobToKeep = Dpapi.Protect(nntp.PasswordPlaintext);
-                nntp.PasswordProtected = blobToKeep;
-                nntp.PasswordPlaintext = null;
-                _config.Nntp = nntp;
-            }
-
-            _config.Validate();
-
-            var usenetLoc = _config.Locations.FirstOrDefault(l =>
-                l.ParsedKind == LocationKind.Nntp && l.Name.Equals("Usenet", StringComparison.OrdinalIgnoreCase));
-            if (usenetLoc is not null && _config.Nntp is not null)
-            {
-                usenetLoc.Host = _config.Nntp.Host;
-                usenetLoc.Port = _config.Nntp.Port;
-                usenetLoc.Ssl = _config.Nntp.Ssl;
-                usenetLoc.Username = _config.Nntp.Username;
-                usenetLoc.Connections = _config.Nntp.Connections;
-                usenetLoc.Newsgroup = _config.Nntp.Newsgroup;
-                usenetLoc.RetentionDays = _config.Nntp.RetentionDays;
-                usenetLoc.PasswordProtected = _config.Nntp.PasswordProtected;
-                usenetLoc.RedundancyMode = _config.Nntp.RedundancyMode;
-            }
-
-            return _config.Nntp is null
-                ? new ApplyNntpOutcome(true, "", 0, "", false, 0, false)
-                : new ApplyNntpOutcome(false, _config.Nntp.Host, _config.Nntp.Port,
-                    _config.Nntp.Username, _config.Nntp.Ssl, _config.Nntp.Connections,
-                    _config.Nntp.HasPassword);
-        }
-    }
 }

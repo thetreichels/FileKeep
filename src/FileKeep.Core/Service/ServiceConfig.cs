@@ -85,25 +85,15 @@ public sealed class ServiceConfig
     public List<MigratedVaultRecord> PreviousVaults { get; set; } = new();
 
     /// <summary>
-    /// Global Usenet provider surface for the repo-scoped operations that
+    /// Global Usenet providers for the repo-scoped operations that
     /// are not tied to a job's targets: remote-backup discovery, NZB
     /// download, retention checks, and the dashboard's manual upload.
-    /// Read via <see cref="EffectiveProviders"/> (fallback when
-    /// <see cref="NntpProviders"/> is empty); no dashboard route writes
-    /// it anymore. Jobs do NOT upload through this —
-    /// they upload to their target <see cref="Locations"/>. Null/empty
-    /// host means no global provider is configured. The password comes
+    /// Read via <see cref="EffectiveProviders"/>. Jobs do NOT upload
+    /// through this — they upload to their target
+    /// <see cref="Locations"/>. If set, uploads go to all providers;
+    /// downloads try each in order until the chunk is found. An empty
+    /// list means no global provider is configured. The password comes
     /// from FILEKEEP_NNTP_PASSWORD if set, else the DPAPI blob.
-    /// </summary>
-    [JsonPropertyName("nntp")]
-    public NntpConfig? Nntp { get; set; }
-
-    /// <summary>
-    /// Multiple global Usenet providers (same repo-scoped surface as
-    /// <see cref="Nntp"/>). If set, uploads go to all providers;
-    /// downloads try each in order until the chunk is found. If empty,
-    /// <see cref="EffectiveProviders"/> falls back to the singleton
-    /// <see cref="Nntp"/>.
     /// </summary>
     [JsonPropertyName("nntpProviders")]
     public List<NntpConfig> NntpProviders { get; set; } = new();
@@ -293,8 +283,8 @@ public sealed class ServiceConfig
     public string? RelayPairingSecretProtected { get; set; }
 
     /// <summary>
-    /// Gets the effective list of global Usenet providers: NntpProviders
-    /// if non-empty, otherwise the single Nntp config as a singleton list.
+    /// Gets the effective list of global Usenet providers: the
+    /// <see cref="NntpProviders"/> list (empty when none are configured).
     /// Delegates to <see cref="ServiceConfigStore.EffectiveProviders"/>.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]

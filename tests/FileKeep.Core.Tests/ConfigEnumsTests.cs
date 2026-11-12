@@ -248,23 +248,6 @@ public sealed class ConfigEnumsTests
         Assert.Contains("has unknown redundancyMode 'raid6'", ex.Message);
     }
 
-    [Fact]
-    public void Validate_GlobalNntpBadRedundancy_Rejected()
-    {
-        // New rejection (previously the global entry's redundancy was
-        // never validated and garbage silently behaved as "none" in
-        // the uploader — the SF-22 silent-none bug, un-fixed for the
-        // global entry). Blank-host placeholders are still tolerated.
-        var config = ValidConfig();
-        config.Nntp = new NntpConfig { Host = "news.example", RedundancyMode = "raid6" };
-        var ex = Assert.Throws<InvalidOperationException>(() => config.Validate());
-        Assert.Contains("nntp.redundancyMode 'raid6' is invalid", ex.Message);
-
-        var placeholder = ValidConfig();
-        placeholder.Nntp = new NntpConfig { Host = "", RedundancyMode = "raid6" };
-        placeholder.Validate();
-    }
-
     // ---- Repository open ----
 
     [Fact]

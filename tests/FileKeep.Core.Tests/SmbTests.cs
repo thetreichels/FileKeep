@@ -50,8 +50,9 @@ public sealed class SmbTests : IDisposable
     {
         // No backwards compatibility: a pre-locations config file
         // carrying the retired per-job fields (autoUpload, smbShare,
-        // smbUser, smbPasswordProtected) no longer loads — the
-        // fail-closed loader rejects the unrecognized members.
+        // smbUser, smbPasswordProtected) — and the retired "nntp"
+        // singleton — no longer loads: the fail-closed loader
+        // rejects the unrecognized members.
         Directory.CreateDirectory(_tmp);
         string repo = Path.Combine(_tmp, "repo");
         string src = Path.Combine(_tmp, "src");

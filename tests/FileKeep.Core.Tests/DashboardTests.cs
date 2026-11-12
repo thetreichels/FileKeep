@@ -1357,13 +1357,16 @@ public sealed class DashboardTests : IDisposable
                 new() { Name = "docs", Repo = _repoDir, Sources = new List<string> { _srcDir },
                         Schedule = "daily 02:00" },
             },
-            Nntp = new NntpConfig
+            NntpProviders = new List<NntpConfig>
             {
-                Host = "news.example.com",
-                Port = 563,
-                Username = "user",
-                Ssl = true,
-                PasswordProtected = "dGVzdC1ibG9i", // base64 "test-blob"
+                new()
+                {
+                    Host = "news.example.com",
+                    Port = 563,
+                    Username = "user",
+                    Ssl = true,
+                    PasswordProtected = "dGVzdC1ibG9i", // base64 "test-blob"
+                },
             },
         };
         string path = Path.Combine(_workDir, "nntp-test.json");
@@ -1373,8 +1376,8 @@ public sealed class DashboardTests : IDisposable
         Assert.DoesNotContain("\"password\":", json); // plaintext never persisted
 
         var loaded = ServiceConfig.Load(path);
-        Assert.Equal("dGVzdC1ibG9i", loaded.Nntp?.PasswordProtected);
-        Assert.True(loaded.Nntp!.HasPassword);
+        Assert.Equal("dGVzdC1ibG9i", loaded.NntpProviders[0].PasswordProtected);
+        Assert.True(loaded.NntpProviders[0].HasPassword);
     }
 
     [Fact]
@@ -1387,49 +1390,6 @@ public sealed class DashboardTests : IDisposable
         Assert.NotNull(job);
         Assert.True(job.BackupPrivilege);
         Assert.Equal(new[] { "nas" }, job.Targets);
-    }
-
-    [Fact]
-    public void UpdateNntp_ClearsWhenHostEmpty()
-    {
-        var config = MakeConfig();
-        config.Nntp = new NntpConfig { Host = "news.example.com", Port = 119 };
-        var scheduler = new BackupScheduler(config);
-        string configPath = Path.Combine(_workDir, "service.json");
-        config.Save(configPath);
-
-        var (status, _) = DashboardApi.UpdateNntp(config, scheduler, configPath,
-            new NntpConfig { Host = "" });
-        Assert.Equal(200, status);
-        Assert.Null(config.Nntp);
-    }
-
-    [Fact]
-    public void UpdateNntp_SetPayload_SerializesThroughDashboardContext()
-    {
-        // The payload must be a named DTO registered in
-        // DashboardJsonContext: the pre-fix anonymous type serialized
-        // to an empty body in the trimmed build (no source-gen
-        // metadata), which a reflection-based assert cannot see — so
-        // serialize through the app's context, per house rule.
-        var config = MakeConfig();
-        var scheduler = new BackupScheduler(config);
-        string configPath = Path.Combine(_workDir, "service.json");
-        config.Save(configPath);
-
-        var (status, payload) = DashboardApi.UpdateNntp(config, scheduler, configPath,
-            new NntpConfig
-            {
-                Host = "news.example.com", Port = 563, Username = "u",
-                Ssl = true, Connections = 8,
-            });
-        Assert.Equal(200, status);
-        var typeInfo = DashboardJsonContext.Default.GetTypeInfo(payload.GetType());
-        Assert.NotNull(typeInfo);
-        string json = System.Text.Json.JsonSerializer.Serialize(payload, typeInfo);
-        Assert.Contains("\"host\":\"news.example.com\"", json);
-        Assert.Contains("\"port\":563", json);
-        Assert.Contains("\"ssl\":true", json);
     }
 
     [Fact]

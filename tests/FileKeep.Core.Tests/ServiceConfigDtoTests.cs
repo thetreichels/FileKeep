@@ -58,22 +58,17 @@ public sealed class ServiceConfigDtoTests : IDisposable
                 RedundancyMode = "none",
             },
         },
-        Nntp = new NntpConfig
-        {
-            Host = "news.example",
-            Port = 563,
-            Ssl = true,
-            Username = "u",
-            Connections = 10,
-            Newsgroup = "alt.binaries.test",
-            RetentionDays = 1095,
-        },
         NntpProviders = new List<NntpConfig>
         {
             new()
             {
-                Host = "news2.example",
+                Host = "news.example",
                 Port = 563,
+                Ssl = true,
+                Username = "u",
+                Connections = 10,
+                Newsgroup = "alt.binaries.test",
+                RetentionDays = 1095,
                 RedundancyMode = "none",
             },
         },
@@ -131,15 +126,14 @@ public sealed class ServiceConfigDtoTests : IDisposable
         Assert.Equal("u", loc.SmbUser);
         Assert.Equal("none", loc.RedundancyMode);
 
-        Assert.NotNull(loaded.Nntp);
-        Assert.Equal("news.example", loaded.Nntp!.Host);
-        Assert.Equal(563, loaded.Nntp.Port);
-        Assert.True(loaded.Nntp.Ssl);
-        Assert.Equal("alt.binaries.test", loaded.Nntp.Newsgroup);
-        Assert.Equal(1095, loaded.Nntp.RetentionDays);
-
         var provider = Assert.Single(loaded.NntpProviders);
-        Assert.Equal("news2.example", provider.Host);
+        Assert.Equal("news.example", provider.Host);
+        Assert.Equal(563, provider.Port);
+        Assert.True(provider.Ssl);
+        Assert.Equal("u", provider.Username);
+        Assert.Equal(10, provider.Connections);
+        Assert.Equal("alt.binaries.test", provider.Newsgroup);
+        Assert.Equal(1095, provider.RetentionDays);
         Assert.Equal("none", provider.RedundancyMode);
 
         var vault = Assert.Single(loaded.PreviousVaults);
@@ -158,6 +152,33 @@ public sealed class ServiceConfigDtoTests : IDisposable
     }
 
     [Fact]
+    public void Load_RetiredNntpSingleton_Throws()
+    {
+        // O1: the "nntp" singleton is gone — an old config carrying
+        // only that key (no other retired members) must fail loudly
+        // under the fail-closed loader, not load with the provider
+        // silently dropped. The same provider under "nntpProviders"
+        // loads fine (positive control).
+        string oldPath = Path.Combine(_workDir, "old-service.json");
+        File.WriteAllText(oldPath, """
+            { "dashboardPort": 18002,
+              "nntp": { "host": "news.example", "port": 563, "ssl": true } }
+            """);
+        var ex = Assert.Throws<InvalidOperationException>(() => ServiceConfig.Load(oldPath));
+        Assert.Contains("Invalid service config", ex.Message);
+        Assert.Contains("nntp", ex.Message);
+
+        string newPath = Path.Combine(_workDir, "new-service.json");
+        File.WriteAllText(newPath, """
+            { "dashboardPort": 18002,
+              "nntpProviders": [ { "host": "news.example", "port": 563, "ssl": true } ] }
+            """);
+        var loaded = ServiceConfig.Load(newPath);
+        var provider = Assert.Single(loaded.NntpProviders);
+        Assert.Equal("news.example", provider.Host);
+    }
+
+    [Fact]
     public void DtoMove_JsonShape_HasExpectedKeys()
     {
         string path = Path.Combine(_workDir, "service.json");
@@ -167,7 +188,7 @@ public sealed class ServiceConfigDtoTests : IDisposable
         var root = doc.RootElement;
         foreach (string key in new[]
         {
-            "dashboardPort", "dashboardBind", "jobs", "locations", "nntp",
+            "dashboardPort", "dashboardBind", "jobs", "locations",
             "nntpProviders", "previousVaults", "protectionLinkMode",
             "yubiKeys", "retentionEnabled", "retentionCheckIntervalHours",
             "retentionWarnDays", "retentionRepostThresholdDays",
@@ -185,9 +206,9 @@ public sealed class ServiceConfigDtoTests : IDisposable
         foreach (string key in new[] { "name", "type", "share", "smbUser", "redundancyMode" })
             Assert.True(locJson.TryGetProperty(key, out _), $"missing location key '{key}'");
 
-        var nntpJson = root.GetProperty("nntp");
-        foreach (string key in new[] { "host", "port", "ssl", "username", "connections", "newsgroup", "retentionDays" })
-            Assert.True(nntpJson.TryGetProperty(key, out _), $"missing nntp key '{key}'");
+        var providerJson = root.GetProperty("nntpProviders")[0];
+        foreach (string key in new[] { "host", "port", "ssl", "username", "connections", "newsgroup", "retentionDays", "redundancyMode" })
+            Assert.True(providerJson.TryGetProperty(key, out _), $"missing nntpProviders key '{key}'");
 
         var vaultJson = root.GetProperty("previousVaults")[0];
         foreach (string key in new[] { "jobs", "oldRepo", "newRepo", "migratedUtc", "oldTargets" })

@@ -34,7 +34,7 @@ public sealed class ServiceConfigBuilder
     /// Builds the candidate and validates it. Throws the same
     /// <see cref="InvalidOperationException"/> the temp-config path threw
     /// for an invalid candidate. The candidate mirrors the temp config
-    /// the dashboard used to build inline: live port/bind/Nntp, snapshot
+    /// the dashboard used to build inline: live port/bind, snapshot
     /// locations, and snapshot jobs with the candidate swapped in.
     /// </summary>
     public ServiceConfig Build()
@@ -46,7 +46,6 @@ public sealed class ServiceConfigBuilder
         {
             DashboardPort = _live.DashboardPort,
             DashboardBind = _live.DashboardBind,
-            Nntp = _live.Nntp,
             Locations = _live.SnapshotLocations(),
             Jobs = _live.SnapshotJobs()
                 .Where(j => !j.Name.Equals(job.Name, StringComparison.OrdinalIgnoreCase))

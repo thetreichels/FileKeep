@@ -279,28 +279,6 @@ public sealed class ServiceConfigValidatorTests
     // ---- Global NNTP + providers ----
 
     [Fact]
-    public void GlobalNntp_HostBearingEntries_Checked_BlankHostTolerated()
-    {
-        var badPort = ValidConfig();
-        badPort.Nntp = new NntpConfig { Host = "h", Port = 0 };
-        RejectsWith(badPort, "nntp.port 0 is out of range.");
-
-        var badConn = ValidConfig();
-        badConn.Nntp = new NntpConfig { Host = "h", Port = 563, Connections = 0 };
-        RejectsWith(badConn, "nntp.connections must be between 1 and 100.");
-
-        var badRed = ValidConfig();
-        badRed.Nntp = new NntpConfig { Host = "h", Port = 563, RedundancyMode = "raid6" };
-        RejectsWith(badRed, "nntp.redundancyMode 'raid6' is invalid");
-
-        // Blank-host globals are placeholders (uploads skip them): even
-        // garbage fields on one are tolerated.
-        var placeholder = ValidConfig();
-        placeholder.Nntp = new NntpConfig { Host = "", Port = 0, RedundancyMode = "raid6" };
-        ServiceConfigValidator.Validate(placeholder);
-    }
-
-    [Fact]
     public void Providers_BlankHostSkipped_HostBearingChecked()
     {
         var skipped = ValidConfig();

@@ -7,7 +7,7 @@ namespace FileKeep.Core.Tests;
 /// Config-lifecycle split, Stage 5: the builder replaces the dashboard's
 /// temp-config validation trick (build a throwaway config, validate it).
 /// These tests pin the builder to the trick's behavior: same composition
-/// (live port/bind/Nntp, snapshot locations, jobs with the candidate
+/// (live port/bind, snapshot locations, jobs with the candidate
 /// swapped in by name), same rejections, and output that passes Load's
 /// validation through a real file. All file IO here is deliberate.
 /// </summary>

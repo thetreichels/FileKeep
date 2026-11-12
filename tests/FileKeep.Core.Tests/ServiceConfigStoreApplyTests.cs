@@ -17,8 +17,8 @@ namespace FileKeep.Core.Tests;
 ///   the live job object before commit; a no-op swaps nothing.
 /// - Attach checks location first, then job, inside the lock.
 /// - DeleteLocation strips + removes atomically, in job order.
-/// - ApplyLocation/ApplyNntp keep the existing blob on blank
-///   plaintext and protect a supplied plaintext inside the lock;
+/// - ApplyLocation keeps the existing blob on blank
+///   plaintext and protects a supplied plaintext inside the lock;
 ///   plaintext tests are Windows-gated (DPAPI throws on Linux),
 ///   where they assert the Protect call path instead.
 /// - ApplyLocation's disguise check leaves the live location
@@ -262,65 +262,5 @@ public sealed class ServiceConfigStoreApplyTests
         var outcome = config.Store.ApplyLocation(loc);
         Assert.Null(outcome.DisguiseError);
         Assert.Equal("xor", existing.RedundancyMode);
-    }
-
-    // ---- ApplyNntp ----
-
-    [Fact]
-    public void ApplyNntp_BlankHostClearsWithoutSyncingUsenetLocation()
-    {
-        var config = new ServiceConfig();
-        var usenet = Loc("Usenet", "nntp");
-        usenet.Host = "old.example";
-        config.Locations.Add(usenet);
-        config.Nntp = new NntpConfig { Host = "old.example" };
-        var outcome = config.Store.ApplyNntp(new NntpConfig { Host = "" });
-        Assert.True(outcome.Cleared);
-        Assert.Null(config.Nntp);
-        Assert.Equal("old.example", usenet.Host);
-    }
-
-    [Fact]
-    public void ApplyNntp_BlankKeepsBlobAndSyncsUsenetLocation()
-    {
-        var config = new ServiceConfig();
-        var usenet = Loc("Usenet", "nntp");
-        usenet.Host = "old.example";
-        config.Locations.Add(usenet);
-        config.Nntp = new NntpConfig { Host = "old.example", PasswordProtected = "old-blob" };
-        var outcome = config.Store.ApplyNntp(new NntpConfig
-        {
-            Host = "new.example",
-            Port = 119,
-            Username = "u",
-            Ssl = false,
-            Connections = 4,
-        });
-        Assert.False(outcome.Cleared);
-        Assert.Equal("new.example", outcome.Host);
-        Assert.Equal("old-blob", config.Nntp!.PasswordProtected);
-        Assert.Null(config.Nntp.PasswordPlaintext);
-        Assert.Equal("new.example", usenet.Host);
-        Assert.Equal(119, usenet.Port);
-        Assert.False(usenet.Ssl);
-        Assert.Equal("u", usenet.Username);
-        Assert.Equal("old-blob", usenet.PasswordProtected);
-    }
-
-    [Fact]
-    public void ApplyNntp_PlaintextReplacesBlobInsideLock()
-    {
-        var config = new ServiceConfig();
-        config.Nntp = new NntpConfig { Host = "old.example", PasswordProtected = "old-blob" };
-        if (!OperatingSystem.IsWindows())
-        {
-            Assert.Throws<PlatformNotSupportedException>(() =>
-                config.Store.ApplyNntp(new NntpConfig { Host = "new.example", PasswordPlaintext = "secret" }));
-            return;
-        }
-        var outcome = config.Store.ApplyNntp(new NntpConfig { Host = "new.example", PasswordPlaintext = "secret" });
-        Assert.False(outcome.Cleared);
-        Assert.NotEqual("old-blob", config.Nntp!.PasswordProtected);
-        Assert.Null(config.Nntp.PasswordPlaintext);
     }
 }

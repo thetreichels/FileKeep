@@ -850,7 +850,7 @@ public sealed class JobPauseTests : IDisposable
         var config = MakeMultiTargetConfig(LocalShare("one"));
         config.RetentionEnabled = true;
         config.RetentionCheckIntervalHours = 24;
-        config.Nntp = new NntpConfig { Host = "unused.invalid", Port = 119 };
+        config.NntpProviders = new List<NntpConfig> { new NntpConfig { Host = "unused.invalid", Port = 119 } };
         config.Jobs[0].Repo = Path.Combine(_workDir, "missing-repo");
         var t0 = new DateTime(2026, 10, 5, 10, 0, 0);
         var scheduler = new BackupScheduler(config, new ManualClock { Now = t0 },

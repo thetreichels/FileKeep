@@ -115,19 +115,20 @@ public sealed class ServiceConfigStoreTests
     }
 
     [Fact]
-    public void EffectiveProviders_FallsBackToSingletonThenEmpty()
+    public void EffectiveProviders_ListOnly()
     {
         var config = ConfigWith(0, 0, 0);
-        config.Nntp = new NntpConfig { Host = "solo" };
+        Assert.Empty(config.EffectiveProviders);
+        config.NntpProviders = new List<NntpConfig> { new() { Host = "solo" } };
         Assert.Equal(new[] { "solo" }, config.EffectiveProviders.Select(p => p.Host));
-        config.Nntp = null;
+        config.NntpProviders = new List<NntpConfig>();
         Assert.Empty(config.EffectiveProviders);
     }
 
     // ---- Concurrency (P2-C2 regression) ----
 
     [Fact]
-    public void Concurrent_SnapshotsDuringMutation_NeverTearOrAlias()
+    public async Task Concurrent_SnapshotsDuringMutation_NeverTearOrAlias()
     {
         var config = ConfigWith(4, 4, 4);
         const int iterations = 200;
@@ -172,14 +173,21 @@ public sealed class ServiceConfigStoreTests
                 }
             }
         });
+        // B-3 (xUnit1031): was Task.WaitAll; await instead. Awaiting
+        // WhenAll unwraps its AggregateException to the first fault,
+        // so on failure collect every faulted task's exception here
+        // (same failure report as the old AggregateException catch).
+        var all = readers.Concat(new[] { writer }).ToArray();
         try
         {
-            Task.WaitAll(readers.Concat(new[] { writer }).ToArray());
+            await Task.WhenAll(all);
         }
-        catch (AggregateException ex)
+        catch (Exception)
         {
             Assert.Fail("snapshot/mutation task faulted: " +
-                string.Join("; ", ex.InnerExceptions.Select(e => e.GetType().Name + ": " + e.Message)));
+                string.Join("; ", all.Where(t => t.Exception is not null)
+                    .SelectMany(t => t.Exception!.InnerExceptions)
+                    .Select(e => e.GetType().Name + ": " + e.Message)));
         }
         Assert.All(readers, t => Assert.True(t.IsCompletedSuccessfully));
         Assert.True(writer.IsCompletedSuccessfully);

@@ -1117,8 +1117,6 @@ static int ExpirationCheck(string[] args)
         try
         {
             var svcConfig = FileKeep.Core.Service.ServiceConfig.Load(configPath);
-            if (svcConfig.Nntp is not null && !string.IsNullOrWhiteSpace(svcConfig.Nntp.Host))
-                retentionByHost[svcConfig.Nntp.Host] = svcConfig.Nntp.RetentionDays;
             foreach (var p in svcConfig.NntpProviders)
             {
                 if (!string.IsNullOrWhiteSpace(p.Host))
@@ -1164,13 +1162,14 @@ static int RetentionCheck(string[] args)
 
     using var repo = BackupRepository.Open(repoPath, GetPassphrase(args));
 
-    // Build NNTP config from service config or args
+    // Build NNTP config from service config or args: the first
+    // host-bearing entry in the global providers list.
     string? configPath = GetOption(args, "--config");
     FileKeep.Core.Service.NntpConfig? nntp = null;
     if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
     {
         var svcConfig = FileKeep.Core.Service.ServiceConfig.Load(configPath);
-        nntp = svcConfig.Nntp;
+        nntp = svcConfig.EffectiveProviders.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.Host));
     }
     if (nntp is null)
     {
