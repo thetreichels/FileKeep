@@ -403,6 +403,7 @@
     <a class="nav-item active" data-view="overview">Overview</a>
     <a class="nav-item" data-view="jobs">Backup jobs</a>
     <a class="nav-item" data-view="vault">Banked Vault</a>
+    <a class="nav-item" data-view="lockboxes">Lockboxes</a>
     <a class="nav-item" data-view="stealth">Stealth Folders</a>
     <a class="nav-item" data-view="security">Security</a>
     <a class="nav-item" data-view="tools">Tools & Settings</a>
@@ -602,7 +603,7 @@
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeRestoreModal()">Cancel</button>
-            <button onclick="switchToExportFromRestore()">Export as bundle…</button>
+            <button onclick="switchToExportFromRestore()">Export as Lockbox…</button>
             <button class="accent" id="restoreModalGo" onclick="submitRestore()">Start recovery</button>
           </div>
         </div>
@@ -619,8 +620,8 @@
       </div>
       <div id="exportModal" class="modal" style="display:none">
         <div class="modal-box">
-          <h2 style="margin-top:0">Export as bundle</h2>
-          <p class="meta">Package this backup as an encrypted <code>.kfb</code> bundle for the iOS secure workspace.</p>
+          <h2 style="margin-top:0" id="exportModalHeading">Export as Lockbox</h2>
+          <p class="meta">Package this backup as an encrypted <code>.kfb</code> Lockbox for the iOS secure workspace.</p>
           <div id="exportModalTitle" style="font-weight:600;margin:12px 0"></div>
           <div class="meta" id="exportModalSub"></div>
           <div style="margin-top:12px">
@@ -629,7 +630,7 @@
             <label class="check"><input type="checkbox" id="exp-use-yk" onchange="updateExportForm()"> YubiKey</label>
           </div>
           <div id="exp-pass-row" style="margin-top:8px">
-            <input id="exp-passphrase" type="password" placeholder="Bundle passphrase" autocomplete="new-password" style="flex:1;width:100%">
+            <input id="exp-passphrase" type="password" placeholder="Lockbox passphrase" autocomplete="new-password" style="flex:1;width:100%">
             <input id="exp-passphrase2" type="password" placeholder="Confirm passphrase" autocomplete="new-password" style="flex:1;width:100%;margin-top:6px">
           </div>
           <div id="exp-link-row" style="margin-top:8px;display:none">
@@ -640,13 +641,59 @@
               </select>
             </label>
           </div>
-          <div class="meta" style="margin-top:8px">YubiKey will prompt for a touch when you export. The bundle opens in the iOS app with the methods you pick here.</div>
+          <div class="meta" id="exp-yk-note" style="margin-top:8px">YubiKey will prompt for a touch when you export. The Lockbox opens in the iOS app with the methods you pick here.</div>
           <div id="export-error" style="display:none;color:var(--bad);font-size:13px;margin-top:8px"></div>
           <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
             <button onclick="closeExportModal()">Cancel</button>
-            <button class="accent" id="exportModalGo" onclick="submitExport()">Export bundle</button>
+            <button class="accent" id="exportModalGo" onclick="submitMethodPicker()">Export Lockbox</button>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="view" id="view-lockboxes">
+      <h1>Lockboxes</h1>
+      <p style="color:var(--text-2);margin:-12px 0 20px">A Lockbox is a portable encrypted <code>.kfb</code> file — a snapshot of files or a backup that opens on your iPhone. Make one here, or bring one back in as a Stealth Folder.</p>
+      <div class="card">
+        <div class="name" style="font-size:16px;font-weight:600">New Lockbox…</div>
+        <p style="color:var(--text-2);font-size:13px;margin:6px 0">From files on this PC, or from a backup already in the Banked Vault. Either way you pick the unlock methods first — passphrase, YubiKey, or both.</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+          <button onclick="document.getElementById('lb-files-picker').click()">Choose files…</button>
+          <span id="lb-files-label" style="font-size:13px;color:var(--text-2)">No files chosen</span>
+          <input id="lb-files-picker" type="file" multiple style="display:none" onchange="lbFilesChanged()">
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+          <input id="lb-new-name" type="text" placeholder="Lockbox name (optional — defaults to lockbox)" autocomplete="off" style="flex:1">
+          <button class="accent" onclick="lbStartCreateFromFiles()">Create Lockbox…</button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+          <select id="lb-backup" style="flex:1"><option value="">Loading backups…</option></select>
+          <input id="lb-backup-name" type="text" placeholder="Lockbox name (optional — defaults to backup)" autocomplete="off">
+          <button class="accent" onclick="lbStartCreateFromBackup()">Create Lockbox from backup…</button>
+        </div>
+      </div>
+      <div class="card" id="lb-import-card">
+        <div class="name" style="font-size:16px;font-weight:600">Import Lockbox as folder…</div>
+        <p style="color:var(--text-2);font-size:13px;margin:6px 0">Unlock a <code>.kfb</code> file and bring its files in as a Stealth Folder. If the folder already exists, new files are added; if a file with the same path is already there, the whole import is refused and the conflicting path is named — delete it first, then import again.</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+          <button onclick="document.getElementById('lb-import-picker').click()">Choose Lockbox…</button>
+          <span id="lb-import-label" style="font-size:13px;color:var(--text-2)">No Lockbox chosen</span>
+          <input id="lb-import-picker" type="file" accept=".kfb" style="display:none" onchange="lbImportFileChanged()">
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+          <input id="lb-import-name" type="text" placeholder="Folder name" maxlength="128" autocomplete="off" style="flex:1">
+          <select id="lb-import-location"></select>
+          <button class="accent" onclick="lbStartImport()">Import Lockbox…</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div class="grow">
+            <div class="name" style="font-size:16px;font-weight:600">Received Lockboxes</div>
+          </div>
+          <button onclick="loadReceivedLockboxes()">Refresh</button>
+        </div>
+        <p style="color:var(--text-2);font-size:13px;margin:6px 0">Lockboxes your iPhone beamed to this PC. To import one, use “Import as folder” below, then pick its <code>.kfb</code> file from the relay folder.</p>
+        <div id="lb-received-list" style="margin-top:12px"><p style="color:var(--text-2)">Loading…</p></div>
       </div>
     </div>
     <div class="view" id="view-stealth">
@@ -742,6 +789,7 @@
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <input id="st-file-export-pass" type="password" placeholder="Export passphrase for this file" autocomplete="off">
               <button onclick="stExportFile()">Export file…</button>
+              <button onclick="stSendFileLockbox()">Send to phone as Lockbox…</button>
             </div>
             <p style="color:var(--text-2);font-size:13px;margin:0">Same encrypted package as a folder export, but with only this file inside. Importing it into a machine that already has the folder merges it in (replaces the same file, keeps the rest); importing it elsewhere creates the folder. The package holds no credentials and no plaintext filenames.</p>
           </div>
@@ -751,6 +799,7 @@
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">
             <input id="st-export-pass" type="password" placeholder="Export passphrase" autocomplete="off">
             <button onclick="stExport()">Export encrypted package…</button>
+            <button onclick="stSendFolderLockbox()">Send to phone as Lockbox…</button>
             <button onclick="stForget()">Forget…</button>
           </div>
           <p style="color:#c00;font-size:13px;margin:6px 0">Forget removes this folder from this machine's catalog only (destination chunks stay, orphaned and opaque). Without an export first, the folder is unrecoverable from this machine.</p>
@@ -1831,6 +1880,7 @@ document.querySelectorAll('.nav-item').forEach(a => a.addEventListener('click', 
   document.querySelector('main').scrollTop = 0;
   if (a.dataset.view === 'about') loadAboutVersion();
   if (a.dataset.view === 'stealth') ofRefresh();
+  if (a.dataset.view === 'lockboxes') loadLockboxesView();
 }));
 function fmtLast(j) {
   if (!j.lastResult) return '<span class="pill idle">never run</span>';
@@ -2830,13 +2880,26 @@ function switchToExportFromRestore() {
   closeRestoreModal();
   if (backupId) openExportModal(backupId);
 }
-// Export bundle modal
+// Shared unlock-method picker (the #exportModal dialog): one picker
+// for every Lockbox flow — export a backup, create a Lockbox from
+// files or from a backup, send a folder/file to the phone, and unlock
+// a Lockbox for import. The method checkboxes + passphrase fields +
+// AND/OR select are the same in all of them; only the heading, the Go
+// label, and what happens on submit change. `methodPicker` holds the
+// pending flow until the user confirms.
 let exportTarget = null;
-async function openExportModal(backupId) {
-  if (!await ensureRestoreSession()) return;
-  exportTarget = { backupId };
-  document.getElementById('exportModalTitle').textContent = 'Export backup';
-  document.getElementById('exportModalSub').textContent = 'Backup ' + backupId.substring(0, 8) + '\u2026';
+let methodPicker = null;
+function openMethodPicker(opts) {
+  // opts: { kind, heading, title, sub, goLabel, note, backupId? } —
+  // kind is 'export', 'create-files', 'create-backup', 'folder',
+  // 'file', or 'import'.
+  methodPicker = opts;
+  if (opts.kind === 'export') exportTarget = { backupId: opts.backupId };
+  document.getElementById('exportModalHeading').textContent = opts.heading;
+  document.getElementById('exportModalTitle').textContent = opts.title;
+  document.getElementById('exportModalSub').textContent = opts.sub || '';
+  document.getElementById('exportModalGo').textContent = opts.goLabel;
+  if (opts.note) document.getElementById('exp-yk-note').textContent = opts.note;
   document.getElementById('export-error').style.display = 'none';
   document.getElementById('exp-passphrase').value = '';
   document.getElementById('exp-passphrase2').value = '';
@@ -2845,17 +2908,35 @@ async function openExportModal(backupId) {
   updateExportForm();
   document.getElementById('exportModal').style.display = '';
 }
+async function openExportModal(backupId) {
+  if (!await ensureRestoreSession()) return;
+  openMethodPicker({
+    kind: 'export', backupId,
+    heading: 'Export as Lockbox',
+    title: 'Export backup',
+    sub: 'Backup ' + backupId.substring(0, 8) + '\u2026',
+    goLabel: 'Export Lockbox',
+    note: 'YubiKey will prompt for a touch when you export. The Lockbox opens in the iOS app with the methods you pick here.'
+  });
+}
 function closeExportModal() {
   document.getElementById('exportModal').style.display = 'none';
   exportTarget = null;
+  methodPicker = null;
 }
 function updateExportForm() {
   const usePass = document.getElementById('exp-use-pass').checked;
   const useYk = document.getElementById('exp-use-yk').checked;
   document.getElementById('exp-pass-row').style.display = usePass ? '' : 'none';
-  document.getElementById('exp-link-row').style.display = (usePass && useYk) ? '' : 'none';
+  // Import unlocks take whatever methods are ticked (the server tries
+  // each wrap; an AND Lockbox needs every share) — the AND/OR choice
+  // only applies when *creating* a Lockbox, so hide it for imports.
+  const isImport = methodPicker && methodPicker.kind === 'import';
+  document.getElementById('exp-link-row').style.display = (!isImport && usePass && useYk) ? '' : 'none';
 }
-async function submitExport() {
+// Reads the picker into { methods, requireAll, passphrase, useYk }.
+// Returns null (with the error shown) when the picker is not usable.
+function readMethodPicker() {
   const errEl = document.getElementById('export-error');
   errEl.style.display = 'none';
   const usePass = document.getElementById('exp-use-pass').checked;
@@ -2863,22 +2944,24 @@ async function submitExport() {
   if (!usePass && !useYk) {
     errEl.textContent = 'Pick at least one unlock method.';
     errEl.style.display = '';
-    return;
+    return null;
   }
+  let passphrase = null;
   const methods = [];
   if (usePass) {
     const p1 = document.getElementById('exp-passphrase').value;
     const p2 = document.getElementById('exp-passphrase2').value;
     if (!p1) {
-      errEl.textContent = 'Enter a passphrase for the bundle.';
+      errEl.textContent = 'Enter a passphrase for the Lockbox.';
       errEl.style.display = '';
-      return;
+      return null;
     }
     if (p1 !== p2) {
       errEl.textContent = 'Passphrases do not match.';
       errEl.style.display = '';
-      return;
+      return null;
     }
+    passphrase = p1;
     methods.push({ type: 'passphrase', passphrase: p1 });
   }
   if (useYk) {
@@ -2886,46 +2969,76 @@ async function submitExport() {
   }
   const requireAll = (usePass && useYk) &&
     document.getElementById('exp-link-mode').value === 'and';
+  return { methods, requireAll, passphrase, useYk };
+}
+async function submitMethodPicker() {
+  if (!methodPicker) { closeExportModal(); return; }
+  const picked = readMethodPicker();
+  if (!picked) return;
+  const errEl = document.getElementById('export-error');
   const go = document.getElementById('exportModalGo');
+  const goLabel = go.textContent;
   go.disabled = true;
-  go.textContent = useYk ? 'Touch your YubiKey…' : 'Exporting…';
+  go.textContent = picked.useYk ? 'Touch your YubiKey…' : 'Working…';
   try {
-    const resp = await fetch('/api/operations/export-bundle', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({
-        repo: currentRepo(),
-        backupId: exportTarget.backupId,
-        methods: methods,
-        requireAll: requireAll
-      })
-    });
-    if (!resp.ok) {
-      let msg = 'Export failed (' + resp.status + ').';
-      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
-      throw new Error(msg);
+    if (methodPicker.kind === 'export') {
+      await doExportBundle(picked.methods, picked.requireAll);
+    } else if (methodPicker.kind === 'create-files') {
+      await doCreateLockboxFromFiles(picked.methods, picked.requireAll);
+    } else if (methodPicker.kind === 'create-backup') {
+      await doCreateLockboxFromBackup(picked.methods, picked.requireAll);
+    } else if (methodPicker.kind === 'folder' || methodPicker.kind === 'file') {
+      await doFolderToLockbox(picked.methods, picked.requireAll);
+    } else if (methodPicker.kind === 'import') {
+      const unlock = { passphrase: picked.passphrase, useYubiKey: picked.useYk, slot: picked.useYk ? 2 : null };
+      if (lbPendingImport && lbPendingImport.token) {
+        await doImportReceivedLockbox(unlock);
+      } else {
+        await doLockboxToFolder(unlock);
+      }
     }
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'backup-' + exportTarget.backupId.substring(0, 8) + '.kfb';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
     closeExportModal();
-    toast('Bundle exported.', 'ok');
   } catch (e) {
     errEl.textContent = e.message;
     errEl.style.display = '';
   } finally {
     go.disabled = false;
-    go.textContent = 'Export bundle';
+    go.textContent = goLabel;
     // Clear passphrases from the form
     document.getElementById('exp-passphrase').value = '';
     document.getElementById('exp-passphrase2').value = '';
   }
+}
+// Kept for the old Go-button callers: the picker submit is the one entry point.
+function submitExport() {
+  return submitMethodPicker();
+}
+async function doExportBundle(methods, requireAll) {
+  const resp = await fetch('/api/operations/export-bundle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify({
+      repo: currentRepo(),
+      backupId: exportTarget.backupId,
+      methods: methods,
+      requireAll: requireAll
+    })
+  });
+  if (!resp.ok) {
+    let msg = 'Export failed (' + resp.status + ').';
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+    throw new Error(msg);
+  }
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'backup-' + exportTarget.backupId.substring(0, 8) + '.kfb';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Lockbox exported.', 'ok');
 }
 function pickNzbFileDirect() {
   document.getElementById('nzb-direct-picker').click();
@@ -2952,6 +3065,311 @@ async function submitAddNzbDirect() {
     toast('NZB download started in the background. Watch the Operations log.', 'ok');
     loadRepo();
   } catch (e) { toast(e.message, 'err'); }
+}
+// ---- Lockboxes view: create from files / from a backup, import as
+// folder, received Lockboxes from the phone ----
+// The three download routes return the .kfb bytes as a file download
+// (Results.File), so they need a raw fetch, not api() (which parses
+// JSON). The filename comes from the Content-Disposition header,
+// falling back to the server's documented default.
+// Pending Lockbox flows, held while the method picker is open.
+let lbPendingFiles = null; // { files: File[], name: string|null }
+let lbPendingBackup = null; // { backupId, name: string|null }
+let lbPendingImport = null; // { file: File|null, token: string|null, folderName, location }
+// file = a manually picked .kfb (lockbox-to-folder); token = a received
+// drop (import-received-lockbox). Exactly one is set.
+let lbPendingSend = null; // { folderName, scope: 'folder'|'file', filePath: string|null }
+async function downloadLockboxResponse(resp, fallbackName) {
+  if (!resp.ok) {
+    let msg = 'Lockbox download failed (' + resp.status + ').';
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+    throw new Error(msg);
+  }
+  const blob = await resp.blob();
+  const cd = resp.headers.get('Content-Disposition') || '';
+  const m = /filename="?([^";]+)"?/.exec(cd);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = m ? m[1] : fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function loadLockboxesView() {
+  lbLoadBackups();
+  lbLoadImportLocations();
+  loadReceivedLockboxes();
+}
+async function lbLoadBackups() {
+  const sel = document.getElementById('lb-backup');
+  if (!sel) return;
+  const repo = currentRepo();
+  if (!repo) { sel.innerHTML = '<option value="">No backups banked yet</option>'; return; }
+  let bs = [];
+  try { bs = await api('/api/backups?repo=' + encodeURIComponent(repo)); } catch (e) {
+    sel.innerHTML = '<option value="">Could not load backups</option>';
+    return;
+  }
+  sel.innerHTML = bs.length
+    ? bs.map(b => `<option value="${esc(b.backupId)}">${esc(b.backupId)} — ${esc(b.createdUtc || '')} (${esc(b.type || '')})</option>`).join('')
+    : '<option value="">No backups banked yet</option>';
+}
+async function lbLoadImportLocations() {
+  const sel = document.getElementById('lb-import-location');
+  if (!sel) return;
+  try {
+    const cfg = await api('/api/config');
+    sel.innerHTML = '';
+    (cfg.locations || []).filter(l => l.type === 'usb' || l.type === 'smb').forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.name;
+      o.textContent = l.name + ' (' + l.type + ')';
+      sel.appendChild(o);
+    });
+    if (!sel.options.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = 'No USB or SMB location yet';
+      sel.appendChild(o);
+    }
+  } catch (e) { /* service-down banner covers this */ }
+}
+// New Lockbox from files on disk.
+function lbFilesChanged() {
+  const input = document.getElementById('lb-files-picker');
+  const label = document.getElementById('lb-files-label');
+  const files = input.files ? [...input.files] : [];
+  label.textContent = files.length
+    ? files.length + ' file(s): ' + files.map(f => f.name).join(', ')
+    : 'No files chosen';
+}
+function lbStartCreateFromFiles() {
+  const input = document.getElementById('lb-files-picker');
+  const files = input.files ? [...input.files] : [];
+  if (!files.length) { toast('Choose at least one file first.', 'err'); return; }
+  const name = document.getElementById('lb-new-name').value.trim();
+  lbPendingFiles = { files, name: name || null };
+  openMethodPicker({
+    kind: 'create-files',
+    heading: 'New Lockbox',
+    title: 'Create from files',
+    sub: files.length + ' file(s)' + (name ? ' — ' + name + '.kfb' : ' — lockbox.kfb'),
+    goLabel: 'Create Lockbox',
+    note: 'YubiKey will prompt for a touch when you create the Lockbox. The Lockbox opens in the iOS app with the methods you pick here.'
+  });
+}
+async function doCreateLockboxFromFiles(methods, requireAll) {
+  if (!lbPendingFiles) throw new Error('No files chosen.');
+  const options = { methods, requireAll };
+  if (lbPendingFiles.name) options.name = lbPendingFiles.name;
+  const fd = new FormData();
+  for (const f of lbPendingFiles.files) fd.append('files', f, f.name);
+  fd.append('options', JSON.stringify(options));
+  const resp = await fetch('/api/operations/create-lockbox', {
+    method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
+  await downloadLockboxResponse(resp, 'lockbox.kfb');
+  document.getElementById('lb-files-picker').value = '';
+  document.getElementById('lb-new-name').value = '';
+  document.getElementById('lb-files-label').textContent = 'No files chosen';
+  lbPendingFiles = null;
+  toast('Lockbox created.', 'ok');
+}
+// New Lockbox from a banked backup (same restore path as Export, so
+// the same restore-session gate applies).
+async function lbStartCreateFromBackup() {
+  const backupId = document.getElementById('lb-backup').value;
+  if (!backupId) { toast('No backup to use — bank a backup first.', 'err'); return; }
+  if (!await ensureRestoreSession()) return;
+  const name = document.getElementById('lb-backup-name').value.trim();
+  lbPendingBackup = { backupId, name: name || null };
+  openMethodPicker({
+    kind: 'create-backup',
+    heading: 'New Lockbox',
+    title: 'Create from backup',
+    sub: 'Backup ' + backupId.substring(0, 8) + '\u2026' + (name ? ' — ' + name + '.kfb' : ' — backup.kfb'),
+    goLabel: 'Create Lockbox',
+    note: 'YubiKey will prompt for a touch when you create the Lockbox. The Lockbox opens in the iOS app with the methods you pick here.'
+  });
+}
+async function doCreateLockboxFromBackup(methods, requireAll) {
+  if (!lbPendingBackup) throw new Error('No backup chosen.');
+  const body = { backupId: lbPendingBackup.backupId, methods, requireAll };
+  if (lbPendingBackup.name) body.name = lbPendingBackup.name;
+  const resp = await fetch('/api/operations/create-lockbox-from-backup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify(body) });
+  await downloadLockboxResponse(resp, 'backup.kfb');
+  document.getElementById('lb-backup-name').value = '';
+  lbPendingBackup = null;
+  toast('Lockbox created.', 'ok');
+}
+// Import a Lockbox as a folder.
+function lbImportFileChanged() {
+  const input = document.getElementById('lb-import-picker');
+  const f = input.files && input.files[0];
+  document.getElementById('lb-import-label').textContent = f ? f.name : 'No Lockbox chosen';
+  if (f && !document.getElementById('lb-import-name').value.trim()) {
+    document.getElementById('lb-import-name').value = f.name.replace(/\.kfb$/i, '');
+  }
+}
+function lbStartImport() {
+  const input = document.getElementById('lb-import-picker');
+  const file = input.files && input.files[0];
+  if (!file) { toast('Choose a Lockbox (.kfb) file first.', 'err'); return; }
+  const folderName = document.getElementById('lb-import-name').value.trim();
+  if (!folderName) { toast('Enter a folder name.', 'err'); return; }
+  const location = document.getElementById('lb-import-location').value;
+  if (!location) { toast('Choose a location — add a USB or SMB location first.', 'err'); return; }
+  lbPendingImport = { file, token: null, folderName, location };
+  openMethodPicker({
+    kind: 'import',
+    heading: 'Unlock Lockbox',
+    title: 'Import as folder',
+    sub: file.name + ' → folder ' + folderName,
+    goLabel: 'Import Lockbox',
+    note: 'YubiKey will prompt for a touch to unlock this Lockbox.'
+  });
+}
+async function doLockboxToFolder(unlock) {
+  if (!lbPendingImport) throw new Error('No Lockbox chosen.');
+  const fd = new FormData();
+  fd.append('lockbox', lbPendingImport.file);
+  fd.append('options', JSON.stringify({
+    folderName: lbPendingImport.folderName,
+    location: lbPendingImport.location,
+    unlock
+  }));
+  const resp = await fetch('/api/operations/lockbox-to-folder', {
+    method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
+  if (!resp.ok) {
+    let msg = 'Import failed (' + resp.status + ').';
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+    throw new Error(msg);
+  }
+  const res = await resp.json();
+  document.getElementById('lb-import-picker').value = '';
+  document.getElementById('lb-import-label').textContent = 'No Lockbox chosen';
+  document.getElementById('lb-import-name').value = '';
+  lbPendingImport = null;
+  await ofRefresh();
+  toast('Imported ' + res.fileCount + ' file(s) into ' + res.folderName + (res.merged ? ' (merged into the existing folder).' : '.'), 'ok');
+}
+// Import a received Lockbox by token: its .kfb already sits in the
+// relay inbox, so the server resolves the token to the drop — no file
+// picker, no upload. The folder name and location were captured when
+// the row's button was tapped.
+async function doImportReceivedLockbox(unlock) {
+  if (!lbPendingImport || !lbPendingImport.token) throw new Error('No received Lockbox chosen.');
+  const resp = await fetch('/api/operations/import-received-lockbox', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify({
+      token: lbPendingImport.token,
+      folderName: lbPendingImport.folderName,
+      location: lbPendingImport.location,
+      unlock
+    }) });
+  if (!resp.ok) {
+    let msg = 'Import failed (' + resp.status + ').';
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
+    throw new Error(msg);
+  }
+  const res = await resp.json();
+  lbPendingImport = null;
+  await ofRefresh();
+  toast('Imported ' + res.fileCount + ' file(s) into ' + res.folderName + (res.merged ? ' (merged into the existing folder).' : '.'), 'ok');
+}
+// Received Lockboxes: drops the paired phone beamed to this PC.
+async function loadReceivedLockboxes() {
+  const box = document.getElementById('lb-received-list');
+  if (!box) return;
+  box.innerHTML = '<p style="color:var(--text-2)">Loading…</p>';
+  let list;
+  try { list = await api('/api/lockboxes/received'); } catch (e) {
+    box.innerHTML = '<p style="color:var(--text-2)">' + esc(e.message) + '</p>';
+    return;
+  }
+  if (!list || !list.length) {
+    box.innerHTML = '<p style="color:var(--text-2)">No Lockboxes received from your iPhone yet.</p>';
+    return;
+  }
+  box.innerHTML = list.map(b => {
+    const detail = [
+      fmtBytes(b.size),
+      'received ' + new Date(b.receivedUtc).toLocaleString(),
+      b.signatureValid ? 'signature OK' : 'BAD SIGNATURE',
+      'par2 ' + b.par2Status
+    ].join(' · ');
+    return `<div class="row" style="margin-bottom:8px;align-items:center">
+      <div class="grow"><div class="name">${esc(b.name)}</div>
+      <div class="meta">${esc(detail)}${b.rejectionReason ? ' · ' + esc(b.rejectionReason) : ''}</div></div>
+      <button ${b.signatureValid ? '' : 'disabled title="' + esc(b.rejectionReason || 'Signature failed verification') + '"'} onclick="lbImportReceived(${jsAttr(b.token)}, ${jsAttr(b.name)})">Import as folder</button>
+    </div>`;
+  }).join('');
+}
+// A received Lockbox imports in one click: its .kfb already sits in
+// the relay inbox, so the server resolves the token to the drop — no
+// file picker. The folder name is prefilled from the received name;
+// the location comes from the import form's location select.
+function lbImportReceived(token, name) {
+  const folderName = name.replace(/\.kfb$/i, '');
+  const location = document.getElementById('lb-import-location').value;
+  if (!location) { toast('Choose a location — add a USB or SMB location first.', 'err'); return; }
+  document.getElementById('lb-import-name').value = folderName;
+  lbPendingImport = { file: null, token, folderName, location };
+  openMethodPicker({
+    kind: 'import',
+    heading: 'Unlock Lockbox',
+    title: 'Import as folder',
+    sub: name + ' → folder ' + folderName,
+    goLabel: 'Import Lockbox',
+    note: 'YubiKey will prompt for a touch to unlock this Lockbox.'
+  });
+}
+// ---- Send a Stealth Folder / file to the phone as a Lockbox ----
+// Gated on a paired phone: the relay status is the source of truth,
+// checked fresh on every tap.
+async function stSendLockbox(scope) {
+  const folderName = scope === 'file' ? stUseFolder : ofSelected;
+  const filePath = scope === 'file' ? stUseFile : null;
+  if (!folderName) return;
+  let paired = false;
+  try { paired = !!(await api('/api/relay/status')).paired; } catch (e) {
+    toast('Could not check relay status: ' + e.message, 'err');
+    return;
+  }
+  if (!paired) {
+    toast('Pair your iPhone first — the iPhone relay card on Overview shows how.', 'err');
+    return;
+  }
+  lbPendingSend = { folderName, scope, filePath };
+  openMethodPicker({
+    kind: scope,
+    heading: 'Send to phone as Lockbox',
+    title: scope === 'file' ? 'Send file to phone' : 'Send folder to phone',
+    sub: folderName + (filePath ? ' / ' + filePath : ''),
+    goLabel: 'Send to phone',
+    note: 'YubiKey will prompt for a touch when you send the Lockbox. Your iPhone picks it up from the relay within minutes.'
+  });
+}
+function stSendFolderLockbox() { stSendLockbox('folder'); }
+function stSendFileLockbox() { stSendLockbox('file'); }
+async function doFolderToLockbox(methods, requireAll) {
+  if (!lbPendingSend) throw new Error('Nothing to send.');
+  const body = {
+    folderName: lbPendingSend.folderName,
+    scope: lbPendingSend.scope,
+    methods,
+    requireAll,
+    sendViaRelay: true
+  };
+  if (lbPendingSend.scope === 'file') body.filePath = lbPendingSend.filePath;
+  const res = await api('/api/operations/folder-to-lockbox', { method: 'POST', body: JSON.stringify(body) });
+  lbPendingSend = null;
+  toast('Lockbox beamed to your iPhone — ' + res.name + ', expires ' + new Date(res.expiryUtc).toLocaleString() + '.', 'ok');
+  loadRelayCard();
 }
 async function checkForUpdates() {
   toast('Checking GitHub for the latest version…');

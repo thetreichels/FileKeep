@@ -115,92 +115,19 @@ public static partial class DashboardApi
 			byte[] dek = RandomNumberGenerator.GetBytes(KeyDerivation.KeySizeBytes);
 			try
 			{
-				// Create wraps
-				var wraps = new List<BundleWrap>();
-				var wrapInfos = new List<(string Type, byte[] Kek, byte[]? Salt, int? Iterations, int? Slot, byte[]? Challenge)>();
-
-				try
+				// Wraps via the shared Lockbox core (DashboardApi.Lockbox.cs):
+				// same KEK derivation, AND/OR semantics, and error
+				// messages as the inline copy this replaced.
+				var lockboxMethods = request.Methods.Select(m => new LockboxUnlockMethodDto
 				{
-					foreach (var m in request.Methods)
-					{
-						if (m.Type == "passphrase")
-						{
-							byte[] salt = RandomNumberGenerator.GetBytes(32);
-							const int iterations = 600000;
-							byte[] kek = KeyDerivation.DeriveKey(m.Passphrase!, salt, iterations);
-							wrapInfos.Add(("passphrase", kek, salt, iterations, null, null));
-						}
-						else if (m.Type == "yubikey-hmac-sha1")
-						{
-							if (yubiKeyProvider is null)
-								return (500, new ErrorDto("YubiKey provider not available."));
-							int slot = m.Slot ?? 2;
-							byte[] challenge = RandomNumberGenerator.GetBytes(32);
-							byte[] hmacResponse;
-							try
-							{
-								hmacResponse = yubiKeyProvider.CalculateHmacSha1(
-									challenge, slot, TimeSpan.FromSeconds(30));
-							}
-							catch (TimeoutException)
-							{
-								return (400, new ErrorDto("YubiKey touch timed out."));
-							}
-							catch (Exception ex)
-							{
-								return (500, new ErrorDto($"YubiKey error: {ex.Message}"));
-							}
-							byte[] kek = YubiKeyCrypto.DeriveKek(hmacResponse);
-							CryptographicOperations.ZeroMemory(hmacResponse);
-							wrapInfos.Add(("yubikey-hmac-sha1", kek, null, null, slot, challenge));
-						}
-					}
-
-					if (request.RequireAll && wrapInfos.Count > 1)
-					{
-						// AND: split DEK into shares
-						byte[][] shares = DekSharing.Split(dek, wrapInfos.Count);
-						try
-						{
-							for (int i = 0; i < wrapInfos.Count; i++)
-							{
-								var (type, kek, salt, iterations, slot, challenge) = wrapInfos[i];
-								var wrap = BundleWriter.CreateWrap(
-									type, kek, shares[i],
-									mode: "and", group: "g1",
-									salt: salt, iterations: iterations,
-									slot: slot, challenge: challenge);
-								wraps.Add(wrap);
-							}
-						}
-						finally
-						{
-							foreach (var s in shares)
-								CryptographicOperations.ZeroMemory(s);
-						}
-					}
-					else
-					{
-						// OR: each wrap holds the full DEK
-						foreach (var (type, kek, salt, iterations, slot, challenge) in wrapInfos)
-						{
-							var wrap = BundleWriter.CreateWrap(
-								type, kek, dek,
-								salt: salt, iterations: iterations,
-								slot: slot, challenge: challenge);
-							wraps.Add(wrap);
-						}
-					}
-				}
-				finally
-				{
-					foreach (var (_, kek, _, _, _, challenge) in wrapInfos)
-					{
-						CryptographicOperations.ZeroMemory(kek);
-						if (challenge is not null)
-							CryptographicOperations.ZeroMemory(challenge);
-					}
-				}
+					Type = m.Type,
+					Passphrase = m.Passphrase,
+					Slot = m.Slot,
+				}).ToList();
+				var (wraps, wrapStatus, wrapError) = BuildLockboxWraps(
+					dek, lockboxMethods, request.RequireAll, yubiKeyProvider);
+				if (wraps is null)
+					return (wrapStatus, new ErrorDto(wrapError ?? "Could not build the Lockbox."));
 
 				// Create bundle
 				byte[] bundleBytes = BundleWriter.Create(wraps, dek, files);

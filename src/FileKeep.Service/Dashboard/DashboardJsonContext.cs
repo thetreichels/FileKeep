@@ -95,6 +95,17 @@ namespace FileKeep.Service;
 [JsonSerializable(typeof(DashboardApi.RelayApprovalRespondDto))]
 [JsonSerializable(typeof(DashboardApi.ExportBundleRequestDto))]
 [JsonSerializable(typeof(DashboardApi.ExportUnlockMethodDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxUnlockMethodDto))]
+[JsonSerializable(typeof(DashboardApi.CreateLockboxOptionsDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxFromBackupRequestDto))]
+[JsonSerializable(typeof(DashboardApi.FolderToLockboxRequestDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxUnlockDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxToFolderRequestDto))]
+[JsonSerializable(typeof(DashboardApi.ImportReceivedLockboxRequestDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxDownloadDto))]
+[JsonSerializable(typeof(DashboardApi.LockboxToFolderResultDto))]
+[JsonSerializable(typeof(DashboardApi.ReceivedLockboxDto))]
+[JsonSerializable(typeof(DashboardApi.ReceivedLockboxDto[]))]
 [JsonSerializable(typeof(JsonElement))]
 // B-2: payload types that reach Results.Json via Dashboard.cs —
 // registered here so JsonPayload can resolve source-generated metadata

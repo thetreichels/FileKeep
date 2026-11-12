@@ -563,6 +563,110 @@ public static class Dashboard
             return JsonPayload(payload, statusCode: status);
         });
 
+        // Lockbox (.kfb) bridge — Windows GUI only. Core lives in
+        // DashboardApi.Lockbox.cs; the routes below are thin shells
+        // (CSRF + body parsing + download-or-JSON shaping).
+        app.MapPost("/api/operations/create-lockbox", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!request.HasFormContentType)
+                return JsonPayload(new ErrorDto("Expected multipart form."), statusCode: StatusCodes.Status400BadRequest);
+            var form = await request.ReadFormAsync();
+            // File parts named "files": the part filename IS the path
+            // inside the Lockbox; "options" text field holds the JSON.
+            var options = string.IsNullOrWhiteSpace(form["options"].ToString())
+                ? new DashboardApi.CreateLockboxOptionsDto()
+                : System.Text.Json.JsonSerializer.Deserialize(
+                    form["options"].ToString(), DashboardJsonContext.Default.CreateLockboxOptionsDto)
+                ?? new DashboardApi.CreateLockboxOptionsDto();
+            var files = new List<(string Path, byte[] Plaintext)>();
+            foreach (var file in form.Files.GetFiles("files"))
+            {
+                await using var ms = new MemoryStream();
+                await file.CopyToAsync(ms);
+                files.Add((file.FileName, ms.ToArray()));
+            }
+            var (status, payload) = DashboardApi.CreateLockboxFromFiles(
+                files, options.Methods, options.RequireAll, options.Name, yubiKeyProvider, ct, log);
+            if (status == 200 && payload is DashboardApi.LockboxDownloadDto download)
+                return Results.File(download.Bytes, "application/octet-stream", download.FileName);
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/operations/create-lockbox-from-backup", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            // The repo comes as a separate field, not in the DTO —
+            // same as the export-bundle route above.
+            string repo = GetBodyString(body, "repo");
+            var lockboxRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.LockboxFromBackupRequestDto)
+                ?? new DashboardApi.LockboxFromBackupRequestDto();
+            var (status, payload) = DashboardApi.CreateLockboxFromBackup(
+                config, repo, lockboxRequest, restoreSession, yubiKeyProvider, ct, log);
+            if (status == 200 && payload is DashboardApi.LockboxDownloadDto download)
+                return Results.File(download.Bytes, "application/octet-stream", download.FileName);
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/operations/folder-to-lockbox", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var folderRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.FolderToLockboxRequestDto)
+                ?? new DashboardApi.FolderToLockboxRequestDto();
+            var (status, payload) = DashboardApi.FolderToLockbox(
+                config, offlineFoldersSession, offlineFoldersPath, folderRequest, yubiKeyProvider, ct, log);
+            if (status == 200 && payload is DashboardApi.LockboxDownloadDto download)
+                return Results.File(download.Bytes, "application/octet-stream", download.FileName);
+            // Otherwise a RelayBeamDto (sendViaRelay) or an ErrorDto.
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/operations/lockbox-to-folder", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!request.HasFormContentType)
+                return JsonPayload(new ErrorDto("Expected multipart form."), statusCode: StatusCodes.Status400BadRequest);
+            var form = await request.ReadFormAsync();
+            var file = form.Files["lockbox"];
+            if (file is null || file.Length == 0)
+                return JsonPayload(new ErrorDto("No Lockbox file was uploaded."), statusCode: StatusCodes.Status400BadRequest);
+            var options = string.IsNullOrWhiteSpace(form["options"].ToString())
+                ? new DashboardApi.LockboxToFolderRequestDto()
+                : System.Text.Json.JsonSerializer.Deserialize(
+                    form["options"].ToString(), DashboardJsonContext.Default.LockboxToFolderRequestDto)
+                ?? new DashboardApi.LockboxToFolderRequestDto();
+            byte[] lockboxBytes;
+            await using (var ms = new MemoryStream())
+            {
+                await file.CopyToAsync(ms);
+                lockboxBytes = ms.ToArray();
+            }
+            var (status, payload) = DashboardApi.LockboxToFolder(
+                config, offlineFoldersSession, offlineFoldersPath, lockboxBytes, options, yubiKeyProvider, ct, log);
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        app.MapPost("/api/operations/import-received-lockbox", async (HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var body = await request.ReadFromJsonAsync<JsonElement>();
+            var importRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.ImportReceivedLockboxRequestDto)
+                ?? new DashboardApi.ImportReceivedLockboxRequestDto();
+            var (status, payload) = DashboardApi.ImportReceivedLockbox(
+                config, offlineFoldersSession, offlineFoldersPath, importRequest, yubiKeyProvider, ct, log);
+            return JsonPayload(payload, statusCode: status);
+        });
+
         // iOS relay (docs/ios-relay-protocol.md): pairing, beam, status.
         app.MapGet("/api/relay/status", () =>
         {
@@ -612,6 +716,13 @@ public static class Dashboard
         app.MapGet("/api/relay/inbox", () =>
         {
             var (status, payload) = DashboardApi.ListRelayInbox(config);
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        // Lockboxes received from the phone via the relay (inbox/laptop/).
+        app.MapGet("/api/lockboxes/received", () =>
+        {
+            var (status, payload) = DashboardApi.ListReceivedLockboxes(config);
             return JsonPayload(payload, statusCode: status);
         });
 
