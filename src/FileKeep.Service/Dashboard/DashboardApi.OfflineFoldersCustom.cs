@@ -43,7 +43,7 @@ public static partial class DashboardApi
         try
         {
             string json = File.ReadAllText(path);
-            var list = JsonSerializer.Deserialize<List<CustomFolderIndexEntry>>(json);
+            var list = JsonSerializer.Deserialize(json, DashboardJsonContext.Default.ListCustomFolderIndexEntry);
             return list ?? new();
         }
         catch { return new(); } // Corrupt index -> treat as empty; folders are recoverable via their .dat files.
@@ -52,7 +52,9 @@ public static partial class DashboardApi
     private static void SaveCustomIndex(string configDir, List<CustomFolderIndexEntry> index)
     {
         string path = CustomIndexPath(configDir);
-        string json = JsonSerializer.Serialize(index, new JsonSerializerOptions { WriteIndented = true });
+        // B-2: source-generated metadata (trim-safe). Indentation is
+        // cosmetic — the index is machine-read only.
+        string json = JsonSerializer.Serialize(index, DashboardJsonContext.Default.ListCustomFolderIndexEntry);
         string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
@@ -115,7 +117,7 @@ public static partial class DashboardApi
                 // Transient unlock: load, add, persist, do NOT leave session unlocked.
                 try
                 {
-                    byte[] key = DeriveCatalogKey(secret);
+                    byte[] key = OfflineFoldersCatalog.DeriveKey(secret);
                     var entries = OfflineFoldersCatalog.Load(catalogPath, key);
                     if (entries.Any(e => string.Equals(e.Name, trimmedName, StringComparison.OrdinalIgnoreCase)))
                         return (400, new ErrorDto("A folder with that name already exists."));
@@ -124,6 +126,14 @@ public static partial class DashboardApi
                     CryptographicOperations.ZeroMemory(key);
                     log?.Invoke("dashboard: offline folder added (global, via proof)");
                     return (200, new OkDto(true));
+                }
+                catch (MissingSecurityModeException ex)
+                {
+                    // O2: the catalog entry has no usable securityMode —
+                    // not a decrypt failure. Surface the exception's
+                    // precise remedy (delete and re-create, or delete
+                    // the catalog file) as a client error.
+                    return (400, new ErrorDto(ex.Message));
                 }
                 catch (CryptographicException)
                 {
@@ -161,6 +171,12 @@ public static partial class DashboardApi
             {
                 (folderKey, keyInfo, totpSecretB32) = BuildCustomKey(kind, proof, yubiKeyProvider);
             }
+            catch (NotSupportedException ex)
+            {
+                // The method is not available yet (E-1: per-folder
+                // YubiKey wrapping does not exist) — 501, like unlock.
+                return (501, new ErrorDto(ex.Message));
+            }
             catch (ArgumentException ex)
             {
                 return (400, new ErrorDto(ex.Message));
@@ -185,7 +201,7 @@ public static partial class DashboardApi
                 if (kind.Equals("totp", StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrEmpty(totpSecretB32))
                 {
-                    return (200, new { ok = true, totpSecret = totpSecretB32 });
+                    return (200, new TotpFolderCreatedDto(true, totpSecretB32));
                 }
                 return (200, new OkDto(true));
             }
@@ -198,7 +214,9 @@ public static partial class DashboardApi
 
     /// <summary>
     /// Builds a folder key + key info from a new credential. Throws
-    /// <see cref="ArgumentException"/> on invalid input.
+    /// <see cref="ArgumentException"/> on invalid input and
+    /// <see cref="NotSupportedException"/> when the method is not
+    /// available yet (per-folder YubiKey wrapping).
     /// Returns the key, the key info, and (for TOTP) the base32 secret for QR display.
     /// </summary>
     private static (byte[] Key, CustomFolderKeyInfo Info, string? TotpSecretB32) BuildCustomKey(
@@ -227,36 +245,14 @@ public static partial class DashboardApi
             }
             case "yubikey":
             {
-                if (yubiKeyProvider is null)
-                    throw new ArgumentException("No YubiKey provider available.");
-                // Per-folder challenge-response: generate a random folder key,
-                // wrap it by programming the YubiKey slot with a new challenge.
-                byte[] folderKey = FolderSecurityCrypto.NewFolderKey();
-                byte[] challenge = RandomNumberGenerator.GetBytes(32);
-                try
-                {
-                    // NOTE: Full per-folder YubiKey programming requires the
-                    // YubiKey setup flow; for now we store the challenge and
-                    // wrap via the provider. See YubiKeySetup for the pattern.
-                    string wrapped = Convert.ToBase64String(folderKey); // Placeholder - real wrap via provider
-                    return (folderKey, new CustomFolderKeyInfo
-                    {
-                        Kind = "yubikey",
-                        ChallengeB64 = Convert.ToBase64String(challenge),
-                        WrappedKeyB64 = wrapped,
-                        YubiKeySlot = 2,
-                    }, null);
-                }
-                catch (Exception ex)
-                {
-                    CryptographicOperations.ZeroMemory(folderKey);
-                    // Never interpolate ex.Message: an inner exception message
-                    // is not a trusted string — it can carry secret-bearing
-                    // values. Log the type for diagnosis; the caller sees a
-                    // stable, secret-free message.
-                    throw new ArgumentException(
-                        $"YubiKey setup failed ({ex.GetType().Name}).");
-                }
+                // E-1: per-folder YubiKey challenge-response wrapping does
+                // not exist yet (unlock refuses with 501 too). Refuse
+                // creation rather than persisting the folder key
+                // unprotected: the old placeholder path stored the raw
+                // 32-byte key base64-encoded in WrappedKeyB64, readable
+                // by anyone with the catalog file.
+                throw new NotSupportedException(
+                    "Per-folder YubiKey folders are not available yet — YubiKey challenge-response wrapping is not implemented.");
             }
             case "totp":
             {
@@ -288,7 +284,7 @@ public static partial class DashboardApi
     private static void SaveCustomFolder(string folderPath, byte[] folderKey, OfflineFolderEntry entry)
     {
         if (folderKey.Length != 32) throw new ArgumentException("Folder key must be 32 bytes.");
-        string json = JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = false });
+        string json = JsonSerializer.Serialize(entry, DashboardJsonContext.Default.OfflineFolderEntry);
         byte[] plaintext = Encoding.UTF8.GetBytes(json);
         byte[] nonce = RandomNumberGenerator.GetBytes(12);
         byte[] ciphertext = new byte[plaintext.Length];
@@ -333,13 +329,40 @@ public static partial class DashboardApi
         {
             using var gcm = new AesGcm(folderKey, 16);
             gcm.Decrypt(nonce, ciphertext, tag, plaintext);
-            var entry = JsonSerializer.Deserialize<OfflineFolderEntry>(Encoding.UTF8.GetString(plaintext));
+            var entry = JsonSerializer.Deserialize(Encoding.UTF8.GetString(plaintext), DashboardJsonContext.Default.OfflineFolderEntry);
             return entry ?? throw new FormatException("Custom folder plaintext is not a valid entry.");
         }
         finally
         {
             CryptographicOperations.ZeroMemory(plaintext);
             CryptographicOperations.ZeroMemory(blob);
+        }
+    }
+
+    /// <summary>
+    /// True when a YubiKey entry was created by the pre-fix placeholder
+    /// path (E-1): <see cref="CustomFolderKeyInfo.WrappedKeyB64"/> is the
+    /// raw 32-byte folder key, base64-encoded — not a YubiKey wrap. The
+    /// folder was never protected and its key can never be unwrapped.
+    /// NOTE: this assumes the only 32-byte WrappedKeyB64 values are the
+    /// placeholder. When real per-folder YubiKey wrapping lands, its
+    /// format must be distinguishable from this shape (or this check
+    /// removed with the 501 unlock path).
+    /// </summary>
+    private static bool IsLegacyPlaintextYubiKeyEntry(CustomFolderKeyInfo ki)
+    {
+        if (!string.Equals(ki.Kind, "yubikey", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (string.IsNullOrEmpty(ki.WrappedKeyB64))
+            return false;
+        try
+        {
+            // Folder keys are 32 bytes (FolderSecurityCrypto.KeySize).
+            return Convert.FromBase64String(ki.WrappedKeyB64).Length == 32;
+        }
+        catch (FormatException)
+        {
+            return false;
         }
     }
 
@@ -363,13 +386,6 @@ public static partial class DashboardApi
             return null; // TOTP alone does not unlock global; kept for API symmetry.
         }
         catch { return null; }
-    }
-
-    private static byte[] DeriveCatalogKey(string secret)
-    {
-        using var sha = SHA256.Create();
-        byte[] input = Encoding.UTF8.GetBytes(secret + "FileKeep offline folders catalog v1");
-        return sha.ComputeHash(input);
     }
 
     /// <summary>
@@ -436,6 +452,12 @@ public static partial class DashboardApi
                 }
                 case "yubikey":
                 {
+                    // E-1: entries created by the pre-fix placeholder path
+                    // stored the raw folder key in WrappedKeyB64. They were
+                    // never YubiKey-protected and can never be unwrapped;
+                    // say so instead of the generic 501.
+                    if (IsLegacyPlaintextYubiKeyEntry(ki))
+                        return (500, new ErrorDto("This folder was created before per-folder YubiKey wrapping was implemented; its key was stored unprotected and it can never be unlocked as a YubiKey folder."));
                     if (!yk || yubiKeyProvider is null)
                         return (403, new ErrorDto("YubiKey touch required."));
                     // TODO: per-folder YubiKey challenge-response unwrap.

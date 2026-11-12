@@ -24,7 +24,11 @@ public sealed record OfflineFolderEntry(string Name, string LocationId, DateTime
     /// How this folder is secured: <see cref="FolderSecurityMode.Global"/>
     /// (the FileKeep global key — the pre-existing behavior) or
     /// <see cref="FolderSecurityMode.Custom"/> (its own independent key).
-    /// Defaults to Global for backward compatibility with existing entries.
+    /// The initializer is the default for entries created in code
+    /// only — on load, <c>securityMode</c> is REQUIRED (O2): a catalog
+    /// entry without a usable value fails the whole load with
+    /// <see cref="MissingSecurityModeException"/>. v1 catalogs carry
+    /// no <c>securityMode</c> and therefore no longer load.
     /// </summary>
     public FolderSecurityMode SecurityMode { get; set; } = FolderSecurityMode.Global;
 
@@ -285,8 +289,12 @@ public static class OfflineFoldersCatalog
     /// Loads and decrypts the catalog. Throws
     /// <see cref="CryptographicException"/> when the key does not
     /// decrypt the file (wrong vault secret or damaged file),
-    /// <see cref="FormatException"/> on malformed content, and
-    /// <see cref="InvalidDataException"/> on a version mismatch.
+    /// <see cref="FormatException"/> on malformed content,
+    /// <see cref="InvalidDataException"/> on a version mismatch, and
+    /// <see cref="MissingSecurityModeException"/> when any entry has
+    /// no usable <c>securityMode</c> (absent, not a string, or an
+    /// unknown value) — one bad entry fails the whole load, and v1
+    /// catalogs (which carry no <c>securityMode</c>) no longer load.
     /// Plaintext is zeroed before returning.
     /// </summary>
     public static List<OfflineFolderEntry> Load(string catalogPath, byte[] key)
@@ -325,14 +333,27 @@ public static class OfflineFoldersCatalog
                         addedUtc = DateTimeOffset.UtcNow;
                     var entry = new OfflineFolderEntry(name, locationId, addedUtc);
                     // Per-folder security (2026-10-30): "securityMode" is
-                    // "Global" or "Custom"; absent means Global (backward
-                    // compatible with pre-existing catalogs).
-                    if (e["securityMode"] is JsonValue sm &&
-                        sm.GetValueKind() == System.Text.Json.JsonValueKind.String &&
-                        Enum.TryParse<FolderSecurityMode>(sm.GetValue<string>(), out var mode))
+                    // "Global" or "Custom". O2: it is REQUIRED on load —
+                    // absent, non-string, or unparsable values fail the
+                    // whole load with MissingSecurityModeException (one
+                    // bad entry fails the whole load; partial loads would
+                    // silently drop folders). The = Global initializer on
+                    // the property is the default for entries created in
+                    // code only, not a load fallback.
+                    string reason;
+                    if (e["securityMode"] is not JsonValue sm)
+                        reason = "missing";
+                    else if (sm.GetValueKind() != System.Text.Json.JsonValueKind.String)
+                        reason = "not a string";
+                    else if (!Enum.TryParse<FolderSecurityMode>(sm.GetValue<string>(), out var mode))
+                        reason = $"unknown value '{sm.GetValue<string>()}'";
+                    else
                     {
                         entry.SecurityMode = mode;
+                        reason = "";
                     }
+                    if (reason.Length != 0)
+                        throw new MissingSecurityModeException(name, locationId, reason);
                     if (e["customKey"] is JsonObject ck)
                     {
                         entry.CustomKey = new CustomFolderKeyInfo

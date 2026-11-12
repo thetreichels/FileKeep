@@ -73,6 +73,13 @@ public static partial class DashboardApi
             if (File.Exists(catalogPath))
             {
                 try { entries = OfflineFoldersCatalog.Load(catalogPath, key); }
+                // O2: a missing securityMode is NOT a decrypt failure —
+                // the entry decrypts fine. Surface the precise message
+                // (which folder is stale, and the remedy) instead of
+                // the decrypt-failure message below. Must come first:
+                // MissingSecurityModeException is an IOException, so the
+                // generic catch below would also match it.
+                catch (MissingSecurityModeException ex) { return (400, new ErrorDto(ex.Message)); }
                 catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
                 {
                     return (400, new ErrorDto(
@@ -149,6 +156,12 @@ public static partial class DashboardApi
         {
             summary = OfflineRekey.Rewrite(catalogPath, old, newSecret, OfflineStoreResolver(config), log);
         }
+        // O2: OfflineRekey.Load throws this when an entry has no usable
+        // securityMode — OfflineRekey itself has no catch around the
+        // Load, so the message only surfaces if this call site catches
+        // it first (it is an IOException, so the generic catch
+        // below would misreport it as a decrypt failure).
+        catch (MissingSecurityModeException ex) { return (400, new ErrorDto(ex.Message)); }
         catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
         {
             return (400, new ErrorDto(
@@ -200,6 +213,16 @@ public static partial class DashboardApi
             _ = OfflineFoldersCatalog.Load(catalogPath, OfflineFoldersCatalog.DeriveKey(newPassphrase));
             return null;
         }
+        // O2: the catalog decrypts under the new secret but an entry
+        // has no usable securityMode — abort the passphrase change
+        // here. Do NOT fall through: the rewrite below would fail the
+        // same way, and the fall-through would misreport it. Must come
+        // first: MissingSecurityModeException is an IOException, so the
+        // generic catch below would also match it.
+        catch (MissingSecurityModeException ex)
+        {
+            return (400, new ErrorDto(ex.Message + " The passphrase was NOT changed."));
+        }
         catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
         {
             // Not under the new secret — fall through to the rewrite.
@@ -216,6 +239,14 @@ public static partial class DashboardApi
         try
         {
             summary = OfflineRekey.Rewrite(catalogPath, oldSecret, newPassphrase, resolveStore, log);
+        }
+        // O2: same as the rekey handler above — the rewrite's Load
+        // throws this for a v1 catalog under the old secret (the probe
+        // Load saw only a decrypt failure under the new key, so the
+        // probe catch could not have caught it). Surface it precisely.
+        catch (MissingSecurityModeException ex)
+        {
+            return (400, new ErrorDto(ex.Message + " The passphrase was NOT changed."));
         }
         catch (Exception ex) when (ex is CryptographicException or FormatException or InvalidDataException or IOException)
         {
@@ -262,7 +293,9 @@ public static partial class DashboardApi
                 $"The folder's location '{folder.LocationId}' no longer exists — nothing to point the export at."));
         OfflineExportPackageDto package;
         try { package = OfflineExport.CreatePackage(folder, location, exportPassphrase); }
-        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        // I-4: the export passphrase is in scope here; pass it as a known
+        // secret so a verbatim copy in the message is scrubbed.
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, exportPassphrase) ?? "")); }
         log?.Invoke($"dashboard: offline folder '{folder.Name}' exported ({folder.Files.Count} files).");
         return (200, new OfflineExportResultDto($"{folder.Name}.filekeep-export.json", package));
     }
@@ -299,7 +332,8 @@ public static partial class DashboardApi
                 $"The folder's location '{folder.LocationId}' no longer exists — nothing to point the export at."));
         OfflineExportPackageDto package;
         try { package = OfflineExport.CreateFilePackage(folder, file, location, exportPassphrase); }
-        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        // I-4: the export passphrase is in scope here; pass it as a known secret.
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, exportPassphrase) ?? "")); }
         log?.Invoke($"dashboard: offline file '{file.Path}' from folder '{folder.Name}' exported.");
         return (200, new OfflineExportResultDto(SafeExportFileName(folder.Name, file.Path), package));
     }
@@ -337,7 +371,10 @@ public static partial class DashboardApi
                 $"The folder's location '{folder.LocationId}' no longer exists — nothing to copy chunks from."));
         OfflineFileStore.OfflineLocationStore store;
         try { store = OfflineFileStore.ResolveStore(location); }
-        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        // I-4: the export passphrase is in scope here; pass it as a known
+        // secret (the store-resolution failure cannot contain it, but the
+        // scrub is a no-op when the value is absent from the message).
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, exportPassphrase) ?? "")); }
         try
         {
             return ExportOfflineFull(folder, location, store.Store, destDir, exportPassphrase, log);
@@ -374,7 +411,8 @@ public static partial class DashboardApi
         }
         OfflineExportPackageDto package;
         try { package = OfflineExport.CreatePackage(folder, location, exportPassphrase); }
-        catch (InvalidOperationException ex) { return (400, new ErrorDto(ex.Message)); }
+        // I-4: the export passphrase is in scope here; pass it as a known secret.
+        catch (InvalidOperationException ex) { return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, exportPassphrase) ?? "")); }
         string manifestPath = FileKeep.Core.OfflineStickLayout.ManifestPath(destDir);
         string json = System.Text.Json.JsonSerializer.Serialize(package,
             DashboardJsonContext.Default.OfflineExportPackageDto);

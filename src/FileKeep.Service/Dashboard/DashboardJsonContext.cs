@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FileKeep.Core.Recovery;
@@ -37,7 +36,6 @@ namespace FileKeep.Service;
 [JsonSerializable(typeof(BrowseFoldersDto))]
 [JsonSerializable(typeof(ConfigJobDto))]
 [JsonSerializable(typeof(List<ConfigJobDto>))]
-[JsonSerializable(typeof(ConfigNntpDto))]
 [JsonSerializable(typeof(ConfigNntpProviderDto))]
 [JsonSerializable(typeof(List<ConfigNntpProviderDto>))]
 [JsonSerializable(typeof(ConfigLocationDto))]
@@ -95,7 +93,25 @@ namespace FileKeep.Service;
 [JsonSerializable(typeof(DashboardApi.RelayPhoneApprovalClaimDto))]
 [JsonSerializable(typeof(DashboardApi.RelayPhoneApprovalClaimStatusDto))]
 [JsonSerializable(typeof(DashboardApi.RelayApprovalRespondDto))]
+[JsonSerializable(typeof(DashboardApi.ExportBundleRequestDto))]
+[JsonSerializable(typeof(DashboardApi.ExportUnlockMethodDto))]
 [JsonSerializable(typeof(JsonElement))]
+// B-2: payload types that reach Results.Json via Dashboard.cs —
+// registered here so JsonPayload can resolve source-generated metadata
+// for them instead of falling back to reflection serialization.
+[JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(OfflineOpenFileDto))]
+[JsonSerializable(typeof(List<OfflineOpenFileDto>))]
+[JsonSerializable(typeof(OfflineOpenTokenDto))]
+[JsonSerializable(typeof(OfflineSaveAsDto))]
+[JsonSerializable(typeof(OfflineRekeySummaryDto))]
+[JsonSerializable(typeof(VaultMigrationSummaryDto))]
+[JsonSerializable(typeof(VaultRepoMappingDto))]
+[JsonSerializable(typeof(CustomFolderListEntryDto))]
+[JsonSerializable(typeof(List<CustomFolderListEntryDto>))]
+[JsonSerializable(typeof(TotpFolderCreatedDto))]
+[JsonSerializable(typeof(List<CustomFolderIndexEntry>))]
+[JsonSerializable(typeof(OfflineFolderEntry))]
 public partial class DashboardJsonContext : JsonSerializerContext
 {
 }
