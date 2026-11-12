@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 
 namespace FileKeep.Core.Relay;
@@ -18,6 +19,23 @@ public sealed class RelayWriter
     private readonly string _relayRoot;
     private readonly byte[] _hmacKey;
     private readonly byte[] _encKey;
+
+    /// <summary>
+    /// One gate object per mailbox directory (canonical path). A
+    /// <see cref="RelayWriter"/> is constructed fresh per beam/poll/ack,
+    /// so an instance lock cannot protect the index read-modify-write
+    /// (W-4): two writers could both read sequence N and both write N+1,
+    /// silently losing one message with a still-valid HMAC. The gate
+    /// serializes index updates in-process; the verify-and-retry in
+    /// <see cref="UpdateIndex"/> covers a writer outside this process.
+    /// Entries live for the process lifetime; in practice there is one
+    /// mailbox dir per relay root, so the table stays tiny.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, object> IndexGates = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
+    private static object IndexGateFor(string mailboxDir) =>
+        IndexGates.GetOrAdd(Path.GetFullPath(mailboxDir), static _ => new object());
 
     /// <param name="relayRoot">The relay folder (SMB-writable, HTTP-readable).</param>
     /// <param name="hmacKey">Signing key from <see cref="RelayCrypto.DeriveHmacKey"/>.</param>
@@ -136,11 +154,90 @@ public sealed class RelayWriter
     public RelayIndex ReadPhoneIndex() => ReadIndex(PhoneMailboxDir);
 
     /// <summary>
+    /// Drop tokens are 32 lowercase hex chars (16 random bytes), as
+    /// generated in <see cref="PublishDrop"/>. Anything else never came
+    /// from this writer; letting it reach a path (e.g. in a
+    /// <c>Path.Combine</c>) is unsafe, so it is rejected everywhere a
+    /// token is acted on.
+    /// </summary>
+    internal static bool IsValidDropToken(string? token)
+    {
+        if (token is null || token.Length != 32)
+            return false;
+        foreach (char c in token)
+        {
+            bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!hex)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Verifies a drop's metadata HMAC. A tampered name (line breaks)
+    /// makes the canonical string throw; that is a verification
+    /// failure, not a prune failure.
+    /// </summary>
+    private bool DropHmacVerifies(RelayDropMetadata meta)
+    {
+        // A null name would throw inside the canonical string; a null
+        // name is not verifiable metadata either way.
+        if (meta.Name is null)
+            return false;
+        try
+        {
+            return RelayCrypto.VerifyDropHmac(_hmacKey, meta);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Deletes one drop's files (.kfb, .kfb.par2, .json). Refuses tokens
+    /// that did not come from <see cref="PublishDrop"/> (defence in
+    /// depth — callers validate too); deletes nothing on mismatch.
+    /// Returns true when the token was valid (deletion attempted).
+    /// </summary>
+    private bool DeleteDropFiles(string token)
+    {
+        if (!IsValidDropToken(token))
+            return false;
+        foreach (string suffix in new[] { ".kfb", ".kfb.par2", ".json" })
+        {
+            string path = Path.Combine(DropsDir, token + suffix);
+            TryDelete(path);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Deletes an unverifiable drop (unreadable or badly signed
+    /// metadata) by its filename token, but only once it is old enough
+    /// not to be mid-publish. The filename token cannot contain a
+    /// separator, and <see cref="DeleteDropFiles"/> still validates its
+    /// shape. Returns true when the drop counted as pruned.
+    /// </summary>
+    private bool PruneUnverifiableDrop(string jsonPath, DateTimeOffset nowUtc)
+    {
+        if (File.GetLastWriteTimeUtc(jsonPath) < nowUtc.AddHours(-1).UtcDateTime)
+        {
+            string token = Path.GetFileNameWithoutExtension(jsonPath);
+            return DeleteDropFiles(token);
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Deletes expired drops (and their par2 + metadata) and orphaned
     /// .kfb/.par2 files with no metadata. Orphans younger than one hour
     /// are left alone — they may be mid-publish. Index entries are left
     /// in place (pruning them is allowed but not required; they are small).
-    /// Returns the number of drops pruned.
+    /// The relay is untrusted, so a drop's metadata is never acted on
+    /// until its HMAC verifies and its token has the generated shape;
+    /// unverifiable drops are cleaned up by filename token only once
+    /// old enough. Returns the number of drops pruned.
     /// </summary>
     public int PruneExpiredDrops(DateTimeOffset nowUtc)
     {
@@ -157,16 +254,21 @@ public sealed class RelayWriter
             {
                 // Unreadable metadata: the drop is unverifiable; delete it
                 // only if it is old enough not to be mid-publish.
-                if (File.GetLastWriteTimeUtc(jsonPath) < nowUtc.AddHours(-1).UtcDateTime)
-                {
-                    string token = Path.GetFileNameWithoutExtension(jsonPath);
-                    DeleteDropFiles(token);
+                if (PruneUnverifiableDrop(jsonPath, nowUtc))
                     pruned++;
-                }
                 continue;
             }
             if (meta is null)
                 continue;
+            // Never act on untrusted metadata: a token that did not come
+            // from PublishDrop, or a metadata HMAC that does not verify,
+            // means the expiry cannot be trusted either.
+            if (!IsValidDropToken(meta.Token) || !DropHmacVerifies(meta))
+            {
+                if (PruneUnverifiableDrop(jsonPath, nowUtc))
+                    pruned++;
+                continue;
+            }
             if (meta.ExpiryUtc <= nowUtc)
             {
                 DeleteDropFiles(meta.Token);
@@ -181,32 +283,62 @@ public sealed class RelayWriter
             if (!File.Exists(Path.Combine(DropsDir, token + ".json"))
                 && File.GetLastWriteTimeUtc(kfbPath) < nowUtc.AddHours(-1).UtcDateTime)
             {
-                DeleteDropFiles(token);
-                pruned++;
+                if (DeleteDropFiles(token))
+                    pruned++;
             }
         }
         return pruned;
     }
 
-    private void DeleteDropFiles(string token)
-    {
-        foreach (string suffix in new[] { ".kfb", ".kfb.par2", ".json" })
-        {
-            string path = Path.Combine(DropsDir, token + suffix);
-            TryDelete(path);
-        }
-    }
+    /// <summary>
+    /// Appends one entry to a mailbox index (sequence +1, re-signed) and
+    /// writes it atomically. The read-modify-write is serialized per
+    /// mailbox directory (W-4): without the gate, two concurrent writers
+    /// both read sequence N, both write N+1, and one message is silently
+    /// lost from the signed index. After each write the fresh index is
+    /// re-read and the entry's presence verified — a writer outside this
+    /// process (same folder, different spelling) can still overwrite us
+    /// between the read and the rename, so a missing entry retries from
+    /// the fresh index instead of losing the message. After
+    /// <see cref="MaxIndexUpdateAttempts"/> failed attempts the update
+    /// throws rather than reporting success for a lost message.
+    /// </summary>
+    private const int MaxIndexUpdateAttempts = 5;
 
     private void UpdateIndex(string mailboxDir, RelayIndexEntry newEntry)
     {
-        RelayIndex index = ReadIndex(mailboxDir);
-        index.Messages.Add(newEntry);
-        index.Sequence++;
-        index.Hmac = RelayCrypto.ComputeIndexHmac(_hmacKey, index.Sequence, index.Messages);
-        WriteAtomic(
-            Path.Combine(mailboxDir, "index.json"),
-            Encoding.UTF8.GetBytes(RelayJson.Serialize(index, RelayJson.Indented, RelayJsonContext.Default.RelayIndex)),
-            overwrite: true);
+        lock (IndexGateFor(mailboxDir))
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                RelayIndex index = ReadIndex(mailboxDir);
+                if (index.Messages.Any(m => m.Id == newEntry.Id))
+                {
+                    // Already recorded: a previous attempt's write landed
+                    // (or the entry was appended by a retry that raced).
+                    return;
+                }
+                index.Messages.Add(newEntry);
+                index.Sequence++;
+                index.Hmac = RelayCrypto.ComputeIndexHmac(_hmacKey, index.Sequence, index.Messages);
+                WriteAtomic(
+                    Path.Combine(mailboxDir, "index.json"),
+                    Encoding.UTF8.GetBytes(RelayJson.Serialize(index, RelayJson.Indented, RelayJsonContext.Default.RelayIndex)),
+                    overwrite: true);
+
+                // Verify the entry landed: a concurrent writer outside
+                // this process may have overwritten the index between
+                // our read and our rename. Re-read from the fresh index.
+                RelayIndex written = ReadIndex(mailboxDir);
+                if (written.Messages.Any(m => m.Id == newEntry.Id))
+                    return;
+                if (attempt >= MaxIndexUpdateAttempts)
+                {
+                    throw new InvalidOperationException(
+                        $"Mailbox index update for message {newEntry.Id} did not land after {MaxIndexUpdateAttempts} attempts — a concurrent writer kept overwriting it.");
+                }
+            }
+        }
     }
 
     /// <summary>

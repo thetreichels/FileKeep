@@ -12,6 +12,35 @@ namespace FileKeep.Core.Relay;
 /// </summary>
 public sealed class RelayInbox
 {
+    /// <summary>
+    /// Absolute cap on a relay bundle's on-disk size (2 GiB). A bundle is
+    /// loaded wholly into memory several times over (scan, par2 verify /
+    /// repair, par2 regenerate), so anything larger is refused before it
+    /// is read rather than risking an OOM of the service process.
+    /// Phone-dropped bundles are exports, not whole-vault backups, so
+    /// 2 GiB is far above any legitimate phone drop while still bounding
+    /// worst-case memory to a few GiB. The signed metadata.Size is the
+    /// tighter, authoritative bound (see <see cref="ScanOneBundle"/>) —
+    /// this cap is the backstop for bundles whose metadata is missing
+    /// or untrusted.
+    /// </summary>
+    public const long MaxBundleBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Exact byte length of the par2 companion for data of
+    /// <paramref name="dataLength"/> bytes, per the FKP2 format (see
+    /// <see cref="RelayPar2"/>): 16-byte header + one SHA-256 per data
+    /// block + one SHA-256 and one full block per parity block. Used to
+    /// refuse a planted oversized par2 before reading it.
+    /// </summary>
+    public static long ExpectedPar2Length(long dataLength)
+    {
+        long blockCount = (dataLength + RelayPar2.BlockSize - 1) / RelayPar2.BlockSize;
+        long groups = (blockCount + RelayPar2.DataShards - 1) / RelayPar2.DataShards;
+        long parityBlockCount = groups * RelayPar2.ParityShards;
+        return 16 + blockCount * 32 + parityBlockCount * 32 + parityBlockCount * RelayPar2.BlockSize;
+    }
+
     private readonly string _relayRoot;
     private readonly byte[] _hmacKey;
     private readonly byte[] _encKey;
@@ -53,10 +82,16 @@ public sealed class RelayInbox
 
     private InboxBundle ScanOneBundle(string token, string kfbPath)
     {
-        byte[] kfbBytes;
+        // W-5: size-gate BEFORE reading. The relay folder is untrusted
+        // and phone-writable, so the on-disk length is checked against
+        // the absolute cap and, once the signed metadata is verified,
+        // against the signed metadata.Size (authoritative) before any
+        // bundle byte is loaded. The par2 is likewise checked against
+        // its exact expected length for this bundle.
+        long onDiskLength;
         try
         {
-            kfbBytes = File.ReadAllBytes(kfbPath);
+            onDiskLength = new FileInfo(kfbPath).Length;
         }
         catch (Exception ex)
         {
@@ -72,8 +107,24 @@ public sealed class RelayInbox
                 RejectionReason = $"Could not read the bundle file: {ex.Message}",
             };
         }
+        if (onDiskLength > MaxBundleBytes)
+        {
+            return new InboxBundle
+            {
+                Token = token,
+                Name = token + ".kfb",
+                Size = onDiskLength,
+                CreatedUtc = DateTimeOffset.UtcNow,
+                KfbPath = kfbPath,
+                SignatureValid = false,
+                Par2Status = InboxPar2Status.NotRead,
+                RejectionReason = $"Bundle is {onDiskLength} bytes, over the {MaxBundleBytes}-byte relay size limit.",
+            };
+        }
 
         // Signature: the signed .json sidecar (see RelayInboxMetadata).
+        // Read and verify it BEFORE the .kfb: its HMAC covers the size,
+        // so a verified size mismatch refuses the read below.
         RelayInboxMetadata? metadata = null;
         string? rejection = null;
         string jsonPath = Path.Combine(LaptopInboxDir, token + ".json");
@@ -96,12 +147,71 @@ public sealed class RelayInbox
             {
                 if (!string.Equals(metadata.Token, token, StringComparison.Ordinal))
                     rejection = "Metadata token does not match the file name.";
-                else if (metadata.Size != kfbBytes.Length)
-                    rejection = $"Metadata size {metadata.Size} does not match the bundle size {kfbBytes.Length}.";
                 else if (!RelayCrypto.VerifyInboxHmac(_hmacKey, metadata))
                     rejection = "Metadata HMAC failed — not written by the paired phone.";
+                else if (onDiskLength > metadata.Size)
+                {
+                    // The file on disk is bigger than the phone signed
+                    // for: refuse without reading it.
+                    return new InboxBundle
+                    {
+                        Token = token,
+                        Name = metadata.Name,
+                        Size = onDiskLength,
+                        CreatedUtc = metadata.CreatedUtc,
+                        KfbPath = kfbPath,
+                        SignatureValid = false,
+                        Par2Status = InboxPar2Status.NotRead,
+                        Metadata = metadata,
+                        RejectionReason = $"Bundle on disk is {onDiskLength} bytes, larger than the signed size {metadata.Size}.",
+                    };
+                }
             }
         }
+
+        byte[] kfbBytes;
+        try
+        {
+            kfbBytes = File.ReadAllBytes(kfbPath);
+        }
+        catch (Exception ex)
+        {
+            return new InboxBundle
+            {
+                Token = token,
+                Name = token + ".kfb",
+                Size = 0,
+                CreatedUtc = DateTimeOffset.UtcNow,
+                KfbPath = kfbPath,
+                SignatureValid = false,
+                Par2Status = InboxPar2Status.Missing,
+                RejectionReason = $"Could not read the bundle file: {ex.Message}",
+            };
+        }
+        // TOCTOU: the file may have grown between the length check and
+        // the read. Refuse anything that came back over the cap instead
+        // of handing it to the par2 flow. (long) cast: byte[].Length is
+        // int, the cap is a long over int.MaxValue, and the bare
+        // comparison warns CS0652.
+        if ((long)kfbBytes.Length > MaxBundleBytes)
+        {
+            return new InboxBundle
+            {
+                Token = token,
+                Name = metadata?.Name ?? token + ".kfb",
+                Size = kfbBytes.Length,
+                CreatedUtc = metadata?.CreatedUtc ?? DateTimeOffset.UtcNow,
+                KfbPath = kfbPath,
+                SignatureValid = false,
+                Par2Status = InboxPar2Status.NotRead,
+                Metadata = metadata,
+                RejectionReason = $"Bundle is {kfbBytes.Length} bytes, over the {MaxBundleBytes}-byte relay size limit.",
+            };
+        }
+        // A truncated file (smaller than signed) is harmless to read and
+        // is caught here, as before.
+        if (rejection is null && metadata is not null && metadata.Size != kfbBytes.Length)
+            rejection = $"Metadata size {metadata.Size} does not match the bundle size {kfbBytes.Length}.";
 
         // Par2: assistant only; a missing/bad par2 never vetoes the bundle.
         InboxPar2Status par2Status;
@@ -116,6 +226,10 @@ public sealed class RelayInbox
             Par2VerifyResult verify;
             try
             {
+                long par2Length = new FileInfo(par2Path).Length;
+                if (par2Length > ExpectedPar2Length(kfbBytes.Length))
+                    throw new InvalidDataException(
+                        $"Par2 is {par2Length} bytes, larger than the {ExpectedPar2Length(kfbBytes.Length)} bytes expected for this bundle.");
                 verify = RelayPar2.Verify(kfbBytes, File.ReadAllBytes(par2Path));
             }
             catch (Exception ex)
@@ -266,6 +380,12 @@ public enum InboxPar2Status
     InvalidPar2,
     /// <summary>No par2 alongside the bundle.</summary>
     Missing,
+    /// <summary>
+    /// The bundle bytes were not read (over the size cap, or larger than
+    /// the signed metadata size), so the par2 was not checked either.
+    /// See <see cref="RelayInbox.MaxBundleBytes"/>.
+    /// </summary>
+    NotRead,
 }
 
 /// <summary>One phone-dropped bundle found by <see cref="RelayInbox.ScanBundles"/>.</summary>

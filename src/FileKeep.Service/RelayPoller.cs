@@ -14,7 +14,10 @@ namespace FileKeep.Service;
 /// alongside the dashboard and the scheduler (see Program.cs).
 ///
 /// A fault in one pass must not kill the poller (SF-18 pattern, same as
-/// the scheduler): the pass is logged and retried next cycle. The poller
+/// the scheduler): the pass is logged and retried next cycle. Three
+/// consecutive failures escalate as a distinct audit event and retries
+/// back off (W-2), so a persistent fault cannot hide as one log line
+/// per poll forever. The poller
 /// never touches the phone's outbox files except to delete bundles it
 /// has imported and approval messages it has consumed; rejected bundles
 /// stay in place for the dashboard to show.
@@ -34,6 +37,17 @@ public sealed class RelayPoller
     private readonly object _statusLock = new();
     private RelayPollerStatus _status = RelayPollerStatus.Disabled;
     private string _lastLoggedState = "";
+
+    // W-2: consecutive poll passes that threw. At
+    // PersistentFailureThreshold the fault is escalated as a distinct
+    // audit event and retries back off; any clean pass resets the count.
+    private int _consecutiveFailures;
+
+    /// <summary>Consecutive failed passes before the fault is escalated (same threshold as the scheduler fix).</summary>
+    private const int PersistentFailureThreshold = 3;
+
+    /// <summary>Audit event for a poller fault that survived the retry threshold.</summary>
+    private const string PersistentFailureEventId = "relay.poll.persistent-failure";
 
     // Approval requests the desktop issued (§7), awaiting the phone's
     // reply; and phone replies already matched, awaiting a claim by the
@@ -147,9 +161,11 @@ public sealed class RelayPoller
         Log("relay poller started");
         while (!stopping.IsCancellationRequested)
         {
+            TimeSpan delay = _pollInterval;
             try
             {
                 PollOnce();
+                _consecutiveFailures = 0;
             }
             catch (OperationCanceledException)
             {
@@ -157,11 +173,33 @@ public sealed class RelayPoller
             }
             catch (Exception ex)
             {
-                // A fault in one pass must not kill the poller.
+                // A fault in one pass must not kill the poller — but a
+                // persistent fault must not stay one log line per poll
+                // forever either (W-2): at the threshold it is escalated
+                // as a distinct audit event and retries back off.
+                _consecutiveFailures++;
                 SetStatus(_status with { State = RelayPollerState.Error, LastError = ex.Message });
-                Log($"relay: poll pass failed, will retry next cycle: {ex.Message}");
+                if (_consecutiveFailures == PersistentFailureThreshold)
+                {
+                    AuditLog.Record(_log, PersistentFailureEventId, AuditLog.Fail,
+                        $"poll pass failed {_consecutiveFailures} times consecutively: {ex.Message}");
+                    Log($"relay: poll pass failed {PersistentFailureThreshold} times consecutively — persistent fault, backing off retries: {ex.Message}");
+                }
+                else if (_consecutiveFailures > PersistentFailureThreshold)
+                {
+                    Log($"relay: poll pass failed ({_consecutiveFailures} consecutive failures) — persistent fault, backing off: {ex.Message}");
+                }
+                else
+                {
+                    Log($"relay: poll pass failed, will retry next cycle: {ex.Message}");
+                }
+                if (_consecutiveFailures >= PersistentFailureThreshold)
+                {
+                    int shift = Math.Min(_consecutiveFailures - PersistentFailureThreshold, 3);
+                    delay = _pollInterval * (1 << shift);
+                }
             }
-            try { await Task.Delay(_pollInterval, stopping); }
+            try { await Task.Delay(delay, stopping); }
             catch (OperationCanceledException) { break; }
         }
         Log("relay poller stopped");
@@ -206,10 +244,51 @@ public sealed class RelayPoller
                 Log($"relay: rejected inbox bundle {bundle.Token} ({bundle.Name}): {bundle.RejectionReason}");
                 continue;
             }
+            // W-5: re-check the on-disk size before reading — the file
+            // may have grown (or been swapped) since ScanBundles gated
+            // it, and the scan's size is the bound the poller trusts.
+            // A file that vanished (or cannot be statted) between the
+            // scan and this pass is rejected, not a pass failure: one
+            // bundle must not fail the whole poll.
+            long onDiskLength;
+            try
+            {
+                onDiskLength = new FileInfo(bundle.KfbPath).Length;
+            }
+            catch (Exception ex)
+            {
+                rejected++;
+                Log($"relay: rejected inbox bundle {bundle.Token} ({bundle.Name}): could not re-check its on-disk size: {ex.Message}; left in place");
+                continue;
+            }
+            if (onDiskLength > RelayInbox.MaxBundleBytes || onDiskLength != bundle.Size)
+            {
+                rejected++;
+                Log($"relay: rejected inbox bundle {bundle.Token} ({bundle.Name}): on-disk size {onDiskLength} no longer matches the scanned size {bundle.Size}; left in place");
+                continue;
+            }
             byte[] kfbBytes = File.ReadAllBytes(bundle.KfbPath);
             if (bundle.Par2Status == InboxPar2Status.Damaged)
             {
-                byte[]? repaired = RelayPar2.Repair(kfbBytes, File.ReadAllBytes(bundle.KfbPath + ".par2"));
+                // W-5: the par2 is likewise re-checked against its exact
+                // expected length before it is read; an oversized par2
+                // counts as unrepairable. A par2 that vanished (or cannot
+                // be read) between the scan and this pass is likewise
+                // unrepairable — it must not fail the whole poll.
+                string par2Path = bundle.KfbPath + ".par2";
+                byte[]? repaired = null;
+                if (File.Exists(par2Path))
+                {
+                    try
+                    {
+                        if (new FileInfo(par2Path).Length <= RelayInbox.ExpectedPar2Length(kfbBytes.Length))
+                            repaired = RelayPar2.Repair(kfbBytes, File.ReadAllBytes(par2Path));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"relay: could not read the par2 for inbox bundle {bundle.Token} ({bundle.Name}): {ex.Message}");
+                    }
+                }
                 if (repaired is null)
                 {
                     rejected++;

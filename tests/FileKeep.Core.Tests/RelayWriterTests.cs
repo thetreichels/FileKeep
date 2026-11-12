@@ -160,12 +160,135 @@ public class RelayWriterTests : IDisposable
     [Fact]
     public void PruneExpiredDrops_DeletesOrphanedKfb()
     {
-        string orphan = Path.Combine(_relayRoot, "drops", "deadbeef.kfb");
+        string orphan = Path.Combine(_relayRoot, "drops", "deadbeefdeadbeefdeadbeefdeadbeef.kfb");
         File.WriteAllBytes(orphan, RandomBytes(500, 12));
         File.SetLastWriteTimeUtc(orphan, DateTimeOffset.UtcNow.AddHours(-2).UtcDateTime);
         int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
         Assert.Equal(1, deleted);
         Assert.False(File.Exists(orphan));
+    }
+
+    [Fact]
+    public void PruneExpiredDrops_KeepsNonTokenOrphan()
+    {
+        // A file whose name is not a generated drop token is not a drop;
+        // prune must not delete it (defence in depth in DeleteDropFiles).
+        string orphan = Path.Combine(_relayRoot, "drops", "deadbeef.kfb");
+        File.WriteAllBytes(orphan, RandomBytes(500, 13));
+        File.SetLastWriteTimeUtc(orphan, DateTimeOffset.UtcNow.AddHours(-2).UtcDateTime);
+        int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
+        Assert.Equal(0, deleted);
+        Assert.True(File.Exists(orphan));
+    }
+
+    private string PlantDropJson(string fileName, string token, string name, long size,
+        DateTimeOffset expiryUtc, string hmac, bool old = false)
+    {
+        var meta = new RelayDropMetadata
+        {
+            Token = token,
+            Name = name,
+            Size = size,
+            ExpiryUtc = expiryUtc,
+            Hmac = hmac,
+        };
+        string jsonPath = Path.Combine(_relayRoot, "drops", fileName);
+        File.WriteAllText(jsonPath,
+            RelayJson.Serialize(meta, RelayJson.Indented, RelayJsonContext.Default.RelayDropMetadata));
+        if (old)
+            File.SetLastWriteTimeUtc(jsonPath, DateTimeOffset.UtcNow.AddHours(-2).UtcDateTime);
+        return jsonPath;
+    }
+
+    [Fact]
+    public void PruneExpiredDrops_RejectsTraversalTokenEvenWhenSigned()
+    {
+        // E-2: a planted token with a past expiry must not delete files
+        // outside drops/ — even when its HMAC verifies (the HMAC key
+        // holder signed it, or the attacker holds the key). Shape first.
+        string id = Guid.NewGuid().ToString("N");
+        string token = "../../service-" + id;
+        DateTimeOffset expiry = DateTimeOffset.UtcNow.AddHours(-1);
+        string hmac = RelayCrypto.ComputeDropHmac(_hmacKey, token, "x.kfb", 10, expiry);
+        string dropsDir = Path.Combine(_relayRoot, "drops");
+        string targetKfb = Path.GetFullPath(Path.Combine(dropsDir, token + ".kfb"));
+        string targetJson = Path.GetFullPath(Path.Combine(dropsDir, token + ".json"));
+        File.WriteAllBytes(targetKfb, RandomBytes(100, 31));
+        File.WriteAllText(targetJson, "{}");
+        try
+        {
+            PlantDropJson("planted.json", token, "x.kfb", 10, expiry, hmac);
+            int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
+            Assert.Equal(0, deleted);
+            Assert.True(File.Exists(targetKfb));
+            Assert.True(File.Exists(targetJson));
+        }
+        finally
+        {
+            try { File.Delete(targetKfb); } catch { }
+            try { File.Delete(targetJson); } catch { }
+        }
+    }
+
+    [Fact]
+    public void PruneExpiredDrops_RejectsBadHmac()
+    {
+        // E-2: an expired drop whose metadata HMAC does not verify is
+        // untrusted — its expiry cannot be trusted, so it is not pruned
+        // while fresh.
+        string token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        string kfbPath = Path.Combine(_relayRoot, "drops", token + ".kfb");
+        File.WriteAllBytes(kfbPath, RandomBytes(500, 32));
+        PlantDropJson(token + ".json", token, "old.kfb", 500,
+            DateTimeOffset.UtcNow.AddHours(-1), "00");
+        int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
+        Assert.Equal(0, deleted);
+        Assert.True(File.Exists(kfbPath));
+    }
+
+    [Fact]
+    public void PruneExpiredDrops_BadHmacOldDrop_CleanedByFilename()
+    {
+        // An unverifiable drop old enough not to be mid-publish is still
+        // cleaned up — by its filename token, never by the untrusted
+        // metadata — so planted junk cannot fill the relay forever.
+        string token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        string kfbPath = Path.Combine(_relayRoot, "drops", token + ".kfb");
+        string jsonPath = PlantDropJson(token + ".json", token, "old.kfb", 500,
+            DateTimeOffset.UtcNow.AddHours(-1), "00", old: true);
+        File.WriteAllBytes(kfbPath, RandomBytes(500, 33));
+        int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
+        Assert.Equal(1, deleted);
+        Assert.False(File.Exists(kfbPath));
+        Assert.False(File.Exists(jsonPath));
+    }
+
+    [Fact]
+    public void PruneExpiredDrops_TamperedName_DoesNotThrow()
+    {
+        // A name with line breaks makes the HMAC canonical string throw;
+        // that is a verification failure, not a prune failure.
+        string token = "cccccccccccccccccccccccccccccccc";
+        string kfbPath = Path.Combine(_relayRoot, "drops", token + ".kfb");
+        File.WriteAllBytes(kfbPath, RandomBytes(500, 34));
+        PlantDropJson(token + ".json", token, "a\nb", 500,
+            DateTimeOffset.UtcNow.AddHours(-1), "00");
+        int deleted = _writer.PruneExpiredDrops(DateTimeOffset.UtcNow);
+        Assert.Equal(0, deleted);
+        Assert.True(File.Exists(kfbPath));
+    }
+
+    [Fact]
+    public void IsValidDropToken_AcceptsOnlyThirtyTwoLowerHex()
+    {
+        Assert.True(RelayWriter.IsValidDropToken("0123456789abcdef0123456789abcdef"));
+        Assert.False(RelayWriter.IsValidDropToken("0123456789ABCDEF0123456789ABCDEF")); // uppercase
+        Assert.False(RelayWriter.IsValidDropToken("0123456789abcdef0123456789abcde")); // 31 chars
+        Assert.False(RelayWriter.IsValidDropToken("0123456789abcdef0123456789abcdef0")); // 33 chars
+        Assert.False(RelayWriter.IsValidDropToken("../../service"));
+        Assert.False(RelayWriter.IsValidDropToken("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")); // non-hex
+        Assert.False(RelayWriter.IsValidDropToken(null));
+        Assert.False(RelayWriter.IsValidDropToken(""));
     }
 
     [Fact]

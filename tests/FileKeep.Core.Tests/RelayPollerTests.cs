@@ -143,7 +143,7 @@ public class RelayPollerTests : IDisposable
         Assert.Equal(0, poller.Status.BundlesImported);
         Assert.Equal(1, poller.Status.BundlesRejected);
         Assert.True(File.Exists(Path.Combine(_relayRoot, "inbox", "laptop", "bbbb.kfb")));
-        Assert.Equal(0, _writer.ReadPhoneIndex().Messages.Count); // no ack
+        Assert.Empty(_writer.ReadPhoneIndex().Messages); // no ack
     }
 
     [Fact]

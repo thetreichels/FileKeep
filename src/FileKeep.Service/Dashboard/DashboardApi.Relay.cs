@@ -339,6 +339,21 @@ public static partial class DashboardApi
         int hours = lifetimeHours ?? (int)TimeSpan.FromDays(7).TotalHours;
         hours = Math.Clamp(hours, 1, 24 * 30);
         string displayName = string.IsNullOrWhiteSpace(name) ? Path.GetFileName(kfbPath) : name.Trim();
+        // W-5: bound the read before loading the file — a beam input is a
+        // local file the user picked, but it is still read wholly into
+        // memory, so refuse anything over the relay size cap.
+        long beamLength;
+        try
+        {
+            beamLength = new FileInfo(kfbPath).Length;
+        }
+        catch (Exception ex)
+        {
+            return (400, new ErrorDto($"Could not read the bundle: {ex.Message}"));
+        }
+        if (beamLength > RelayInbox.MaxBundleBytes)
+            return (400, new ErrorDto(
+                $"Bundle is {beamLength} bytes, over the {RelayInbox.MaxBundleBytes}-byte relay size limit."));
         byte[] kfbBytes;
         try
         {
@@ -348,9 +363,18 @@ public static partial class DashboardApi
         {
             return (400, new ErrorDto($"Could not read the bundle: {ex.Message}"));
         }
+        // TOCTOU: the file may have grown between the length check and
+        // the read; refuse anything that came back over the cap.
+        // (long) cast: byte[].Length is int, the cap is a long over
+        // int.MaxValue, and the bare comparison warns CS0652.
+        if ((long)kfbBytes.Length > RelayInbox.MaxBundleBytes)
+            return (400, new ErrorDto(
+                $"Bundle is {kfbBytes.Length} bytes, over the {RelayInbox.MaxBundleBytes}-byte relay size limit."));
         try
         {
-            DropPublishResult result = writer!.PublishDrop(kfbBytes, displayName, TimeSpan.FromHours(hours));
+            if (writer is null)
+                return (500, new ErrorDto("Relay writer is unavailable."));
+            DropPublishResult result = writer.PublishDrop(kfbBytes, displayName, TimeSpan.FromHours(hours));
             log?.Invoke($"dashboard: beamed {displayName} as drop {result.Token}");
             return (200, new RelayBeamDto
             {
@@ -407,8 +431,10 @@ public static partial class DashboardApi
     {
         if (!TryGetRelayInbox(config, out RelayInbox? inbox, out string? error))
             return (400, new ErrorDto(error!));
+        if (inbox is null)
+            return (500, new ErrorDto("Relay inbox is unavailable."));
         var list = new List<RelayInboxBundleDto>();
-        foreach (InboxBundle bundle in inbox!.ScanBundles())
+        foreach (InboxBundle bundle in inbox.ScanBundles())
         {
             list.Add(new RelayInboxBundleDto
             {
@@ -451,7 +477,9 @@ public static partial class DashboardApi
         };
         try
         {
-            writer!.WriteMessage(
+            if (writer is null)
+                return (500, new ErrorDto("Relay writer is unavailable."));
+            writer.WriteMessage(
                 RelayMessageKinds.ApprovalRequest,
                 Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalRequestBody)));
         }
@@ -550,7 +578,9 @@ public static partial class DashboardApi
         var body = new ApprovalBody { Nonce = "", RefId = id, Approved = approved };
         try
         {
-            writer!.WriteMessage(
+            if (writer is null)
+                return (500, new ErrorDto("Relay writer is unavailable."));
+            writer.WriteMessage(
                 RelayMessageKinds.Approval,
                 Encoding.UTF8.GetBytes(RelayJson.Serialize(body, RelayJson.Default, RelayJsonContext.Default.ApprovalBody)));
         }
@@ -558,8 +588,8 @@ public static partial class DashboardApi
         {
             return (500, new ErrorDto($"Could not write the approval reply: {ex.Message}"));
         }
-        if (TryGetRelayInbox(config, out RelayInbox? inbox, out _))
-            inbox!.DeleteMessage(id);
+        if (TryGetRelayInbox(config, out RelayInbox? inbox, out _) && inbox is not null)
+            inbox.DeleteMessage(id);
         log?.Invoke($"dashboard: phone approval request {id} answered (approved={approved})");
         return (200, new OkDto(true));
     }
