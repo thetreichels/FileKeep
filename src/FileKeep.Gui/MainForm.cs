@@ -339,6 +339,12 @@ public class MainForm : Form
     // P2-L13: set when the form starts closing; the async WebView2
     // init checks it after every await and stops touching controls.
     private bool _closing;
+    // I-7: async close handling — the first FormClosing is cancelled
+    // while the restore-session lock runs; _closeLockStarted guards
+    // a second close arriving meanwhile, _closeConfirmed lets the
+    // re-close through to the teardown.
+    private bool _closeLockStarted;
+    private bool _closeConfirmed;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _trayToggleItem;
     private bool _trayEnabled;
@@ -465,18 +471,65 @@ public class MainForm : Form
                     ToolTipIcon.Info);
             }
         };
-        FormClosing += (s, e) =>
+        FormClosing += OnFormClosing;
+    }
+
+    /// <summary>
+    /// Async close handling (I-7): the restore-session lock is an HTTP
+    /// round-trip, so it runs async instead of blocking the UI thread
+    /// with GetAwaiter().GetResult(). The first close is cancelled,
+    /// the lock runs, then Close() is called again and the second pass
+    /// does the teardown. A close that arrives while the lock is
+    /// already running (double X click) is cancelled and left to the
+    /// in-flight lock's re-close. Windows shutdown and Task Manager
+    /// closes are never delayed: the lock runs fire-and-forget there
+    /// and the close proceeds, with the 1-hour idle expiry as the
+    /// backstop.
+    /// </summary>
+    private async void OnFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        // Flag FIRST: an in-flight InitializeWebViewAsync resumes
+        // after its awaits and must not touch the WebView while
+        // (or after) it is disposed here (P2-L13).
+        _closing = true;
+
+        if (_closeConfirmed)
         {
-            // Flag FIRST: an in-flight InitializeWebViewAsync resumes
-            // after its awaits and must not touch the WebView while
-            // (or after) it is disposed here (P2-L13).
-            _closing = true;
-            LockRestoreSessionOnClose();
-            Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
-            try { _webView?.Dispose(); } catch { /* closing anyway */ }
-        };
+            TeardownOnClose();
+            return;
+        }
+
+        if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)
+        {
+            // Best-effort only — never delay a forced close for the
+            // lock. If the process dies first, idle expiry locks it.
+            _ = LockRestoreSessionOnCloseAsync();
+            TeardownOnClose();
+            return;
+        }
+
+        if (_closeLockStarted)
+        {
+            // A close is already in flight; the in-flight lock
+            // re-closes when it finishes.
+            e.Cancel = true;
+            return;
+        }
+
+        e.Cancel = true;
+        _closeLockStarted = true;
+        await LockRestoreSessionOnCloseAsync();
+        _closeConfirmed = true;
+        if (!IsDisposed)
+            Close();
+    }
+
+    private void TeardownOnClose()
+    {
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        _trayIcon.Visible = false;
+        _trayIcon.Dispose();
+        try { _webView?.Dispose(); } catch { /* closing anyway */ }
     }
 
     /// <summary>
@@ -490,13 +543,16 @@ public class MainForm : Form
     /// 1-hour idle expiry is the backstop (a crash runs no close hook,
     /// so it relies on that backstop too). Minimize-to-tray is not a
     /// close and does not lock: the GUI is still running.
+    /// Runs async (I-7): the old GetAwaiter().GetResult() calls blocked
+    /// the UI thread for the HTTP round-trips; the caller awaits this
+    /// and re-closes, so the form stays responsive while it runs.
     /// </summary>
-    private void LockRestoreSessionOnClose()
+    private async Task LockRestoreSessionOnCloseAsync()
     {
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            string html = http.GetStringAsync(DashboardUrl).GetAwaiter().GetResult();
+            string html = await http.GetStringAsync(DashboardUrl);
             const string marker = "<meta name=\"n-token\" content=\"";
             int start = html.IndexOf(marker, StringComparison.Ordinal);
             if (start < 0) return;
@@ -506,7 +562,7 @@ public class MainForm : Form
             string token = html.Substring(start, end - start);
             using var req = new HttpRequestMessage(HttpMethod.Post, DashboardUrl + "api/restore/lock");
             req.Headers.Add("X-CSRF-Token", token);
-            using var _ = http.SendAsync(req).GetAwaiter().GetResult();
+            using var _ = await http.SendAsync(req);
         }
         catch { /* closing anyway — idle expiry is the backstop */ }
     }
@@ -674,8 +730,12 @@ public class MainForm : Form
             // Expose native dialogs to JavaScript as window.chrome.webview.hostObjects.fileKeep
             _webView.CoreWebView2.AddHostObjectToScript("fileKeep", new NativeBridge(this));
 
+            // B-3 (CS4014): the script-registration call used to be
+            // fire-and-forget. It is awaited now: the helpers must be
+            // registered before any dashboard page can call them, and
+            // this method is already async with navigation after it.
             // Inject a helper so dashboard JS can call: await window.fileKeepPickFolder('title')
-            _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(@"
+            await _webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(@"
                 window.fileKeepPickFolder = async function(title) {
                     try {
                         const bridge = chrome.webview.hostObjects.fileKeep;

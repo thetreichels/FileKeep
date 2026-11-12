@@ -1,6 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using FileKeep.Core;
 using FileKeep.Core.Nntp;
 using FileKeep.Core.Security;
@@ -133,7 +131,11 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            // I-4: the typed passphrase (and the proof passphrase) are in
+            // scope here; pass them as known secrets so a verbatim copy in
+            // the message is scrubbed (shape rules cannot see a typed
+            // passphrase). ErrorDto also shape-scrubs at construction.
+            return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, passphrase, proofPassphrase) ?? ""));
         }
     }
 
@@ -195,7 +197,9 @@ public static partial class DashboardApi
         }
         catch (InvalidOperationException ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            // I-4: the passphrase being wrapped is in scope; pass it as a
+            // known secret (see the SetPassphrase catch above).
+            return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, passphrase) ?? ""));
         }
         catch (TimeoutException)
         {
@@ -203,7 +207,7 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto("YubiKey setup failed: " + ex.Message));
+            return (400, new ErrorDto("YubiKey setup failed: " + (SecretScrubber.Scrub(ex.Message, passphrase) ?? "")));
         }
         finally
         {
@@ -263,7 +267,9 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            // I-4: the repository passphrase (and the proof passphrase) are
+            // in scope here; pass them as known secrets.
+            return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, passphrase, proofPassphrase) ?? ""));
         }
     }
 
@@ -319,7 +325,11 @@ public static partial class DashboardApi
         }
         catch (Exception ex)
         {
-            return (400, new ErrorDto(ex.Message));
+            // I-4: the generated secret (and the proof passphrase) are in
+            // scope here; pass them as known secrets. The 52-char shape is
+            // also caught by the shape rules, but the explicit value covers
+            // it even if it appears in a non-canonical form.
+            return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, secret, proofPassphrase) ?? ""));
         }
     }
 
@@ -494,7 +504,13 @@ public static partial class DashboardApi
             config.PassphraseWrapIterations = iterations;
         }
         try { config.Save(configPath); }
-        catch (Exception ex) { return (400, new ErrorDto(ex.Message)); }
+        catch (Exception ex)
+        {
+            // I-4: the new wrap passphrase, the repository secret, and the
+            // proof passphrase are all in scope here; pass them as known
+            // secrets.
+            return (400, new ErrorDto(SecretScrubber.Scrub(ex.Message, passphrase, root, proofPassphrase) ?? ""));
+        }
         log?.Invoke("dashboard: passphrase added to YubiKey-only profile (wraps generated secret)");
         AuditLog.Record(log, AuditLog.SecurityMode, AuditLog.Ok, "passphrase-added=true");
         return (200, new OkDto(true));
@@ -650,7 +666,7 @@ public static partial class DashboardApi
         catch (Exception ex)
         {
             AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "op=program-spare reason=error");
-            return (400, new ErrorDto($"Failed to program spare key: {ex.Message}" ));
+            return (400, new ErrorDto($"Failed to program spare key: {SecretScrubber.Scrub(ex.Message, proofPassphrase) ?? ""}" ));
         }
     }
 

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using FileKeep.Core.Security;
 
 namespace FileKeep.Service;
 
@@ -107,8 +108,12 @@ public static class WindowsServiceHost
             // here means the host itself died. Report a non-zero exit code so
             // SCM shows a start failure, not a clean stop.
             crashed = true;
+            // I-8: the crash log writes the full exception (message + stack
+            // trace) to disk. Scrub it like the operational log sink does —
+            // a subsystem that interpolates a secret-shaped value into its
+            // message must not leak it into service-crash.log.
             try { File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "service-crash.log"),
-                $"{DateTime.UtcNow:O} host died: {ex}{Environment.NewLine}"); } catch { }
+                $"{DateTime.UtcNow:O} host died: {SecretScrubber.Scrub(ex.ToString())}{Environment.NewLine}"); } catch { }
         }
         finally
         {
