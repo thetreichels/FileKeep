@@ -12,13 +12,22 @@ public sealed class Catalog : IDisposable
     private readonly object _lock = new(); // SQLite connection is not thread-safe
     private bool _disposed;
 
+    // SQLite primary result codes (sqlite3.h). Microsoft.Data.Sqlite
+    // exposes them as ints on SqliteException.SqliteErrorCode — there
+    // is no SqliteErrorCode enum in this provider (that enum belongs
+    // to System.Data.SQLite). Only these two indicate a corrupt /
+    // not-a-database file; every other code is re-thrown, never
+    // quarantined (W-16).
+    private const int SqliteCorrupt = 11; // SQLITE_CORRUPT
+    private const int SqliteNotADatabase = 26; // SQLITE_NOTADB
+
     public Catalog(string dbPath)
     {
         try
         {
             _conn = OpenAndInit(dbPath);
         }
-        catch (SqliteException)
+        catch (SqliteException ex) when (ex.SqliteErrorCode is SqliteCorrupt or SqliteNotADatabase)
         {
             // P2-D2: a torn catalog (power loss mid-write) used to brick
             // every repository operation with a raw SqliteException.
@@ -27,6 +36,11 @@ public sealed class Catalog : IDisposable
             // a rebuildable index (P2-D1: BackupRepository rescans
             // chunks/ and manifests/ to refill it), so no backup data is
             // lost. If the fresh start also fails, that error stands.
+            // W-16: quarantine ONLY on corruption-indicating result
+            // codes. Any other SqliteException (disk full, locked,
+            // permission denied, bad path) is re-thrown immediately —
+            // quarantining on those would silently discard a healthy
+            // index and mask a possibly persistent failure.
             QuarantineCorrupt(dbPath);
             _conn = OpenAndInit(dbPath);
         }
@@ -390,7 +404,9 @@ public sealed class Catalog : IDisposable
         {
             using var cmd = _conn.CreateCommand();
             cmd.CommandText = "SELECT COUNT(*) FROM backups";
-            return (int)(long)cmd.ExecuteScalar()!;
+            // W-17: checked narrowing — a row count past int.MaxValue
+            // must fail loudly (OverflowException) rather than wrap.
+            return checked((int)(long)cmd.ExecuteScalar()!);
         }
     }
 

@@ -1,6 +1,4 @@
-using System.Net;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using FileKeep.Core;
 using FileKeep.Core.Json;
@@ -12,7 +10,7 @@ using Microsoft.AspNetCore.Http.Features;
 namespace FileKeep.Service;
 
 /// <summary>
-/// Localhost web dashboard (the v0.7 GUI): service status, manual job
+/// Localhost web dashboard (the v0.09.01 GUI): service status, manual job
 /// triggers, backup lists and the operations log. Binds to loopback by
 /// default; it has no authentication, so it must not be exposed to a
 /// network without a reverse proxy in front. Backup triggering never
@@ -33,6 +31,34 @@ public static class Dashboard
     {
         using var reader = new StreamReader(request.Body);
         return await reader.ReadToEndAsync();
+    }
+
+    /// <summary>
+    /// Trim-safe JSON result for dashboard responses (B-2).
+    /// <c>Results.Json(object)</c> uses reflection-based serialization,
+    /// which the trimmer cannot analyse (IL2026) and which yields empty
+    /// bodies in a trimmed publish. This resolves source-generated
+    /// metadata for the payload's runtime type from
+    /// <see cref="DashboardJsonContext"/> (dashboard DTOs) or
+    /// <see cref="FileKeep.Core.Json.FileKeepJsonContext"/> (Core DTOs)
+    /// and serializes through the <c>JsonTypeInfo</c> overload instead.
+    /// A payload whose type has no registered metadata is a programming
+    /// error: fail loudly with a 500 <see cref="ErrorDto"/> rather than
+    /// silently serving an empty body.
+    /// </summary>
+    private static IResult JsonPayload(object? payload, int statusCode = StatusCodes.Status200OK)
+    {
+        if (payload is null)
+            return Results.Content("null", "application/json", statusCode: statusCode);
+        System.Text.Json.Serialization.Metadata.JsonTypeInfo? info =
+            DashboardJsonContext.Default.GetTypeInfo(payload.GetType())
+            ?? FileKeep.Core.Json.FileKeepJsonContext.Default.GetTypeInfo(payload.GetType());
+        if (info is not null)
+            return Results.Json(payload, info, statusCode: statusCode);
+        return Results.Json(
+            new ErrorDto($"No JSON metadata registered for response type '{payload.GetType().Name}'."),
+            DashboardJsonContext.Default.ErrorDto,
+            statusCode: StatusCodes.Status500InternalServerError);
     }
 
     /// <summary>
@@ -124,17 +150,9 @@ public static class Dashboard
                         }
                     }
                 }
-                int depth = 1;
-                if (ctx.Request.Headers.TryGetValue("Depth", out var depthHeader))
-                {
-                    depth = depthHeader.ToString() switch
-                    {
-                        "0" => 0,
-                        "1" => 1,
-                        "infinity" => int.MaxValue,
-                        _ => 1,
-                    };
-                }
+                int depth = ctx.Request.Headers.TryGetValue("Depth", out var depthHeader)
+                    ? WebDav.ParseDepth(depthHeader.ToString())
+                    : 1;
                 string? token = null;
                 if (ctx.Request.Headers.TryGetValue("Lock-Token", out var lockHeader))
                     token = lockHeader.ToString().Trim('<', '>', ' ');
@@ -252,7 +270,7 @@ public static class Dashboard
                 if (!ctx.Response.HasStarted)
                 {
                     ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    await Results.Json(
+                    await JsonPayload(
                         new ErrorDto("The request body was not valid JSON."),
                         statusCode: StatusCodes.Status400BadRequest).ExecuteAsync(ctx);
                 }
@@ -269,7 +287,7 @@ public static class Dashboard
             return Results.Content(DashboardHtml.Page(csrfToken), "text/html; charset=utf-8");
         });
 
-        app.MapGet("/api/status", () => Results.Json(DashboardApi.GetStatus(scheduler)));
+        app.MapGet("/api/status", () => JsonPayload(DashboardApi.GetStatus(scheduler)));
 
         app.MapGet("/api/version", () =>
         {
@@ -335,7 +353,7 @@ public static class Dashboard
                 if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
                     folders.Add(new FolderDto(name, path));
             }
-            return Results.Json(folders);
+            return JsonPayload(folders);
         });
 
         // Server-side folder listing for the dashboard's folder picker —
@@ -346,7 +364,7 @@ public static class Dashboard
         app.MapGet("/api/browse-folders", (string? path) =>
         {
             var (status, payload) = DashboardApi.BrowseFolders(path);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/jobs/{name}/run", (string name, HttpRequest request) =>
@@ -356,12 +374,18 @@ public static class Dashboard
             if (!DashboardApi.IsKnownJob(scheduler, name))
                 return Results.NotFound(new ErrorDto($"Unknown job '{name}'." ));
             // Run in the background; the scheduler serializes runs.
+            // W-3: the log call inside the catch is itself wrapped — if
+            // logging throws, the Task faults unobserved. No passphrase or
+            // session is read here (RunJobNow uses the service's own
+            // environment passphrase), so there is nothing to re-resolve
+            // inside the task.
             Task.Run(() =>
             {
                 try { scheduler.RunJobNow(name); }
                 catch (Exception ex)
                 {
-                    log?.Invoke($"dashboard: manual run of job '{name}' FAILED: {ex.Message}");
+                    try { log?.Invoke($"dashboard: manual run of job '{name}' FAILED: {ex.Message}"); }
+                    catch { /* logging must never fault the background task */ }
                 }
             });
             return Results.Accepted();
@@ -382,7 +406,7 @@ public static class Dashboard
                         sources.Add(s);
             string repoPath = GetBodyString(body, "repoPath");
             var (status, payload) = DashboardApi.StartOneTimeBackup(scheduler, sources, repoPath, config);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         // Repo-scoped endpoints only accept repos belonging to configured
@@ -390,13 +414,13 @@ public static class Dashboard
         app.MapGet("/api/backups", (string repo) =>
         {
             var (status, payload) = DashboardApi.GetBackups(config, repo, restoreSession);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/log", (string repo, int lines = 100) =>
         {
             var (status, payload) = DashboardApi.GetLog(config, repo, lines);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         // Operations: manual actions for every CLI capability, run in the
@@ -409,7 +433,7 @@ public static class Dashboard
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
             var (status, payload) = DashboardApi.StartUpload(config, scheduler, repo, backupId);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/verify", async (HttpRequest request) =>
@@ -420,7 +444,7 @@ public static class Dashboard
             string repo = GetBodyString(body, "repo");
             string backupId = GetBodyString(body, "backupId");
             var (status, payload) = DashboardApi.StartVerify(config, repo, backupId, restoreSession, scheduler, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/retention-check", async (HttpRequest request) =>
@@ -430,7 +454,7 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             bool dryRun = body.TryGetProperty("dryRun", out var d) && d.GetBoolean();
             var (status, payload) = DashboardApi.StartRetentionCheck(config, scheduler, dryRun);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/nntp-test", async (HttpRequest request) =>
@@ -447,7 +471,7 @@ public static class Dashboard
             string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
             bool ssl = !body.TryGetProperty("ssl", out var s) || s.GetBoolean();
             var (status, payload) = DashboardApi.TestNntpConnection(host, port, user, pass, ssl);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/smb-test", async (HttpRequest request) =>
@@ -459,7 +483,7 @@ public static class Dashboard
             string user = body.TryGetProperty("user", out var u) ? u.GetString() ?? "" : "";
             string pass = body.TryGetProperty("pass", out var pw) ? pw.GetString() ?? "" : "";
             var (status, payload) = DashboardApi.TestSmbConnection(share, user, pass);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/file-exists", async (HttpRequest request) =>
@@ -469,25 +493,25 @@ public static class Dashboard
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string path = GetBodyString(body, "path");
             bool exists = !string.IsNullOrEmpty(path) && File.Exists(path);
-            return Results.Json(new ExistsDto(exists));
+            return JsonPayload(new ExistsDto(exists));
         });
 
         app.MapGet("/api/operations/usb-drives", () =>
         {
             var (status, payload) = DashboardApi.ListUsbDrives();
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/removable-drives", () =>
         {
             var (status, payload) = DashboardApi.ListRemovableDrives();
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/drives", () =>
         {
             var (status, payload) = DashboardApi.ListPhysicalDrives();
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/restore", async (HttpRequest request) =>
@@ -507,13 +531,13 @@ public static class Dashboard
             // restore between files/chunks so its outcome gets logged
             // instead of the process dying mid-write in silence.
             var (status, payload) = DashboardApi.StartRestore(config, repo, backupId, destDir, mergePolicy, smbShare, smbUser, restoreSession, ct, scheduler, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/restores", () =>
         {
             var (status, payload) = DashboardApi.ListActiveRestores();
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/export-bundle", async (HttpRequest request) =>
@@ -522,9 +546,12 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
             string repo = GetBodyString(body, "repo");
-            var exportRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.ExportBundleRequestDto>(
-                body.GetRawText(),
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            // Source-generated deserialization (B-2): the reflection overload
+            // warns IL2026 and breaks under trimming. Every property carries
+            // an explicit [JsonPropertyName], so the old case-insensitive
+            // matching is not needed — same as the protection-profile routes.
+            var exportRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.ExportBundleRequestDto)
                 ?? new DashboardApi.ExportBundleRequestDto();
             // The repo comes as a separate field, not in the DTO
             var (status, payload) = DashboardApi.ExportBundle(
@@ -533,14 +560,14 @@ public static class Dashboard
             {
                 return Results.File(bundleBytes, "application/octet-stream", "backup.kfb");
             }
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         // iOS relay (docs/ios-relay-protocol.md): pairing, beam, status.
         app.MapGet("/api/relay/status", () =>
         {
             var (status, payload) = DashboardApi.GetRelayStatus(config, relayPoller);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/relay/pair", async (HttpRequest request) =>
@@ -548,12 +575,11 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            var pairRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayPairRequestDto>(
-                body.GetRawText(),
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            var pairRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.RelayPairRequestDto)
                 ?? new DashboardApi.RelayPairRequestDto();
             var (status, payload) = DashboardApi.PairRelay(config, configPath, pairRequest, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/relay/unpair", async (HttpRequest request) =>
@@ -561,7 +587,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.UnpairRelay(config, configPath, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/relay/beam", async (HttpRequest request) =>
@@ -569,25 +595,24 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            var beamRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayBeamRequestDto>(
-                body.GetRawText(),
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            var beamRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.RelayBeamRequestDto)
                 ?? new DashboardApi.RelayBeamRequestDto();
             var (status, payload) = DashboardApi.BeamBundle(
                 config, beamRequest.KfbPath, beamRequest.Name, beamRequest.LifetimeHours, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/relay/drops", () =>
         {
             var (status, payload) = DashboardApi.ListRelayDrops(config);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/relay/inbox", () =>
         {
             var (status, payload) = DashboardApi.ListRelayInbox(config);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/relay/approvals/{id}/respond", async (HttpRequest request, string id) =>
@@ -595,13 +620,12 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var body = await request.ReadFromJsonAsync<JsonElement>();
-            var respondRequest = System.Text.Json.JsonSerializer.Deserialize<DashboardApi.RelayApprovalRespondDto>(
-                body.GetRawText(),
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            var respondRequest = System.Text.Json.JsonSerializer.Deserialize(
+                body.GetRawText(), DashboardJsonContext.Default.RelayApprovalRespondDto)
                 ?? new DashboardApi.RelayApprovalRespondDto();
             var (status, payload) = DashboardApi.RespondToApproval(
                 config, relayPoller, id, respondRequest.Approved, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/restore/cancel", async (HttpRequest request) =>
@@ -614,13 +638,13 @@ public static class Dashboard
             var (status, payload) = DashboardApi.CancelRestore(
                 string.IsNullOrWhiteSpace(destDir) ? null : destDir,
                 string.IsNullOrWhiteSpace(device) ? null : device);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/operations/nzb", (string repo, string backupId) =>
         {
             var (status, payload, fileName) = DashboardApi.GenerateNzb(config, repo, backupId, restoreSession);
-            if (status != 200) return Results.Json(payload, statusCode: status);
+            if (status != 200) return JsonPayload(payload, statusCode: status);
             return Results.File((byte[])payload, "application/x-nzb", fileName);
         });
 
@@ -635,7 +659,7 @@ public static class Dashboard
             string tmp = Path.Combine(Path.GetTempPath(), "filekeep-" + Guid.NewGuid().ToString("N") + ".nzb");
             await using (var fs = File.Create(tmp)) await file.CopyToAsync(fs);
             var (status, payload) = DashboardApi.StartNzbDownload(config, scheduler, tmp, restoreSession);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/disk-backup", async (HttpRequest request) =>
@@ -649,7 +673,7 @@ public static class Dashboard
             string? smbShare = body.TryGetProperty("smbShare", out var s) ? s.GetString() : null;
             bool sparse = !body.TryGetProperty("sparse", out var sp) || sp.GetBoolean();
             var (status, payload) = DashboardApi.StartDiskBackup(config, repo, device, imageName, smbShare, sparse, scheduler);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/disk-restore", async (HttpRequest request) =>
@@ -664,16 +688,16 @@ public static class Dashboard
             string? deviceModel = body.TryGetProperty("deviceModel", out var dm) ? dm.GetString() : null;
             long? deviceSizeBytes = body.TryGetProperty("deviceSizeBytes", out var ds) && ds.TryGetInt64(out long s) ? s : null;
             var (status, payload) = DashboardApi.StartDiskRestore(config, repo, backupId, device, confirmed, restoreSession, deviceModel, deviceSizeBytes, ct, scheduler, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
 
 
         app.MapGet("/api/operations/winre-prerequisites", () =>
-            Results.Json(DashboardApi.CheckWinRePrerequisites()));
+            JsonPayload(DashboardApi.CheckWinRePrerequisites()));
 
         app.MapGet("/api/operations/winre-build-status", () =>
-            Results.Json(DashboardApi.GetWinReBuildStatus()));
+            JsonPayload(DashboardApi.GetWinReBuildStatus()));
 
         app.MapPost("/api/operations/winre-build", async (HttpRequest request) =>
         {
@@ -692,7 +716,7 @@ public static class Dashboard
             string? readerExportPath = body.TryGetProperty("readerExportPath", out var rep) && rep.ValueKind == JsonValueKind.String ? rep.GetString() : null;
             string? readerExportMode = body.TryGetProperty("readerExportMode", out var rem) && rem.ValueKind == JsonValueKind.String ? rem.GetString() : null;
             var (status, payload) = DashboardApi.StartWinReBuild(driveLetter, diskNumber, imagePath, sourceDir, bootMode, imageSizeMB, expectedModel, expectedSizeBytes, readerExe, readerExportPath, readerExportMode);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/operations/winre-build/cancel", (HttpRequest request) =>
@@ -700,27 +724,19 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.CancelWinReBuild();
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
 
         // Settings UI: read and update the backup job configuration.
         // All writes require the CSRF token and are validated before saving.
         app.MapGet("/api/config", () =>
-            Results.Json(new ConfigSnapshotDto(
+            JsonPayload(new ConfigSnapshotDto(
                 config.DashboardPort,
                 config.DashboardBind,
                 // Never expose the encrypted password blob to the UI.
                 // Snapshot under JobsLock: UpsertJob/DeleteJob mutate concurrently.
                 config.SnapshotJobs().Select(DashboardApi.ToDto).ToList(),
-                // Never expose the encrypted password blob to the UI.
-                config.Nntp == null ? null : new ConfigNntpDto(
-                    config.Nntp.Host,
-                    config.Nntp.Port,
-                    config.Nntp.Username,
-                    config.Nntp.Ssl,
-                    config.Nntp.Connections,
-                    config.Nntp.HasPassword),
                 config.SnapshotProviders().Select(p => new ConfigNntpProviderDto(
                     p.Host,
                     p.Port,
@@ -740,15 +756,15 @@ public static class Dashboard
         app.MapGet("/api/config/location-disk", () =>
         {
             var (status, payload) = DashboardApi.GetLocationDiskUsage(config);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/run-progress", () =>
         {
             var progress = scheduler.GetRunProgress();
             if (progress is null)
-                return Results.Json(new ActiveDto(false));
-            return Results.Json(new RunProgressDto(true, progress));
+                return JsonPayload(new ActiveDto(false));
+            return JsonPayload(new RunProgressDto(true, progress));
         });
 
         app.MapPost("/api/jobs/{name}/cancel", (string name, HttpRequest request) =>
@@ -758,8 +774,8 @@ public static class Dashboard
             if (!DashboardApi.IsKnownJob(scheduler, name))
                 return Results.NotFound(new ErrorDto($"Unknown job '{name}'."));
             return scheduler.CancelRun(name)
-                ? Results.Json(new OkDto(true))
-                : Results.Json(new ErrorDto($"Job '{name}' is not running."),
+                ? JsonPayload(new OkDto(true))
+                : JsonPayload(new ErrorDto($"Job '{name}' is not running."),
                     statusCode: StatusCodes.Status409Conflict);
         });
 
@@ -773,7 +789,7 @@ public static class Dashboard
             if (job is null)
                 return Results.BadRequest(new ErrorDto("Empty job."));
             var (status, payload) = DashboardApi.UpsertJob(config, scheduler, configPath, job, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapDelete("/api/config/jobs/{name}", (string name, HttpRequest request) =>
@@ -781,7 +797,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteJob(config, scheduler, configPath, name, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/locations", async (HttpRequest request) =>
@@ -794,7 +810,7 @@ public static class Dashboard
             if (loc is null)
                 return Results.BadRequest(new ErrorDto("Empty location."));
             var (status, payload) = DashboardApi.UpsertLocation(config, configPath, loc, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapDelete("/api/config/locations/{name}", (string name, HttpRequest request) =>
@@ -802,7 +818,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteLocation(config, scheduler, configPath, name, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/jobs/{name}/pause", async (string name, HttpRequest request) =>
@@ -814,7 +830,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             bool paused = body.TryGetProperty("paused", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.True;
             var (status, payload) = DashboardApi.SetJobPaused(config, scheduler, configPath, name, paused, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/jobs/{name}/attach-location", async (string name, HttpRequest request) =>
@@ -828,7 +844,7 @@ public static class Dashboard
             if (string.IsNullOrWhiteSpace(location))
                 return Results.BadRequest(new ErrorDto("location is required."));
             var (status, payload) = DashboardApi.AttachLocation(config, scheduler, configPath, name, location, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/locations/{name}/test", (string name, HttpRequest request) =>
@@ -836,7 +852,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.TestLocation(config, name);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/locations/{name}/scan", (string name, HttpRequest request) =>
@@ -844,7 +860,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.ScanLocationForBackups(config, name, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/vault/scan-usb", async (HttpRequest request) =>
@@ -856,7 +872,7 @@ public static class Dashboard
                 ? el.GetString() ?? ""
                 : "";
             var (status, payload) = DashboardApi.ScanUsbForBackups(config, drivePath, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/vault/import-discovered", async (HttpRequest request) =>
@@ -874,13 +890,13 @@ public static class Dashboard
                 ? sEl.GetString() ?? ""
                 : "";
             var (status, payload) = DashboardApi.ImportDiscoveredBackup(config, repo, backupId, sourcePath, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/config/passphrase-status", (HttpRequest request) =>
         {
             var (status, payload) = DashboardApi.GetPassphraseStatus(config);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/config/passphrase", async (HttpRequest request) =>
@@ -894,7 +910,7 @@ public static class Dashboard
             bool useYubiKey = body.TryGetProperty("yubikey", out var yk) && yk.GetBoolean();
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.SetPassphrase(config, configPath, passphrase, useYubiKey, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp, offlineFoldersSession, OfflineFoldersCatalog.CatalogPathFor(configPath));
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/security/passphrase-wrap", async (HttpRequest request) =>
@@ -907,7 +923,7 @@ public static class Dashboard
             string? passphrase = body.TryGetProperty("passphrase", out var pp) ? pp.GetString() : null;
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.AddPassphraseWrap(config, configPath, passphrase, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/protection/profile", () =>
@@ -933,7 +949,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("Empty profile."));
             var (status, payload) = DashboardApi.SetProtectionProfile(config, configPath, profile, log, yubiKeyProvider);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(FileKeepJsonOptions.Serialize((ProtectionProfileResponse)payload,
                 FileKeepJsonOptions.Default, FileKeepJsonContext.Default.ProtectionProfileResponse),
                 "application/json");
@@ -954,7 +970,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("Empty request."));
             var (status, payload) = DashboardApi.AddYubiKeyName(config, configPath, body.Name, log, body.ProofPassphrase, body.ProofYubiKey, yubiKeyProvider, body.ProofTotp);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(FileKeepJsonOptions.Serialize((AddYubiKeyResponse)payload,
                 FileKeepJsonOptions.Default, FileKeepJsonContext.Default.AddYubiKeyResponse),
                 "application/json");
@@ -968,7 +984,7 @@ public static class Dashboard
             // setup sends none, exactly like the other gated routes.
             var (proofPassphrase, proofYubiKey, proofTotp) = await ReadProofFieldsAsync(request);
             var (status, payload) = DashboardApi.SetupPhoneTotp(config, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/protection/phone/verify", async (HttpRequest request) =>
@@ -981,7 +997,7 @@ public static class Dashboard
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.VerifyPhoneTotp(config, code, configPath, log, proofPassphrase, proofYubiKey, yubiKeyProvider, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/yubikey/program-spare", async (HttpRequest request) =>
@@ -990,7 +1006,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (proofPassphrase, proofYubiKey, proofTotp) = await ReadProofFieldsAsync(request);
             var (status, payload) = DashboardApi.ProgramSpareKey(config, configPath, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/yubikey/link", async (HttpRequest request) =>
@@ -1008,7 +1024,7 @@ public static class Dashboard
             // (program + wrap, 60s timeout each).
             var (status, payload) = DashboardApi.LinkYubiKey(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false, body?.ProofTotp);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkYubiKeyDto)payload, DashboardJsonContext.Default.OkYubiKeyDto),
                 "application/json");
@@ -1030,7 +1046,7 @@ public static class Dashboard
             // returned in this response only — never again.
             var (status, payload) = DashboardApi.SetupGeneratedSecret(config, configPath, body?.Slot, yubiKeyProvider, log, body?.ProofPassphrase, body?.ProofYubiKey ?? false, body?.ProofTotp);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((YubiKeySetupGeneratedDto)payload, DashboardJsonContext.Default.YubiKeySetupGeneratedDto),
                 "application/json");
@@ -1042,7 +1058,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             // The touch blocks until the user presses the key (or 60s timeout).
             var (status, payload) = DashboardApi.UnlockRestoreSession(config, restoreSession, yubiKeyProvider, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/restore/unlock-secret", async (HttpRequest request) =>
@@ -1055,7 +1071,7 @@ public static class Dashboard
             string? secret = body.TryGetProperty("secret", out var s) ? s.GetString() : null;
             var (status, payload) = DashboardApi.UnlockRestoreSessionWithSecret(config, restoreSession, secret, log);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
                 "application/json");
@@ -1071,7 +1087,7 @@ public static class Dashboard
             string? code = body.TryGetProperty("code", out var c) ? c.GetString() : null;
             var (status, payload) = DashboardApi.UnlockRestoreSessionWithPhone(config, restoreSession, code, log);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
                 "application/json");
@@ -1087,7 +1103,7 @@ public static class Dashboard
             string? passphrase = body.TryGetProperty("passphrase", out var p) ? p.GetString() : null;
             var (status, payload) = DashboardApi.UnlockRestoreSessionWithPassphrase(config, restoreSession, passphrase, log);
             if (status != 200)
-                return Results.Json(payload, statusCode: status);
+                return JsonPayload(payload, statusCode: status);
             return Results.Content(
                 JsonSerializer.Serialize((OkDto)payload, DashboardJsonContext.Default.OkDto),
                 "application/json");
@@ -1100,7 +1116,7 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.RequestPhoneApproval(config, relayPoller, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/restore/unlock-phone-approval", async (HttpRequest request) =>
@@ -1112,7 +1128,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             string? nonce = body.TryGetProperty("nonce", out var n) ? n.GetString() : null;
             var (status, payload) = DashboardApi.ClaimPhoneApproval(config, restoreSession, relayPoller, nonce, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/restore/lock", (HttpRequest request) =>
@@ -1120,13 +1136,13 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.LockRestoreSession(restoreSession);
-            return Results.Json(payload);
+            return JsonPayload(payload);
         });
 
         app.MapGet("/api/restore/session", () =>
         {
             var (status, payload) = DashboardApi.GetRestoreSessionStatus(config, restoreSession);
-            return Results.Json(payload);
+            return JsonPayload(payload);
         });
 
         // Offline Folders card (slice 1: locked card + encrypted
@@ -1134,7 +1150,7 @@ public static class Dashboard
         app.MapGet("/api/offline-folders/status", () =>
         {
             var (status, payload) = DashboardApi.GetOfflineFoldersStatus(offlineFoldersSession);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/unlock", async (HttpRequest request) =>
@@ -1148,7 +1164,7 @@ public static class Dashboard
             var (proofPassphrase, proofYubiKey, _) = await ReadProofFieldsAsync(request);
             var (status, payload) = DashboardApi.UnlockOfflineFolders(config, offlineFoldersSession,
                 offlineFoldersPath, proofPassphrase, proofYubiKey, yubiKeyProvider, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/vaults/migrate", async (HttpRequest request) =>
@@ -1162,7 +1178,7 @@ public static class Dashboard
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.MigrateVaults(config, configPath, newSecret,
                 yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/export", async (HttpRequest request) =>
@@ -1178,7 +1194,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A folder is required."));
             var (status, payload) = DashboardApi.ExportOfflineFolder(config, offlineFoldersSession,
                 folder, exportPassphrase, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/export-file", async (HttpRequest request) =>
@@ -1195,7 +1211,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A folder and a file are required."));
             var (status, payload) = DashboardApi.ExportOfflineFile(config, offlineFoldersSession,
                 folder, file, exportPassphrase, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/export-full", async (HttpRequest request) =>
@@ -1212,7 +1228,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A folder and a destination are required."));
             var (status, payload) = DashboardApi.ExportOfflineFull(config, offlineFoldersSession,
                 folder, destination, exportPassphrase, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/import", async (HttpRequest request) =>
@@ -1226,14 +1242,14 @@ public static class Dashboard
             OfflineExportPackageDto? package = null;
             if (body.TryGetProperty("package", out var pkgEl))
             {
-                try { package = System.Text.Json.JsonSerializer.Deserialize<OfflineExportPackageDto>(pkgEl.GetRawText()); }
+                try { package = System.Text.Json.JsonSerializer.Deserialize(pkgEl.GetRawText(), DashboardJsonContext.Default.OfflineExportPackageDto); }
                 catch { /* falls through to the null check */ }
             }
             if (package is null)
                 return Results.BadRequest(new ErrorDto("An export package is required."));
             var (status, payload) = DashboardApi.ImportOfflineFolder(config, offlineFoldersSession,
                 offlineFoldersPath, package, exportPassphrase, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/import-by-path", async (HttpRequest request) =>
@@ -1251,14 +1267,14 @@ public static class Dashboard
             try
             {
                 var json = await System.IO.File.ReadAllTextAsync(packagePath);
-                package = System.Text.Json.JsonSerializer.Deserialize<OfflineExportPackageDto>(json);
+                package = System.Text.Json.JsonSerializer.Deserialize(json, DashboardJsonContext.Default.OfflineExportPackageDto);
             }
             catch { /* falls through to the null check */ }
             if (package is null)
                 return Results.BadRequest(new ErrorDto("The selected file is not a valid export package."));
             var (status, payload) = DashboardApi.ImportOfflineFolder(config, offlineFoldersSession,
                 offlineFoldersPath, package, exportPassphrase, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/forget", async (HttpRequest request) =>
@@ -1274,7 +1290,7 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A folder is required."));
             var (status, payload) = DashboardApi.ForgetOfflineFolder(config, offlineFoldersSession,
                 offlineFoldersPath, folder, confirm, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/open-token", async (HttpRequest request) =>
@@ -1294,7 +1310,7 @@ public static class Dashboard
             var issued = offlineDav.IssueOpenToken(folder, file, readOnly);
             if (issued is null)
                 return Results.NotFound(new ErrorDto("No such offline file."));
-            return Results.Json(new OfflineOpenTokenDto(issued.Value.Token, issued.Value.Url, readOnly));
+            return JsonPayload(new OfflineOpenTokenDto(issued.Value.Token, issued.Value.Url, readOnly));
         });
 
         app.MapPost("/api/offline-folders/release-open", async (HttpRequest request) =>
@@ -1309,14 +1325,14 @@ public static class Dashboard
                 return Results.BadRequest(new ErrorDto("A token is required."));
             if (!offlineDav.ReleaseOpenToken(token))
                 return Results.NotFound(new ErrorDto("No such open."));
-            return Results.Json(new OkDto(true));
+            return JsonPayload(new OkDto(true));
         });
 
         app.MapGet("/api/offline-folders/opens", () =>
         {
             if (!offlineFoldersSession.IsUnlocked)
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
-            return Results.Json(offlineDav.ListOpens());
+            return JsonPayload(offlineDav.ListOpens());
         });
 
         app.MapPost("/api/offline-folders/save-as", async (HttpRequest request) =>
@@ -1340,7 +1356,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.SaveOfflineFileAs(config, offlineFoldersSession,
                 folder, file, destination, locationName, path, fileName, overwrite);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/rekey", async (HttpRequest request) =>
@@ -1355,7 +1371,7 @@ public static class Dashboard
             var (proofPassphrase, proofYubiKey, proofTotp) = ProofFieldsOf(body);
             var (status, payload) = DashboardApi.RekeyOfflineFolders(config, configPath, offlineFoldersSession,
                 oldSecret, newSecret, yubiKeyProvider, log, proofPassphrase, proofYubiKey, proofTotp);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/lock", (HttpRequest request) =>
@@ -1363,13 +1379,13 @@ public static class Dashboard
             if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.LockOfflineFolders(offlineFoldersSession);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapGet("/api/offline-folders", () =>
         {
             var (status, payload) = DashboardApi.GetOfflineFolders(offlineFoldersSession);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders", async (HttpRequest request) =>
@@ -1383,7 +1399,7 @@ public static class Dashboard
             string? locationId = body.TryGetProperty("locationId", out var l) ? l.GetString() : null;
             var (status, payload) = DashboardApi.AddOfflineFolder(config, offlineFoldersSession,
                 offlineFoldersPath, name, locationId, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapDelete("/api/offline-folders/{name}", (string name, HttpRequest request) =>
@@ -1392,7 +1408,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteOfflineFolder(offlineFoldersSession,
                 offlineFoldersPath, name, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         // Per-folder security (2026-10-30, Joel): create without unlock,
@@ -1411,7 +1427,7 @@ public static class Dashboard
             string? securityMode = body.TryGetProperty("securityMode", out var s) ? s.GetString() : null;
             var (status, payload) = DashboardApi.CreateOfflineFolderWithProof(config, offlineFoldersSession,
                 offlineFoldersPath, offlineFoldersDir, name, locationId, securityMode, body, yubiKeyProvider, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/{name}/unlock", async (string name, HttpRequest request) =>
@@ -1423,7 +1439,7 @@ public static class Dashboard
             catch { return Results.BadRequest(new ErrorDto("Invalid JSON.")); }
             var (status, payload) = DashboardApi.UnlockCustomFolder(offlineFoldersSession,
                 offlineFoldersDir, name, body, yubiKeyProvider, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/{name}/lock", (string name, HttpRequest request) =>
@@ -1432,7 +1448,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             offlineFoldersSession.LockCustomFolder(name);
             log?.Invoke($"dashboard: custom offline folder locked ({name})");
-            return Results.Json(new OkDto(true));
+            return JsonPayload(new OkDto(true));
         });
 
         app.MapGet("/api/offline-folders/custom", (HttpRequest request) =>
@@ -1441,22 +1457,20 @@ public static class Dashboard
             // Names are visible while locked by design (required for unlock buttons).
             var index = DashboardApi.LoadCustomIndex(offlineFoldersDir);
             var unlocked = offlineFoldersSession.GetUnlockedCustomFolders();
-            var list = index.Select(e => new
-            {
-                name = e.Name,
-                locationId = e.LocationId,
-                addedUtc = e.AddedUtc.ToString("O"),
-                kind = e.Kind,
-                unlocked = unlocked.Contains(e.Name, StringComparer.Ordinal),
-            }).ToList();
-            return Results.Json(list);
+            var list = index.Select(e => new CustomFolderListEntryDto(
+                e.Name,
+                e.LocationId,
+                e.AddedUtc.ToString("O"),
+                e.Kind,
+                unlocked.Contains(e.Name, StringComparer.Ordinal))).ToList();
+            return JsonPayload(list);
         });
 
         // Slice 2: file list / upload / delete within an offline folder.
         app.MapGet("/api/offline-folders/{folder}/files", (string folder) =>
         {
             var (status, payload) = DashboardApi.GetOfflineFolderFiles(offlineFoldersSession, folder);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapPost("/api/offline-folders/{folder}/files", async (string folder, HttpRequest request) =>
@@ -1477,7 +1491,7 @@ public static class Dashboard
                 (Path.GetFileName(f.FileName), f.OpenReadStream(), DateTimeOffset.UtcNow)).ToList();
             var (status, payload) = DashboardApi.StoreOfflineFilesBatch(config, offlineFoldersSession,
                 offlineFoldersPath, folder, batch, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         // Native-picker upload: same store, paths instead of multipart bytes.
@@ -1496,13 +1510,19 @@ public static class Dashboard
             {
                 if (p.ValueKind != System.Text.Json.JsonValueKind.String)
                     return Results.BadRequest(new ErrorDto("paths must be strings."));
-                paths.Add(p.GetString()!);
+                // W-7: GetString() is null for a JSON null, which the
+                // ValueKind check above already excludes — but say so
+                // explicitly instead of asserting with '!'.
+                string? path = p.GetString();
+                if (path is null)
+                    return Results.BadRequest(new ErrorDto("paths must be strings."));
+                paths.Add(path);
             }
             if (paths.Count == 0)
                 return Results.BadRequest(new ErrorDto("No files selected."));
             var (status, payload) = DashboardApi.AddOfflineFilesByPath(config, offlineFoldersSession,
                 offlineFoldersPath, folder, paths, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         app.MapDelete("/api/offline-folders/{folder}/files/{*path}", (string folder, string path, HttpRequest request) =>
@@ -1511,7 +1531,7 @@ public static class Dashboard
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             var (status, payload) = DashboardApi.DeleteOfflineFile(offlineFoldersSession,
                 offlineFoldersPath, folder, path, log);
-            return Results.Json(payload, statusCode: status);
+            return JsonPayload(payload, statusCode: status);
         });
 
         MapOfflineDavRoutes(app, offlineDav);

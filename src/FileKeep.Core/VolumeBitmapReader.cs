@@ -10,8 +10,6 @@ namespace FileKeep.Core;
 public static class VolumeBitmapReader
 {
     private const uint FSCTL_GET_VOLUME_BITMAP = 0x9006F;
-    private const uint METHOD_BUFFERED = 0;
-    private const uint FILE_ANY_ACCESS = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct StartingLcnInputBuffer
@@ -117,9 +115,15 @@ public static class VolumeBitmapReader
                     if (bytesReturned < 16)
                         break;
 
+                    // W-17: bytesReturned comes from a device ioctl — never
+                    // trust it to fit the buffer. More than the buffer we
+                    // handed over is a driver/device lie, not a bitmap.
+                    if (bytesReturned > bufferSize)
+                        throw new InvalidDataException(
+                            $"FSCTL_GET_VOLUME_BITMAP returned {bytesReturned} bytes, more than the {bufferSize}-byte output buffer.");
                     long outStartingLcn = Marshal.ReadInt64(outBuffer, 0);
                     long bitmapSizeBytes = Marshal.ReadInt64(outBuffer, 8);
-                    int bitmapBytes = (int)(bytesReturned - 16);
+                    int bitmapBytes = checked((int)(bytesReturned - 16));
 
                     if (bitmapBytes <= 0)
                         break;

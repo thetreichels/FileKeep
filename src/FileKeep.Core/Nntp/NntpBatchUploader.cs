@@ -20,6 +20,7 @@ public sealed class NntpBatchUploader : IDisposable
     private readonly NntpConfig _nntp;
     private readonly string? _password;
     private readonly string _redundancy;
+    private readonly RedundancyKind _redundancyKind;
     private readonly int _parityGroupSize;
     private readonly Action<string> _log;
     private readonly NntpConnectionPool _pool;
@@ -46,6 +47,11 @@ public sealed class NntpBatchUploader : IDisposable
         _nntp = nntp ?? throw new ArgumentNullException(nameof(nntp));
         _password = password;
         _redundancy = redundancy ?? "none";
+        // Lenient parse: the string does not always arrive from validated
+        // config (the scheduler never calls ServiceConfig.Validate), so an
+        // unknown mode maps to None — today's silent no-parity behavior —
+        // rather than throwing. See Parity.FromString.
+        _redundancyKind = Parity.FromString(_redundancy);
         _parityGroupSize = parityGroupSize;
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _limits = new ProviderLimits(repo.RepoRoot);
@@ -94,10 +100,7 @@ public sealed class NntpBatchUploader : IDisposable
 
     private void RecordParityGroups(IReadOnlyList<string> slice)
     {
-        if (_redundancy == "xor")
-            _parityGroups.AddRange(XorParity.GroupsFor(slice, _parityGroupSize));
-        else if (_redundancy == "par2")
-            _parityGroups.AddRange(Par2Redundancy.GroupsFor(slice));
+        _parityGroups.AddRange(Parity.GroupsFor(_redundancyKind, slice, _parityGroupSize));
     }
 
     private void RecordNfoDate(int batchIndex, string date)
@@ -159,7 +162,7 @@ public sealed class NntpBatchUploader : IDisposable
             {
                 lastError = ex;
                 _log($"batch {batchIndex}: attempt {attempt} failed ({ex.Message}); retrying...");
-                Thread.Sleep(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+                ExponentialBackoff.SleepForAttempt(attempt, TimeSpan.FromSeconds(1));
             }
         }
         throw new InvalidOperationException(
@@ -266,8 +269,7 @@ public sealed class NntpBatchUploader : IDisposable
     {
         int dataUnits = volumeEntries.Count;
         int parityGroups = dataUnits / 10 + (dataUnits % 10 >= 2 ? 1 : 0);
-        int parityUnits = _redundancy == "xor" ? parityGroups
-            : _redundancy == "par2" ? parityGroups * 3 : 0;
+        int parityUnits = Parity.ParityUnitsPerGroup(_redundancyKind) * parityGroups;
         if (parityUnits == 0)
             return;
 
@@ -278,7 +280,7 @@ public sealed class NntpBatchUploader : IDisposable
         byte[] GetVolumeBytes(string volId) =>
             VolumePacker.BuildVolume(chunkMap[volId], _repo.GetChunkBlob).Bytes;
 
-        string parityLabel = _redundancy == "xor" ? "XOR" : "PAR2";
+        string parityLabel = Parity.Label(_redundancyKind);
         int parityUploaded = 0, paritySkipped = 0;
         var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = _nntp.Connections };
         for (int g = 0; g < sortedVolIds.Length; g += 10)
@@ -288,9 +290,7 @@ public sealed class NntpBatchUploader : IDisposable
                 continue;
             RecordParityGroups(group);
             IReadOnlyDictionary<string, byte[]> blocks =
-                _redundancy == "xor"
-                    ? XorParity.GenerateParity(group, GetVolumeBytes, null, _parityGroupSize)
-                    : Par2Redundancy.GenerateParity(group, GetVolumeBytes);
+                Parity.GenerateParity(_redundancyKind, group, GetVolumeBytes, _parityGroupSize);
             Parallel.ForEach(blocks, parallelOptions, kvp =>
             {
                 if (!_store.Exists(kvp.Key))
@@ -329,9 +329,9 @@ public sealed class NntpBatchUploader : IDisposable
 
         // Per-batch parity over the batch's chunks.
         int parityGroups = orderedChunkIds.Length / 10 + (orderedChunkIds.Length % 10 >= 2 ? 1 : 0);
-        if ((_redundancy == "xor" || _redundancy == "par2") && parityGroups > 0)
+        if (_redundancyKind != RedundancyKind.None && parityGroups > 0)
         {
-            string parityLabel = _redundancy == "xor" ? "XOR" : "PAR2";
+            string parityLabel = Parity.Label(_redundancyKind);
             int parityUploaded = 0, paritySkipped = 0;
             for (int g = 0; g < orderedChunkIds.Length; g += 10)
             {
@@ -340,9 +340,7 @@ public sealed class NntpBatchUploader : IDisposable
                     continue;
                 RecordParityGroups(group);
                 IReadOnlyDictionary<string, byte[]> blocks =
-                    _redundancy == "xor"
-                        ? XorParity.GenerateParity(group, id => _repo.GetChunkBlob(id), null, _parityGroupSize)
-                        : Par2Redundancy.GenerateParity(group, id => _repo.GetChunkBlob(id));
+                    Parity.GenerateParity(_redundancyKind, group, id => _repo.GetChunkBlob(id), _parityGroupSize);
                 Parallel.ForEach(blocks, parallelOptions, kvp =>
                 {
                     if (!_store.Exists(kvp.Key))

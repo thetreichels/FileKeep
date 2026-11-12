@@ -66,7 +66,7 @@ public sealed class AuditLogTests : IDisposable
         var session = new RestoreSession();
         var (status, _) = DashboardApi.UnlockRestoreSessionWithPassphrase(config, session, fakeSecret, log);
         Assert.Equal(400, status);
-        Assert.Single(lines.Where(l => l.StartsWith("AUDIT ")));
+        Assert.Single(lines, l => l.StartsWith("AUDIT "));
         Assert.Equal("AUDIT unlock.attempt fail method=passphrase", lines[0]);
         Assert.DoesNotContain(fakeBlob, lines[0]);
         Assert.DoesNotContain(fakeSecret, lines[0]);

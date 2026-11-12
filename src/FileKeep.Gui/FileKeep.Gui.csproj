@@ -10,6 +10,15 @@
     <AssemblyName>FileKeepGui</AssemblyName>
     <ApplicationIcon>../../assets/filekeep.ico</ApplicationIcon>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- MSB3277 (deliberate suppression): Microsoft.Web.WebView2's WPF
+         assembly ships only as a net5.0-windows build referencing
+         WindowsBase 5.0.0.0, while net10.0-windows provides WindowsBase
+         4.0.0.0 as the primary framework reference. MSBuild unifies to
+         4.0.0.0, which is what runs on .NET 10. Verified 2026-11-11:
+         even the latest WebView2 (1.0.4314.35) still ships the same
+         net5.0-windows WPF lib referencing WindowsBase 5.0.0.0, so
+         upgrading the package cannot resolve the conflict. -->
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
     <!-- Single-file self-contained publish -->
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>

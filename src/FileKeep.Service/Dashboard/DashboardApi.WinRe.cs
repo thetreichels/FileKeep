@@ -1,9 +1,6 @@
-using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using FileKeep.Core;
 using FileKeep.Core.Nntp;
-using FileKeep.Core.Security;
 using FileKeep.Core.Service;
 
 namespace FileKeep.Service;
@@ -122,17 +119,51 @@ public static partial class DashboardApi
     {
         psi.RedirectStandardOutput = true;
         psi.RedirectStandardError = true;
-        using var proc = System.Diagnostics.Process.Start(psi)!;
+        // W-15: Process.Start can return null; the old `!` turned that
+        // into a NullReferenceException downstream. Report it as a
+        // failed run instead (exit code -1, no output), like a timeout.
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null)
+        {
+            LogWinReBuild($"RunToolCapture: Process.Start returned null for {psi.FileName}");
+            return (-1, "");
+        }
         var stdoutTask = proc.StandardOutput.ReadToEndAsync();
         var stderrTask = proc.StandardError.ReadToEndAsync();
         if (!proc.WaitForExit(timeoutMs))
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
             try { proc.WaitForExit(5000); } catch { }
-            return (-1, stdoutTask.Wait(TimeSpan.FromSeconds(5)) ? stdoutTask.Result : "");
+            // W-15: same drain-timeout logging as the normal path below —
+            // a truncated stdout after a killed process must leave a trace.
+            if (!stdoutTask.Wait(TimeSpan.FromSeconds(5)))
+                LogWinReBuild($"RunToolCapture: stdout drain timed out for {psi.FileName} after kill");
+            return (-1, stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : "");
         }
-        string output = stdoutTask.Wait(TimeSpan.FromSeconds(5)) ? stdoutTask.Result : "";
-        try { _ = stderrTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        // W-15: a stdout drain timeout used to silently return "".
+        // Log it; the output stays best-effort.
+        bool stdoutDrained;
+        try { stdoutDrained = stdoutTask.Wait(TimeSpan.FromSeconds(5)); }
+        catch (Exception ex)
+        {
+            LogWinReBuild($"RunToolCapture: stdout drain failed for {psi.FileName}: {ex.Message}");
+            stdoutDrained = false;
+        }
+        if (!stdoutDrained)
+            LogWinReBuild($"RunToolCapture: stdout drain timed out for {psi.FileName}");
+        string output = stdoutDrained ? stdoutTask.Result : "";
+        // W-15: the stderr drain failure used to be swallowed silently,
+        // returning truncated output with no trace. Log it; the output
+        // stays best-effort (empty on a drain timeout/failure).
+        bool stderrDrained;
+        try { stderrDrained = stderrTask.Wait(TimeSpan.FromSeconds(5)); }
+        catch (Exception ex)
+        {
+            LogWinReBuild($"RunToolCapture: stderr drain failed for {psi.FileName}: {ex.Message}");
+            stderrDrained = false;
+        }
+        if (!stderrDrained)
+            LogWinReBuild($"RunToolCapture: stderr drain timed out for {psi.FileName}");
         return (proc.ExitCode, output);
     }
 
@@ -683,7 +714,17 @@ public static partial class DashboardApi
         });
         var stderrTask = proc.StandardError.ReadToEndAsync();
 
-        if (!proc.WaitForExit((int)timeout.TotalMilliseconds))
+        // W-17: (int)timeout.TotalMilliseconds overflows for a TimeSpan
+        // over ~24 days (the unchecked cast wraps negative and
+        // WaitForExit throws). A negative timeout is a caller bug;
+        // an over-large one is clamped to the largest wait WaitForExit
+        // can express.
+        if (timeout < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must not be negative.");
+        int waitMs = timeout.TotalMilliseconds >= int.MaxValue
+            ? int.MaxValue
+            : (int)timeout.TotalMilliseconds;
+        if (!proc.WaitForExit(waitMs))
         {
             try { proc.Kill(entireProcessTree: true); } catch { }
             System.Threading.Tasks.Task.WaitAll(

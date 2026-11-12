@@ -373,10 +373,31 @@ public sealed class RecoveryWizard : Form
         catch (InvalidOperationException) { /* form closing/gone (ObjectDisposedException included) */ }
     }
 
+    /// <summary>
+    /// Runs a synchronous UI update, dropping it if the form is already
+    /// closing/gone. The async void handlers' catch/finally blocks run
+    /// after an await, when the wizard may have been closed
+    /// mid-operation; a throw there would escape the handler and crash
+    /// the wizard, so reporting/teardown UI touches in those blocks go
+    /// through here (or through <see cref="SetStatus"/>).
+    /// </summary>
+    private void SafeUi(Action action)
+    {
+        try { action(); }
+        catch (ObjectDisposedException) { /* form closing/gone */ }
+        catch (InvalidOperationException) { /* form closing/gone */ }
+    }
+
     private void SetStatus(string text, bool isError = false)
     {
-        _status.Text = text;
-        _status.ForeColor = isError ? Color.DarkRed : SystemColors.ControlText;
+        // W-14: every async void handler reports errors through here
+        // from its catch block, after an await — the wizard may have
+        // been closed mid-operation by then, so this must never throw.
+        SafeUi(() =>
+        {
+            _status.Text = text;
+            _status.ForeColor = isError ? Color.DarkRed : SystemColors.ControlText;
+        });
     }
 
     // ---------- Page 1: backup location ----------
@@ -783,7 +804,7 @@ public sealed class RecoveryWizard : Form
         }
         finally
         {
-            _checkRemote.Enabled = true;
+            SafeUi(() => _checkRemote.Enabled = true);
         }
     }
 
@@ -884,8 +905,11 @@ public sealed class RecoveryWizard : Form
         }
         finally
         {
-            _checkSmb.Enabled = true;
-            _smbPassword.Text = ""; // never retain the password in the UI
+            SafeUi(() =>
+            {
+                _checkSmb.Enabled = true;
+                _smbPassword.Text = ""; // never retain the password in the UI
+            });
         }
     }
 
@@ -932,12 +956,15 @@ public sealed class RecoveryWizard : Form
         }
         catch (Exception ex)
         {
-            _smbResults.Items.Clear();
-            _smbResults.Items.Add("Scan failed: " + ex.Message);
+            SafeUi(() =>
+            {
+                _smbResults.Items.Clear();
+                _smbResults.Items.Add("Scan failed: " + ex.Message);
+            });
         }
         finally
         {
-            _scanSmb.Enabled = true;
+            SafeUi(() => _scanSmb.Enabled = true);
         }
     }
 
@@ -1014,11 +1041,11 @@ public sealed class RecoveryWizard : Form
         catch (Exception ex)
         {
             SetStatus("Download failed: " + ex.Message, isError: true);
-            _dlLog.AppendText("\r\nERROR: " + ex.Message + "\r\n");
+            SafeUi(() => _dlLog.AppendText("\r\nERROR: " + ex.Message + "\r\n"));
         }
         finally
         {
-            _dlStart.Enabled = true;
+            SafeUi(() => _dlStart.Enabled = true);
         }
     }
 
@@ -1072,12 +1099,12 @@ public sealed class RecoveryWizard : Form
         }
         catch (Exception ex)
         {
-            _verifyResult.Text = "ERROR: " + ex.Message;
+            SafeUi(() => _verifyResult.Text = "ERROR: " + ex.Message);
             SetStatus("Verification failed: " + ex.Message, isError: true);
         }
         finally
         {
-            _verifyStart.Enabled = true;
+            SafeUi(() => _verifyStart.Enabled = true);
         }
     }
 
@@ -1332,12 +1359,12 @@ public sealed class RecoveryWizard : Form
         }
         catch (Exception ex)
         {
-            _restoreLog.Text = "ERROR: " + ex.Message;
+            SafeUi(() => _restoreLog.Text = "ERROR: " + ex.Message);
             SetStatus("Restore failed: " + ex.Message, isError: true);
         }
         finally
         {
-            _restoreStart.Enabled = true;
+            SafeUi(() => _restoreStart.Enabled = true);
         }
     }
 

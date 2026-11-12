@@ -364,6 +364,23 @@ public sealed class BackupScheduler
     /// checks for the whole interval.</summary>
     private DateTime _nextRetentionRetry = DateTime.MinValue;
 
+    /// <summary>W-2: consecutive per-cycle failures of the due-job
+    /// scan and the retention pass. One transient fault must not kill
+    /// the scheduler (SF-18), but a persistent fault used to be one
+    /// identical log line per poll forever, with no escalation. After
+    /// <see cref="ConsecutiveFailureEscalationThreshold"/> consecutive
+    /// failures the loop emits a distinct SCHEDULER-FAULT-ESCALATED
+    /// event (once per streak) and backs off between retries; a
+    /// success resets the streak. Guarded by _stateLock.</summary>
+    public const int ConsecutiveFailureEscalationThreshold = 3;
+    /// <summary>W-2: cap on the exponential back-off between
+    /// scheduler cycles while a scan/retention fault persists.</summary>
+    public static readonly TimeSpan MaxCycleBackoff = TimeSpan.FromMinutes(10);
+    private int _consecutiveScanFailures;
+    private bool _scanEscalationLogged;
+    private int _consecutiveRetentionFailures;
+    private bool _retentionEscalationLogged;
+
     // Live progress for the backup run in flight — the job cards'
     // progress row reads it via GetRunProgress. Published by Execute
     // for the run's whole duration; volatile because dashboard request
@@ -670,6 +687,81 @@ public sealed class BackupScheduler
         }
     }
 
+    /// <summary>W-2: records one failed due-job scan. Returns the
+    /// streak length when this failure crosses the escalation
+    /// threshold (the caller emits the SCHEDULER-FAULT-ESCALATED
+    /// event), 0 otherwise. The event fires once per streak: later
+    /// failures keep the ordinary per-cycle line until a success
+    /// resets it.</summary>
+    internal int RecordScanFailure()
+    {
+        lock (_stateLock)
+        {
+            _consecutiveScanFailures++;
+            if (_consecutiveScanFailures >= ConsecutiveFailureEscalationThreshold && !_scanEscalationLogged)
+            {
+                _scanEscalationLogged = true;
+                return _consecutiveScanFailures;
+            }
+            return 0;
+        }
+    }
+
+    /// <summary>W-2: same as <see cref="RecordScanFailure"/> for the
+    /// retention pass.</summary>
+    internal int RecordRetentionFailure()
+    {
+        lock (_stateLock)
+        {
+            _consecutiveRetentionFailures++;
+            if (_consecutiveRetentionFailures >= ConsecutiveFailureEscalationThreshold && !_retentionEscalationLogged)
+            {
+                _retentionEscalationLogged = true;
+                return _consecutiveRetentionFailures;
+            }
+            return 0;
+        }
+    }
+
+    /// <summary>W-2: a successful scan clears the failure streak, so
+    /// a later fault escalates again from scratch.</summary>
+    internal void ResetScanFailures()
+    {
+        lock (_stateLock)
+        {
+            _consecutiveScanFailures = 0;
+            _scanEscalationLogged = false;
+        }
+    }
+
+    /// <summary>W-2: a successful retention pass clears the failure
+    /// streak, so a later fault escalates again from scratch.</summary>
+    internal void ResetRetentionFailures()
+    {
+        lock (_stateLock)
+        {
+            _consecutiveRetentionFailures = 0;
+            _retentionEscalationLogged = false;
+        }
+    }
+
+    /// <summary>W-2: delay before the next scheduler cycle. The base
+    /// poll interval while healthy; exponential back-off (2x per
+    /// consecutive failure, capped) while a scan/retention fault
+    /// persists, so a poisoned cycle stops hammering the failing
+    /// subsystem and the log every poll.</summary>
+    internal TimeSpan BackoffDelay()
+    {
+        int failures;
+        lock (_stateLock)
+            failures = Math.Max(_consecutiveScanFailures, _consecutiveRetentionFailures);
+        if (failures <= 0)
+            return _pollInterval;
+        double factor = Math.Pow(2, Math.Min(failures - 1, 5));
+        double ms = Math.Min(_pollInterval.TotalMilliseconds * factor, MaxCycleBackoff.TotalMilliseconds);
+        return TimeSpan.FromMilliseconds(ms);
+    }
+
     /// <summary>
     /// Main loop: runs until <paramref name="stopping"/> is cancelled.
     /// When stopping fires, any active operation is cancelled (NS-3/NS-5:
@@ -684,6 +776,7 @@ public sealed class BackupScheduler
             try
             {
                 RunDueJobs(_clock.Now, stopping);
+                ResetScanFailures();
             }
             catch (OperationCanceledException)
             {
@@ -700,14 +793,23 @@ public sealed class BackupScheduler
                 // exception would fault this task (and, via the host's
                 // supervision, take the whole service down).
                 Log($"scheduler: due-job scan failed, will retry next cycle: {ex.Message}");
+                // W-2: a persistent fault used to be just this line per
+                // poll forever. After 3 consecutive failures, escalate
+                // with a distinct, greppable event (once per streak).
+                int streak = RecordScanFailure();
+                if (streak > 0)
+                    Log($"SCHEDULER-FAULT-ESCALATED: due-job scan has failed {streak} consecutive times; no scheduled backup has run since the streak began. Last error: {ex.Message}");
             }
             try { RunRetentionIfDue(_clock.Now, stopping); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
                 Log($"scheduler: retention pass failed, will retry next cycle: {ex.Message}");
+                int streak = RecordRetentionFailure();
+                if (streak > 0)
+                    Log($"SCHEDULER-FAULT-ESCALATED: retention pass has failed {streak} consecutive times; no retention check has completed since the streak began. Last error: {ex.Message}");
             }
-            try { await Task.Delay(_pollInterval, stopping); }
+            try { await Task.Delay(BackoffDelay(), stopping); }
             catch (OperationCanceledException) { break; }
         }
         Log("scheduler stopped");
@@ -761,6 +863,20 @@ public sealed class BackupScheduler
             {
                 _nextRetentionRetry = now + TimeSpan.FromMinutes(15);
             }
+        }
+        if (ok)
+        {
+            ResetRetentionFailures();
+        }
+        else
+        {
+            // W-2: RunRetentionChecks returns false (no throw) when a
+            // per-repo pass fails, so count that too — otherwise a
+            // permanently failing retention pass never escalates. The
+            // per-repo errors were already logged by RunRetentionChecks.
+            int streak = RecordRetentionFailure();
+            if (streak > 0)
+                Log($"SCHEDULER-FAULT-ESCALATED: retention pass has failed {streak} consecutive times; no retention check has completed since the streak began.");
         }
     }
 
@@ -2744,25 +2860,15 @@ public sealed class BackupScheduler
         // failed manifest post does NOT fail the backup — the volumes are
         // safe on Usenet and the post stays retryable via journal + STAT
         // idempotency.
+        // D4: retry via the shared helper (maxAttempts 3, baseDelay 1s —
+        // sleeps 2s, 4s); exhaustion only warns + logs, no rethrow.
         const int maxManifestAttempts = 3;
-        Exception? manifestError = null;
-        for (int attempt = 1; attempt <= maxManifestAttempts; attempt++)
-        {
-            try
-            {
-                int articles = repo.UploadManifest(manifest.BackupId, nntp);
-                Log($"job '{job.Name}': manifest posted to Usenet ({articles} articles).");
-                manifestError = null;
-                break;
-            }
-            catch (Exception ex)
-            {
-                manifestError = ex;
-                Log($"job '{job.Name}': manifest post attempt {attempt} failed: {ex.Message}");
-                if (attempt < maxManifestAttempts)
-                    Thread.Sleep(TimeSpan.FromSeconds(Math.Pow(2, attempt)));
-            }
-        }
+        var (manifestPosted, articles, manifestError) = ExponentialBackoff.TryExecute(
+            maxManifestAttempts, TimeSpan.FromSeconds(1),
+            () => repo.UploadManifest(manifest.BackupId, nntp),
+            (attempt, ex) => Log($"job '{job.Name}': manifest post attempt {attempt} failed: {ex.Message}"));
+        if (manifestPosted)
+            Log($"job '{job.Name}': manifest posted to Usenet ({articles} articles).");
         if (manifestError is not null)
         {
             Log($"job '{job.Name}': WARNING: manifest for {manifest.BackupId} could not be " +
@@ -3059,7 +3165,10 @@ public sealed class BackupScheduler
                     : job.RedundancyMode;
                 // Parsed once for the comparisons below; the string still
                 // goes to the uploader, whose parameter stays a string
-                // (it is a runtime decision value, not config).
+                // (it is a runtime decision value, not config) — the
+                // uploader maps an unknown mode to None (Parity.FromString)
+                // rather than throwing, since this string is not
+                // guaranteed to have passed config validation.
                 var redundancyKind = RedundancyKindParser.Parse(redundancy);
                 int uploaded = 0, skipped = 0;
                 // Parallel upload using the connection pool.
@@ -3078,8 +3187,7 @@ public sealed class BackupScheduler
                 // positional groups of 10, trailing groups of < 2 skipped.
                 int dataUnits = useVolumes ? volumeGroups.Count : chunkIds.Length;
                 int parityGroups = dataUnits / 10 + (dataUnits % 10 >= 2 ? 1 : 0);
-                int parityUnits = redundancyKind == RedundancyKind.Xor ? parityGroups
-                    : redundancyKind == RedundancyKind.Par2 ? parityGroups * 3 : 0;
+                int parityUnits = Redundancy.Parity.ParityUnitsPerGroup(redundancyKind) * parityGroups;
 
                 // Progress tracker: logs every 5 min with rolling throughput ETA.
                 // Shows "measuring..." until enough data (10 chunks + 30s), then
@@ -3194,7 +3302,7 @@ public sealed class BackupScheduler
                     if (parityUnits > 0)
                     {
                         progress.SetPhase("parity");
-                        string parityLabel = redundancyKind == RedundancyKind.Xor ? "XOR" : "PAR2";
+                        string parityLabel = Redundancy.Parity.Label(redundancyKind);
                         if (useVolumes)
                         {
                             var chunkMap = volumeEntries.ToDictionary(
@@ -3208,13 +3316,9 @@ public sealed class BackupScheduler
                                 string[] group = sortedVolIds.Skip(g).Take(10).ToArray();
                                 if (group.Length < 2)
                                     continue;
-                                parityGroupLists.AddRange(redundancyKind == RedundancyKind.Xor
-                                    ? Redundancy.XorParity.GroupsFor(group, job.ParityGroupSize)
-                                    : Redundancy.Par2Redundancy.GroupsFor(group));
+                                parityGroupLists.AddRange(Redundancy.Parity.GroupsFor(redundancyKind, group, job.ParityGroupSize));
                                 IReadOnlyDictionary<string, byte[]> blocks =
-                                    redundancyKind == RedundancyKind.Xor
-                                        ? Redundancy.XorParity.GenerateParity(group, GetVolumeBytes, null, job.ParityGroupSize)
-                                        : Redundancy.Par2Redundancy.GenerateParity(group, GetVolumeBytes);
+                                    Redundancy.Parity.GenerateParity(redundancyKind, group, GetVolumeBytes, job.ParityGroupSize);
                                 Parallel.ForEach(blocks, parallelOptions, kvp =>
                                 {
                                     if (!store.Exists(kvp.Key))
@@ -3233,15 +3337,10 @@ public sealed class BackupScheduler
                         }
                         else
                         {
-                            parityGroupLists.AddRange(redundancyKind == RedundancyKind.Xor
-                                ? Redundancy.XorParity.GroupsFor(chunkIds, job.ParityGroupSize)
-                                : Redundancy.Par2Redundancy.GroupsFor(chunkIds));
+                            parityGroupLists.AddRange(Redundancy.Parity.GroupsFor(redundancyKind, chunkIds, job.ParityGroupSize));
                             IReadOnlyDictionary<string, byte[]> parityBlocks =
-                                redundancyKind == RedundancyKind.Xor
-                                    ? Redundancy.XorParity.GenerateParity(
-                                        chunkIds, id => repo.GetChunkBlob(id), null, job.ParityGroupSize)
-                                    : Redundancy.Par2Redundancy.GenerateParity(
-                                        chunkIds, id => repo.GetChunkBlob(id));
+                                Redundancy.Parity.GenerateParity(
+                                    redundancyKind, chunkIds, id => repo.GetChunkBlob(id), job.ParityGroupSize);
                             Parallel.ForEach(parityBlocks, parallelOptions, kvp =>
                             {
                                 if (!store.Exists(kvp.Key))

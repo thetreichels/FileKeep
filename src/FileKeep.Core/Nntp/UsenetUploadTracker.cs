@@ -123,10 +123,25 @@ public sealed class UsenetUploadTracker
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Unreadable current file: save this instance's records
-            // anyway; Load() reports corruption loudly at open time.
+            // Do NOT overwrite the on-disk file: it may hold the other
+            // instances' records, and replacing it with only this
+            // instance's records would silently erase them (the exact
+            // loss Load() guards against). Preserve the torn file for
+            // forensics (same .corrupt-<ts> scheme as Load()) and
+            // surface the problem instead.
+            try
+            {
+                string backupPath = _path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                File.Move(_path, backupPath);
+            }
+            catch { }
+            throw new InvalidDataException(
+                $"Upload tracker file is corrupt: {_path}. " +
+                $"The torn file was preserved with a .corrupt- suffix. " +
+                $"This instance's records were NOT saved. " +
+                $"Original error: {ex.Message}", ex);
         }
         string json = FileKeepJsonOptions.Serialize(_records.Values.ToList(),
             FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.ListUploadRecord);

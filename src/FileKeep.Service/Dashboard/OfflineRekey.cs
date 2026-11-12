@@ -27,11 +27,12 @@ namespace FileKeep.Service;
 /// fixes the failures and re-runs instead of landing in a catalog
 /// that claims new-key while some files are still old-key.
 ///
-/// Stores rewrite via Delete + Put because Put alone is a
-/// deduplicating no-op over an existing chunk ID. If a Put fails
-/// after its Delete, the old blob is restored on a best-effort
-/// basis and the chunk is recorded as a failure, never silently
-/// dropped.
+/// Stores rewrite via <see cref="IBlobStore.Replace"/> (tmp-write +
+/// atomic rename) because <c>Put</c> alone is a deduplicating no-op
+/// over an existing chunk ID. A failed replace leaves the old blob
+/// in place — there is no delete-then-put window in which a crash
+/// can leave the chunk missing — and the chunk is recorded as a
+/// failure, never silently dropped.
 /// </summary>
 public static class OfflineRekey
 {
@@ -120,12 +121,14 @@ public static class OfflineRekey
                                             CryptographicOperations.ZeroMemory(check);
                                             try
                                             {
-                                                store.Delete(chunkId);
-                                                try { store.Put(chunkId, newBlob); }
+                                                // Atomic replace (W-12): a crash or
+                                                // failure here leaves the old blob
+                                                // in place, so there is nothing to
+                                                // restore — just record the failure.
+                                                try { store.Replace(chunkId, newBlob); }
                                                 catch (Exception ex)
                                                 {
-                                                    try { store.Put(chunkId, blob); } catch { /* best effort restore */ }
-                                                    failures.Add($"{folder.Name}/{file.Path}: chunk {chunkId} could not be rewritten ({ex.Message}) — old blob restored.");
+                                                    failures.Add($"{folder.Name}/{file.Path}: chunk {chunkId} could not be rewritten ({ex.Message}) — old blob still in place.");
                                                     continue;
                                                 }
                                                 byte[] stored = store.Get(chunkId);
@@ -133,7 +136,11 @@ public static class OfflineRekey
                                                 {
                                                     if (!TryDecrypt(stored, newContent, chunkId, out byte[]? storedCheck) || storedCheck is null)
                                                     {
-                                                        try { store.Delete(chunkId); store.Put(chunkId, blob); } catch { /* best effort restore */ }
+                                                        // The new blob is on disk but
+                                                        // does not verify — restore the
+                                                        // old blob (also atomic) and
+                                                        // record the failure.
+                                                        try { store.Replace(chunkId, blob); } catch { /* best effort restore */ }
                                                         failures.Add($"{folder.Name}/{file.Path}: chunk {chunkId} failed stored verification — old blob restored.");
                                                         continue;
                                                     }

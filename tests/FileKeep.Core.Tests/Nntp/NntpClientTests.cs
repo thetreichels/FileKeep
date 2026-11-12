@@ -149,15 +149,32 @@ public sealed class NntpClientTests : IDisposable
     }
 
     [Fact]
-    public void GetArticle_NoCap_BackwardsCompatible()
+    public void GetArticle_NoMaxBytes_UsesDefaultCap()
     {
         const string msgId = "<nocap@invalid>";
         _server.Articles[msgId] = "X-Header: test\r\n\r\n" + new string('b', 64 * 1024);
         using var client = Connect();
-        // No maxBytes: uncapped, as before.
+        // No maxBytes: the 64 MiB default cap applies (W-6); a 64 KiB
+        // article is well under it, so the read completes.
         string? article = client.GetArticle(msgId);
         Assert.NotNull(article);
         Assert.True(article.Length >= 64 * 1024);
         client.Quit();
+    }
+
+    [Fact]
+    public void Constructor_HugeTimeout_ThrowsArgumentOutOfRange()
+    {
+        // W-17: a TimeSpan over ~24.8 days would overflow the int
+        // millisecond socket timeout; reject it at construction.
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new NntpClient("news.example.com", timeout: TimeSpan.FromDays(30)));
+    }
+
+    [Fact]
+    public void Constructor_NegativeTimeout_ThrowsArgumentOutOfRange()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new NntpClient("news.example.com", timeout: TimeSpan.FromSeconds(-1)));
     }
 }

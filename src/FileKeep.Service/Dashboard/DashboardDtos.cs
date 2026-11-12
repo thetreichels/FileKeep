@@ -1,6 +1,4 @@
-using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using FileKeep.Core.Recovery;
 
 namespace FileKeep.Service;
 
@@ -269,15 +267,6 @@ public sealed record ConfigJobDto(
     [property: JsonPropertyName("sources")] List<string>? Sources,
     [property: JsonPropertyName("paused")] bool Paused);
 
-/// <summary>NNTP config summary for /api/config response.</summary>
-public sealed record ConfigNntpDto(
-    [property: JsonPropertyName("host")] string? Host,
-    [property: JsonPropertyName("port")] int Port,
-    [property: JsonPropertyName("username")] string? Username,
-    [property: JsonPropertyName("ssl")] bool Ssl,
-    [property: JsonPropertyName("connections")] int Connections,
-    [property: JsonPropertyName("hasPassword")] bool HasPassword);
-
 /// <summary>NNTP provider summary for /api/config response.</summary>
 public sealed record ConfigNntpProviderDto(
     [property: JsonPropertyName("host")] string? Host,
@@ -315,7 +304,6 @@ public sealed record ConfigSnapshotDto(
     [property: JsonPropertyName("dashboardPort")] int DashboardPort,
     [property: JsonPropertyName("dashboardBind")] string? DashboardBind,
     [property: JsonPropertyName("jobs")] List<ConfigJobDto> Jobs,
-    [property: JsonPropertyName("nntp")] ConfigNntpDto? Nntp,
     [property: JsonPropertyName("nntpProviders")] List<ConfigNntpProviderDto> NntpProviders,
     [property: JsonPropertyName("locations")] List<ConfigLocationDto> Locations);
 
@@ -498,3 +486,25 @@ public sealed record WinReBuildStatusDto(
     [property: JsonPropertyName("estimatedRemainingSec")] int EstimatedRemainingSec,
     [property: JsonPropertyName("elapsedSec")] int ElapsedSec,
     [property: JsonPropertyName("steps")] List<WinReBuildStepDto> Steps);
+
+/// <summary>
+/// One custom (per-folder security) folder for GET /api/offline-folders/custom.
+/// Replaces the anonymous type that used to be serialized here, which the
+/// trimmed service has no JSON metadata for (B-2).
+/// </summary>
+public sealed record CustomFolderListEntryDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("locationId")] string LocationId,
+    [property: JsonPropertyName("addedUtc")] string AddedUtc,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("unlocked")] bool Unlocked);
+
+/// <summary>
+/// Response for POST /api/offline-folders/create when the folder uses TOTP:
+/// the base32 secret the UI shows as a QR code. Replaces the anonymous
+/// { ok, totpSecret } payload (B-2); the create path returns this DTO
+/// directly.
+/// </summary>
+public sealed record TotpFolderCreatedDto(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("totpSecret")] string TotpSecret);

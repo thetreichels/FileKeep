@@ -230,12 +230,45 @@ public sealed class SmbShare : IDisposable
     /// <summary>The connected UNC path (share root or subdirectory).</summary>
     public string UncPath => _uncPath;
 
-    /// <summary>Combines the share path with a relative subpath.</summary>
+    /// <summary>Combines the share path with a relative subpath.
+    /// Rejects rooted parts and <c>..</c> segments, and verifies the
+    /// resolved result stays under the share root, so a part can never
+    /// escape the share (W-18). Valid inputs behave exactly as before.</summary>
     public string Combine(params string[] parts)
     {
         string path = _uncPath;
         foreach (string part in parts)
+        {
+            if (string.IsNullOrEmpty(part))
+                continue; // Path.Combine ignores empty parts; keep that.
+            if (Path.IsPathRooted(part) || part.StartsWith('\\') || part.StartsWith('/'))
+                throw new ArgumentException(
+                    $"Combine rejects rooted path part '{part}': parts must be relative to the share.", nameof(parts));
+            foreach (string segment in part.Split('\\', '/'))
+            {
+                if (segment == "..")
+                    throw new ArgumentException(
+                        $"Combine rejects '..' path part '{part}': parts must stay under the share.", nameof(parts));
+            }
             path = Path.Combine(path, part);
+        }
+        // Defence in depth: the resolved path must stay under the share
+        // root. Skipped when the root itself is not platform-rooted
+        // (a UNC root on a non-Windows host), where the per-part
+        // checks above are the guard.
+        if (Path.IsPathRooted(_uncPath))
+        {
+            string full = Path.GetFullPath(path);
+            string root = Path.GetFullPath(_uncPath);
+            StringComparison cmp = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            string rootWithSep = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            if (!full.Equals(root, cmp) && !full.StartsWith(rootWithSep, cmp))
+                throw new ArgumentException(
+                    $"Combined path '{full}' escapes the share root '{root}'.", nameof(parts));
+            return full;
+        }
         return path;
     }
 

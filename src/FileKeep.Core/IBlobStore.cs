@@ -23,9 +23,26 @@ public interface IBlobStore
     /// this so a corrupt local copy can be replaced by a verified
     /// re-download (SF-13: <see cref="Put"/> alone would no-op over the
     /// bad bytes). The default is a no-op — remote stores (Usenet)
-    /// cannot delete what they published.
+    /// cannot delete what they published. Only "already gone" is
+    /// swallowed: a delete that fails for permissions, a lock, or an
+    /// I/O error is a real failure the caller must see (W-11).
     /// </summary>
     void Delete(string chunkIdHex) { }
+
+    /// <summary>
+    /// Atomically replaces a stored blob. Unlike <see cref="Put"/>,
+    /// which is a deduplicating no-op over an existing chunk ID, this
+    /// always writes the given bytes. The default implementation is
+    /// delete-then-put, which is NOT atomic — a crash between the two
+    /// leaves the chunk missing. File-backed stores override it with
+    /// a tmp-write + atomic rename, so a crash leaves the old or the
+    /// new blob, never a missing chunk (W-12, offline rekey).
+    /// </summary>
+    void Replace(string chunkIdHex, byte[] blob)
+    {
+        Delete(chunkIdHex);
+        Put(chunkIdHex, blob);
+    }
 
     /// <summary>
     /// Stores a blob from a span, for hot loops that encrypt into a pooled

@@ -190,7 +190,7 @@ public sealed class ServiceConfigPersistenceTests : IDisposable
     }
 
     [Fact]
-    public void Save_ConcurrentSamePath_FinalFileIsOneCompleteWrite()
+    public async Task Save_ConcurrentSamePath_FinalFileIsOneCompleteWrite()
     {
         // Deterministic because the temp-write+move run under Save's
         // static gate: without it, Windows refuses concurrent
@@ -200,7 +200,8 @@ public sealed class ServiceConfigPersistenceTests : IDisposable
         var ports = Enumerable.Range(18010, 8).ToArray();
         var tasks = ports.Select(port =>
             Task.Run(() => ValidConfig(port).Save(path))).ToArray();
-        Task.WaitAll(tasks);
+        // B-3 (xUnit1031): was Task.WaitAll; await instead.
+        await Task.WhenAll(tasks);
         Assert.All(tasks, t => Assert.True(t.IsCompletedSuccessfully));
 
         var loaded = ServiceConfig.Load(path);
@@ -209,13 +210,14 @@ public sealed class ServiceConfigPersistenceTests : IDisposable
     }
 
     [Fact]
-    public void Save_ConcurrentDistinctPaths_AllCorrectNoLeftovers()
+    public async Task Save_ConcurrentDistinctPaths_AllCorrectNoLeftovers()
     {
         var paths = Enumerable.Range(18020, 8)
             .Select(port => (port, PathFor($"service-{port}.json"))).ToArray();
         var tasks = paths.Select(p =>
             Task.Run(() => ValidConfig(p.port).Save(p.Item2))).ToArray();
-        Task.WaitAll(tasks);
+        // B-3 (xUnit1031): was Task.WaitAll; await instead.
+        await Task.WhenAll(tasks);
         Assert.All(tasks, t => Assert.True(t.IsCompletedSuccessfully));
 
         foreach (var (port, path) in paths)

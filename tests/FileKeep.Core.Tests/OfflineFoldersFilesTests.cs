@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using FileKeep.Core;
 using FileKeep.Core.Service;
 using FileKeep.Service;
@@ -180,8 +179,12 @@ public sealed class OfflineFoldersFilesTests : IDisposable
     }
 
     [Fact]
-    public void CatalogV1_Loads_WithEmptyFileIndex()
+    public void CatalogV1_Unlock_Returns400MissingSecurityMode()
     {
+        // O2: `securityMode` is required on catalog load, so a v1
+        // catalog (no securityMode on any entry) fails to load and
+        // unlock answers 400 naming the missing security mode —
+        // it no longer loads with an empty file index.
         string path = CatalogPath();
         byte[] key = OfflineFoldersCatalog.DeriveKey(Pass);
         try
@@ -198,9 +201,13 @@ public sealed class OfflineFoldersFilesTests : IDisposable
 
             var config = ConfigWith(new BackupLocation { Name = "nas", Type = "smb", Share = ShareDir("share") });
             var session = new OfflineFoldersSession();
-            Assert.Equal(200, DashboardApi.UnlockOfflineFolders(config, session, path, Pass, false, null).Status);
-            var files = FilesPayload(DashboardApi.GetOfflineFolderFiles(session, "Old"));
-            Assert.Empty(files);
+            var (status, payload) = DashboardApi.UnlockOfflineFolders(config, session, path, Pass, false, null);
+            Assert.Equal(400, status);
+            string error = Assert.IsType<ErrorDto>(payload).Error;
+            Assert.Contains("no usable security mode", error);
+            Assert.Contains("Old", error);
+            Assert.DoesNotContain("cannot be decrypted with this vault secret", error);
+            Assert.False(session.IsUnlocked);
         }
         finally
         {
@@ -514,7 +521,7 @@ public sealed class OfflineFoldersFilesTests : IDisposable
     }
 
     [Fact]
-    public void Serve_CreatesNoPlaintextFiles()
+    public async Task Serve_CreatesNoPlaintextFiles()
     {
         string share = ShareDir("share");
         var (config, session, catalog) = UnlockedFolder(_workDir, CatalogPath(),
@@ -526,7 +533,8 @@ public sealed class OfflineFoldersFilesTests : IDisposable
             .Select(f => Path.GetRelativePath(share, f)).OrderBy(x => x).ToList();
 
         var handler = new OfflineFoldersDavHandler(config, session, catalog);
-        Assert.Equal(data, DavGetBytes(handler, "Vault", "secret.txt").GetAwaiter().GetResult());
+        // B-3 (xUnit1031): was .GetAwaiter().GetResult(); await instead.
+        Assert.Equal(data, await DavGetBytes(handler, "Vault", "secret.txt"));
 
         var after = Directory.EnumerateFiles(share, "*", SearchOption.AllDirectories)
             .Select(f => Path.GetRelativePath(share, f)).OrderBy(x => x).ToList();

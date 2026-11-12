@@ -14,6 +14,17 @@ public sealed class NntpClient : IDisposable
 {
     private static readonly Encoding WireEncoding = Encoding.Latin1;
 
+    /// <summary>
+    /// Default cap for a multiline response (article bodies, LISTGROUP
+    /// listings) when the caller does not pass one: 64 MiB, matching
+    /// <see cref="NntpBlobStore.DefaultMaxArticleBytes"/>. A server that
+    /// never sends the terminating "." line could otherwise grow the
+    /// buffer without bound. Pass 0 explicitly to opt out of the cap
+    /// (uncapped read); every production caller passes its own cap, so
+    /// 0 is only for tests and trusted transports.
+    /// </summary>
+    public const long DefaultMaxReadChars = 64L * 1024 * 1024;
+
     private readonly string? _host;
     private readonly int _port;
     private readonly bool _useTls;
@@ -38,7 +49,7 @@ public sealed class NntpClient : IDisposable
         _host = host;
         _port = port;
         _useTls = useTls;
-        _timeout = timeout ?? TimeSpan.FromSeconds(30);
+        _timeout = ValidateTimeout(timeout);
     }
 
     /// <summary>
@@ -48,7 +59,25 @@ public sealed class NntpClient : IDisposable
     public NntpClient(Stream transport, TimeSpan? timeout = null)
     {
         _externalTransport = transport ?? throw new ArgumentNullException(nameof(transport));
-        _timeout = timeout ?? TimeSpan.FromSeconds(30);
+        _timeout = ValidateTimeout(timeout);
+    }
+
+    /// <summary>
+    /// Validates a caller-supplied timeout. Socket timeouts are int
+    /// milliseconds, so a TimeSpan over ~24.8 days would overflow the
+    /// (int) cast in <see cref="Connect"/> to a negative value; reject
+    /// it (and negatives) here instead of silently misbehaving.
+    /// </summary>
+    private static TimeSpan ValidateTimeout(TimeSpan? timeout)
+    {
+        TimeSpan value = timeout ?? TimeSpan.FromSeconds(30);
+        if (value < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout), value,
+                "NNTP timeout must not be negative.");
+        if (value.TotalMilliseconds > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(timeout), value,
+                "NNTP timeout exceeds the maximum socket timeout of ~24.8 days.");
+        return value;
     }
 
     public void Connect()
@@ -71,8 +100,10 @@ public sealed class NntpClient : IDisposable
                 _tcp = null;
                 throw new NntpException($"Timed out connecting to {_host}:{_port}.");
             }
-            _tcp.SendTimeout = (int)_timeout.TotalMilliseconds;
-            _tcp.ReceiveTimeout = (int)_timeout.TotalMilliseconds;
+            // ValidateTimeout bounds this to [0, int.MaxValue] ms; the
+            // clamp is defence in depth so the cast can never wrap.
+            _tcp.SendTimeout = (int)Math.Clamp(_timeout.TotalMilliseconds, 0, int.MaxValue);
+            _tcp.ReceiveTimeout = (int)Math.Clamp(_timeout.TotalMilliseconds, 0, int.MaxValue);
 
             Stream stream = _tcp.GetStream();
             if (_useTls)
@@ -170,12 +201,14 @@ public sealed class NntpClient : IDisposable
 
     /// <summary>
     /// Returns the full article text, or null when it doesn't exist.
-    /// When <paramref name="maxBytes"/> is positive, the read aborts with
-    /// <see cref="NntpException"/> as soon as the article exceeds that many
-    /// characters — a fail-fast guard so a malicious oversized article cannot
-    /// exhaust memory before the caller ever sees it.
+    /// The read aborts with <see cref="NntpException"/> as soon as the
+    /// article exceeds <paramref name="maxBytes"/> characters — a
+    /// fail-fast guard so a malicious oversized article cannot exhaust
+    /// memory before the caller ever sees it. Defaults to
+    /// <see cref="DefaultMaxReadChars"/> (64 MiB); pass 0 explicitly
+    /// to read uncapped.
     /// </summary>
-    public string? GetArticle(string messageId, long maxBytes = 0)
+    public string? GetArticle(string messageId, long maxBytes = DefaultMaxReadChars)
     {
         EnsureConnected();
         var (code, text) = SendCommand($"ARTICLE {messageId}");
@@ -257,7 +290,7 @@ public sealed class NntpClient : IDisposable
         return (code, line.Length > 4 ? line[4..] : "");
     }
 
-    private string ReadMultiline(long maxChars = 0)
+    private string ReadMultiline(long maxChars = DefaultMaxReadChars)
     {
         var sb = new StringBuilder();
         while (true)

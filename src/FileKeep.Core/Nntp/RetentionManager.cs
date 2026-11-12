@@ -545,7 +545,11 @@ public sealed class RetentionManager
     {
         if (volumeMode)
         {
-            var chunkIds = volumeChunks![articleId];
+            if (volumeChunks is null ||
+                !volumeChunks.TryGetValue(articleId, out IReadOnlyList<string>? chunkIds))
+                throw new InvalidDataException(
+                    $"Retention manifest is inconsistent: volume {articleId} " +
+                    "has no chunk list.");
             if (chunkIds.Any(id => LocalChunkMissing(repo, id)))
             {
                 // Some local chunks are gone (e.g. wiped after upload to

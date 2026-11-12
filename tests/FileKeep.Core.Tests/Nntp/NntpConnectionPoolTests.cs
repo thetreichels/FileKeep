@@ -79,7 +79,7 @@ public sealed class NntpConnectionPoolTests : IDisposable
     }
 
     [Fact]
-    public void Pool_Acquire_BlocksUntilRelease_WhenExhausted()
+    public async Task Pool_Acquire_BlocksUntilRelease_WhenExhausted()
     {
         using var pool = CreatePool(1);
         var only = pool.Acquire();
@@ -87,11 +87,14 @@ public sealed class NntpConnectionPoolTests : IDisposable
         var pending = Task.Run(() => pool.Acquire());
         // The semaphore is held by `only`, so the acquire cannot
         // complete before the release — this direction cannot flake.
-        Assert.False(pending.Wait(TimeSpan.FromMilliseconds(300)));
+        // B-3 (xUnit1031): blocking Task.Wait/.Result can deadlock
+        // under xUnit's sync context; await instead.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Assert.False(pending.IsCompleted);
         pool.Release(only);
-        Assert.True(pending.Wait(TimeSpan.FromSeconds(5)));
-        Assert.Same(only, pending.Result);
-        pool.Release(pending.Result);
+        var acquired = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Same(only, acquired);
+        pool.Release(acquired);
     }
 
     [Fact]

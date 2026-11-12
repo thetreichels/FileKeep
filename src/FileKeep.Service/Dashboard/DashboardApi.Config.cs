@@ -1,6 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using FileKeep.Core;
 using FileKeep.Core.Nntp;
 using FileKeep.Core.Security;
@@ -152,23 +149,56 @@ public static partial class DashboardApi
     /// disk and are skipped. Probes run in parallel under a bounded
     /// wait so one dead share can't hang the locations card — this is
     /// its own endpoint, fetched after the card renders, never part of
-    /// /api/config.
+    /// /api/config. Per-location problems (invalid type, failed probe,
+    /// probe still running after the bounded wait) are reported through
+    /// <paramref name="log"/> instead of silently dropping the location.
     /// </summary>
-    public static (int Status, object Payload) GetLocationDiskUsage(ServiceConfig config)
+    public static (int Status, object Payload) GetLocationDiskUsage(ServiceConfig config, Action<string>? log = null)
     {
         try
         {
-            var probes = config.SnapshotLocations()
-                .Where(l => l.ParsedKind is LocationKind.Usb or LocationKind.Smb)
-                .Select(l => Task.Run(() =>
+            // W-7: resolve each location's kind BEFORE the Task.Run,
+            // with the throwing parser guarded — LocationKindParser
+            // throws on a null/unknown Type, and the old
+            // l.Type!.Equals("usb", ...) inside the probe faulted the
+            // task, silently dropping the location from the results
+            // (and a null Type faulted the ParsedKind filter itself,
+            // 500ing the whole endpoint). A malformed location is
+            // skipped with a log line; the rest still probe.
+            var diskLocations = new List<(BackupLocation Location, LocationKind Kind)>();
+            foreach (BackupLocation l in config.SnapshotLocations())
+            {
+                LocationKind kind;
+                try { kind = l.ParsedKind; }
+                catch (Exception ex)
                 {
-                    string? root = l.Type!.Equals("usb", StringComparison.OrdinalIgnoreCase)
-                        ? FileKeep.Core.UsbDriveResolver.ResolveDriveLetter(l.VolumeSerial)
-                        : l.Share;
-                    var usage = root is null ? null : ProbeDiskUsage(root);
-                    return usage is null
-                        ? null
-                        : new LocationDiskDto(l.Name ?? "", usage.Value.Total, usage.Value.Free);
+                    log?.Invoke($"dashboard: location-disk: skipping location '{l.Name}' with invalid type '{l.Type}': {ex.Message}");
+                    continue;
+                }
+                if (kind is LocationKind.Usb or LocationKind.Smb)
+                    diskLocations.Add((l, kind));
+            }
+            var probes = diskLocations
+                .Select(pair => Task.Run(() =>
+                {
+                    var (l, kind) = pair;
+                    try
+                    {
+                        string? root = kind == LocationKind.Usb
+                            ? FileKeep.Core.UsbDriveResolver.ResolveDriveLetter(l.VolumeSerial)
+                            : l.Share;
+                        var usage = root is null ? null : ProbeDiskUsage(root);
+                        return usage is null
+                            ? null
+                            : new LocationDiskDto(l.Name ?? "", usage.Value.Total, usage.Value.Free);
+                    }
+                    catch (Exception ex)
+                    {
+                        // W-7: a probe failure is a per-location error,
+                        // not a reason to fault the task and vanish.
+                        log?.Invoke($"dashboard: location-disk: probe failed for location '{l.Name}': {ex.Message}");
+                        return (LocationDiskDto?)null;
+                    }
                 }))
                 .ToArray();
             Task.WaitAll(probes, TimeSpan.FromSeconds(10));
@@ -176,6 +206,14 @@ public static partial class DashboardApi
                 .Where(t => t.IsCompletedSuccessfully && t.Result is not null)
                 .Select(t => t.Result!)
                 .ToArray();
+            // W-7: a probe that faulted, was cancelled, or was still
+            // running after the bounded wait used to vanish silently
+            // in the filter above — say so instead.
+            for (int i = 0; i < probes.Length; i++)
+            {
+                if (!probes[i].IsCompletedSuccessfully)
+                    log?.Invoke($"dashboard: location-disk: probe for location '{diskLocations[i].Location.Name}' did not complete ({probes[i].Status})");
+            }
             return (200, result);
         }
         catch (Exception ex)
@@ -515,41 +553,6 @@ public static partial class DashboardApi
         catch (Exception ex)
         {
             return (200, new OkMessageDto(false, ex.Message ));
-        }
-    }
-
-    public static (int Status, object Payload) UpdateNntp(ServiceConfig config,
-        BackupScheduler scheduler, string configPath, NntpConfig nntp,
-        Action<string>? log = null)
-    {
-        // Candidate-apply, with a disclosed narrowing (see
-        // ApplyNntp): mutate + validate + Usenet sync run under the
-        // store lock in ApplyNntp, as before; Save + Reload now run
-        // outside it, like every other Config site. The return data
-        // is captured under the lock in the outcome, so the log and
-        // response cannot report a concurrent UpdateNntp call's host.
-        // Never return the encrypted blob to the UI; just report whether one is stored.
-        // Named DTO, registered in DashboardJsonContext: this used to
-        // return an anonymous type, whose metadata the trimmer strips
-        // — in the published build the response body came back empty
-        // (the SF-1 class of bug; the endpoint is not called by the
-        // current page, which is why it survived both audit passes).
-        try
-        {
-            var outcome = config.Store.ApplyNntp(nntp);
-            config.Save(configPath);
-            scheduler.ReloadJobs(config);
-            log?.Invoke($"dashboard: Usenet provider {(outcome.Cleared ? "cleared" : $"set to {outcome.Host}")}");
-            object safe = outcome.Cleared
-                ? new HasPasswordDto(false)
-                : new ConfigNntpDto(
-                    outcome.Host, outcome.Port, outcome.Username,
-                    outcome.Ssl, outcome.Connections, outcome.HasPassword);
-            return (200, safe);
-        }
-        catch (Exception ex)
-        {
-            return (SaveFailureStatus(ex), new ErrorDto(ex.Message));
         }
     }
 

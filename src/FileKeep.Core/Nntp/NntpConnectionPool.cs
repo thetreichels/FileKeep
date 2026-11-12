@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace FileKeep.Core.Nntp;
 
@@ -22,8 +24,22 @@ public sealed class NntpConnectionPool : IDisposable
     private readonly SemaphoreSlim _semaphore;
     private readonly object _allClientsLock = new();
     private readonly int _size;
-    private readonly string _username;
-    private readonly string _password;
+    // W-13: credentials are held as UTF-8 bytes, never as long-lived
+    // strings — a string cannot be zeroed, so the NNTP password used
+    // to linger in the managed heap for the pool's whole lifetime.
+    // The bytes are decoded to strings only at the narrow point of
+    // use (CreateConnectedClient, for NntpClient.Authenticate, which
+    // takes strings) and zeroed with CryptographicOperations.ZeroMemory
+    // in Dispose. The transient decoded strings still exist for the
+    // duration of one Authenticate call; that is inherent to the
+    // string-based NntpClient API and is out of scope here.
+    private readonly byte[] _usernameBytes;
+    private readonly byte[] _passwordBytes;
+    // Serializes decoding against Dispose's ZeroMemory so Dispose
+    // cannot zero the arrays mid-decode. Authentication itself runs
+    // outside the lock (network I/O); zeroing between decode and
+    // Authenticate is harmless because the string is already materialized.
+    private readonly object _credentialLock = new();
     private readonly bool _useTls;
     private readonly TimeSpan? _timeout;
     private readonly Func<NntpClient>? _clientFactory;
@@ -65,8 +81,9 @@ public sealed class NntpConnectionPool : IDisposable
         Port = port;
         _size = size;
         _useTls = useTls;
-        _username = username ?? "";
-        _password = password ?? "";
+        // Convert immediately: the caller's string is not retained.
+        _usernameBytes = Encoding.UTF8.GetBytes(username ?? "");
+        _passwordBytes = Encoding.UTF8.GetBytes(password ?? "");
         _timeout = timeout;
         _clientFactory = clientFactory;
         _semaphore = new SemaphoreSlim(size, size);
@@ -97,8 +114,17 @@ public sealed class NntpConnectionPool : IDisposable
             return _clientFactory();
         var client = new NntpClient(Host, Port, _useTls, _timeout);
         client.Connect();
-        if (!string.IsNullOrEmpty(_username))
-            client.Authenticate(_username, _password);
+        // Narrow point of use: decode only for this one Authenticate
+        // call; the strings go out of scope when this method returns.
+        string username;
+        string password;
+        lock (_credentialLock)
+        {
+            username = Encoding.UTF8.GetString(_usernameBytes);
+            password = Encoding.UTF8.GetString(_passwordBytes);
+        }
+        if (!string.IsNullOrEmpty(username))
+            client.Authenticate(username, password);
         return client;
     }
 
@@ -241,6 +267,15 @@ public sealed class NntpConnectionPool : IDisposable
             // Drain the queue (clients already disposed above).
             while (_available.TryDequeue(out _)) { }
             _semaphore.Dispose();
+            // W-13: zero the held credentials so the NNTP password
+            // does not linger in the managed heap after disposal.
+            // (Also runs on the constructor-failure path, which calls
+            // Dispose() before rethrowing.)
+            lock (_credentialLock)
+            {
+                CryptographicOperations.ZeroMemory(_usernameBytes);
+                CryptographicOperations.ZeroMemory(_passwordBytes);
+            }
         }
     }
 }

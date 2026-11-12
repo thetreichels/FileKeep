@@ -607,6 +607,19 @@ public static partial class DashboardApi
 
 
     /// <summary>
+    /// W-3: best-effort operations-log write for fire-and-forget
+    /// dashboard tasks. OperationLog.Append already swallows
+    /// IOExceptions, but it can still throw (unauthorized, bad path,
+    /// ...) — a logging failure must never fault the unobserved
+    /// background Task, so swallow here too.
+    /// </summary>
+    private static void AppendOperationLogBestEffort(string repo, string operation, string details)
+    {
+        try { OperationLog.Append(repo, operation, details); }
+        catch (Exception) { /* logging must never fault the background task */ }
+    }
+
+    /// <summary>
     /// Starts a manual NNTP upload of a backup in the background.
     /// Returns (202, accepted) or (400, error).
     /// </summary>
@@ -628,7 +641,7 @@ public static partial class DashboardApi
             }
             catch (Exception ex)
             {
-                OperationLog.Append(repo, "manual-upload",
+                AppendOperationLogBestEffort(repo, "manual-upload",
                     $"backupId={backupId} FAILED: {ex.Message}");
             }
         });
@@ -637,7 +650,9 @@ public static partial class DashboardApi
     }
 
     /// <summary>
-    /// Starts a manual backup verification in the background.
+    /// Starts a manual backup verification in the background. The
+    /// passphrase is re-resolved inside the task (see below), so the
+    /// verify uses the session state at execution time.
     /// </summary>
     public static (int Status, object Payload) StartVerify(
         ServiceConfig config, string repo, string backupId,
@@ -655,12 +670,27 @@ public static partial class DashboardApi
                 : (500, PassphraseUnavailableError(config, "Service passphrase is not configured."));
         Task.Run(() =>
         {
-            // P2-C3: serialize against scheduled runs and every other
-            // long operation through the scheduler's operation gate.
-            using var op = scheduler?.BeginDashboardOperation();
             try
             {
-                using var r = OpenRepoForAudit(repo, passphrase, backupId, "verify", log);
+                // W-3: re-resolve the passphrase here, not at accept
+                // time, so a lock/unlock between the 202 and execution
+                // is honoured — the task uses the session state at
+                // execution time, not a stale pre-accept snapshot. The
+                // accept-time check above stays: it gives the caller
+                // its immediate 401/500 instead of a silent async drop.
+                string? taskPassphrase = GetRestorePassphrase(config, session);
+                if (string.IsNullOrEmpty(taskPassphrase))
+                {
+                    AuditLog.Record(log, AuditLog.RestoreVerify, AuditLog.Fail,
+                        $"repo={repo} backupId={backupId} issues=locked");
+                    AppendOperationLogBestEffort(repo, "manual-verify",
+                        $"backupId={backupId} FAILED: restore session locked or passphrase unavailable at execution time");
+                    return;
+                }
+                // P2-C3: serialize against scheduled runs and every other
+                // long operation through the scheduler's operation gate.
+                using var op = scheduler?.BeginDashboardOperation();
+                using var r = OpenRepoForAudit(repo, taskPassphrase, backupId, "verify", log);
                 IReadOnlyList<string> issues;
                 try { issues = r.Verify(backupId); }
                 catch (Exception)
@@ -672,12 +702,12 @@ public static partial class DashboardApi
                 AuditLog.Record(log, AuditLog.RestoreVerify,
                     issues.Count == 0 ? AuditLog.Ok : AuditLog.Fail,
                     $"repo={repo} backupId={backupId} issues={issues.Count}");
-                OperationLog.Append(repo, "manual-verify",
+                AppendOperationLogBestEffort(repo, "manual-verify",
                     issues.Count == 0 ? $"backupId={backupId} OK" : $"backupId={backupId} ISSUES: {string.Join("; ", issues.Take(5))}");
             }
             catch (Exception ex)
             {
-                OperationLog.Append(repo, "manual-verify",
+                AppendOperationLogBestEffort(repo, "manual-verify",
                     $"backupId={backupId} FAILED: {ex.Message}");
             }
         });
@@ -703,12 +733,12 @@ public static partial class DashboardApi
                     // MU-5: a completion line — success used to leave
                     // no operations-log trace at all, so the outcome
                     // was indistinguishable from "still running."
-                    OperationLog.Append(repo, "manual-retention",
+                    AppendOperationLogBestEffort(repo, "manual-retention",
                         $"dryRun={dryRun} complete");
                 }
                 catch (Exception ex)
                 {
-                    OperationLog.Append(repo, "manual-retention",
+                    AppendOperationLogBestEffort(repo, "manual-retention",
                         $"dryRun={dryRun} FAILED: {ex.Message}");
                 }
             }

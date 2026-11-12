@@ -48,6 +48,11 @@ public sealed class LogFileSecurityTests : IDisposable
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
     }
 
+    // B-3 (CA1416): this test is Windows-only by construction — it
+    // throws SkipException on any other OS before touching the ACL
+    // APIs — but the analyzer cannot see through that runtime guard,
+    // so the Windows-only calls are suppressed here (test-only).
+#pragma warning disable CA1416
     [Fact]
     public void WindowsFile_RestrictedToSystemAndAdmins()
     {
@@ -71,6 +76,7 @@ public sealed class LogFileSecurityTests : IDisposable
         Assert.Equal(System.Security.AccessControl.AccessControlType.Allow, admins.AccessControlType);
         Assert.Equal(System.Security.AccessControl.FileSystemRights.FullControl, admins.FileSystemRights);
     }
+#pragma warning restore CA1416
 
     [Fact]
     public void MissingFile_NoThrow()

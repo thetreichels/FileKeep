@@ -72,8 +72,9 @@ public sealed class OfflineFileExportTests : IDisposable
     {
         byte[] plaintext = JsonSerializer.SerializeToUtf8Bytes(payload);
         byte[] salt = RandomNumberGenerator.GetBytes(32);
-        using var pbkdf2 = new Rfc2898DeriveBytes(passphrase, salt, 600_000, HashAlgorithmName.SHA512);
-        byte[] key = pbkdf2.GetBytes(32);
+        // B-3 (SYSLIB0060): the Rfc2898DeriveBytes constructor is
+        // obsolete; the static Pbkdf2 derives the same 32-byte key.
+        byte[] key = Rfc2898DeriveBytes.Pbkdf2(passphrase, salt, 600_000, HashAlgorithmName.SHA512, 32);
         byte[] nonce = RandomNumberGenerator.GetBytes(ChunkCrypto.NonceSizeBytes);
         byte[] ciphertext = new byte[plaintext.Length];
         byte[] tag = new byte[ChunkCrypto.TagSizeBytes];
