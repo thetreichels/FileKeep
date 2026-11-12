@@ -670,6 +670,11 @@
           <input id="lb-backup-name" type="text" placeholder="Lockbox name (optional — defaults to backup)" autocomplete="off">
           <button class="accent" onclick="lbStartCreateFromBackup()">Create Lockbox from backup…</button>
         </div>
+        <div id="lb-send-row" style="display:none;gap:6px;flex-wrap:wrap;align-items:center;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+          <label style="font-size:13px"><input id="lb-send-to-phone" type="checkbox"> Send to phone as Lockbox</label>
+          <span style="font-size:13px;color:var(--text-2)">Beams the new Lockbox to your iPhone instead of downloading it.</span>
+        </div>
+        <p id="lb-send-hint" style="color:var(--text-2);font-size:13px;margin:6px 0 0;display:none">Pair your iPhone first — the iPhone relay card on Overview shows how.</p>
       </div>
       <div class="card" id="lb-import-card">
         <div class="name" style="font-size:16px;font-weight:600">Import Lockbox as folder…</div>
@@ -3073,8 +3078,8 @@ async function submitAddNzbDirect() {
 // JSON). The filename comes from the Content-Disposition header,
 // falling back to the server's documented default.
 // Pending Lockbox flows, held while the method picker is open.
-let lbPendingFiles = null; // { files: File[], name: string|null }
-let lbPendingBackup = null; // { backupId, name: string|null }
+let lbPendingFiles = null; // { files: File[], name: string|null, sendViaRelay: bool }
+let lbPendingBackup = null; // { backupId, name: string|null, sendViaRelay: bool }
 let lbPendingImport = null; // { file: File|null, token: string|null, folderName, location }
 // file = a manually picked .kfb (lockbox-to-folder); token = a received
 // drop (import-received-lockbox). Exactly one is set.
@@ -3085,6 +3090,11 @@ async function downloadLockboxResponse(resp, fallbackName) {
     try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { }
     throw new Error(msg);
   }
+  // A create with sendViaRelay returns a JSON RelayBeamDto (200,
+  // application/json) instead of file bytes — no download. Returns
+  // that beam object; returns null after a file download.
+  const ct = resp.headers.get('Content-Type') || '';
+  if (ct.includes('application/json')) return await resp.json();
   const blob = await resp.blob();
   const cd = resp.headers.get('Content-Disposition') || '';
   const m = /filename="?([^";]+)"?/.exec(cd);
@@ -3095,11 +3105,33 @@ async function downloadLockboxResponse(resp, fallbackName) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  return null;
 }
 function loadLockboxesView() {
   lbLoadBackups();
   lbLoadImportLocations();
+  lbRefreshSendToggle();
   loadReceivedLockboxes();
+}
+// "Send to phone as Lockbox" on the New Lockbox card is gated on a
+// paired phone (GET /api/relay/status), checked fresh every time the
+// view loads. Paired: the toggle shows; unpaired (or status
+// unreachable): it hides, the stale check is cleared so a hidden
+// toggle can never beam, and a hint points at the Overview relay card.
+async function lbRefreshSendToggle() {
+  const row = document.getElementById('lb-send-row');
+  const hint = document.getElementById('lb-send-hint');
+  const box = document.getElementById('lb-send-to-phone');
+  if (!row || !hint || !box) return;
+  let paired = false;
+  let reachable = true;
+  try { paired = !!(await api('/api/relay/status')).paired; } catch (e) { reachable = false; }
+  row.style.display = paired ? '' : 'none';
+  // The hint only applies when the status actually says unpaired —
+  // a failed status check means the service is unreachable, not
+  // that the phone needs pairing.
+  hint.style.display = (reachable && !paired) ? '' : 'none';
+  if (!paired) box.checked = false;
 }
 async function lbLoadBackups() {
   const sel = document.getElementById('lb-backup');
@@ -3149,7 +3181,7 @@ function lbStartCreateFromFiles() {
   const files = input.files ? [...input.files] : [];
   if (!files.length) { toast('Choose at least one file first.', 'err'); return; }
   const name = document.getElementById('lb-new-name').value.trim();
-  lbPendingFiles = { files, name: name || null };
+  lbPendingFiles = { files, name: name || null, sendViaRelay: document.getElementById('lb-send-to-phone').checked };
   openMethodPicker({
     kind: 'create-files',
     heading: 'New Lockbox',
@@ -3161,19 +3193,24 @@ function lbStartCreateFromFiles() {
 }
 async function doCreateLockboxFromFiles(methods, requireAll) {
   if (!lbPendingFiles) throw new Error('No files chosen.');
-  const options = { methods, requireAll };
+  const options = { methods, requireAll, sendViaRelay: !!lbPendingFiles.sendViaRelay, lifetimeHours: null };
   if (lbPendingFiles.name) options.name = lbPendingFiles.name;
   const fd = new FormData();
   for (const f of lbPendingFiles.files) fd.append('files', f, f.name);
   fd.append('options', JSON.stringify(options));
   const resp = await fetch('/api/operations/create-lockbox', {
     method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
-  await downloadLockboxResponse(resp, 'lockbox.kfb');
+  const beam = await downloadLockboxResponse(resp, 'lockbox.kfb');
   document.getElementById('lb-files-picker').value = '';
   document.getElementById('lb-new-name').value = '';
   document.getElementById('lb-files-label').textContent = 'No files chosen';
   lbPendingFiles = null;
-  toast('Lockbox created.', 'ok');
+  if (beam) {
+    toast('Lockbox beamed to your iPhone — ' + beam.name + ', expires ' + new Date(beam.expiryUtc).toLocaleString() + '.', 'ok');
+    loadRelayCard();
+  } else {
+    toast('Lockbox created.', 'ok');
+  }
 }
 // New Lockbox from a banked backup (same restore path as Export, so
 // the same restore-session gate applies).
@@ -3182,7 +3219,7 @@ async function lbStartCreateFromBackup() {
   if (!backupId) { toast('No backup to use — bank a backup first.', 'err'); return; }
   if (!await ensureRestoreSession()) return;
   const name = document.getElementById('lb-backup-name').value.trim();
-  lbPendingBackup = { backupId, name: name || null };
+  lbPendingBackup = { backupId, name: name || null, sendViaRelay: document.getElementById('lb-send-to-phone').checked };
   openMethodPicker({
     kind: 'create-backup',
     heading: 'New Lockbox',
@@ -3194,16 +3231,21 @@ async function lbStartCreateFromBackup() {
 }
 async function doCreateLockboxFromBackup(methods, requireAll) {
   if (!lbPendingBackup) throw new Error('No backup chosen.');
-  const body = { backupId: lbPendingBackup.backupId, methods, requireAll };
+  const body = { backupId: lbPendingBackup.backupId, methods, requireAll, sendViaRelay: !!lbPendingBackup.sendViaRelay, lifetimeHours: null };
   if (lbPendingBackup.name) body.name = lbPendingBackup.name;
   const resp = await fetch('/api/operations/create-lockbox-from-backup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
     body: JSON.stringify(body) });
-  await downloadLockboxResponse(resp, 'backup.kfb');
+  const beam = await downloadLockboxResponse(resp, 'backup.kfb');
   document.getElementById('lb-backup-name').value = '';
   lbPendingBackup = null;
-  toast('Lockbox created.', 'ok');
+  if (beam) {
+    toast('Lockbox beamed to your iPhone — ' + beam.name + ', expires ' + new Date(beam.expiryUtc).toLocaleString() + '.', 'ok');
+    loadRelayCard();
+  } else {
+    toast('Lockbox created.', 'ok');
+  }
 }
 // Import a Lockbox as a folder.
 function lbImportFileChanged() {
@@ -3306,8 +3348,22 @@ async function loadReceivedLockboxes() {
       <div class="grow"><div class="name">${esc(b.name)}</div>
       <div class="meta">${esc(detail)}${b.rejectionReason ? ' · ' + esc(b.rejectionReason) : ''}</div></div>
       <button ${b.signatureValid ? '' : 'disabled title="' + esc(b.rejectionReason || 'Signature failed verification') + '"'} onclick="lbImportReceived(${jsAttr(b.token)}, ${jsAttr(b.name)})">Import as folder</button>
+      <button onclick="lbDeleteReceived(${jsAttr(b.token)}, ${jsAttr(b.name)})">Delete</button>
     </div>`;
   }).join('');
+}
+// A received Lockbox is manual cleanup: the drop stays in the inbox
+// after import, so Delete removes just the inbox copy — folders
+// already imported from it are untouched. Offered on every row,
+// including bad-signature rows whose Import button is disabled.
+async function lbDeleteReceived(token, name) {
+  if (!window.confirm(`Delete received Lockbox '${name}'? This only removes the inbox copy — folders you already imported from it are untouched.`)) return;
+  try {
+    await api('/api/lockboxes/received/' + encodeURIComponent(token), { method: 'DELETE' });
+    toast(`Received Lockbox '${name}' deleted.`, 'ok');
+    loadReceivedLockboxes();
+    loadRelayCard();
+  } catch (e) { toast(e.message, 'err'); }
 }
 // A received Lockbox imports in one click: its .kfb already sits in
 // the relay inbox, so the server resolves the token to the drop — no

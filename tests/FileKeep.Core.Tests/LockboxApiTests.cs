@@ -317,6 +317,44 @@ public sealed class LockboxApiTests : IDisposable
     }
 
     [Fact]
+    public void CreateFromFiles_SendViaRelay_Unconfigured_Returns400_AndDeletesTemp()
+    {
+        // Config with no relay: same gate as the folder-to-lockbox
+        // beam test — the staged temp .kfb must be deleted even
+        // though beaming failed.
+        var config = new ServiceConfig();
+        string[] before = LockboxTempFiles();
+        var r = DashboardApi.CreateLockboxFromFiles(
+            config,
+            new List<(string, byte[])> { LkFile("a.txt", "beam me") },
+            new[] { PassphraseMethod(LockPass) }, requireAll: false,
+            name: "beam-drop", sendViaRelay: true);
+        Assert.Equal(400, r.Status);
+        Assert.Contains("Relay is not configured", ErrorMessage(r), StringComparison.Ordinal);
+        Assert.Equal(before.Length, LockboxTempFiles().Length);
+        Assert.Empty(LockboxTempFiles().Except(before));
+    }
+
+    [Fact]
+    public void CreateFromFiles_SendViaRelay_False_Downloads()
+    {
+        // Explicit flag-off: the download path is unchanged — the
+        // bytes come back as a LockboxDownloadDto, a real bundle.
+        var config = new ServiceConfig();
+        var result = DashboardApi.CreateLockboxFromFiles(
+            config,
+            new List<(string, byte[])> { LkFile("a.txt", "plain download") },
+            new[] { PassphraseMethod(LockPass) }, requireAll: false,
+            name: "plain", sendViaRelay: false);
+        var dto = Download(result);
+        Assert.Equal("plain.kfb", dto.FileName);
+        var opened = OpenedFiles(dto.Bytes, new DashboardApi.LockboxUnlockDto { Passphrase = LockPass });
+        var only = Assert.Single(opened);
+        Assert.Equal("plain download", Encoding.UTF8.GetString(only.Plaintext));
+        CryptographicOperations.ZeroMemory(only.Plaintext);
+    }
+
+    [Fact]
     public void CreateFromFiles_WrongPassphrase_CannotOpen()
     {
         var dto = Download(DashboardApi.CreateLockboxFromFiles(
@@ -393,6 +431,29 @@ public sealed class LockboxApiTests : IDisposable
         var r = DashboardApi.CreateLockboxFromBackup(config, _repoDir, request);
         Assert.Equal(400, r.Status);
         Assert.Contains("backupId is required", ErrorMessage(r), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateFromBackup_SendViaRelay_Unconfigured_Returns400_AndDeletesTemp()
+    {
+        // Same gate as the create-from-files beam test, via the
+        // backup path: ExportBundle builds the bytes, the beam fails
+        // at the relay gate, and the staged temp .kfb is deleted.
+        string backupId = MakeBackupWithFiles();
+        var config = ConfigWithRepoJob();
+        var request = new DashboardApi.LockboxFromBackupRequestDto
+        {
+            BackupId = backupId,
+            Methods = new List<DashboardApi.LockboxUnlockMethodDto> { PassphraseMethod(LockPass) },
+            Name = "docs-backup",
+            SendViaRelay = true,
+        };
+        string[] before = LockboxTempFiles();
+        var r = DashboardApi.CreateLockboxFromBackup(config, _repoDir, request, UnlockedSession());
+        Assert.Equal(400, r.Status);
+        Assert.Contains("Relay is not configured", ErrorMessage(r), StringComparison.Ordinal);
+        Assert.Equal(before.Length, LockboxTempFiles().Length);
+        Assert.Empty(LockboxTempFiles().Except(before));
     }
 
     // ----- 3. folder -> Lockbox -----
@@ -696,6 +757,108 @@ public sealed class LockboxApiTests : IDisposable
         var (status, payload) = DashboardApi.ListReceivedLockboxes(inbox);
         Assert.Equal(200, status);
         Assert.Empty(Assert.IsType<DashboardApi.ReceivedLockboxDto[]>(payload));
+    }
+
+    // ----- 6. delete a received Lockbox -----
+
+    [Fact]
+    public void DeleteReceivedLockbox_HappyPath()
+    {
+        string relayRoot = Path.Combine(_workDir, "relay");
+        var inbox = SimulatedInbox(relayRoot, out byte[] hmacKey);
+        byte[] kfb = Encoding.UTF8.GetBytes("fake bundle bytes for delete");
+        SimulatePhoneDrop(relayRoot, "del00001", kfb, "from-phone.kfb", hmacKey, signCorrectly: true);
+
+        var (status, payload) = DashboardApi.DeleteReceivedLockbox(new ServiceConfig(), inbox, "del00001");
+        Assert.Equal(200, status);
+        Assert.IsType<OkDto>(payload);
+        // The list is empty afterwards...
+        var (listStatus, listPayload) = DashboardApi.ListReceivedLockboxes(inbox);
+        Assert.Equal(200, listStatus);
+        Assert.Empty(Assert.IsType<DashboardApi.ReceivedLockboxDto[]>(listPayload));
+        // ...and all three drop files are gone from the inbox dir.
+        string inboxDir = Path.Combine(relayRoot, "inbox", "laptop");
+        Assert.False(File.Exists(Path.Combine(inboxDir, "del00001.kfb")));
+        Assert.False(File.Exists(Path.Combine(inboxDir, "del00001.kfb.par2")));
+        Assert.False(File.Exists(Path.Combine(inboxDir, "del00001.json")));
+    }
+
+    [Fact]
+    public void DeleteReceivedLockbox_UnknownToken_Returns404()
+    {
+        string relayRoot = Path.Combine(_workDir, "relay");
+        var inbox = SimulatedInbox(relayRoot, out _);
+        var r = DashboardApi.DeleteReceivedLockbox(new ServiceConfig(), inbox, "no-such-token");
+        Assert.Equal(404, r.Status);
+        Assert.Contains("No received Lockbox with that token", ErrorMessage(r), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DeleteReceivedLockbox_Unconfigured_Returns400()
+    {
+        // The public (config) entry point hits the relay gate first:
+        // no relay folder at all.
+        var r = DashboardApi.DeleteReceivedLockbox(new ServiceConfig(), "whatever");
+        Assert.Equal(400, r.Status);
+        Assert.Contains("Relay is not configured", ErrorMessage(r), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DeleteReceivedLockbox_AfterImport_LeavesFolderIntact()
+    {
+        var (config, session, catalog, location) = UnlockedFolder();
+        string relayRoot = Path.Combine(_workDir, "relay");
+        var inbox = SimulatedInbox(relayRoot, out byte[] hmacKey);
+        byte[] kfb = Download(DashboardApi.CreateLockboxFromFiles(
+            new List<(string, byte[])>
+            {
+                LkFile("hello.txt", "imported hello"),
+                LkFile("sub/world.txt", "imported world"),
+            },
+            new[] { PassphraseMethod(LockPass) }, requireAll: false)).Bytes;
+        SimulatePhoneDrop(relayRoot, "recv0001", kfb, "from-phone.kfb", hmacKey, signCorrectly: true);
+
+        var (importStatus, _) = DashboardApi.ImportReceivedLockbox(
+            config, inbox, session, catalog,
+            new DashboardApi.ImportReceivedLockboxRequestDto
+            {
+                Token = "recv0001",
+                FolderName = "Imported",
+                Location = location.Name,
+                Unlock = new DashboardApi.LockboxUnlockDto { Passphrase = LockPass },
+            });
+        Assert.Equal(200, importStatus);
+
+        // The imported drop stays in the inbox until deleted...
+        var (deleteStatus, _) = DashboardApi.DeleteReceivedLockbox(config, inbox, "recv0001");
+        Assert.Equal(200, deleteStatus);
+        var (listStatus, listPayload) = DashboardApi.ListReceivedLockboxes(inbox);
+        Assert.Equal(200, listStatus);
+        Assert.Empty(Assert.IsType<DashboardApi.ReceivedLockboxDto[]>(listPayload));
+
+        // ...and deleting it leaves the imported folder intact.
+        var entries = session.GetEntries();
+        Assert.NotNull(entries);
+        var folder = entries!.First(e => e.Name == "Imported");
+        Assert.Equal(2, folder.Files.Count);
+        foreach (var entry in folder.Files)
+        {
+            byte[] back = ReadBack(session, location, entry);
+            string expected = entry.Path == "hello.txt" ? "imported hello" : "imported world";
+            Assert.Equal(expected, Encoding.UTF8.GetString(back));
+        }
+    }
+
+    /// <summary>RelayInbox over a fresh relay dir, like
+    /// LockboxReceivedImportTests.SimulatedInbox (duplicated here
+    /// because that helper is private to that class).</summary>
+    private static RelayInbox SimulatedInbox(string relayRoot, out byte[] hmacKey)
+    {
+        byte[] seed = RelayCrypto.NewPairingSecret();
+        hmacKey = RelayCrypto.DeriveHmacKey(seed);
+        byte[] encKey = RelayCrypto.DeriveEncKey(seed);
+        var writer = new RelayWriter(relayRoot, hmacKey, encKey); // creates the relay folders
+        return new RelayInbox(relayRoot, hmacKey, encKey, writer);
     }
 
     private static void SimulatePhoneDrop(

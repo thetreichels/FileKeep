@@ -797,4 +797,12 @@ public sealed class LockboxRouteTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         Assert.Contains("Relay is not configured", await ErrorTextAsync(resp), StringComparison.Ordinal);
     });
+
+    [Fact]
+    public Task DeleteReceivedLockbox_MissingCsrf_Returns403() => WithServerAsync(async ctx =>
+    {
+        using var bare = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        using var resp = await bare.DeleteAsync(ctx.BaseUrl + "/api/lockboxes/received/some-token");
+        Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+    });
 }

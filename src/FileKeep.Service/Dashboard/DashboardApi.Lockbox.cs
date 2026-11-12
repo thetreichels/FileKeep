@@ -37,6 +37,7 @@ namespace FileKeep.Service;
 ///   POST /api/operations/lockbox-to-folder (multipart — see below)
 ///   POST /api/operations/import-received-lockbox (JSON body)
 ///   GET  /api/lockboxes/received          (no body)
+///   DELETE /api/lockboxes/received/{token} (no body; CSRF-checked)
 ///
 /// Multipart shape (follows the POST /api/operations/download-nzb
 /// precedent — Dashboard.cs reads await request.ReadFormAsync(); the GUI
@@ -45,8 +46,12 @@ namespace FileKeep.Service;
 ///     part's filename IS the path inside the Lockbox, '/'-separated
 ///     (e.g. filename "sub/name.txt"); plus one text field "options"
 ///     holding JSON: <see cref="CreateLockboxOptionsDto"/>
-///     ({methods, requireAll, name}). The route returns the bytes as a
-///     download named options.name (default "lockbox.kfb").
+///     ({methods, requireAll, name, sendViaRelay, lifetimeHours}).
+///     The route returns the bytes as a download named options.name
+///     (default "lockbox.kfb") — unless sendViaRelay is true, in
+///     which case the fresh Lockbox is beamed to the paired phone
+///     and the route returns the <see cref="RelayBeamDto"/> JSON
+///     instead (same shape as folder-to-lockbox).
 ///   - lockbox-to-folder: one file part named "lockbox" (the .kfb);
 ///     plus one text field "options" holding JSON:
 ///     <see cref="LockboxToFolderRequestDto"/>
@@ -60,6 +65,10 @@ namespace FileKeep.Service;
 ///     ({bytes, fileName}); the deferred route does
 ///     Results.File(dto.Bytes, "application/octet-stream", dto.FileName).
 ///     The relay-send path returns a <see cref="RelayBeamDto"/> instead.
+///   - A received drop STAYS in the inbox after import (Joel,
+///     2026-11-11); DELETE /api/lockboxes/received/{token} removes
+///     it manually via <see cref="DeleteReceivedLockbox"/> — the
+///     drop's .kfb/.kfb.par2/.json only, never any folder.
 ///   - "Send to phone" is gated by the GUI on
 ///     GET /api/relay/status -&gt; RelayStatusDto.Paired; this file does
 ///     not build that check.
@@ -110,6 +119,13 @@ public static partial class DashboardApi
 		[JsonPropertyName("name")]
 		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
 		public string? Name { get; set; } // download filename without .kfb; default "lockbox"
+
+		[JsonPropertyName("sendViaRelay")]
+		public bool SendViaRelay { get; set; } // true = beam to the paired phone instead of downloading
+
+		[JsonPropertyName("lifetimeHours")]
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public int? LifetimeHours { get; set; } // relay drop lifetime; BeamBundle clamps 1h..30d
 	}
 
 	/// <summary>JSON body for create-from-backup (same route pattern as export-bundle).</summary>
@@ -127,6 +143,13 @@ public static partial class DashboardApi
 		[JsonPropertyName("name")]
 		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
 		public string? Name { get; set; } // download filename without .kfb; default "backup"
+
+		[JsonPropertyName("sendViaRelay")]
+		public bool SendViaRelay { get; set; } // true = beam to the paired phone instead of downloading
+
+		[JsonPropertyName("lifetimeHours")]
+		[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+		public int? LifetimeHours { get; set; } // relay drop lifetime; BeamBundle clamps 1h..30d
 	}
 
 	/// <summary>JSON body for folder-to-lockbox.</summary>
@@ -419,15 +442,63 @@ public static partial class DashboardApi
 	}
 
 	/// <summary>
+	/// THE shared beam helper: beams already-built Lockbox bytes to
+	/// the paired phone. Stages the bytes to a temp
+	/// <c>fk-lockbox-&lt;guid&gt;.kfb</c> (BeamBundle takes a .kfb path
+	/// on disk), calls <see cref="BeamBundle"/>, and deletes the temp
+	/// file in <c>finally</c> on EVERY path (success, beam error, or
+	/// staging exception) — the regression gate is
+	/// <c>FolderToLockbox_SendViaRelay_Unconfigured_Returns400_AndDeletesTemp</c>.
+	/// The bytes are zeroed in <c>finally</c> too: callers must not
+	/// use them afterwards (the download path never reaches here).
+	/// Returns BeamBundle's (status, <see cref="RelayBeamDto"/>) on
+	/// success, or (status, <see cref="ErrorDto"/>) on failure —
+	/// unconfigured/unpaired relay → 400 "Relay is not configured."
+	/// (or "No phone is paired.") via TryGetRelayInbox.
+	/// </summary>
+	public static (int Status, object Payload) BeamLockboxBytes(
+		ServiceConfig config,
+		byte[] bytes,
+		string displayName,
+		int? lifetimeHours,
+		Action<string>? log = null)
+	{
+		string tempPath = Path.Combine(Path.GetTempPath(), $"fk-lockbox-{Guid.NewGuid():N}.kfb");
+		try
+		{
+			File.WriteAllBytes(tempPath, bytes);
+			var (beamStatus, beamPayload) = BeamBundle(
+				config, tempPath, displayName, lifetimeHours, log);
+			return (beamStatus, beamPayload);
+		}
+		catch (Exception ex)
+		{
+			return (500, new ErrorDto($"Could not stage the Lockbox for beaming: {ex.Message}"));
+		}
+		finally
+		{
+			try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+			CryptographicOperations.ZeroMemory(bytes);
+		}
+	}
+
+	/// <summary>
 	/// Creates a Lockbox from in-memory files. Returns
 	/// (200, <see cref="LockboxDownloadDto"/>) on success, or
-	/// (status, <see cref="ErrorDto"/>).
+	/// (status, <see cref="ErrorDto"/>). When
+	/// <paramref name="sendViaRelay"/> is true the fresh Lockbox is
+	/// beamed to the paired phone instead of downloaded, via
+	/// <see cref="BeamLockboxBytes"/> (which zeroes the bytes), and
+	/// the beam result is returned as-is.
 	/// </summary>
 	public static (int Status, object Payload) CreateLockboxFromFiles(
+		ServiceConfig? config,
 		IReadOnlyList<(string Path, byte[] Plaintext)> files,
 		IReadOnlyList<LockboxUnlockMethodDto> methods,
 		bool requireAll,
 		string? name = null,
+		bool sendViaRelay = false,
+		int? lifetimeHours = null,
 		IYubiKeyProvider? yubiKeyProvider = null,
 		CancellationToken cancellationToken = default,
 		Action<string>? log = null)
@@ -448,12 +519,39 @@ public static partial class DashboardApi
 		if (bytes is null)
 			return (status, new ErrorDto(buildError ?? "Could not build the Lockbox."));
 		log?.Invoke($"lockbox: created from {files.Count} file(s)");
-		return (200, new LockboxDownloadDto
+		if (!sendViaRelay)
 		{
-			Bytes = bytes,
-			FileName = DownloadFileName(name, "lockbox.kfb"),
-		});
+			return (200, new LockboxDownloadDto
+			{
+				Bytes = bytes,
+				FileName = DownloadFileName(name, "lockbox.kfb"),
+			});
+		}
+		if (config is null)
+		{
+			CryptographicOperations.ZeroMemory(bytes);
+			return (400, new ErrorDto("Relay is not configured."));
+		}
+		return BeamLockboxBytes(config, bytes, DownloadFileName(name, "lockbox.kfb"), lifetimeHours, log);
 	}
+
+	/// <summary>
+	/// Download-only overload of <see cref="CreateLockboxFromFiles"/>:
+	/// no relay is involved, so no config is needed. Kept so the
+	/// existing download-only callers (LockboxApiTests,
+	/// LockboxReceivedImportTests) need no change; the route and the
+	/// beam tests use the config-first overload above.
+	/// </summary>
+	public static (int Status, object Payload) CreateLockboxFromFiles(
+		IReadOnlyList<(string Path, byte[] Plaintext)> files,
+		IReadOnlyList<LockboxUnlockMethodDto> methods,
+		bool requireAll,
+		string? name = null,
+		IYubiKeyProvider? yubiKeyProvider = null,
+		CancellationToken cancellationToken = default,
+		Action<string>? log = null) =>
+		CreateLockboxFromFiles(null, files, methods, requireAll, name,
+			sendViaRelay: false, null, yubiKeyProvider, cancellationToken, log);
 
 	/// <summary>
 	/// Creates a Lockbox from a backup. DELEGATES to
@@ -463,7 +561,10 @@ public static partial class DashboardApi
 	/// FileName is request.Name (default "backup") with a .kfb suffix,
 	/// so the deferred route names the download
 	/// <c>&lt;name&gt;.kfb</c> instead of ExportBundle's hardcoded
-	/// "backup.kfb". Errors pass through unchanged.
+	/// "backup.kfb". When request.SendViaRelay is true the fresh
+	/// Lockbox is beamed to the paired phone instead (via
+	/// <see cref="BeamLockboxBytes"/>) and the beam result is
+	/// returned as-is. Errors pass through unchanged.
 	/// </summary>
 	public static (int Status, object Payload) CreateLockboxFromBackup(
 		ServiceConfig config,
@@ -489,10 +590,13 @@ public static partial class DashboardApi
 			config, repo, exportRequest, session, yubiKeyProvider, cancellationToken, log);
 		if (status != 200 || payload is not byte[] bytes)
 			return (status, payload);
+		string fileName = DownloadFileName(request.Name, "backup.kfb");
+		if (request.SendViaRelay)
+			return BeamLockboxBytes(config, bytes, fileName, request.LifetimeHours, log);
 		return (200, new LockboxDownloadDto
 		{
 			Bytes = bytes,
-			FileName = DownloadFileName(request.Name, "backup.kfb"),
+			FileName = fileName,
 		});
 	}
 
@@ -507,10 +611,9 @@ public static partial class DashboardApi
 	/// file named by request.FilePath (mirrors
 	/// <see cref="OfflineExport.ScopeFolder"/> /
 	/// <see cref="OfflineExport.ScopeFile"/>). When
-	/// request.SendViaRelay is true, the .kfb is written to a temp
-	/// file, beamed with <see cref="BeamBundle"/> (which takes a .kfb
-	/// path on disk and returns token/name/size/expiry), and the temp
-	/// file is deleted on every path; the beam result is returned
+	/// request.SendViaRelay is true, the .kfb is beamed with
+	/// <see cref="BeamLockboxBytes"/> (temp stage + <see cref="BeamBundle"/>,
+	/// temp deleted on every path) and the beam result is returned
 	/// as-is. Otherwise the bytes are returned for download. The GUI
 	/// gates "Send to phone" on GET /api/relay/status -&gt;
 	/// RelayStatusDto.Paired — that check is not built here.
@@ -611,25 +714,10 @@ public static partial class DashboardApi
 			return (200, new LockboxDownloadDto { Bytes = bytes, FileName = displayName });
 		}
 
-		// Beam needs a .kfb path on disk: stage to temp, beam, delete
-		// on every path (success, beam error, or exception).
-		string tempPath = Path.Combine(Path.GetTempPath(), $"fk-lockbox-{Guid.NewGuid():N}.kfb");
-		try
-		{
-			File.WriteAllBytes(tempPath, bytes);
-			var (beamStatus, beamPayload) = BeamBundle(
-				config, tempPath, displayName, request.LifetimeHours, log);
-			return (beamStatus, beamPayload);
-		}
-		catch (Exception ex)
-		{
-			return (500, new ErrorDto($"Could not stage the Lockbox for beaming: {ex.Message}"));
-		}
-		finally
-		{
-			try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
-			CryptographicOperations.ZeroMemory(bytes);
-		}
+		// Beam needs a .kfb path on disk: the shared
+		// BeamLockboxBytes stages to temp, beams, and deletes the
+		// temp on every path (success, beam error, or exception).
+		return BeamLockboxBytes(config, bytes, displayName, request.LifetimeHours, log);
 	}
 
 	/// <summary>
@@ -878,6 +966,49 @@ public static partial class DashboardApi
 	{
 		ArgumentNullException.ThrowIfNull(inbox);
 		return (200, inbox.ScanBundles().Select(MapReceivedLockbox).ToArray());
+	}
+
+	/// <summary>
+	/// Deletes one received Lockbox from the relay inbox by token —
+	/// the manual per-row Delete in GET /api/lockboxes/received.
+	/// An imported drop STAYS in the inbox (Joel, 2026-11-11); this
+	/// is the only way it leaves. Follows
+	/// <see cref="ImportReceivedLockbox"/>'s pattern exactly:
+	/// TryGetRelayInbox → 400 when the relay is not configured or no
+	/// phone is paired; the token is matched against the scanned
+	/// bundles by ordinal equality (never used as a path), unknown
+	/// token → 404. Deletes ONLY the drop's .kfb/.kfb.par2/.json via
+	/// <see cref="RelayInbox.DeleteBundle"/> — it never touches any
+	/// folder, so deleting after an import leaves the imported
+	/// folder intact. Returns (200, <see cref="OkDto"/>(true)).
+	/// </summary>
+	public static (int Status, object Payload) DeleteReceivedLockbox(ServiceConfig config, string token)
+	{
+		if (!TryGetRelayInbox(config, out RelayInbox? inbox, out string? error))
+			return (400, new ErrorDto(error!));
+		if (inbox is null)
+			return (500, new ErrorDto("Relay inbox is unavailable."));
+		return DeleteReceivedLockbox(config, inbox, token);
+	}
+
+	/// <summary>
+	/// Test seam: delete-by-token over an explicit
+	/// <see cref="RelayInbox"/> (tests drive it with a simulated
+	/// phone drop instead of a paired relay; the pairing secret
+	/// needs DPAPI, which is Windows-only).
+	/// </summary>
+	internal static (int Status, object Payload) DeleteReceivedLockbox(
+		ServiceConfig config, RelayInbox inbox, string token)
+	{
+		ArgumentNullException.ThrowIfNull(inbox);
+		if (string.IsNullOrWhiteSpace(token))
+			return (404, new ErrorDto("No received Lockbox with that token."));
+		var bundle = inbox.ScanBundles().FirstOrDefault(b =>
+			string.Equals(b.Token, token.Trim(), StringComparison.Ordinal));
+		if (bundle is null)
+			return (404, new ErrorDto("No received Lockbox with that token."));
+		inbox.DeleteBundle(bundle.Token);
+		return (200, new OkDto(true));
 	}
 
 	private static ReceivedLockboxDto MapReceivedLockbox(RelayInboxBundleDto dto) => new()

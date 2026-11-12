@@ -588,9 +588,11 @@ public static class Dashboard
                 files.Add((file.FileName, ms.ToArray()));
             }
             var (status, payload) = DashboardApi.CreateLockboxFromFiles(
-                files, options.Methods, options.RequireAll, options.Name, yubiKeyProvider, ct, log);
+                config, files, options.Methods, options.RequireAll, options.Name,
+                options.SendViaRelay, options.LifetimeHours, yubiKeyProvider, ct, log);
             if (status == 200 && payload is DashboardApi.LockboxDownloadDto download)
                 return Results.File(download.Bytes, "application/octet-stream", download.FileName);
+            // Otherwise a RelayBeamDto (sendViaRelay) or an ErrorDto.
             return JsonPayload(payload, statusCode: status);
         });
 
@@ -609,6 +611,7 @@ public static class Dashboard
                 config, repo, lockboxRequest, restoreSession, yubiKeyProvider, ct, log);
             if (status == 200 && payload is DashboardApi.LockboxDownloadDto download)
                 return Results.File(download.Bytes, "application/octet-stream", download.FileName);
+            // Otherwise a RelayBeamDto (sendViaRelay) or an ErrorDto.
             return JsonPayload(payload, statusCode: status);
         });
 
@@ -723,6 +726,17 @@ public static class Dashboard
         app.MapGet("/api/lockboxes/received", () =>
         {
             var (status, payload) = DashboardApi.ListReceivedLockboxes(config);
+            return JsonPayload(payload, statusCode: status);
+        });
+
+        // Manual per-row delete of a received drop. An imported drop
+        // stays in the inbox until deleted here; the delete touches
+        // only the drop's files, never any folder.
+        app.MapDelete("/api/lockboxes/received/{token}", (string token, HttpRequest request) =>
+        {
+            if (!DashboardApi.ValidateCsrfToken(csrfToken, request.Headers["X-CSRF-Token"]))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var (status, payload) = DashboardApi.DeleteReceivedLockbox(config, token);
             return JsonPayload(payload, statusCode: status);
         });
 
