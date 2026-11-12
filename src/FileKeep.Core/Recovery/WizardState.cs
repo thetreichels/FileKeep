@@ -511,26 +511,14 @@ public sealed class WizardState : IDisposable
                     : Path.Combine(remoteChunks, shard, fileName);
                 if (!File.Exists(remotePath))
                     throw new FileNotFoundException(notFoundMessage(id));
-                Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                string tmpPath = localPath + ".tmp-" + Guid.NewGuid().ToString("N");
-                try
-                {
-                    // Disguised sources store header-wrapped blobs;
-                    // strip on the way in so verification sees clean
-                    // ciphertext (pre-header files copy through unchanged).
-                    if (layout is not null)
-                        Service.DisguisedLayout.CopyUnwrapped(remotePath, tmpPath);
-                    else
-                        File.Copy(remotePath, tmpPath);
-                    if (!repo.VerifyChunkBlobAt(tmpPath, id))
-                        throw new InvalidDataException(
-                            $"Chunk {id} pulled from {remoteChunks} failed verification; it was not stored.");
-                    File.Move(tmpPath, localPath, overwrite: true);
-                }
-                finally
-                {
-                    try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
-                }
+                // Disguised sources store header-wrapped blobs;
+                // strip on the way in so verification sees clean
+                // ciphertext (pre-header files copy through unchanged).
+                Action<string> copyToTemp = layout is not null
+                    ? tmp => Service.DisguisedLayout.CopyUnwrapped(remotePath, tmp)
+                    : tmp => File.Copy(remotePath, tmp);
+                OfflineStickLayout.CopyVerifiedBlobAtomic(
+                    localPath, id, repo, copyToTemp, remoteChunks);
             }
             done++;
             if (done % 25 == 0) progress?.Invoke(done, total);

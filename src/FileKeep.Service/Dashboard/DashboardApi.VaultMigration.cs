@@ -138,7 +138,7 @@ public static partial class DashboardApi
                 if (loc.ParsedKind == LocationKind.Smb)
                 {
                     fresh = loc.Clone();
-                    fresh.Share = loc.Share.TrimEnd('\\', '/') + "-migrated";
+                    fresh.Share = PathCanonicalization.TrimTrailingSeparators(loc.Share) + "-migrated";
                 }
                 else if (loc.ParsedKind == LocationKind.Usb)
                 {
@@ -203,7 +203,7 @@ public static partial class DashboardApi
 
     private static string UniqueRepoPath(ServiceConfig config, string oldRepo)
     {
-        string basePath = oldRepo.TrimEnd('\\', '/') + "-migrated";
+        string basePath = PathCanonicalization.TrimTrailingSeparators(oldRepo) + "-migrated";
         string candidate = basePath;
         int n = 2;
         while (Directory.Exists(candidate) ||

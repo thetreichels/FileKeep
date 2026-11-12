@@ -175,55 +175,33 @@ public static class ServiceConfigValidator
             (!string.IsNullOrEmpty(config.PassphraseWrapProtected) &&
              !string.IsNullOrEmpty(config.PassphraseWrapSaltB64));
         bool yubiKeyMethod = config.GeneratedSecretMode || config.PassphraseYubiKey;
-        if (config.PhoneAuthEnabled && !passphraseMethod && !yubiKeyMethod)
-            throw new InvalidOperationException(
-                "Phone authenticator cannot be the only enabled method. Enable Passphrase or YubiKey first.");
-        if (config.ParsedLink == LinkKind.And && !(passphraseMethod && yubiKeyMethod))
-            throw new InvalidOperationException(
-                "\"and\" link mode requires both Passphrase and YubiKey to be enabled.");
-        if (config.Nntp is not null && !string.IsNullOrWhiteSpace(config.Nntp.Host))
-        {
-            if (config.Nntp.Port is < 1 or > 65535)
-                throw new InvalidOperationException($"nntp.port {config.Nntp.Port} is out of range.");
-            if (config.Nntp.Connections < 1 || config.Nntp.Connections > 100)
-                throw new InvalidOperationException("nntp.connections must be between 1 and 100.");
-            // The global NNTP entry's redundancy was never validated: a
-            // garbage value silently behaved as "none" in the uploader
-            // (the same silent-none bug SF-22 fixed for jobs). Blank-host
-            // globals are placeholders (uploads skip them), so only
-            // host-bearing globals are checked.
-            if (!string.IsNullOrEmpty(config.Nntp.RedundancyMode))
-            {
-                try { RedundancyKindParser.Parse(config.Nntp.RedundancyMode); }
-                catch (ArgumentException)
-                {
-                    throw new InvalidOperationException(
-                        $"nntp.redundancyMode '{config.Nntp.RedundancyMode}' is invalid (expected \"none\", \"xor\", or \"par2\").");
-                }
-            }
-        }
-        // Providers (SF-21): entries in the list get the same checks the
-        // legacy singleton gets. A blank-host entry is a tolerated
-        // placeholder (uploads skip it with a log line — SF-14), so only
-        // entries with a host are field-checked.
+        if (ProtectionRules.ValidateCombination(passphraseMethod, yubiKeyMethod, config.PhoneAuthEnabled, config.ParsedLink) is string error)
+            throw new InvalidOperationException(error);
+        // Providers (SF-21): entries in the list are field-checked.
+        // A blank-host entry is a tolerated placeholder (uploads skip
+        // it with a log line — SF-14), so only entries with a host
+        // are field-checked.
         foreach (var provider in config.NntpProviders)
         {
             if (string.IsNullOrWhiteSpace(provider.Host))
                 continue;
-            if (provider.Port is < 1 or > 65535)
-                throw new InvalidOperationException(
-                    $"nntpProviders entry '{provider.Host}' port {provider.Port} is out of range.");
-            if (provider.Connections < 1 || provider.Connections > 100)
-                throw new InvalidOperationException(
-                    $"nntpProviders entry '{provider.Host}' connections must be between 1 and 100.");
-            if (!string.IsNullOrEmpty(provider.RedundancyMode))
+            ValidateNntpEntry(provider, $"nntpProviders entry '{provider.Host}'");
+        }
+    }
+
+    private static void ValidateNntpEntry(NntpConfig provider, string hostLabel)
+    {
+        if (provider.Port is < 1 or > 65535)
+            throw new InvalidOperationException($"{hostLabel} port {provider.Port} is out of range.");
+        if (provider.Connections < 1 || provider.Connections > 100)
+            throw new InvalidOperationException($"{hostLabel} connections must be between 1 and 100.");
+        if (!string.IsNullOrEmpty(provider.RedundancyMode))
+        {
+            try { RedundancyKindParser.Parse(provider.RedundancyMode); }
+            catch (ArgumentException)
             {
-                try { RedundancyKindParser.Parse(provider.RedundancyMode); }
-                catch (ArgumentException)
-                {
-                    throw new InvalidOperationException(
-                        $"nntpProviders entry '{provider.Host}' has unknown redundancyMode '{provider.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
-                }
+                throw new InvalidOperationException(
+                    $"{hostLabel} has unknown redundancyMode '{provider.RedundancyMode}' (expected \"none\", \"xor\", or \"par2\").");
             }
         }
     }

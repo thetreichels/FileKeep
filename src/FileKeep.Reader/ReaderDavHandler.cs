@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text;
 using System.Xml.Linq;
 using FileKeep.Core;
@@ -32,7 +31,8 @@ public sealed class ReaderDavHandler
         public required string Method { get; init; }
         /// <summary>URL-decoded path segments below the DAV root.</summary>
         public required IReadOnlyList<string> Segments { get; init; }
-        public string Depth { get; init; } = "1";
+        /// <summary>0, 1, or <see cref="WebDav.DepthInfinity"/> for infinity.</summary>
+        public int Depth { get; init; } = 1;
         public byte[] Body { get; init; } = Array.Empty<byte>();
         public string? LockToken { get; init; }
     }
@@ -81,7 +81,7 @@ public sealed class ReaderDavHandler
     {
         var r = new Response { Status = 200 };
         r.Headers["DAV"] = "1, 2";
-        r.Headers["Allow"] = "OPTIONS, PROPFIND, GET, PUT, DELETE, LOCK, UNLOCK";
+        r.Headers["Allow"] = WebDav.AllowMethods;
         return r;
     }
 
@@ -179,7 +179,7 @@ public sealed class ReaderDavHandler
         return holder.Key is not null && !string.Equals(holder.Key, presented, StringComparison.Ordinal);
     }
 
-    private Response Propfind(string path, string depth)
+    private Response Propfind(string path, int depth)
     {
         // Resolve the target: root, a file, or an intermediate collection.
         bool isRoot = string.IsNullOrEmpty(path);
@@ -191,9 +191,9 @@ public sealed class ReaderDavHandler
 
         var resources = new List<(string Path, bool IsCollection, ReaderSession.Entry? File)>();
         resources.Add((path, isCollection, file));
-        if (isCollection && depth != "0")
+        if (isCollection && depth != 0)
         {
-            bool recursive = depth == "infinity";
+            bool recursive = depth == WebDav.DepthInfinity;
             foreach (var f in _session.Files)
             {
                 if (!isRoot && !f.Path.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase))
@@ -223,32 +223,20 @@ public sealed class ReaderDavHandler
                 resources.Add((f.Path, false, f));
             }
         }
-        var multi = new XElement(D + "multistatus",
-            resources.Select(r =>
-            {
-                var prop = new XElement(D + "prop",
-                    new XElement(D + "displayname", r.Path.Split('/').Last()),
-                    new XElement(D + "resourcetype",
-                        r.IsCollection ? new XElement(D + "collection") : null));
-                if (r.File is not null)
-                {
-                    prop.Add(new XElement(D + "getcontentlength", r.File.Size));
-                    prop.Add(new XElement(D + "getlastmodified",
-                        r.File.ModifiedUtc.UtcDateTime.ToString("R",
-                            System.Globalization.CultureInfo.InvariantCulture)));
-                }
-                return new XElement(D + "response",
-                    new XElement(D + "href", Href(r.Path)),
-                    new XElement(D + "propstat",
-                        prop,
-                        new XElement(D + "status", "HTTP/1.1 200 OK")));
-            }));
-        var doc = new XDocument(multi);
+        // Shared builder (D6): same shape as the Offline Folders handler;
+        // this handler keeps its own "application/xml" ContentType and
+        // never sets ReadOnly or ContentLength.
+        var nodes = resources.Select(r => new WebDav.DavResource(
+            Href(r.Path),
+            r.Path.Split('/').Last(),
+            r.IsCollection,
+            r.File?.Size,
+            r.File?.ModifiedUtc)).ToList();
         return new Response
         {
             Status = 207,
             ContentType = "application/xml",
-            Body = Encoding.UTF8.GetBytes(doc.ToString()),
+            Body = WebDav.BuildMultistatus(nodes),
         };
     }
 

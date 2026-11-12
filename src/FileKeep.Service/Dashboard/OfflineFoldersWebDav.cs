@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
+using FileKeep.Core;
 using FileKeep.Core.Service;
 
 namespace FileKeep.Service;
@@ -67,8 +68,6 @@ public sealed class OfflineFoldersDavHandler
     {
         public int Status { get; } = status;
     }
-
-    private sealed record DavNode(string Href, string DisplayName, bool IsCollection, long? Size, DateTimeOffset? ModifiedUtc, bool ReadOnly = false);
 
     /// <summary>One Use-dialog open: the file, and whether it may write.</summary>
     private sealed record OpenEntry(string Folder, string Path, bool ReadOnly);
@@ -189,7 +188,7 @@ public sealed class OfflineFoldersDavHandler
     {
         var result = new DavResult { Status = 200, ContentLength = 0 };
         result.Headers["DAV"] = "1";
-        result.Headers["Allow"] = "OPTIONS, PROPFIND, GET, PUT, DELETE, LOCK, UNLOCK";
+        result.Headers["Allow"] = WebDav.AllowMethods;
         return result;
     }
 
@@ -227,18 +226,18 @@ public sealed class OfflineFoldersDavHandler
     {
         var entries = Entries();
         if (entries is null) return Error(403, "Offline Folders is locked.");
-        var nodes = new List<DavNode>();
+        var nodes = new List<WebDav.DavResource>();
         if (request.Segments.Length == 0)
         {
-            nodes.Add(new DavNode("/dav/offline/", "Offline Folders", true, null, null));
+            nodes.Add(new WebDav.DavResource("/dav/offline/", "Offline Folders", true, null, null));
             if (request.Depth >= 1)
             {
                 foreach (var entry in entries)
-                    nodes.Add(new DavNode(
+                    nodes.Add(new WebDav.DavResource(
                         "/dav/offline/" + Uri.EscapeDataString(entry.Name) + "/",
                         entry.Name, true, null, entry.AddedUtc));
             }
-            return Multistatus(nodes);
+            return MultistatusResult(nodes);
         }
 
         var folder = entries.FirstOrDefault(e =>
@@ -248,10 +247,10 @@ public sealed class OfflineFoldersDavHandler
         if (rest.Length == 0)
         {
             string href = "/dav/offline/" + Uri.EscapeDataString(folder.Name) + "/";
-            nodes.Add(new DavNode(href, folder.Name, true, null, folder.AddedUtc));
+            nodes.Add(new WebDav.DavResource(href, folder.Name, true, null, folder.AddedUtc));
             if (request.Depth >= 1)
                 nodes.AddRange(ChildrenOf(folder, href, "", request.Depth == int.MaxValue));
-            return Multistatus(nodes);
+            return MultistatusResult(nodes);
         }
 
         string relPath = string.Join("/", rest);
@@ -260,7 +259,7 @@ public sealed class OfflineFoldersDavHandler
         if (file is not null)
         {
             nodes.Add(FileNode(folder, file));
-            return Multistatus(nodes);
+            return MultistatusResult(nodes);
         }
         // Intermediate collection? It exists when some file lives under it.
         string prefix = relPath + "/";
@@ -268,19 +267,19 @@ public sealed class OfflineFoldersDavHandler
         {
             string href = "/dav/offline/" + Uri.EscapeDataString(folder.Name) + "/" +
                 string.Join("/", rest.Select(Uri.EscapeDataString)) + "/";
-            nodes.Add(new DavNode(href, rest[^1], true, null, null));
+            nodes.Add(new WebDav.DavResource(href, rest[^1], true, null, null));
             if (request.Depth >= 1)
                 nodes.AddRange(ChildrenOf(folder, href, prefix, request.Depth == int.MaxValue));
-            return Multistatus(nodes);
+            return MultistatusResult(nodes);
         }
         return Error(404, "No such offline file.");
     }
 
-    private IEnumerable<DavNode> ChildrenOf(
+    private IEnumerable<WebDav.DavResource> ChildrenOf(
         OfflineFolderEntry folder, string baseHref, string prefix, bool recursive)
     {
         var dirs = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        var nodes = new List<DavNode>();
+        var nodes = new List<WebDav.DavResource>();
         foreach (var file in folder.Files)
         {
             if (!file.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
@@ -296,7 +295,7 @@ public sealed class OfflineFoldersDavHandler
                 string dir = rel[..slash];
                 if (dirs.Add(dir))
                 {
-                    nodes.Add(new DavNode(
+                    nodes.Add(new WebDav.DavResource(
                         baseHref + Uri.EscapeDataString(dir) + "/",
                         dir, true, null, null));
                 }
@@ -306,7 +305,7 @@ public sealed class OfflineFoldersDavHandler
         {
             // Depth infinity: descend one more level per directory by
             // re-listing with each directory as the prefix.
-            var extra = new List<DavNode>();
+            var extra = new List<WebDav.DavResource>();
             foreach (string dir in dirs)
                 extra.AddRange(ChildrenOf(folder, baseHref + Uri.EscapeDataString(dir) + "/", prefix + dir + "/", recursive: true));
             nodes.AddRange(extra);
@@ -314,12 +313,12 @@ public sealed class OfflineFoldersDavHandler
         return nodes;
     }
 
-    private DavNode FileNode(OfflineFolderEntry folder, OfflineFileEntry file)
+    private WebDav.DavResource FileNode(OfflineFolderEntry folder, OfflineFileEntry file)
     {
         string href = "/dav/offline/" + Uri.EscapeDataString(folder.Name) + "/" +
             string.Join("/", file.Path.Split('/').Select(Uri.EscapeDataString));
         string display = file.Path.Split('/')[^1];
-        return new DavNode(href, display, false, file.Size, file.ModifiedUtc,
+        return new WebDav.DavResource(href, display, false, file.Size, file.ModifiedUtc,
             ReadOnly: HasReadOnlyOpen(folder.Name, file.Path));
     }
 
@@ -333,35 +332,13 @@ public sealed class OfflineFoldersDavHandler
         }
     }
 
-    private static DavResult Multistatus(List<DavNode> nodes)
+    /// <summary>
+    /// Wraps the shared <see cref="WebDav.BuildMultistatus"/> body in this
+    /// handler's 207 result (its own ContentType + ContentLength).
+    /// </summary>
+    private static DavResult MultistatusResult(IReadOnlyList<WebDav.DavResource> nodes)
     {
-        XNamespace d = "DAV:";
-        XNamespace fk = "urn:filekeep";
-        var root = new XElement(d + "multistatus");
-        foreach (var node in nodes)
-        {
-            var response = new XElement(d + "response",
-                new XElement(d + "href", node.Href),
-                new XElement(d + "propstat",
-                    new XElement(d + "prop",
-                        new XElement(d + "displayname", node.DisplayName),
-                        node.IsCollection
-                            ? new XElement(d + "resourcetype", new XElement(d + "collection"))
-                            : new XElement(d + "resourcetype"),
-                        node.Size is not null
-                            ? new XElement(d + "getcontentlength", node.Size.Value)
-                            : null,
-                        node.ModifiedUtc is not null
-                            ? new XElement(d + "getlastmodified",
-                                node.ModifiedUtc.Value.UtcDateTime.ToString("R"))
-                            : null,
-                        node.ReadOnly
-                            ? new XElement(fk + "readonly", "true")
-                            : null),
-                    new XElement(d + "status", "HTTP/1.1 200 OK")));
-            root.Add(response);
-        }
-        byte[] body = Encoding.UTF8.GetBytes(new XDocument(root).ToString());
+        byte[] body = WebDav.BuildMultistatus(nodes);
         return new DavResult
         {
             Status = 207,
@@ -533,8 +510,13 @@ public sealed class OfflineFoldersDavHandler
         return (folder, file, location);
     }
 
+    // B-3 (IL2075): the old reflection read (GetProperty("Error") /
+    // GetProperty("error")) cannot survive trimming. Every error
+    // payload reaching here is an ErrorDto — all error returns in
+    // StoreOfflineFile / DeleteOfflineFile / PersistOfflineFolders
+    // construct one — so a direct typed read returns the same message
+    // for every reachable payload, with a generic fallback for
+    // anything else.
     private static string ErrorMessage(object payload) =>
-        payload.GetType().GetProperty("Error")?.GetValue(payload) as string
-            ?? payload.GetType().GetProperty("error")?.GetValue(payload) as string
-            ?? "The operation failed.";
+        payload is ErrorDto error ? error.Error : "The operation failed.";
 }

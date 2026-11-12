@@ -38,13 +38,15 @@ public enum VerificationMode
 /// <summary>Parses verification mode from configuration strings.</summary>
 public static class VerificationModeParser
 {
+    private static readonly Dictionary<string, VerificationMode> Names = new(StringComparer.Ordinal)
+    {
+        ["fast"] = VerificationMode.Fast,
+        ["verify"] = VerificationMode.Verify,
+        ["paranoid"] = VerificationMode.Paranoid,
+    };
+
     public static VerificationMode Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "verify" => VerificationMode.Verify,
-            "paranoid" => VerificationMode.Paranoid,
-            "fast" or null or "" => VerificationMode.Fast,
-            _ => throw new ArgumentException(
-                $"Unknown verification mode '{value}'. Valid: fast, verify, paranoid."),
-        };
+        StringEnumParser.Parse(value, Names, VerificationMode.Fast,
+            v => new ArgumentException(
+                $"Unknown verification mode '{v}'. Valid: fast, verify, paranoid."));
 }

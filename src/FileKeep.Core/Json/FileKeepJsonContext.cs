@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
@@ -93,20 +92,15 @@ public static class FileKeepJsonOptions
     /// Serializes with the given options, going through the trim-warning-free
     /// JsonTypeInfo overload. The type info is resolved from the options so
     /// custom settings (indentation, naming policy) are honored.
+    /// Delegates to <see cref="TrimSafeJson"/>.
     /// </summary>
     public static string Serialize<T>(T value, JsonSerializerOptions options, JsonTypeInfo<T> typeInfo)
-    {
-        var resolved = (JsonTypeInfo<T>)options.GetTypeInfo(typeInfo.Type);
-        return JsonSerializer.Serialize(value, resolved);
-    }
+        => TrimSafeJson.Serialize(value, options, typeInfo);
 
     /// <summary>
     /// Deserializes with the given options, going through the trim-warning-free
-    /// JsonTypeInfo overload.
+    /// JsonTypeInfo overload. Delegates to <see cref="TrimSafeJson"/>.
     /// </summary>
     public static T? Deserialize<T>(string json, JsonSerializerOptions options, JsonTypeInfo<T> typeInfo)
-    {
-        var resolved = (JsonTypeInfo<T>)options.GetTypeInfo(typeInfo.Type);
-        return JsonSerializer.Deserialize(json, resolved);
-    }
+        => TrimSafeJson.Deserialize(json, options, typeInfo);
 }

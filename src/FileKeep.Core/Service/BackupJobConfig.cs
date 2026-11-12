@@ -32,7 +32,7 @@ public sealed class BackupJobConfig
     {
         get
         {
-            return Sources.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            return NormalizeEntries(Sources, trimEntries: false, deduplicate: false);
         }
     }
 
@@ -158,14 +158,46 @@ public sealed class BackupJobConfig
     {
         get
         {
-            if (Targets is { Count: > 0 })
-                return Targets
-                    .Select(t => t.Trim())
-                    .Where(t => t.Length > 0)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-            return new List<string>();
+            return NormalizeEntries(Targets, trimEntries: true, deduplicate: true);
         }
+    }
+
+    /// <summary>
+    /// Shared normalization behind <see cref="EffectiveSources"/> and
+    /// <see cref="EffectiveTargets"/>: drops blank entries (null, empty,
+    /// or whitespace-only). The two lists do NOT normalize identically,
+    /// so the differences are parameters, not a second helper:
+    /// <list type="bullet">
+    /// <item><description>Targets are trimmed and de-duplicated
+    /// (case-insensitive, first occurrence wins).</description></item>
+    /// <item><description>Sources are kept verbatim — only blanks are
+    /// dropped. Trimming or de-duping sources would change
+    /// <see cref="FirstSource"/> / snapshot roots and would defeat the
+    /// duplicate-source check in
+    /// <see cref="ServiceConfigValidator"/> (which compares
+    /// <see cref="EffectiveSources"/> entries pairwise).</description></item>
+    /// </list>
+    /// A null input normalizes to an empty list.
+    /// </summary>
+    private static List<string> NormalizeEntries(
+        IEnumerable<string?>? values, bool trimEntries, bool deduplicate)
+    {
+        var result = new List<string>();
+        HashSet<string>? seen = deduplicate
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : null;
+        if (values is null)
+            return result;
+        foreach (string? value in values)
+        {
+            string entry = trimEntries ? value?.Trim() ?? "" : value ?? "";
+            if (string.IsNullOrWhiteSpace(entry))
+                continue;
+            if (seen is not null && !seen.Add(entry))
+                continue;
+            result.Add(entry);
+        }
+        return result;
     }
 
     /// <summary>

@@ -13,16 +13,8 @@ public sealed record PhysicalDriveInfo(
 {
     public string Display =>
         IsSystemDrive
-            ? $"⚠ {Index}: {Model} ({FormatSize(SizeBytes)}) [{DevicePath}] — SYSTEM DRIVE"
-            : $"{Index}: {Model} ({FormatSize(SizeBytes)}) [{DevicePath}]";
-
-    private static string FormatSize(ulong bytes)
-    {
-        const ulong GB = 1024UL * 1024 * 1024;
-        if (bytes >= GB)
-            return $"{bytes / (double)GB:F1} GB";
-        return $"{bytes / (1024.0 * 1024):F0} MB";
-    }
+            ? $"⚠ {Index}: {Model} ({SizeFormatting.Format(SizeBytes, SizeUnitStyle.DecimalLabelsGbMb)}) [{DevicePath}] — SYSTEM DRIVE"
+            : $"{Index}: {Model} ({SizeFormatting.Format(SizeBytes, SizeUnitStyle.DecimalLabelsGbMb)}) [{DevicePath}]";
 }
 
 /// <summary>

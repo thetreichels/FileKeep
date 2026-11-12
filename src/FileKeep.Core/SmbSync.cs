@@ -184,7 +184,7 @@ public sealed class SmbSync
         _log?.Invoke($"SMB sync to {share.UncPath}: {result.ChunksCopied} chunks copied " +
             $"({result.ChunksSkipped} already present), {result.ManifestsCopied} manifests, " +
             $"{result.ParityCopied} parity files, " +
-            $"{FormatBytes(result.BytesCopied)} transferred.");
+            $"{SizeFormatting.Format(result.BytesCopied, SizeUnitStyle.BinaryIec)} transferred.");
         return result;
     }
 
@@ -206,17 +206,22 @@ public sealed class SmbSync
         ArgumentException.ThrowIfNullOrWhiteSpace(repoRoot);
         ArgumentNullException.ThrowIfNull(share);
         int copied = 0;
-        string chunksDir = Path.Combine(repoRoot, "chunks");
+        // D1: both ends go through the stores' PathFor instead of
+        // hand-building chunk paths — the local store lowercases the ID
+        // (P2-D14) and validates it (64 hex chars), the SMB store
+        // preserves case and validates it, so a mixed-case foreign ID
+        // can no longer write a second, unguarded copy on the share.
+        // (Constructing the stores performs no I/O; they only resolve paths.)
+        var srcStore = new LocalBlobStore(repoRoot);
+        var destStore = new SmbBlobStore(share, destSubfolder, layout);
         foreach (string id in chunkIds)
         {
-            string src = Path.Combine(chunksDir, id[..2], id[2..]);
+            string src = srcStore.PathFor(id);
             if (!File.Exists(src))
                 throw new FileNotFoundException(
                     $"Chunk {id} is missing from the local staging repo; " +
                     "it cannot be confirmed at the destination.", src);
-            string dest = layout is not null
-                ? share.Combine(destSubfolder ?? layout.CoverName, layout.ChunkFileName(id))
-                : share.Combine("chunks", id[..2], id[2..]);
+            string dest = destStore.PathFor(id);
             if (CopyWrappedOrPlain(src, dest, layout, out _))
             {
                 copied++;
@@ -287,11 +292,4 @@ public sealed class SmbSync
         return true;
     }
 
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F1} GiB";
-        if (bytes >= 1024L * 1024) return $"{bytes / (1024.0 * 1024):F1} MiB";
-        if (bytes >= 1024) return $"{bytes / 1024.0:F1} KiB";
-        return $"{bytes} B";
-    }
 }

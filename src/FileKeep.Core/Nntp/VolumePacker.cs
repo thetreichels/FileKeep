@@ -222,9 +222,11 @@ public static class VolumePacker
         return new PackedVolume(volumeId, bytes, ids.ToArray());
     }
 
+    // Thin wrapper over the shared rule: this site's message uniquely embeds
+    // the offending value, so the throw stays here (message byte-identical).
     private static void ValidateChunkId(string chunkId)
     {
-        if (chunkId.Length != 64 || !chunkId.All(Uri.IsHexDigit))
+        if (!ChunkIdValidator.IsValid(chunkId))
             throw new ArgumentException($"Chunk ID must be 64 hex chars: {chunkId}", nameof(chunkId));
     }
 }

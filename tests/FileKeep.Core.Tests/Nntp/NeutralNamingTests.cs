@@ -31,7 +31,9 @@ public sealed class NeutralNamingTests
     [Fact]
     public void VolumeArticle_UsesNeutralNaming()
     {
-        string volumeId = new('v', 64);
+        // Placeholder volume ID: must be valid 64-hex (shared ChunkIdValidator
+        // rule); the value itself is incidental to the naming assertions.
+        string volumeId = new('a', 64);
         byte[] bytes = new byte[64];
         string article = ArticleCodec.BuildVolumeArticle(
             volumeId, "0123456789abcdef", bytes, "alt.binaries.test", "poster-x",

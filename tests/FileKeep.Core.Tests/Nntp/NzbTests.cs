@@ -21,7 +21,6 @@ public sealed class NzbTests
     private static readonly string IdB = new('b', 64);
     private static readonly string IdC = new('c', 64);
     private static readonly string IdD = new('d', 64);
-    private static readonly string IdE = new('e', 64);
     private static readonly string IdF = new('f', 64);
 
     private static BackupManifest MakeManifest(params (string path, string[] chunks)[] files)

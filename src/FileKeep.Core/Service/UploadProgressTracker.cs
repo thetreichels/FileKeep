@@ -153,9 +153,7 @@ public sealed class UploadProgressTracker : IDisposable
                     confidence = "";
                 }
 
-                string rate = bytesPerSec >= 1024*1024
-                    ? $"{bytesPerSec/(1024*1024):F1} MB/s"
-                    : $"{bytesPerSec/1024:F0} KB/s";
+                string rate = SizeFormatting.Format(bytesPerSec, SizeUnitStyle.RateDecimalLabels);
 
                 _log($"job '{_jobName}': uploading {_phase} to {_host}... {done}/{_totalChunks} ({pct:F1}%) — {rate}, {eta}{confidence}");
             }

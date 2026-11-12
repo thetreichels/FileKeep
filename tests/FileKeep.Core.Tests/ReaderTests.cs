@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FileKeep.Core;
@@ -190,7 +189,7 @@ public sealed class ReaderTests : IDisposable
             {
                 Method = "PROPFIND",
                 Segments = Array.Empty<string>(),
-                Depth = "1",
+                Depth = 1,
             });
             Assert.Equal(207, depth1.Status);
             string xml1 = Encoding.UTF8.GetString(depth1.Body!);
@@ -201,7 +200,7 @@ public sealed class ReaderTests : IDisposable
             {
                 Method = "PROPFIND",
                 Segments = Array.Empty<string>(),
-                Depth = "infinity",
+                Depth = WebDav.DepthInfinity,
             });
             string xmlInf = Encoding.UTF8.GetString(infinity.Body!);
             Assert.Contains("nested.txt", xmlInf);

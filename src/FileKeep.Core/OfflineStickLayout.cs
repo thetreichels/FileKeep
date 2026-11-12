@@ -36,9 +36,6 @@ public static class OfflineStickLayout
     /// <summary>Manifest package filename inside the reader folder.</summary>
     public const string ManifestFileName = "manifest.filekeep-export.json";
 
-    /// <summary>Chunk subfolder inside the reader folder (full exports).</summary>
-    public const string ChunksFolderName = "chunks";
-
     /// <summary>Full path of the reader folder under <paramref name="stickRoot"/>.</summary>
     public static string ReaderFolder(string stickRoot) =>
         Path.Combine(stickRoot, ReaderFolderName);
@@ -99,6 +96,45 @@ public static class OfflineStickLayout
         {
             try { File.Delete(temp); } catch { /* best effort */ }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Copies a chunk blob from a remote source into the local repo,
+    /// atomically and verified: the copy lands in a temp file beside
+    /// the destination, the temp file must verify as the chunk
+    /// (<paramref name="chunkIdHex"/>) under <paramref name="repo"/>'s
+    /// key, and only then is it moved into place — so a torn or
+    /// corrupt pull never becomes a stored chunk. The temp file is
+    /// deleted on every failure path (best effort). The copy itself
+    /// is supplied by <paramref name="copyToTemp"/> (a plain copy,
+    /// or a header-stripping copy for disguised sources), so the
+    /// copy → verify → move → cleanup shape stays in one place.
+    /// Throws <see cref="InvalidDataException"/> when the copied
+    /// blob fails verification; nothing is stored in that case.
+    /// </summary>
+    public static void CopyVerifiedBlobAtomic(
+        string localPath,
+        string chunkIdHex,
+        BackupRepository repo,
+        Action<string> copyToTemp,
+        string sourceDescription)
+    {
+        string? dir = Path.GetDirectoryName(localPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+        string tmpPath = localPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            copyToTemp(tmpPath);
+            if (!repo.VerifyChunkBlobAt(tmpPath, chunkIdHex))
+                throw new InvalidDataException(
+                    $"Chunk {chunkIdHex} pulled from {sourceDescription} failed verification; it was not stored.");
+            File.Move(tmpPath, localPath, overwrite: true);
+        }
+        finally
+        {
+            try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
         }
     }
 }

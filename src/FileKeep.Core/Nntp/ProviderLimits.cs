@@ -116,11 +116,11 @@ public sealed class ProviderLimits
     {
         string json = FileKeepJsonOptions.Serialize(entries,
             FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.DictionaryStringLimitEntry);
-        // Atomic write: temp file + move, so a crash never leaves half a file.
-        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N"); // P2-C14: unique temp (fixed names collide between concurrent savers)
-        File.WriteAllText(tmp, json);
-        try { File.Move(tmp, path, overwrite: true); }
-        catch { try { File.Delete(tmp); } catch { } throw; } // P2-C15: don't leak the temp on failure
+        // Atomic write (temp file + move, so a crash never leaves half a
+        // file) via the shared helper — unique temp (P2-C14: fixed names
+        // collide between concurrent savers) and temp cleanup on
+        // failure (P2-C15), overwrite: true.
+        OfflineStickLayout.WritePackageAtomic(path, json);
     }
 
     public sealed class LimitEntry

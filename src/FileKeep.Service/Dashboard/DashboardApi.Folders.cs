@@ -1,3 +1,5 @@
+using FileKeep.Core.Service;
+
 namespace FileKeep.Service;
 
 /// <summary>
@@ -36,7 +38,7 @@ public static partial class DashboardApi
                     drives.Add(new FolderDto(
                         string.IsNullOrWhiteSpace(label)
                             ? driveRoot
-                            : $"{label} ({driveRoot.TrimEnd('\\', '/')})",
+                            : $"{label} ({PathCanonicalization.TrimTrailingSeparators(driveRoot)})",
                         driveRoot));
                 }
             }

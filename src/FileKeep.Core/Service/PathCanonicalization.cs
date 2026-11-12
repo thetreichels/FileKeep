@@ -31,6 +31,17 @@ namespace FileKeep.Core.Service;
 public static class PathCanonicalization
 {
     /// <summary>
+    /// Trims trailing directory separators (<c>\</c> and <c>/</c>) from
+    /// a path. This is the one shared spelling of the inline
+    /// <c>TrimEnd('\\', '/')</c> / <c>TrimEnd('\\')</c> sites it
+    /// replaces: it trims ALL trailing separators, so a root such as
+    /// <c>"C:\"</c> becomes <c>"C:"</c>, exactly as the inline sites
+    /// did. It does not resolve, normalize, or validate the path.
+    /// </summary>
+    public static string TrimTrailingSeparators(string path) =>
+        path.TrimEnd('\\', '/');
+
+    /// <summary>
     /// Returns the canonical form of <paramref name="path"/> for
     /// duplicate/nesting comparison: fully qualified, link- and
     /// short-path-resolved where possible, with trailing separators
@@ -39,12 +50,10 @@ public static class PathCanonicalization
     /// </summary>
     public static string Canonicalize(string path)
     {
-        string lexical = Path.GetFullPath(path).TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string lexical = TrimTrailingSeparators(Path.GetFullPath(path));
         string resolved = ResolveLinkTargetBestEffort(lexical);
         string expanded = ExpandShortPathBestEffort(resolved);
-        return expanded.TrimEnd(
-            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return TrimTrailingSeparators(expanded);
     }
 
     private static string ResolveLinkTargetBestEffort(string path)

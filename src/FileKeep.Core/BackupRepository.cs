@@ -1839,9 +1839,13 @@ public sealed class BackupRepository : IDisposable
                     blob = remote.Get(chunkId);
                     VerifyDownloadedBlob(chunkId, blob);
                 }
-                catch (Exception)
+                catch (Exception ex) when (ex is IOException or InvalidDataException or CryptographicException)
                 {
-                    // Chunk missing or corrupted — try parity reconstruction
+                    // Chunk missing or corrupted — try parity reconstruction.
+                    // Only fetch/corruption failures reach here: cancellation,
+                    // out-of-memory and other non-recoverable faults propagate
+                    // immediately instead of burning a reconstruction attempt
+                    // that cannot fix them (and masking the real cause).
                     blob = TryReconstructChunk(chunkId, allChunkIds, remote);
                     if (blob is null)
                         throw; // Reconstruction failed, rethrow original
@@ -1959,9 +1963,13 @@ public sealed class BackupRepository : IDisposable
                     volumeBytes = remote.GetVolume(volumeId);
                     VolumePacker.Unpack(volumeBytes); // fail closed on bad framing
                 }
-                catch (Exception)
+                catch (Exception ex) when (ex is IOException or InvalidDataException or CryptographicException)
                 {
-                    // Volume missing or corrupted — try parity reconstruction
+                    // Volume missing or corrupted — try parity reconstruction.
+                    // Only fetch/corruption failures reach here: cancellation,
+                    // out-of-memory and other non-recoverable faults propagate
+                    // immediately instead of burning a reconstruction attempt
+                    // that cannot fix them (and masking the real cause).
                     volumeBytes = TryReconstructVolume(volumeId, ParityScope(volumeId), plan, remote);
                     if (volumeBytes is null)
                         throw; // Reconstruction failed, rethrow original
@@ -2023,50 +2031,69 @@ public sealed class BackupRepository : IDisposable
             catch { return false; }
         }
 
-        // Try XOR parity first (simpler, single parity block)
-        var xorGroup = Redundancy.XorParity.GetGroupFor(volumeId, allVolumeIds);
-        if (xorGroup.Count >= 2)
-        {
-            string parityId = Redundancy.XorParity.MakeParityId(xorGroup);
-            try
+        return TryReconstruct(
+            volumeId,
+            allVolumeIds,
+            GetVolumeBytesOrNull,
+            vid =>
             {
-                byte[] parityBytes = remote.GetVolume(parityId);
-                byte[]? reconstructed = Redundancy.XorParity.Reconstruct(
-                    volumeId, xorGroup, GetVolumeBytesOrNull, parityBytes);
-                if (reconstructed is not null && VerifyVolume(reconstructed))
-                    return reconstructed;
-            }
-            catch { /* parity not available */ }
-        }
+                try { return remote.GetVolume(vid); }
+                catch { return null; }
+            },
+            VerifyVolume);
+    }
 
-        // Try PAR2 (Reed-Solomon, up to 3 missing)
-        var par2Group = Redundancy.Par2Redundancy.GetGroupFor(volumeId, allVolumeIds);
-        if (par2Group.Count >= 2)
+    /// <summary>
+    /// Shared parity reconstruction (audit D5): tries XOR first, then
+    /// PAR2 — the order both reconstructors used. Each kind attempt is
+    /// isolated: a kind-level failure (e.g. PAR2 refusing RS1-format
+    /// parity) falls through to the next kind, exactly as before.
+    /// Verification stays a delegate supplied by the caller; this helper
+    /// never verifies, decrypts, or hashes anything itself.
+    /// </summary>
+    private byte[]? TryReconstruct(
+        string targetId,
+        IReadOnlyList<string> allIds,
+        Func<string, byte[]?> getUnitOrNull,
+        Func<string, byte[]?> fetchParityOrNull,
+        Func<byte[], bool> verifyCandidate)
+    {
+        foreach (RedundancyKind kind in new[] { RedundancyKind.Xor, RedundancyKind.Par2 })
         {
-            try
-            {
-                var parityDatas = new List<byte[]>();
-                for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
-                {
-                    string parityId = Redundancy.Par2Redundancy.MakeParityId(par2Group, p);
-                    try { parityDatas.Add(remote.GetVolume(parityId)); }
-                    catch { /* parity block not available */ }
-                }
-
-                if (parityDatas.Count > 0)
-                {
-                    var reconstructed = Redundancy.Par2Redundancy.Reconstruct(
-                        par2Group, GetVolumeBytesOrNull, parityDatas);
-                    if (reconstructed is not null &&
-                        reconstructed.TryGetValue(volumeId, out byte[]? candidate) &&
-                        VerifyVolume(candidate))
-                        return candidate;
-                }
-            }
-            catch { /* reconstruction failed */ }
+            byte[]? candidate;
+            try { candidate = TryReconstructWith(kind, targetId, allIds, getUnitOrNull, fetchParityOrNull); }
+            catch { continue; } // RS1 refusal + any kind-level failure -> try the next kind, as before
+            if (candidate is not null && verifyCandidate(candidate))
+                return candidate;
         }
-
         return null;
+    }
+
+    private byte[]? TryReconstructWith(
+        RedundancyKind kind,
+        string targetId,
+        IReadOnlyList<string> allIds,
+        Func<string, byte[]?> getUnitOrNull,
+        Func<string, byte[]?> fetchParityOrNull)
+    {
+        if (kind == RedundancyKind.Xor)
+        {
+            var group = Redundancy.XorParity.GetGroupFor(targetId, allIds);
+            if (group.Count < 2) return null;
+            byte[]? parity = fetchParityOrNull(Redundancy.XorParity.MakeParityId(group));
+            if (parity is null) return null;
+            return Redundancy.XorParity.Reconstruct(targetId, group, getUnitOrNull, parity);
+        }
+        // Par2
+        var par2Group = Redundancy.Par2Redundancy.GetGroupFor(targetId, allIds);
+        if (par2Group.Count < 2) return null;
+        var parityDatas = new List<byte[]>();
+        for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
+            if (fetchParityOrNull(Redundancy.Par2Redundancy.MakeParityId(par2Group, p)) is byte[] d)
+                parityDatas.Add(d);
+        if (parityDatas.Count == 0) return null;
+        var reconstructed = Redundancy.Par2Redundancy.Reconstruct(par2Group, getUnitOrNull, parityDatas);
+        return reconstructed is not null && reconstructed.TryGetValue(targetId, out byte[]? c) ? c : null;
     }
 
     /// <summary>
@@ -2095,78 +2122,36 @@ public sealed class BackupRepository : IDisposable
         IReadOnlyList<string> allChunkIds,
         IBlobStore remote)
     {
-        // Try XOR parity first (simpler, single parity block)
-        var xorGroup = Redundancy.XorParity.GetGroupFor(chunkId, allChunkIds);
-        if (xorGroup.Count >= 2)
-        {
-            string parityId = Redundancy.XorParity.MakeParityId(xorGroup);
-            try
-            {
-                byte[] parityBytes = remote.Get(parityId);
-                byte[]? reconstructed = Redundancy.XorParity.Reconstruct(
-                    chunkId, xorGroup,
-                    id => {
-                        try {
-                            if (_blobs.Exists(id)) return _blobs.Get(id);
-                            return remote.Get(id);
-                        } catch { return null; }
-                    },
-                    parityBytes);
-                if (reconstructed is not null)
-                {
-                    // Verify the reconstructed chunk
-                    try {
-                        VerifyDownloadedBlob(chunkId, reconstructed);
-                        return reconstructed;
-                    } catch { /* verification failed */ }
-                }
-            }
-            catch { /* parity not available */ }
-        }
-
-        // Try PAR2 (Reed-Solomon, up to 3 missing)
-        // Uses Par2Redundancy.Reconstruct which handles the length header
-        // and trims reconstructed shards to original sizes.
-        var par2Group = Redundancy.Par2Redundancy.GetGroupFor(chunkId, allChunkIds);
-        if (par2Group.Count >= 2)
+        byte[]? GetChunkBytesOrNull(string id)
         {
             try
             {
-                // Fetch available parity blocks
-                var parityDatas = new List<byte[]>();
-                for (int p = 0; p < Redundancy.Par2Redundancy.ParityShards; p++)
-                {
-                    string parityId = Redundancy.Par2Redundancy.MakeParityId(par2Group, p);
-                    try {
-                        parityDatas.Add(remote.Get(parityId));
-                    } catch { /* parity block not available */ }
-                }
-
-                if (parityDatas.Count > 0)
-                {
-                    var reconstructed = Redundancy.Par2Redundancy.Reconstruct(
-                        par2Group,
-                        id => {
-                            try {
-                                if (_blobs.Exists(id)) return _blobs.Get(id);
-                                return remote.Get(id);
-                            } catch { return null; }
-                        },
-                        parityDatas);
-
-                    if (reconstructed is not null && reconstructed.TryGetValue(chunkId, out byte[]? candidate))
-                    {
-                        try {
-                            VerifyDownloadedBlob(chunkId, candidate);
-                            return candidate;
-                        } catch { /* verification failed */ }
-                    }
-                }
+                if (_blobs.Exists(id)) return _blobs.Get(id);
+                return remote.Get(id);
             }
-            catch { /* reconstruction failed */ }
+            catch { return null; }
         }
 
-        return null;
+        bool VerifyChunk(byte[] candidate)
+        {
+            try
+            {
+                VerifyDownloadedBlob(chunkId, candidate);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        return TryReconstruct(
+            chunkId,
+            allChunkIds,
+            GetChunkBytesOrNull,
+            id =>
+            {
+                try { return remote.Get(id); }
+                catch { return null; }
+            },
+            VerifyChunk);
     }
 
     /// <summary>
@@ -2789,7 +2774,7 @@ public sealed class BackupRepository : IDisposable
                     AssertNoReparsePoints(destDir, dirPath, includeLeaf: true);
                     Directory.CreateDirectory(dirPath);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     errors.Add($"{dir}/: {ex.Message}");
                 }
@@ -2863,7 +2848,7 @@ public sealed class BackupRepository : IDisposable
                     RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result,
                         claimedPaths);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     RecordError(entry, ex);
                 }
@@ -2872,12 +2857,15 @@ public sealed class BackupRepository : IDisposable
             {
                 if (entry.SymlinkTarget is null)
                     continue;
+                // NS-5: cancellation is honored between symlink restores
+                // too — the first loop's check above does not cover this pass.
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     RestoreOneFile(entry, manifest, destDir, verifyOnly, buffer, options, result,
                         claimedPaths);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     RecordError(entry, ex);
                 }

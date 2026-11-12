@@ -378,16 +378,14 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     private void WaitForArticle(string messageId)
     {
         const int maxAttempts = 6;
-        int delayMs = 500;
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             if (UseClient(c => c.Stat(messageId)))
                 return;
             if (attempt < maxAttempts)
-            {
-                Thread.Sleep(delayMs);
-                delayMs *= 2; // 0.5s, 1s, 2s, 4s, 8s = ~15.5s total
-            }
+                // D4: poll loop, not try/catch retry — SleepForAttempt only
+                // (baseDelay 250ms: 500ms, 1s, 2s, 4s, 8s = ~15.5s total).
+                ExponentialBackoff.SleepForAttempt(attempt, TimeSpan.FromMilliseconds(250));
         }
         throw new InvalidDataException(
             $"Article {messageId} was posted but never became retrievable (STAT failed after {maxAttempts} attempts).");
@@ -770,13 +768,17 @@ public sealed class NntpBlobStore : IBlobStore, IDisposable
     /// <see cref="IndexAuth"/>: returns the canonical inner index JSON,
     /// or null when the envelope is missing, malformed, or its HMAC
     /// does not verify (forged/tampered — treated as not there).
+    /// Also null when this store carries no <see cref="IndexAuth"/>:
+    /// an authenticated envelope can never verify without a key.
     /// </summary>
     private string? TryUnwrapAuthenticatedChunkIndex(string body)
     {
         string? canonical = TryExtractChunkIndexEnvelope(body, out string? hmacHex);
         if (canonical is null)
             return null;
-        return _indexAuth!.VerifyChunkIndexHmac(canonical, hmacHex) ? canonical : null;
+        if (_indexAuth is null)
+            return null;
+        return _indexAuth.VerifyChunkIndexHmac(canonical, hmacHex) ? canonical : null;
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using FileKeep.Core.Service;
 
 namespace FileKeep.Core;
 
@@ -175,7 +176,7 @@ public static class StorageGuard
             if (string.IsNullOrEmpty(root))
                 return null;
             // Root is like "C:\". Open the volume.
-            string volume = @"\\.\" + root.TrimEnd('\\');
+            string volume = @"\\.\" + PathCanonicalization.TrimTrailingSeparators(root);
             nint hVol = CreateFile(volume, 0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE, nint.Zero, OPEN_EXISTING, 0, nint.Zero);
             if (hVol == -1)

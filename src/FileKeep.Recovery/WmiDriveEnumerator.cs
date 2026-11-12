@@ -1,5 +1,6 @@
 using System.Management;
 using FileKeep.Core.Recovery;
+using FileKeep.Core.Service;
 
 namespace FileKeep.Recovery;
 
@@ -53,7 +54,8 @@ public sealed class WmiDriveEnumerator : IDriveEnumerator
         try
         {
             string windowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            string? driveLetter = Path.GetPathRoot(windowsDir)?.TrimEnd('\\');
+            string? driveLetter = PathCanonicalization.TrimTrailingSeparators(
+                Path.GetPathRoot(windowsDir) ?? "");
             if (string.IsNullOrEmpty(driveLetter))
                 return -1;
 

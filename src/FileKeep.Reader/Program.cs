@@ -4,7 +4,6 @@ using FileKeep.Core;
 using FileKeep.Reader;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Hosting;
 
 // FileKeep portable reader (Stealth Folders slice 3, part 3).
 // Runs from a stick, no install, no registry, no host writes
@@ -217,7 +216,7 @@ try
             {
                 Method = ctx.Request.Method,
                 Segments = segments,
-                Depth = ctx.Request.Headers.TryGetValue("Depth", out var d) ? d.ToString() : "1",
+                Depth = WebDav.ParseDepth(ctx.Request.Headers.TryGetValue("Depth", out var d) ? d.ToString() : null),
                 Body = body,
                 LockToken = lockToken,
             });

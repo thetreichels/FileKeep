@@ -210,8 +210,7 @@ public static class ArticleCodec
     public static string BuildArticleWithMessageId(
         string chunkIdHex, string messageId, byte[] blob, string newsgroup, string from)
     {
-        if (chunkIdHex.Length != 64)
-            throw new ArgumentException("Chunk ID must be 64 hex chars.", nameof(chunkIdHex));
+        ChunkIdValidator.RequireChunkId(chunkIdHex, nameof(chunkIdHex));
 
         var sb = new StringBuilder();
         sb.Append("From: ").Append(FormatFrom(from)).Append("\r\n");
@@ -311,8 +310,7 @@ public static class ArticleCodec
         string volumeIdHex, string messageId, byte[] volumeBytes, string newsgroup, string from,
         string? setName = null, int partNumber = 0, int partCount = 0)
     {
-        if (volumeIdHex.Length != 64)
-            throw new ArgumentException("Volume ID must be 64 hex chars.", nameof(volumeIdHex));
+        ChunkIdValidator.RequireVolumeId(volumeIdHex, nameof(volumeIdHex));
 
         string fileName, subject;
         if (!string.IsNullOrEmpty(setName) && partNumber > 0 && partCount > 0)

@@ -126,20 +126,21 @@ public static partial class DashboardApi
             if (request.YubiKeyEnabled && !config.PassphraseYubiKey)
                 return (400, new ErrorDto("YubiKey is not set up. Complete YubiKey setup first."));
         }
-        if (linkMode == "and" && (!request.PassphraseEnabled || !request.YubiKeyEnabled))
-            return (400, new ErrorDto("\"and\" link mode requires both Passphrase and YubiKey to be enabled."));
         // The phone authenticator can only ever be a SECONDARY method:
         // USB recovery cannot use TOTP, so at least one of Passphrase
         // or YubiKey must always stay configured, or recovery would be
         // stranded with no usable method. This is a configuration rule
         // only — as a proof in the Windows app, a TOTP code stands
         // alone like any other proof (see the security gate).
+        // Shared with ServiceConfigValidator: the method-combination
+        // rules live in ProtectionRules.ValidateCombination.
+        if (ProtectionRules.ValidateCombination(request.PassphraseEnabled, request.YubiKeyEnabled, request.PhoneEnabled, LinkKindParser.Parse(linkMode)) is string error)
+            return (400, new ErrorDto(error));
+        // All-off stays a standalone endpoint rule: a fresh config with
+        // no method at all still loads fine at the validator, so this
+        // rule must not migrate into the shared predicate.
         if (!request.PassphraseEnabled && !request.YubiKeyEnabled)
-        {
-            if (request.PhoneEnabled)
-                return (400, new ErrorDto("Phone authenticator cannot be the only enabled method. Enable Passphrase or YubiKey first."));
             return (400, new ErrorDto("At least one of Passphrase or YubiKey must stay enabled."));
-        }
 
         config.PassphraseYubiKey = request.YubiKeyEnabled;
         config.PhoneAuthEnabled = request.PhoneEnabled;
@@ -338,14 +339,19 @@ public static partial class DashboardApi
             {
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
             }
-            bool ok = matchedStep is not null;
-            if (!ok)
+            // B-3 (CS8629): the old `bool ok = matchedStep is not null`
+            // let the compiler lose track of the null state, so both
+            // `.Value` reads below warned. An explicit null check here
+            // keeps the same behaviour (wrong code answers plain false)
+            // and makes the non-null step visible to the compiler.
+            if (matchedStep is null)
             {
                 TotpGuard.ReportFailure(log);
                 AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=totp");
                 return (200, new OkDto(false));
             }
-            if (!hasPending && !TotpGuard.AcceptStep(matchedStep.Value))
+            long step = matchedStep.Value;
+            if (!hasPending && !TotpGuard.AcceptStep(step))
             {
                 // Live-secret replay: a code already used for a proof
                 // or unlock cannot verify again inside its window.
@@ -354,7 +360,7 @@ public static partial class DashboardApi
                 AuditLog.Record(log, AuditLog.AuthFailure, AuditLog.Fail, "proof=totp-replay");
                 return (200, new OkDto(false));
             }
-            if (ok && hasPending)
+            if (hasPending)
             {
                 // SF-17: verified — the staged secret becomes the live
                 // one. Until this moment the previously enrolled
@@ -391,10 +397,10 @@ public static partial class DashboardApi
                 // Promotion succeeded: seed the replay record with the
                 // enrollment code's step, so that code cannot then be
                 // replayed as a proof or unlock inside its window.
-                TotpGuard.AcceptStep(matchedStep.Value);
+                TotpGuard.AcceptStep(step);
             }
             TotpGuard.ReportSuccess();
-            return (200, new OkDto(ok));
+            return (200, new OkDto(true));
         }
         catch (Exception ex)
         {

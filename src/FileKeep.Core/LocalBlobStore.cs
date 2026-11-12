@@ -3,7 +3,10 @@ namespace FileKeep.Core;
 /// <summary>
 /// Local <see cref="IBlobStore"/>: blobs at chunks/&lt;hh&gt;/&lt;rest&gt;.
 /// Content addressing makes deduplication automatic — a blob that already
-/// exists is never written twice.
+/// exists is never written twice. The atomic write core, the already-exists
+/// race check, and the path helpers live in <see cref="BlobStoreIO"/>
+/// (shared with <see cref="SmbBlobStore"/>, D1); this store only supplies
+/// its canonicalization (lowercase, P2-D14) and its layout.
 /// </summary>
 public sealed class LocalBlobStore : IBlobStore
 {
@@ -27,17 +30,15 @@ public sealed class LocalBlobStore : IBlobStore
 
     public string PathFor(string chunkIdHex)
     {
-        if (chunkIdHex.Length != 64 || !chunkIdHex.All(Uri.IsHexDigit))
-            throw new ArgumentException("Chunk ID must be 64 hex chars.", nameof(chunkIdHex));
+        BlobStoreIO.ValidateChunkId(chunkIdHex);
         // P2-D14: canonical lowercase (chunk IDs are SHA-256 hex; a
         // mixed-case foreign ID must address the same blob).
-        chunkIdHex = chunkIdHex.ToLowerInvariant();
         if (_layout is not null)
-            return Path.Combine(
-                Path.GetDirectoryName(_rootDir)!,
-                _layout.CoverName,
-                _layout.ChunkFileName(chunkIdHex));
-        return Path.Combine(_rootDir, chunkIdHex[..2], chunkIdHex[2..]);
+            return BlobStoreIO.DisguisedChunkPath(
+                Path.Combine(Path.GetDirectoryName(_rootDir)!, _layout.CoverName),
+                _layout, chunkIdHex);
+        return BlobStoreIO.PlainChunkPath(_rootDir, chunkIdHex,
+            static id => id.ToLowerInvariant());
     }
 
     public bool Exists(string chunkIdHex) => File.Exists(PathFor(chunkIdHex));
@@ -47,13 +48,8 @@ public sealed class LocalBlobStore : IBlobStore
     /// batch's chunks after its upload is confirmed. Never deletes
     /// manifests, catalog, or journal — only chunk blobs.
     /// </summary>
-    public void Delete(string chunkIdHex)
-    {
-        string path = PathFor(chunkIdHex);
-        try { File.Delete(path); }
-        catch (FileNotFoundException) { }
-        catch (DirectoryNotFoundException) { }
-    }
+    public void Delete(string chunkIdHex) =>
+        BlobStoreIO.DeleteFile(PathFor(chunkIdHex));
 
     public void Put(string chunkIdHex, byte[] blob)
     {
@@ -64,43 +60,24 @@ public sealed class LocalBlobStore : IBlobStore
         if (_layout is not null)
             blob = Service.DisguisedLayout.WrapContent(blob, path);
 
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        // Write atomically so interrupted backups never leave half a blob,
-        // and flush to disk before the rename so a power loss cannot leave
-        // the renamed blob's contents behind in a volatile cache (DL-9).
-        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                fs.Write(blob, 0, blob.Length);
-                fs.Flush(flushToDisk: true);
-            }
-            try
-            {
-                File.Move(tmp, path);
-            }
-            catch (IOException ex) when (IsAlreadyExists(ex))
-            {
-                // Lost the race with another writer that committed this
-                // exact chunk concurrently. The chunk ID is the SHA-256
-                // of the plaintext, so the winner's blob decrypts to the
-                // same plaintext (the nonce travels in the blob) — this
-                // is a dedup hit, not a failure. The cause is checked
-                // at failure time, not by re-probing the filesystem: a
-                // concurrent prune may delete the winner's blob between
-                // a failed Move and any later existence check, which
-                // used to turn this handled race into a throw.
-            }
-            // Best-effort only and never throws (see TryFlushDirectory),
-            // so it sits outside the Move's catch.
-            TryFlushDirectory(Path.GetDirectoryName(path)!);
-        }
-        finally
-        {
-            if (File.Exists(tmp))
-                File.Delete(tmp);
-        }
+        BlobStoreIO.PutFile(path, blob);
+    }
+
+    /// <summary>
+    /// Atomically replaces a stored blob: tmp-write + flush + rename
+    /// with overwrite, so a crash leaves the old or the new blob,
+    /// never a missing chunk. Used by offline rekey, where
+    /// <see cref="Put(string, byte[])"/> alone is a dedup no-op over
+    /// the existing chunk ID (W-12).
+    /// </summary>
+    public void Replace(string chunkIdHex, byte[] blob)
+    {
+        string path = PathFor(chunkIdHex);
+        // Disguised destinations store header-wrapped blobs; plain ones raw.
+        if (_layout is not null)
+            blob = Service.DisguisedLayout.WrapContent(blob, path);
+
+        BlobStoreIO.ReplaceFile(path, blob);
     }
 
     /// <summary>
@@ -120,81 +97,7 @@ public sealed class LocalBlobStore : IBlobStore
         if (wrapped is not null)
             blob = wrapped;
 
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        string tmp = path + ".tmp-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                fs.Write(blob);
-                fs.Flush(flushToDisk: true);
-            }
-            try
-            {
-                File.Move(tmp, path);
-            }
-            catch (IOException ex) when (IsAlreadyExists(ex))
-            {
-                // Lost the race with another writer that committed this
-                // exact chunk concurrently. The chunk ID is the SHA-256
-                // of the plaintext, so the winner's blob decrypts to the
-                // same plaintext (the nonce travels in the blob) — this
-                // is a dedup hit, not a failure. The cause is checked
-                // at failure time, not by re-probing the filesystem: a
-                // concurrent prune may delete the winner's blob between
-                // a failed Move and any later existence check, which
-                // used to turn this handled race into a throw.
-            }
-            // Best-effort only and never throws (see TryFlushDirectory),
-            // so it sits outside the Move's catch.
-            TryFlushDirectory(Path.GetDirectoryName(path)!);
-        }
-        finally
-        {
-            if (File.Exists(tmp))
-                File.Delete(tmp);
-        }
-    }
-
-    /// <summary>
-    /// Best-effort fsync of the directory holding a just-renamed blob, so
-    /// the rename (directory entry) is as durable as the file contents.
-    /// Unix-only: Windows cannot open a directory as a stream (NTFS
-    /// journals metadata instead), so this is a no-op there; any other
-    /// failure is swallowed — durability here is strictly best-effort and
-    /// must never fail a Put. Residual caveat: the entry of a subdirectory
-    /// created moments earlier (the chunk's hh folder in its parent) is
-    /// covered only by the filesystem's own journaling, not by this flush.
-    /// </summary>
-    /// <summary>
-    /// True when an <see cref="IOException"/> is the OS reporting that
-    /// the move destination already exists — the lost-a-race-with-
-    /// another-writer case. Verified empirically on both platforms
-    /// (2026-10-27, bare File.Move onto an existing file): Windows
-    /// reports Win32 ERROR_ALREADY_EXISTS (183) as 0x800700B7; Linux
-    /// reports raw errno EEXIST (17) as 0x11. Checking the failure
-    /// cause at failure time, instead of re-probing the filesystem,
-    /// is what makes this race-proof: a concurrent prune may delete
-    /// the winner's blob between a failed Move and any later
-    /// existence check.
-    /// </summary>
-    private static bool IsAlreadyExists(IOException ex) =>
-        ex.HResult == unchecked((int)0x800700B7) // Windows ERROR_ALREADY_EXISTS
-        || ex.HResult == 0x11; // Linux EEXIST
-
-    private static void TryFlushDirectory(string dir)
-    {
-        if (OperatingSystem.IsWindows())
-            return;
-        try
-        {
-            using var fs = new FileStream(dir, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            fs.Flush(flushToDisk: true);
-        }
-        catch
-        {
-            // Best effort only.
-        }
+        BlobStoreIO.PutFile(path, blob);
     }
 
     public byte[] Get(string chunkIdHex)

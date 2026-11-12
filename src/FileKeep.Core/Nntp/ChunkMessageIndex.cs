@@ -237,7 +237,6 @@ public sealed class ChunkMessageIndex
                 // at open time.
             }
         }
-        // Unique temp name: concurrent saves must not share a temp file.
         // Snapshot under the lock so serialization sees a consistent map.
         string json;
         lock (_mapLock)
@@ -245,13 +244,9 @@ public sealed class ChunkMessageIndex
             json = FileKeepJsonOptions.Serialize(_map,
                 FileKeepJsonOptions.Indented, FileKeepJsonContext.Default.DictionaryStringDictionaryStringString);
         }
-        string tmp = _path + ".tmp-" + Guid.NewGuid().ToString("N");
-        File.WriteAllText(tmp, json);
-        try { File.Move(tmp, _path, overwrite: true); }
-        catch
-        {
-            try { File.Delete(tmp); } catch { }
-            throw;
-        }
+        // Atomic write via the shared helper: unique temp name
+        // (concurrent saves must not share a temp file), move with
+        // overwrite: true, temp cleaned up on failure.
+        OfflineStickLayout.WritePackageAtomic(_path, json);
     }
 }

@@ -1,6 +1,55 @@
 namespace FileKeep.Core;
 
 /// <summary>
+/// Shared helper behind the string-enum parsers in this file and
+/// <see cref="VerificationModeParser"/>: one trim + lowercase +
+/// lookup, so each per-type parser only declares its name table, its
+/// empty handling, and its error text. The unknown-value exception is
+/// built from the ORIGINAL value (untrimmed), exactly as the parsers
+/// did before; a whitespace-only value normalizes to empty.
+/// </summary>
+public static class StringEnumParser
+{
+    /// <summary>
+    /// Parses <paramref name="value"/> by normalized-name lookup.
+    /// Null, empty, or whitespace-only input maps to
+    /// <paramref name="emptyDefault"/>; an unknown value throws the
+    /// exception produced by <paramref name="unknown"/>.
+    /// </summary>
+    public static T Parse<T>(
+        string? value,
+        IReadOnlyDictionary<string, T> names,
+        T emptyDefault,
+        Func<string?, Exception> unknown)
+    {
+        string? normalized = value?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(normalized))
+            return emptyDefault;
+        if (names.TryGetValue(normalized, out T? result))
+            return result;
+        throw unknown(value);
+    }
+
+    /// <summary>
+    /// Parses <paramref name="value"/> by normalized-name lookup.
+    /// Null, empty, whitespace-only, or unknown input throws the
+    /// exception produced by <paramref name="unknown"/> — there is no
+    /// valid empty value for this type.
+    /// </summary>
+    public static T Parse<T>(
+        string? value,
+        IReadOnlyDictionary<string, T> names,
+        Func<string?, Exception> unknown)
+    {
+        string? normalized = value?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(normalized) ||
+            !names.TryGetValue(normalized, out T? result))
+            throw unknown(value);
+        return result;
+    }
+}
+
+/// <summary>
 /// Redundancy applied to uploaded articles: none, one XOR parity article
 /// per group, or three par2-style parity articles per group.
 ///
@@ -26,15 +75,17 @@ public enum RedundancyKind
 /// <summary>Parses redundancy mode from configuration strings.</summary>
 public static class RedundancyKindParser
 {
+    private static readonly Dictionary<string, RedundancyKind> Names = new(StringComparer.Ordinal)
+    {
+        ["none"] = RedundancyKind.None,
+        ["xor"] = RedundancyKind.Xor,
+        ["par2"] = RedundancyKind.Par2,
+    };
+
     public static RedundancyKind Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "xor" => RedundancyKind.Xor,
-            "par2" => RedundancyKind.Par2,
-            "none" or null or "" => RedundancyKind.None,
-            _ => throw new ArgumentException(
-                $"Unknown redundancy mode '{value}'. Valid: none, xor, par2."),
-        };
+        StringEnumParser.Parse(value, Names, RedundancyKind.None,
+            v => new ArgumentException(
+                $"Unknown redundancy mode '{v}'. Valid: none, xor, par2."));
 }
 
 /// <summary>
@@ -58,14 +109,16 @@ public enum LinkKind
 /// <summary>Parses protection link mode from configuration strings.</summary>
 public static class LinkKindParser
 {
+    private static readonly Dictionary<string, LinkKind> Names = new(StringComparer.Ordinal)
+    {
+        ["or"] = LinkKind.Or,
+        ["and"] = LinkKind.And,
+    };
+
     public static LinkKind Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "and" => LinkKind.And,
-            "or" or null or "" => LinkKind.Or,
-            _ => throw new ArgumentException(
-                $"Unknown protection link mode '{value}'. Valid: or, and."),
-        };
+        StringEnumParser.Parse(value, Names, LinkKind.Or,
+            v => new ArgumentException(
+                $"Unknown protection link mode '{v}'. Valid: or, and."));
 }
 
 /// <summary>
@@ -91,15 +144,17 @@ public enum LocationKind
 /// <summary>Parses backup location type from configuration strings.</summary>
 public static class LocationKindParser
 {
+    private static readonly Dictionary<string, LocationKind> Names = new(StringComparer.Ordinal)
+    {
+        ["nntp"] = LocationKind.Nntp,
+        ["smb"] = LocationKind.Smb,
+        ["usb"] = LocationKind.Usb,
+    };
+
     public static LocationKind Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "nntp" => LocationKind.Nntp,
-            "smb" => LocationKind.Smb,
-            "usb" => LocationKind.Usb,
-            _ => throw new ArgumentException(
-                $"Unknown location type '{value}'. Valid: nntp, smb, usb."),
-        };
+        StringEnumParser.Parse(value, Names,
+            v => new ArgumentException(
+                $"Unknown location type '{v}'. Valid: nntp, smb, usb."));
 }
 
 /// <summary>
@@ -122,14 +177,16 @@ public enum BackupMode
 /// <summary>Parses job mode from configuration strings.</summary>
 public static class BackupModeParser
 {
+    private static readonly Dictionary<string, BackupMode> Names = new(StringComparer.Ordinal)
+    {
+        ["incremental"] = BackupMode.Incremental,
+        ["full"] = BackupMode.Full,
+    };
+
     public static BackupMode Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "incremental" => BackupMode.Incremental,
-            "full" => BackupMode.Full,
-            _ => throw new ArgumentException(
-                $"Unknown backup mode '{value}'. Valid: incremental, full."),
-        };
+        StringEnumParser.Parse(value, Names,
+            v => new ArgumentException(
+                $"Unknown backup mode '{v}'. Valid: incremental, full."));
 }
 
 /// <summary>
@@ -156,14 +213,16 @@ public enum JobKind
 /// <summary>Parses job type from configuration strings.</summary>
 public static class JobKindParser
 {
+    private static readonly Dictionary<string, JobKind> Names = new(StringComparer.Ordinal)
+    {
+        ["files"] = JobKind.Files,
+        ["disk"] = JobKind.Disk,
+    };
+
     public static JobKind Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "files" => JobKind.Files,
-            "disk" => JobKind.Disk,
-            _ => throw new ArgumentException(
-                $"Unknown job type '{value}'. Valid: files, disk."),
-        };
+        StringEnumParser.Parse(value, Names,
+            v => new ArgumentException(
+                $"Unknown job type '{v}'. Valid: files, disk."));
 }
 
 /// <summary>
@@ -187,12 +246,14 @@ public enum ChunkingKind
 /// <summary>Parses repository chunking scheme from configuration strings.</summary>
 public static class ChunkingKindParser
 {
+    private static readonly Dictionary<string, ChunkingKind> Names = new(StringComparer.Ordinal)
+    {
+        ["fixed"] = ChunkingKind.Fixed,
+        ["cdc"] = ChunkingKind.Cdc,
+    };
+
     public static ChunkingKind Parse(string? value) =>
-        value?.Trim().ToLowerInvariant() switch
-        {
-            "fixed" => ChunkingKind.Fixed,
-            "cdc" => ChunkingKind.Cdc,
-            _ => throw new ArgumentException(
-                $"Unknown chunking scheme '{value}'. Valid: fixed, cdc."),
-        };
+        StringEnumParser.Parse(value, Names,
+            v => new ArgumentException(
+                $"Unknown chunking scheme '{v}'. Valid: fixed, cdc."));
 }
