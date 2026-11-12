@@ -59,17 +59,26 @@ not claim a consistency level it has not demonstrated end to end.
 ### Acceptance criteria
 
 - [ ] VSS (or equivalent genuine snapshot mechanism) implemented and tested
-  on real Windows
+  on real Windows — mechanism implemented (FileKeepVss.exe, CLI `--vss`,
+  scheduler, dashboard); tests use a stub helper (`VssSnapshotTests`), so a
+  real shadow-copy test on real hardware is still owed (verified 2026-11-11)
 - [ ] Documentation states which consistency level each backup type provides
-- [ ] Bare-metal recovery tested from a VSS snapshot, not a live copy
-- [ ] Failure mode defined: what happens when VSS is unavailable (fail
-  closed with a clear error, not a silent live copy)
+  — `VSS-DESIGN.md` §2 states the three levels; user-facing docs
+  (`RECOVERY.md`) and the dashboard do not yet state the level per backup
+  type, and there is no `consistencyLevel` job option (`VSS-DESIGN.md:246`)
+  (verified 2026-11-11)
+- [ ] Bare-metal recovery tested from a VSS snapshot, not a live copy —
+  blocked on the WinRE USB boot test (on hold) (verified 2026-11-11)
+- [x] Failure mode defined: what happens when VSS is unavailable (fail
+  closed with a clear error, not a silent live copy) — defined in
+  `VSS-DESIGN.md` and implemented fail-closed (`VssSnapshot.Create` throws;
+  CLI and scheduler never fall back to a live copy) (verified 2026-11-11)
 
 ---
 
 ## 2. Incremental Correctness Model
 
-**Status:** Open engineering problem
+**Status:** Verification mode implemented and tested (2026-11-11); scheduled standalone verification and user-facing tradeoff docs still open
 **Blocks:** Trust in incremental backup correctness
 
 ### Problem
@@ -113,12 +122,20 @@ The fast path stays for performance. What is missing:
 
 ### Acceptance criteria
 
-- [ ] Verification mode setting (`fast` / `verify` / `paranoid`) implemented
-  and exposed in job configuration
-- [ ] Scheduled deep verification independent of backup runs
-- [ ] Documentation explains the tradeoff and the failure mode of `fast`
-- [ ] Test: file with changed contents but preserved size+mtime is detected
-  in `verify` and `paranoid` modes
+- [x] Verification mode setting (`fast` / `verify` / `paranoid`) implemented
+  and exposed in job configuration — `BackupJobConfig.verificationMode`
+  (default `fast`), CLI `--verify`, dashboard job form (verified 2026-11-11)
+- [ ] Scheduled deep verification independent of backup runs — post-backup
+  auto-verify exists, plus manual CLI `verify` and a dashboard Verify
+  operation; no schedule for a standalone verification pass
+  (verified 2026-11-11)
+- [ ] Documentation explains the tradeoff and the failure mode of `fast` —
+  the dashboard job form has a one-line tradeoff hint; the `fast` failure
+  mode (spoofed size+mtime misclassified as unchanged) is not documented
+  anywhere user-facing (verified 2026-11-11)
+- [x] Test: file with changed contents but preserved size+mtime is detected
+  in `verify` and `paranoid` modes — `EdgeCaseTests.Incremental_DetectsSpoofedMtime`
+  (verified 2026-11-11)
 
 ---
 
@@ -204,7 +221,8 @@ Determine remaining retention
   from dates
 - [x] Reposting updates manifest indexes atomically
 - [ ] Dashboard shows retention health per backup (days remaining, articles
-  reposted)
+  reposted) — dashboard has only a manual "Check now" button and an
+  operations-log outcome; no per-backup health view (verified 2026-11-11)
 - [x] Test: simulated expiry triggers repost and index update
   (`RetentionManagerTests`)
 

@@ -4,8 +4,8 @@ How the FileKeep desktop app (Windows service) and the FileKeep iOS Reader app
 talk to each other without any live connection between them, without Tailscale,
 and without trusting the server in the middle.
 
-Status: agreed design (2026-11-04). Desktop side implemented first; iOS side
-follows through the main chat after the v0.0.3 photos/videos work lands.
+Status: agreed design (2026-11-04). Desktop side implemented; iOS side not
+yet started.
 
 ## 0. Principles
 
@@ -14,7 +14,7 @@ follows through the main chat after the v0.0.3 photos/videos work lands.
   server-side code at all. Nothing to deploy, patch, or exploit.
 - **Read by HTTP anywhere, write by SMB when home.** The phone reads the relay
   over HTTP from anywhere; it writes only when the SMB share is reachable on
-  the local network. It detects SMB availability (Bonjour `_smb._tcp` browsing
+  the local network. It detects SMB availability (subnet scan for TCP 445
   + network-path monitoring) and flushes queued outbound items when home.
 - **The server is never trusted.** Only the desktop's key is trusted. Every
   file the desktop writes is signed; the phone verifies before acting.
@@ -44,6 +44,10 @@ One folder, exposed both ways (SMB write, HTTP read):
     laptop/
       <uuid>.kfb          # phone-created bundles waiting for desktop import
       <uuid>.kfb.par2
+      <uuid>.json         # inbox metadata (name, size, createdUtc) — signed;
+                          # without a valid signed .json the bundle is ignored
+  received/
+    <uuid>.kfb          # desktop-imported phone bundles (with .par2 + .json)
 ```
 
 Each side owns its outbox directory and only ever writes there
@@ -56,7 +60,7 @@ never touch the same file. Drop and inbox files use random token/UUID names.
   key (or shared-secret seed).
 - Phone scans it with the camera. No passwords typed.
 - Phone stores its private key / shared secret in the iOS Keychain,
-  biometric-gated (Face ID). Desktop stores the phone's key in
+  biometric-gated (Face ID). Desktop stores the shared pairing secret in
   DPAPI-protected config (`ServiceConfig`, alongside the other
   `*Protected` fields).
 - Revocation: delete the key on either side; a lost phone is unpaired from
@@ -127,11 +131,13 @@ certificate fingerprint captured at pairing.
 - Every bundle/drop gets a tiny `.par2` alongside it: block hashes of the
   `.kfb` plus Reed-Solomon recovery blocks (reuse
   `FileKeep.Core.Redundancy.ReedSolomon`; PAR2-style, a few percent of the
-  bundle). Format: `[magic "FKP2"][blockSize:4][blockCount:4]`
-  `[sha256 per block][rs parity blocks]` — exact layout is an
-  implementation detail of the builder, but it must be readable by both
-  sides from this spec's description of the semantics: verify any block,
-  repair up to the parity count.
+  bundle). Format (all integers little-endian):
+  `[magic "FKP2"][blockSize:4][blockCount:4][parityBlockCount:4]`
+  `[sha256 per data block][sha256 per parity block][rs parity blocks]`.
+  Data blocks are 64 KiB; groups of 100 data blocks get 5 parity blocks
+  (~5% overhead). The layout is fixed by the builder (`RelayPar2` in this
+  repo); both sides read this format: verify any block, repair up to the
+  parity count.
 - **Proves integrity, enables repair.** Verifies the bundle is bit-identical
   to what the desktop wrote; damaged blocks are repaired from parity
   instead of forcing a re-download.
